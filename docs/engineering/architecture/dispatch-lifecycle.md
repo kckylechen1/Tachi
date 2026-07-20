@@ -78,6 +78,8 @@ A T2 packet is a frozen leaf issue. Its body is the single text both implementer
 
 The implementer lane and the adversarial-review lane are *different vendors* — this is non-negotiable and is the whole reason a self-report can be checked. The current default assignment (owner 2026-07-04) is opus-implements / codex-reviews; the pre-07-04 assignment (codex-implements / opus-reviews, the #733 lane) is a valid alternate — pick per task, never let one side self-grade. Whoever implements does not review the same slice. The leader freezes and adjudicates and belongs to neither lane.
 
+**Helper-agent routing (owner-ratified 2026-07-20):** a session that needs helper agents spawns them through its own harness's native subagent mechanism. Tachi task dispatch is a leader-level cross-carrier lane mechanism, not a substitute subagent pool — a session that keeps routing helper work through Tachi dispatch instead of its own agents is mis-routing, even when each individual dispatch succeeds. This is a routing rule, not a ban on helpers: cross-vendor review and the rest of this section's law still apply to whatever helpers a session spawns.
+
 ---
 
 ## 3. 怎么回 (Return)

@@ -5,10 +5,10 @@
 >
 > **Relationship to per-carrier private manuals:** this is the repo-scoped execution kernel that every backend lane reads, whatever its carrier. A carrier with its own global private manual composes with this file — that manual already declares repo-specific rules authoritative in the repo's own AGENTS.md, so where they overlap they agree, and this file is authoritative for repo-scoped execution. Carriers without a rich private manual rely on this file alone. **Carrier-specific mechanism — which tool plays which role, concrete dispatch commands, current default vendor assignments — is never stated here; it lives in that carrier's own private manual**, if it has one (repo-root files named after a specific tool are that tool's private manual, not a public contract). If you don't have one, treat this file as the whole contract and do not invent mechanism it doesn't state.
 
-## Owner execution override — sole interactive sessions
+## Owner routing override — use your own subagents, not Tachi dispatch (owner-ratified 2026-07-20)
 
-- **Do not spawn or consult external agents, subagents, reviewers, or dispatch lanes.** A sole interactive session implements, reviews, verifies, deploys, and performs post-deploy smoke testing itself.
-- For an owner-directed delivery task, keep the completion target operational: finish the requested fix, merge only when the owner explicitly authorized it, deploy it, and verify the live service. Do not add dispatch ceremony or broaden the task beyond what deployment requires.
+- **When you need helper agents, spawn them through your own harness's native subagent mechanism.** Do not route helper work through Tachi task dispatch as a substitute for your own agents: Tachi dispatch is a leader-level cross-carrier lane mechanism, not a session's default subagent pool. This changes *where helpers come from*, not whether you may have them — exploration, implementation help, and cross-vendor review remain available and governed by the dispatch law in the canon doc.
+- For an owner-directed delivery task, keep the completion target operational: finish the requested fix, merge only when the owner explicitly authorized it, deploy it, and verify the live service. Do not add dispatch ceremony beyond what the task requires.
 - This override applies only to the sole-session branch below. A lane that was already dispatched with a frozen packet still obeys that packet and the report contract.
 
 ## Scope: are you a dispatched lane, or the sole session?
