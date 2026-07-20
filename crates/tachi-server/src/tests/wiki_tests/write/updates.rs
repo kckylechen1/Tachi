@@ -1,6 +1,61 @@
 use super::*;
 
 #[tokio::test]
+async fn tachi_wiki_write_update_tombstones_legacy_source_refs() {
+    let mut legacy = make_entry("legacy-wiki-row");
+    legacy.path = "/wiki/agent/tachi/legacy-refs".to_string();
+    legacy.topic = "legacy-refs".to_string();
+    legacy.metadata = json!({
+        "wiki": true,
+        "source_refs": ["https://example.com/stale-legacy-ref"]
+    });
+    legacy.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![legacy]);
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Legacy references".to_string(),
+            text: "Updated wiki content must not retain stale legacy references.".to_string(),
+            path: Some("/wiki/agent/tachi/legacy-refs".to_string()),
+            topic: Some("legacy-refs".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.8,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("update legacy wiki row");
+    let response: Value = serde_json::from_str(&response).expect("response json");
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: response["id"].as_str().expect("id").to_string(),
+            include_archived: false,
+            project: Some("wiki".to_string()),
+        }))
+        .await
+        .expect("get updated wiki memory");
+    let entry: Value = serde_json::from_str(&fetched).expect("entry json");
+
+    assert_eq!(entry["metadata"]["evidence_refs_v1"], json!([]));
+    assert_eq!(entry["metadata"]["source_refs"], Value::Null);
+    assert!(
+        !entry["metadata"].to_string().contains("stale-legacy-ref"),
+        "stale legacy reference must no longer be reachable: {entry:#}"
+    );
+}
+
+#[tokio::test]
 async fn tachi_wiki_write_updates_existing_path_in_place() {
     let (server, _home) = seed_wiki_project_entries(Vec::new());
 

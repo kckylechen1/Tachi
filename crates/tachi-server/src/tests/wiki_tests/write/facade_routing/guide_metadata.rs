@@ -10,6 +10,7 @@ async fn tachi_wiki_write_preserves_guide_path_and_applies_to_metadata() {
             format: None,
             query: None,
             category: Some("guide".to_string()),
+            lifecycle: None,
             top_k: None,
             limit: None,
             title: Some("AgentReview guide".to_string()),

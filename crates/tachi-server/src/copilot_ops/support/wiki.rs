@@ -21,10 +21,9 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
 }
 
 /// Builds the layer/scope/authority/lifecycle metadata stamped onto every
-/// `tachi_wiki_write` entry, plus the #1072 dual-write typed `evidence_refs_v1`
-/// (canon doc §7.1) alongside the legacy `metadata.source_refs: string[]`
-/// (set separately by the caller — this function never touches that key, so
-/// `source_refs` is never mutated in place).
+/// `tachi_wiki_write` entry, with typed `evidence_refs_v1` as the canonical
+/// write shape (canon doc §7.1). Legacy `metadata.source_refs: string[]` remains
+/// a read fallback for existing entries but is not written here.
 ///
 /// Cross-vendor review fix (#1215, BUG 1): `lifecycle` NO LONGER defaults to
 /// `active` for every non-draft path. Canon doc §7's invariant is

@@ -88,6 +88,44 @@ async fn wiki_search_excludes_pending_review_drafts_by_default_and_includes_with
     );
 }
 
+#[tokio::test]
+async fn wiki_facade_browse_preserves_active_default_and_forwards_all_lifecycle() {
+    let mut fresh = make_entry("wiki-facade-fresh-pending");
+    fresh.path = "/wiki/engineering/fresh-pending".to_string();
+    fresh.metadata = json!({"lifecycle": "pending_review"});
+    let (server, _home) = seed_wiki_project_entries(vec![fresh]);
+
+    let default_params: TachiWikiParams = serde_json::from_value(json!({
+        "action": "browse",
+        "project": "wiki"
+    }))
+    .expect("default facade params");
+    let default_body = server
+        .tachi_wiki(Parameters(default_params))
+        .await
+        .expect("default browse");
+    let default_json: Value = serde_json::from_str(&default_body).expect("default browse JSON");
+    assert_eq!(default_json["total"], 0, "default must remain active-only");
+    assert_eq!(default_json["categories"], json!([]));
+
+    let all_params: TachiWikiParams = serde_json::from_value(json!({
+        "action": "browse",
+        "project": "wiki",
+        "lifecycle": "all"
+    }))
+    .expect("all-lifecycle facade params");
+    let all_body = server
+        .tachi_wiki(Parameters(all_params))
+        .await
+        .expect("all-lifecycle browse");
+    let all_json: Value = serde_json::from_str(&all_body).expect("all browse JSON");
+    assert_eq!(all_json["total"], 1);
+    assert_eq!(
+        all_json["categories"],
+        json!([{"path": "/wiki/engineering", "count": 1}])
+    );
+}
+
 /// #1072 RED case 3: "Read/search currently hide authority/revision/source
 /// refs; GREEN exposes them."
 #[tokio::test]
@@ -153,6 +191,28 @@ async fn wiki_read_falls_back_to_legacy_source_refs_when_no_typed_refs_present()
     )
     .expect("read should succeed");
     assert_eq!(value["status"], json!("found"));
+    assert_eq!(
+        value["entry"]["references"],
+        json!(["kckylechen1/tachi#1072"])
+    );
+}
+
+#[tokio::test]
+async fn wiki_read_falls_back_when_typed_refs_have_no_usable_targets() {
+    let mut entry = active_wiki_entry();
+    entry.path = "/wiki/engineering/lifecycle/invalid-typed-refs".to_string();
+    entry.metadata = json!({
+        "evidence_refs_v1": [{"ref": "  "}, {"ref": 42}],
+        "source_refs": [null, "", "kckylechen1/tachi#1072"]
+    });
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let value = collect_wiki_read_value(
+        &server,
+        "/wiki/engineering/lifecycle/invalid-typed-refs",
+        "wiki",
+    )
+    .expect("read should succeed");
     assert_eq!(
         value["entry"]["references"],
         json!(["kckylechen1/tachi#1072"])

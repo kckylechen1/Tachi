@@ -402,6 +402,11 @@ pub struct TachiWikiParams {
     pub query: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// Wiki lifecycle scope for search/browse. Omitted preserves the
+    /// active-only truthful-retrieval default; pass `"all"` or an explicit
+    /// lifecycle such as `"pending_review"` to opt into those rows.
+    #[serde(default)]
+    pub lifecycle: Option<String>,
     #[serde(default)]
     pub top_k: Option<usize>,
     #[serde(default)]

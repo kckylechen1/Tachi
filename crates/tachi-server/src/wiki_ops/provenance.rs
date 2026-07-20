@@ -118,6 +118,7 @@ pub(super) fn preferred_wiki_references(metadata: &Value) -> Vec<String> {
         .map(|refs| {
             refs.iter()
                 .filter_map(|r| r.get("ref").and_then(Value::as_str))
+                .filter(|reference| !reference.trim().is_empty())
                 .map(str::to_string)
                 .collect()
         })
@@ -131,6 +132,7 @@ pub(super) fn preferred_wiki_references(metadata: &Value) -> Vec<String> {
         .map(|refs| {
             refs.iter()
                 .filter_map(Value::as_str)
+                .filter(|reference| !reference.trim().is_empty())
                 .map(str::to_string)
                 .collect()
         })

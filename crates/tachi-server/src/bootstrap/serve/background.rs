@@ -31,14 +31,20 @@ pub(super) fn spawn_idle_connection_cleanup(
 /// Also runs `PRAGMA optimize` (see `MemoryStore::run_optimize`) on the same
 /// tick: both are cheap, best-effort, write-connection maintenance ops that
 /// want a "quiet moment" cadence, so they share this timer rather than
-/// running two near-identical interval loops.
+/// running two near-identical interval loops. `maintain_named_projects` must
+/// follow the daemon's manifest-background scope: a scoped/global-only daemon
+/// must not attach DBs it does not own merely to perform maintenance.
 pub(super) fn spawn_wal_checkpoint(
     server: &MemoryServer,
+    maintain_named_projects: bool,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let ckpt_secs = parse_env_u64("TACHI_WAL_CHECKPOINT_SECS").unwrap_or(300);
     if ckpt_secs == 0 {
         return tokio::spawn(async {});
+    }
+    if !maintain_named_projects {
+        eprintln!("[wal] named-project maintenance disabled for scoped daemon");
     }
     let ckpt_secs = ckpt_secs.max(30);
     let ckpt_server = server.clone();
@@ -49,44 +55,50 @@ pub(super) fn spawn_wal_checkpoint(
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    if let Err(e) = ckpt_server.with_global_store(|store| {
-                        store.checkpoint_wal_truncate().map_err(|e| e.to_string())
-                    }) {
-                        eprintln!("[wal] global checkpoint skipped: {e}");
-                    }
-                    if let Err(e) = ckpt_server.with_global_store(|store| {
-                        store.run_optimize().map_err(|e| e.to_string())
-                    }) {
-                        eprintln!("[optimize] global optimize skipped: {e}");
-                    }
-                    if ckpt_server.has_project_db() {
-                        if let Err(e) = ckpt_server.with_project_store(|store| {
-                            store.checkpoint_wal_truncate().map_err(|e| e.to_string())
-                        }) {
-                            eprintln!("[wal] project checkpoint skipped: {e}");
-                        }
-                        if let Err(e) = ckpt_server.with_project_store(|store| {
-                            store.run_optimize().map_err(|e| e.to_string())
-                        }) {
-                            eprintln!("[optimize] project optimize skipped: {e}");
-                        }
-                    }
-                    for name in crate::path_utils::list_named_projects() {
-                        if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
-                            store.checkpoint_wal_truncate().map_err(|e| e.to_string())
-                        }) {
-                            eprintln!("[wal] named-project '{name}' checkpoint skipped: {e}");
-                        }
-                        if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
-                            store.run_optimize().map_err(|e| e.to_string())
-                        }) {
-                            eprintln!("[optimize] named-project '{name}' optimize skipped: {e}");
-                        }
-                    }
+                    run_wal_checkpoint(&ckpt_server, maintain_named_projects);
                 }
             }
         }
     })
+}
+
+fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool) {
+    if let Err(e) = ckpt_server
+        .with_global_store(|store| store.checkpoint_wal_truncate().map_err(|e| e.to_string()))
+    {
+        eprintln!("[wal] global checkpoint skipped: {e}");
+    }
+    if let Err(e) =
+        ckpt_server.with_global_store(|store| store.run_optimize().map_err(|e| e.to_string()))
+    {
+        eprintln!("[optimize] global optimize skipped: {e}");
+    }
+    if ckpt_server.has_project_db() {
+        if let Err(e) = ckpt_server
+            .with_project_store(|store| store.checkpoint_wal_truncate().map_err(|e| e.to_string()))
+        {
+            eprintln!("[wal] project checkpoint skipped: {e}");
+        }
+        if let Err(e) =
+            ckpt_server.with_project_store(|store| store.run_optimize().map_err(|e| e.to_string()))
+        {
+            eprintln!("[optimize] project optimize skipped: {e}");
+        }
+    }
+    if maintain_named_projects {
+        for name in crate::path_utils::list_named_projects() {
+            if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
+                store.checkpoint_wal_truncate().map_err(|e| e.to_string())
+            }) {
+                eprintln!("[wal] named-project '{name}' checkpoint skipped: {e}");
+            }
+            if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
+                store.run_optimize().map_err(|e| e.to_string())
+            }) {
+                eprintln!("[optimize] named-project '{name}' optimize skipped: {e}");
+            }
+        }
+    }
 }
 
 pub(super) fn spawn_background_gc(
@@ -447,6 +459,7 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvRestore;
 
     fn make_server() -> (tempfile::TempDir, MemoryServer) {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -471,12 +484,54 @@ mod tests {
     async fn wal_checkpoint_exits_on_shutdown_cancel() {
         let (_tmp, server) = make_server();
         let shutdown = CancellationToken::new();
-        let handle = spawn_wal_checkpoint(&server, shutdown.clone());
+        let handle = spawn_wal_checkpoint(&server, true, shutdown.clone());
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
             .expect("wal checkpoint task did not exit within 2s after shutdown")
             .expect("task panicked");
+    }
+
+    #[test]
+    fn wal_checkpoint_scoped_to_active_dbs_does_not_attach_named_projects() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let foreign_db = tachi_home
+            .join("projects")
+            .join("foreign")
+            .join(memcore::MEMORY_DB_FILENAME);
+        drop(MemoryServer::new(foreign_db.clone(), None).expect("foreign named-project DB"));
+
+        let server = MemoryServer::new(tachi_home.join("global.db"), None).expect("server");
+        run_wal_checkpoint(&server, false);
+
+        assert!(
+            server
+                .db
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "active-DB-only maintenance must not open or cache named-project DBs"
+        );
+
+        run_wal_checkpoint(&server, true);
+        let attached = server
+            .db
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(attached.len(), 1);
+        assert!(
+            attached
+                .contains_key(&std::fs::canonicalize(foreign_db).expect("canonical foreign DB")),
+            "manifest-wide maintenance must keep maintaining named-project DBs"
+        );
     }
 
     #[tokio::test]

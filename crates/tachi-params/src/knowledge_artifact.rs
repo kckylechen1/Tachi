@@ -6,8 +6,8 @@
 //! closure state). This module implements the subset of that document's
 //! target contracts #1072 lands as callable runtime shapes:
 //! `KnowledgeArtifactV1`'s closed lifecycle/authority vocabulary,
-//! `WikiEvidenceRefV1` (the typed evidence ref dual-written alongside the
-//! legacy `metadata.source_refs: string[]`, never mutated in place), and
+//! `WikiEvidenceRefV1` (the canonical typed evidence-ref write shape, with
+//! legacy `metadata.source_refs: string[]` retained as a read fallback), and
 //! `ClosureProposalV1` / `ClosureApprovalReceiptV1` (the
 //! `closure_candidate → pending_approval → applied` lifecycle's
 //! hash-invalidation core).
@@ -159,9 +159,9 @@ pub struct WikiReviewReceiptV1 {
     pub decided_at: String,
 }
 
-/// Canon doc §7.1's typed evidence ref, dual-written alongside the legacy
-/// `metadata.source_refs: string[]` (never mutated in place — see module
-/// doc). Deliberately a lean subset of #1002's full `EvidenceRefV1`
+/// Canon doc §7.1's canonical typed evidence-ref write shape. Legacy
+/// `metadata.source_refs: string[]` remains a read fallback. Deliberately a
+/// lean subset of #1002's full `EvidenceRefV1`
 /// (relation / immutable_revision / section_or_span): a bare wiki
 /// `references[]` string (a URL, an absolute path, or a GitHub shorthand —
 /// see `wiki_ops::references::validate_reference_format`) carries no
@@ -181,8 +181,8 @@ pub struct WikiEvidenceRefV1 {
 /// validates against (GitHub shorthand `#N` / `repo#N` / `owner/repo#N`,
 /// and repo-relative `docs/...` spec paths). Ambiguous shapes (a bare URL or
 /// absolute path could be almost any `SourceKindV1`) deliberately return
-/// `None` rather than guess — an unclassified typed ref is still dual-written
-/// with its raw `ref` string intact.
+/// `None` rather than guess — an unclassified typed ref still retains its raw
+/// `ref` string intact.
 pub fn classify_wiki_reference(raw: &str) -> Option<SourceKindV1> {
     let trimmed = raw.trim();
     if trimmed.starts_with("docs/") || trimmed.starts_with("docs\\") {
@@ -211,9 +211,9 @@ fn is_github_issue_shorthand(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/'))
 }
 
-/// Dual-write builder: turns validated `references[]` strings into typed
-/// `evidence_refs_v1` entries at write time. Callers keep writing the legacy
-/// `metadata.source_refs: string[]` unchanged alongside this.
+/// Canonical-write builder: turns validated `references[]` strings into typed
+/// `evidence_refs_v1` entries at write time. Readers retain a fallback for
+/// legacy `metadata.source_refs: string[]` entries.
 pub fn build_evidence_refs_v1(references: &[String], captured_at: &str) -> Vec<WikiEvidenceRefV1> {
     references
         .iter()
@@ -636,7 +636,7 @@ mod tests {
         );
     }
 
-    // ─── evidence_refs_v1 dual-write (RED case 3/7) ────────────────────
+    // ─── evidence_refs_v1 canonical typed refs (RED case 3/7) ──────────
 
     #[test]
     fn classify_wiki_reference_recognizes_github_shorthand_and_docs_paths() {

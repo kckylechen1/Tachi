@@ -63,11 +63,11 @@ async fn workflow_close_loop_writes_wiki_with_references() {
         .await
         .expect("get");
     let entry: Value = serde_json::from_str(&fetched).expect("entry");
-    let refs: Vec<String> = entry["metadata"]["source_refs"]
+    let refs: Vec<String> = entry["metadata"]["evidence_refs_v1"]
         .as_array()
         .expect("refs")
         .iter()
-        .map(|value| value.as_str().expect("reference string").to_string())
+        .map(|value| value["ref"].as_str().expect("reference string").to_string())
         .collect();
     assert_eq!(
         refs,

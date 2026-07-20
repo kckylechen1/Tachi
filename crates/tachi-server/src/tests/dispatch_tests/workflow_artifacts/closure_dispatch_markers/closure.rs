@@ -80,8 +80,19 @@ async fn tachi_task_close_loop_writes_wiki_with_references() {
         .await
         .expect("get wiki entry");
     let entry: Value = serde_json::from_str(&fetched).expect("entry JSON");
+    let refs = entry["metadata"]["evidence_refs_v1"]
+        .as_array()
+        .expect("typed evidence refs");
+    assert_eq!(refs.len(), 3);
+    assert_eq!(refs[0]["ref"], json!("kckylechen1/tachi#194"));
     assert_eq!(
-        entry["metadata"]["source_refs"],
+        refs[1]["ref"],
+        json!("docs/engineering/architecture/agent-flow.md")
+    );
+    assert_eq!(refs[2]["ref"], json!("#153"));
+    assert!(entry["metadata"].get("source_refs").is_none());
+    assert_eq!(
+        entry["metadata"]["promotion"]["source_refs"],
         json!([
             "kckylechen1/tachi#194",
             "docs/engineering/architecture/agent-flow.md",
