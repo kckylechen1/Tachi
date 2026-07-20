@@ -22,7 +22,10 @@ pub use read::{
 };
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
-pub use search::{search_fts, search_symbolic_candidates, search_vec};
+pub use search::{
+    search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
+    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+};
 pub use update::{
     record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, try_claim_event, update_enrichment_fields, update_with_revision,
@@ -576,6 +579,10 @@ fn upsert_with_idless_identity(
                     cand_id,
                 ],
             )?;
+            // Winner was synced inside `merge_into_jaccard_candidate`; the
+            // superseded loser must land in the symbolic projection too so
+            // `include_superseded` recall can see it before any repair (#1331).
+            sync_memories_symbolic_fts(&tx, &entry.id)?;
             tx.commit()?;
             return Ok(IdlessUpsertResult::Saved);
         }
@@ -700,6 +707,9 @@ fn upsert_with_idless_identity(
                 "UPDATE memories SET superseded_by = ?1, idless_identity = NULL WHERE id = ?2",
                 params![cand_id, entry.id],
             )?;
+            // Same early-return hole as the explicit-id Jaccard path: the
+            // loser never reaches the post-block `sync_memories_fts` call.
+            sync_memories_symbolic_fts(&tx, &entry.id)?;
             tx.commit()?;
             return Ok(IdlessUpsertResult::Saved);
         }
@@ -1042,6 +1052,80 @@ mod idless_upsert_tests {
             )
             .unwrap();
         assert_eq!(winner_identity.as_deref(), Some("identity-original"));
+    }
+
+    /// #1331 BUG 2: id-less Jaccard early-return must sync the superseded
+    /// loser into `memories_symbolic_fts` before commit so
+    /// `include_superseded` symbolic recall sees it immediately.
+    #[test]
+    fn idless_jaccard_loser_is_symbolic_searchable_when_include_superseded() {
+        let mut store = crate::MemoryStore::open_in_memory().unwrap();
+
+        let shared = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+                       kilo lima mike november oscar papa quebec romeo sierra";
+        let base_text = format!("{shared} tango");
+        let near_dup_text = format!("{shared} uniformuniquesymbol");
+        assert!(jaccard_similarity(&base_text, &near_dup_text) > 0.9);
+        assert!(jaccard_similarity(&base_text, &near_dup_text) < 1.0);
+
+        let mut original = entry("sym-sync-original");
+        original.path = "/notes/sym-sync".to_string();
+        original.text = base_text;
+        assert_eq!(
+            store
+                .upsert_idless(&original, "identity-sym-original")
+                .unwrap(),
+            IdlessUpsertResult::Saved
+        );
+
+        let mut near_dup = entry("sym-sync-loser");
+        near_dup.path = "/notes/sym-sync".to_string();
+        near_dup.text = near_dup_text;
+        assert_eq!(
+            store
+                .upsert_idless(&near_dup, "identity-sym-loser")
+                .unwrap(),
+            IdlessUpsertResult::Saved
+        );
+
+        let conn = store.connection();
+        let superseded_by: Option<String> = conn
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id = 'sym-sync-loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(superseded_by.as_deref(), Some("sym-sync-original"));
+
+        let in_symbolic: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_symbolic_fts WHERE id = 'sym-sync-loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            in_symbolic, 1,
+            "superseded Jaccard loser must be projected into memories_symbolic_fts \
+             before the early-return commit"
+        );
+
+        let hits = search_symbolic_candidates(
+            conn,
+            "uniformuniquesymbol",
+            10,
+            false,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            hits.iter().any(|e| e.id == "sym-sync-loser"),
+            "include_superseded symbolic recall must find the early-return loser; got {:?}",
+            hits.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+        );
     }
 }
 

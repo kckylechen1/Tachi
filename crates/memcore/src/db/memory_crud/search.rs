@@ -341,12 +341,18 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
 
-    // Prefer the trigram index when term filters are present (#1331). Path-
-    // prefix-only queries keep the ordinary `memories` path (prefix LIKE can
-    // use `idx_memories_path`). Legacy fixtures without the virtual table
-    // fall back to the pre-#1331 full-table LIKE scan so eligibility tests
-    // that build a bare `memories` table keep working.
-    if !terms.is_empty() && memories_symbolic_fts_available(conn) {
+    // Prefer the trigram index when every term is trigram-eligible (#1331).
+    // SQLite's FTS5 trigram tokenizer requires ≥3 Unicode characters per
+    // MATCH token; `symbolic_terms` still admits ≥3 UTF-8 *bytes* (so a
+    // single CJK character enters the term list). Short-grapheme queries
+    // must keep the pre-#1331 LIKE table-scan path or MATCH returns empty
+    // while LIKE would have hit. Path-prefix-only queries keep the ordinary
+    // `memories` path. Legacy fixtures without the virtual table also fall
+    // back to the LIKE scan.
+    if !terms.is_empty()
+        && memories_symbolic_fts_available(conn)
+        && terms_trigram_match_eligible(&terms)
+    {
         return search_symbolic_via_trigram(
             conn,
             &terms,
@@ -380,15 +386,37 @@ fn memories_symbolic_fts_available(conn: &Connection) -> bool {
     .is_ok()
 }
 
+/// Production SQL body for trigram-accelerated symbolic retrieval (#1331).
+///
+/// Shared with the receipts harness EXPLAIN assertion so the plan test cannot
+/// drift from a handwritten mirror. `{columns}` is substituted with either the
+/// full [`MEMORY_SELECT_COLUMNS_QUALIFIED`] list (runtime) or `m.id` (plan).
+pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
+         FROM memories_symbolic_fts
+         JOIN memories m ON m.id = memories_symbolic_fts.id
+         WHERE (?1 = 1 OR m.archived = 0)
+           AND (?2 = 1 OR m.superseded_by IS NULL)
+           AND (?3 IS NULL OR m.path LIKE ?3)
+           AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
+           AND m.id NOT LIKE 'anchor:%'
+           AND memories_symbolic_fts MATCH ?5
+         ORDER BY tachi_symbolic_score(?6, m.id, m.path, m.topic, m.summary, m.text, m.keywords, m.entities) DESC, julianday(m.timestamp) DESC, m.id ASC
+         LIMIT ?7";
+
+/// Build the production trigram SELECT statement for the given column list.
+pub fn symbolic_trigram_select_sql(columns: &str) -> String {
+    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE.replace("{columns}", columns)
+}
+
 /// Trigram-accelerated symbolic candidate retrieval (#1331).
 ///
 /// Uses FTS5 `MATCH` on `memories_symbolic_fts` (trigram tokenizer). Quoted
 /// phrase MATCH is contiguous substring search across the same columns the
-/// table-scan path LIKEs — equivalent for terms of length ≥ 3 (already
-/// enforced by [`symbolic_terms`]), without `ESCAPE` (which disables the
-/// trigram LIKE optimization and falls back to a virtual-table scan).
-/// Scoring and the final row payload still read from `memories`, preserving
-/// #1154's relevance-first ORDER BY / LIMIT contract.
+/// table-scan path LIKEs — equivalent for terms with ≥3 Unicode characters
+/// (gated by [`terms_trigram_match_eligible`]), without `ESCAPE` (which
+/// disables the trigram LIKE optimization and falls back to a virtual-table
+/// scan). Scoring and the final row payload still read from `memories`,
+/// preserving #1154's relevance-first ORDER BY / LIMIT contract.
 #[allow(clippy::too_many_arguments)]
 fn search_symbolic_via_trigram(
     conn: &Connection,
@@ -401,19 +429,7 @@ fn search_symbolic_via_trigram(
     as_of_utc: Option<&str>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let match_query = symbolic_trigram_match_query(terms);
-    let sql = format!(
-        "SELECT {MEMORY_SELECT_COLUMNS_QUALIFIED}
-         FROM memories_symbolic_fts
-         JOIN memories m ON m.id = memories_symbolic_fts.id
-         WHERE (?1 = 1 OR m.archived = 0)
-           AND (?2 = 1 OR m.superseded_by IS NULL)
-           AND (?3 IS NULL OR m.path LIKE ?3)
-           AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
-           AND m.id NOT LIKE 'anchor:%'
-           AND memories_symbolic_fts MATCH ?5
-         ORDER BY tachi_symbolic_score(?6, m.id, m.path, m.topic, m.summary, m.text, m.keywords, m.entities) DESC, julianday(m.timestamp) DESC, m.id ASC
-         LIMIT ?7"
-    );
+    let sql = symbolic_trigram_select_sql(MEMORY_SELECT_COLUMNS_QUALIFIED);
 
     let params: Vec<Value> = vec![
         (include_archived as i64).into(),
@@ -559,6 +575,13 @@ fn symbolic_terms(query: &str) -> Vec<String> {
     terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
     terms.truncate(12);
     terms
+}
+
+/// FTS5 trigram MATCH needs ≥3 Unicode characters per term. Byte-length
+/// gating in [`symbolic_terms`] is necessary but not sufficient (one CJK
+/// character is 3 UTF-8 bytes / 1 char).
+fn terms_trigram_match_eligible(terms: &[String]) -> bool {
+    !terms.is_empty() && terms.iter().all(|term| term.chars().count() >= 3)
 }
 
 fn symbolic_term_match_clause(parameter_index: usize) -> String {

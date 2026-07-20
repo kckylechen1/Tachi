@@ -964,8 +964,10 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         [],
     )?;
 
-    // Symbolic trigram index (#1331): same drift-repair shape as memories_fts,
-    // but stores raw column bytes so LIKE eligibility stays identical.
+    // Symbolic trigram index (#1331): insert-missing drift repair only.
+    // Content refreshes after path/data migrations are owned by v22's full
+    // rebuild (`migrate_v22_memories_symbolic_fts`) so this early backfill
+    // cannot permanently freeze pre-migration field values.
     let symbolic_fts_present: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
