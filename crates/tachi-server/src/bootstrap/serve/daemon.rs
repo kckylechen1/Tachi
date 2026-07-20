@@ -1,38 +1,7 @@
 use super::*;
 use std::sync::Arc;
 
-async fn normalize_malformed_mcp_json_response(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let is_mcp_post = request.method() == axum::http::Method::POST
-        && matches!(request.uri().path(), "/mcp" | "/mcp/");
-    let is_json = request
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
-    let response = next.run(request).await;
-    if is_mcp_post && is_json && response.status() == axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE
-    {
-        return mcp_parse_error_response();
-    }
-    response
-}
-
-fn mcp_parse_error_response() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    (
-        axum::http::StatusCode::BAD_REQUEST,
-        axum::Json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": null,
-            "error": { "code": -32700, "message": "Parse error" }
-        })),
-    )
-        .into_response()
-}
+use super::malformed_json_middleware::normalize_malformed_mcp_json_response;
 
 pub(super) async fn serve_http_daemon(
     server: MemoryServer,
@@ -731,22 +700,26 @@ impl Drop for DiscoveryPidGuard {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn malformed_mcp_json_response_is_structured_parse_error() {
-        let response = mcp_parse_error_response();
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    // #1308 follow-up: `normalize_malformed_mcp_json_response` /
+    // `parse_error_response` moved into `malformed_json_middleware.rs`
+    // (own unit test lives there now, alongside the fn). portable-server
+    // is deliberately zero-dependency on tachi-server (see
+    // `crates/portable-server/Cargo.toml`), so there is no shared crate to
+    // hold this ~30-line axum middleware in without adding a new
+    // dependency edge — the ruled-on tradeoff is an enforced-parity
+    // duplicate instead. This test is the enforcement: it fails loudly if
+    // the two copies ever drift.
+    #[test]
+    fn malformed_json_middleware_stays_in_parity_with_portable_server() {
+        let tachi_server_copy = include_str!("malformed_json_middleware.rs");
+        let portable_server_copy =
+            include_str!("../../../../portable-server/src/malformed_json_middleware.rs");
         assert_eq!(
-            response.headers()[axum::http::header::CONTENT_TYPE],
-            "application/json"
+            tachi_server_copy, portable_server_copy,
+            "crates/tachi-server/src/bootstrap/serve/malformed_json_middleware.rs \
+             and crates/portable-server/src/malformed_json_middleware.rs must stay \
+             byte-identical (tachi #1308 follow-up) — edit one, edit its twin too"
         );
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("parse error response body");
-        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON-RPC body");
-        assert_eq!(body["jsonrpc"], "2.0");
-        assert!(body["id"].is_null());
-        assert_eq!(body["error"]["code"], -32700);
-        assert_eq!(body["error"]["message"], "Parse error");
     }
 
     #[test]

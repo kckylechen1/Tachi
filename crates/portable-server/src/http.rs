@@ -25,40 +25,8 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 
+use crate::malformed_json_middleware::normalize_malformed_mcp_json_response;
 use crate::service::PortableServer;
-
-async fn normalize_malformed_mcp_json_response(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let is_mcp_post = request.method() == axum::http::Method::POST
-        && matches!(request.uri().path(), "/mcp" | "/mcp/");
-    let is_json = request
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
-    let response = next.run(request).await;
-    if is_mcp_post && is_json && response.status() == axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE
-    {
-        return parse_error_response();
-    }
-    response
-}
-
-fn parse_error_response() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    (
-        axum::http::StatusCode::BAD_REQUEST,
-        axum::Json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": null,
-            "error": { "code": -32700, "message": "Parse error" }
-        })),
-    )
-        .into_response()
-}
 
 /// How often the liveness watchdog (see [`watchdog`]) self-probes.
 const LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(30);

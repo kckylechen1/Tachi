@@ -23,6 +23,7 @@
 mod config;
 mod decay;
 mod http;
+mod malformed_json_middleware;
 mod service;
 
 use config::{Config, IN_MEMORY};

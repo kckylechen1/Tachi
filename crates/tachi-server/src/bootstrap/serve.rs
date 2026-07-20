@@ -16,6 +16,7 @@ mod background;
 mod cli_commands;
 mod daemon;
 mod logging;
+mod malformed_json_middleware;
 mod runtime;
 mod stdio;
 
