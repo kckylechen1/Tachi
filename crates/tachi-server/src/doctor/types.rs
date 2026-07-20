@@ -101,6 +101,16 @@ pub struct AutoFixAction {
     /// `shm=copy_failed_partial_renamed_incomplete`, or
     /// `shm=copy_failed_partial_remains`. SHM is not durability-equivalent to
     /// WAL; a failed SHM copy does not block the checkpoint.
+    ///
+    /// `checkpoint_wal_copy` also has two `outcome: "skipped"` shapes, both
+    /// fail-closed on a live/undeterminable daemon and both leave
+    /// `destination: None`: `"live daemon holds this DB; refuse to make a
+    /// torn copy"` (ownership confirmed held) and `"daemon ownership
+    /// undetermined (<reason>); refusing to risk a torn copy"` (ownership
+    /// could not be determined — lsof missing/erroring, canonicalize
+    /// failure, or unsupported platform). The second shape must never be
+    /// conflated with "not owned": an undeterminable daemon is treated the
+    /// same as a confirmed-live one, not the same as a confirmed-absent one.
     pub note: String,
     /// Usable checkpoint path on success only. Must be `None` on any failure
     /// after a copy was attempted (incomplete destination discarded or

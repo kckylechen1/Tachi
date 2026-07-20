@@ -455,14 +455,33 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
     // the three files (main + -wal + -shm) non-atomically produces a
     // torn snapshot, and running PRAGMA wal_checkpoint(TRUNCATE) on the
     // copy is undefined behavior on a partial WAL. Skip and explain.
-    if daemon_owns_db(src_path) {
-        return AutoFixAction {
-            path: src.to_string(),
-            action: "checkpoint_wal_copy".to_string(),
-            outcome: "skipped".to_string(),
-            note: "live daemon holds this DB; refuse to make a torn copy".to_string(),
-            destination: None,
-        };
+    //
+    // `Unknown` fails closed exactly like `Owned`: if we cannot tell
+    // whether a daemon holds the file, we must not risk the torn-copy +
+    // undefined-checkpoint failure mode either. Only a confirmed `NotOwned`
+    // may fall through to the copy path below.
+    match daemon_ownership(src_path) {
+        DbOwnership::Owned => {
+            return AutoFixAction {
+                path: src.to_string(),
+                action: "checkpoint_wal_copy".to_string(),
+                outcome: "skipped".to_string(),
+                note: "live daemon holds this DB; refuse to make a torn copy".to_string(),
+                destination: None,
+            };
+        }
+        DbOwnership::Unknown(reason) => {
+            return AutoFixAction {
+                path: src.to_string(),
+                action: "checkpoint_wal_copy".to_string(),
+                outcome: "skipped".to_string(),
+                note: format!(
+                    "daemon ownership undetermined ({reason}); refusing to risk a torn copy"
+                ),
+                destination: None,
+            };
+        }
+        DbOwnership::NotOwned => {}
     }
 
     // Collision-resistant destination: timestamp (µs) + short uuid so two
@@ -732,34 +751,129 @@ fn discard_incomplete_checkpoint(dest: &Path) -> Option<String> {
     }
 }
 
+/// Tri-state result of probing whether a live daemon holds `db_path` open.
+/// `Unknown` must fail closed at every call site: it is not a synonym for
+/// `NotOwned`, and callers must never fall through to an unguarded copy on
+/// `Unknown` — that was the fail-open bug (torn main+wal+shm copies plus a
+/// `wal_checkpoint(TRUNCATE)` against a partial WAL, reported as `outcome=ok`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DbOwnership {
+    /// lsof ran cleanly and found at least one process with the file open.
+    Owned,
+    /// lsof ran cleanly and found no holders.
+    NotOwned,
+    /// Ownership could not be determined; `reason` is surfaced verbatim in
+    /// the caller's receipt note (never swallowed).
+    Unknown(String),
+}
+
 /// Best-effort detection: does any running tachi-tachi-server have an
-/// open file handle on `db_path`? Uses `lsof` on Unix; on other platforms
-/// (or if `lsof` is missing / errors) returns false (i.e. fall through to
-/// the unguarded copy path — preserves prior behavior).
+/// open file handle on `db_path`? Uses `lsof` on Unix. Only a clean lsof
+/// run (readable exit status + output) may resolve to `Owned`/`NotOwned`;
+/// canonicalize failure, a missing/erroring `lsof`, and non-unix platforms
+/// all return `Unknown` — the caller must fail closed on that, not fall
+/// through to the unguarded copy path.
 #[cfg(unix)]
-fn daemon_owns_db(db_path: &Path) -> bool {
+fn probe_db_ownership(db_path: &Path) -> DbOwnership {
     use std::process::Command;
     let abs = match db_path.canonicalize() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(e) => return DbOwnership::Unknown(format!("canonicalize failed: {e}")),
     };
     let abs_str = abs.to_string_lossy().to_string();
     // Using `--` to terminate options before the path argument so paths
     // beginning with `-` are treated literally.
     let output = Command::new("lsof").arg("--").arg(&abs_str).output();
     match output {
-        Ok(o) if o.status.success() => {
+        Ok(o) => classify_lsof_output(
+            o.status.code(),
+            &String::from_utf8_lossy(&o.stdout),
+            &String::from_utf8_lossy(&o.stderr),
+        ),
+        Err(e) => DbOwnership::Unknown(format!("lsof unavailable: {e}")),
+    }
+}
+
+/// Pure classification of an `lsof` invocation's exit signature into
+/// ownership — no process execution, so every signature below is
+/// unit-testable without needing to actually kill `lsof` mid-run (a
+/// genuinely signal-killed subprocess is not reliably reproducible in an
+/// integration-style test).
+///
+/// `status_code` is `Option<i32>` per `std::process::ExitStatus::code()`:
+/// `None` means the process was terminated by a signal on unix (SIGKILL,
+/// an OOM kill, ...) rather than exiting normally — that case must be
+/// checked *before* the "both streams empty" heuristic below, because a
+/// signal-killed `lsof` also leaves both streams empty and would otherwise
+/// be misread as the harmless "no holders found" signature.
+///
+/// Signatures:
+/// - `Some(0)` + >1 stdout line → `Owned` (header + at least one holder line)
+/// - `Some(0)` + ≤1 stdout line → `NotOwned` (header only / no output)
+/// - `Some(n)` (n != 0) + both streams empty → `NotOwned` (lsof's normal,
+///   silent "no holders" exit-1 signature)
+/// - `None` (signal death) → `Unknown("lsof terminated by signal")`,
+///   regardless of stream contents
+/// - `Some(n)` (n != 0) + diagnostic text on either stream → `Unknown`
+///   with the first diagnostic line surfaced
+#[cfg(unix)]
+fn classify_lsof_output(status_code: Option<i32>, stdout: &str, stderr: &str) -> DbOwnership {
+    match status_code {
+        Some(0) => {
             // lsof prints a header line + one line per holder; >1 line means held.
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().count() > 1
+            if stdout.lines().count() > 1 {
+                DbOwnership::Owned
+            } else {
+                DbOwnership::NotOwned
+            }
         }
-        _ => false,
+        None => DbOwnership::Unknown("lsof terminated by signal".to_string()),
+        Some(_) => {
+            // lsof's non-zero exit is ambiguous by design: it means either
+            // "no holders found" (the common, harmless case — empty
+            // stdout/stderr) or a genuine fault (permission denied, lsof
+            // internal error, unexpected args). Only trust the "no holders"
+            // reading when lsof stayed silent on both streams; any
+            // diagnostic text means we cannot tell, so fail closed.
+            if stderr.trim().is_empty() && stdout.trim().is_empty() {
+                DbOwnership::NotOwned
+            } else {
+                let detail = stderr
+                    .lines()
+                    .next()
+                    .filter(|l| !l.trim().is_empty())
+                    .or_else(|| stdout.lines().next())
+                    .unwrap_or("lsof exited non-zero")
+                    .trim()
+                    .to_string();
+                DbOwnership::Unknown(format!("lsof error: {detail}"))
+            }
+        }
     }
 }
 
 #[cfg(not(unix))]
-fn daemon_owns_db(_db_path: &Path) -> bool {
-    false
+fn probe_db_ownership(_db_path: &Path) -> DbOwnership {
+    DbOwnership::Unknown("unsupported platform (no ownership probe on non-unix)".to_string())
+}
+
+// Test inject: force `daemon_ownership` to return a specific result without
+// depending on real lsof behavior (a genuinely erroring lsof is not
+// reliably reproducible across CI environments).
+#[cfg(all(test, unix))]
+thread_local! {
+    static INJECT_OWNERSHIP: std::cell::RefCell<Option<DbOwnership>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn daemon_ownership(db_path: &Path) -> DbOwnership {
+    #[cfg(all(test, unix))]
+    {
+        if let Some(forced) = INJECT_OWNERSHIP.with(|c| c.borrow_mut().take()) {
+            return forced;
+        }
+    }
+    probe_db_ownership(db_path)
 }
 
 /// Remove all but the `keep` most-recent `<src>.checkpointed.*.db` (and
@@ -1239,6 +1353,200 @@ mod checkpoint_honesty_tests {
             mode & 0o044,
             0,
             "checkpoint dest must not be group/world-readable"
+        );
+    }
+
+    /// Sanity check that the real (uninjected) probe resolves an ordinary
+    /// tempdir fixture — nobody else has it open — to `NotOwned`, so the
+    /// `Owned`/`Unknown` tests below are meaningfully exercising the
+    /// fail-closed branches and not just always hitting the same arm.
+    #[test]
+    fn not_owned_probe_falls_through_to_copy() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        write_delete_mode_db(&db);
+
+        assert_eq!(daemon_ownership(&db), DbOwnership::NotOwned);
+
+        let action = checkpoint_wal_copy(db.to_str().unwrap());
+        assert_eq!(action.outcome, "ok");
+        assert!(action.destination.is_some());
+    }
+
+    struct ClearOwnershipInject;
+    impl Drop for ClearOwnershipInject {
+        fn drop(&mut self) {
+            INJECT_OWNERSHIP.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    #[test]
+    fn owned_daemon_skips_without_touching_disk() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        write_delete_mode_db(&db);
+
+        let _clear = ClearOwnershipInject;
+        INJECT_OWNERSHIP.with(|c| *c.borrow_mut() = Some(DbOwnership::Owned));
+
+        let action = checkpoint_wal_copy(db.to_str().unwrap());
+
+        assert_eq!(action.outcome, "skipped");
+        assert!(action.destination.is_none());
+        assert!(
+            action.note.contains("live daemon holds this DB"),
+            "note must name the live-daemon skip reason, got: {}",
+            action.note
+        );
+        assert!(
+            checkpointed_globs(dir.path(), "memory.db").is_empty(),
+            "an owned DB must produce zero .checkpointed.*.db copies"
+        );
+    }
+
+    #[test]
+    fn unknown_ownership_fails_closed_without_touching_disk() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        write_delete_mode_db(&db);
+
+        let _clear = ClearOwnershipInject;
+        INJECT_OWNERSHIP.with(|c| {
+            *c.borrow_mut() = Some(DbOwnership::Unknown(
+                "lsof unavailable: No such file or directory (os error 2)".to_string(),
+            ))
+        });
+
+        let action = checkpoint_wal_copy(db.to_str().unwrap());
+
+        assert_eq!(
+            action.outcome, "skipped",
+            "undeterminable ownership must fail closed (skip), not fall through to copy"
+        );
+        assert!(
+            action.destination.is_none(),
+            "must never advertise a destination when ownership could not be determined"
+        );
+        assert!(
+            action.note.contains("daemon ownership undetermined"),
+            "note must say ownership was undetermined, got: {}",
+            action.note
+        );
+        assert!(
+            action.note.contains("lsof unavailable"),
+            "note must surface the underlying reason (拒必有声), got: {}",
+            action.note
+        );
+        assert!(
+            checkpointed_globs(dir.path(), "memory.db").is_empty(),
+            "unknown ownership must produce zero .checkpointed.*.db copies — \
+             never a potentially torn destination"
+        );
+    }
+
+    #[test]
+    fn unknown_ownership_note_is_distinct_from_owned_note() {
+        // Guard against the two fail-closed branches being conflated into a
+        // single "not owned"-shaped note (the bug this change fixes): an
+        // undeterminable daemon must be surfaced differently than a
+        // confirmed-live one, even though both skip.
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        write_delete_mode_db(&db);
+
+        let _clear = ClearOwnershipInject;
+        INJECT_OWNERSHIP.with(|c| {
+            *c.borrow_mut() = Some(DbOwnership::Unknown("canonicalize failed: x".into()))
+        });
+        let unknown_action = checkpoint_wal_copy(db.to_str().unwrap());
+
+        INJECT_OWNERSHIP.with(|c| *c.borrow_mut() = Some(DbOwnership::Owned));
+        let owned_action = checkpoint_wal_copy(db.to_str().unwrap());
+
+        assert_eq!(unknown_action.outcome, "skipped");
+        assert_eq!(owned_action.outcome, "skipped");
+        assert_ne!(
+            unknown_action.note, owned_action.note,
+            "Unknown and Owned must not collapse into the same receipt note"
+        );
+    }
+
+    // classify_lsof_output is pure (no process execution), so every exit
+    // signature — including signal death, which cannot be reliably forced
+    // on a real subprocess in a test — is directly testable here.
+
+    #[test]
+    fn classify_success_multiple_holders_is_owned() {
+        let header_plus_holder = "COMMAND  PID USER  FD TYPE\ntachi  123 kyle  10r REG\n";
+        assert_eq!(
+            classify_lsof_output(Some(0), header_plus_holder, ""),
+            DbOwnership::Owned
+        );
+    }
+
+    #[test]
+    fn classify_success_no_holder_lines_is_not_owned() {
+        // Some(0) with header-only (or empty) stdout: exit succeeded but
+        // nothing matched.
+        assert_eq!(classify_lsof_output(Some(0), "", ""), DbOwnership::NotOwned);
+        assert_eq!(
+            classify_lsof_output(Some(0), "COMMAND  PID USER  FD TYPE\n", ""),
+            DbOwnership::NotOwned
+        );
+    }
+
+    #[test]
+    fn classify_nonzero_exit_both_streams_empty_is_not_owned() {
+        // lsof's normal, silent "no holders found" signature: exit 1, not a
+        // fault, both streams empty.
+        assert_eq!(classify_lsof_output(Some(1), "", ""), DbOwnership::NotOwned);
+    }
+
+    #[test]
+    fn classify_signal_death_is_unknown_even_with_empty_streams() {
+        // The bug this test guards: a signal-killed lsof (SIGKILL/OOM) also
+        // leaves both streams empty, which is indistinguishable from the
+        // "no holders" signature by stream contents alone. `status_code()
+        // == None` must be checked first and must never resolve to
+        // `NotOwned`.
+        assert_eq!(
+            classify_lsof_output(None, "", ""),
+            DbOwnership::Unknown("lsof terminated by signal".to_string())
+        );
+        // Also must not be swayed by incidental non-empty output preceding
+        // the kill — signal death always wins.
+        assert_eq!(
+            classify_lsof_output(None, "COMMAND  PID USER  FD TYPE\n", "some partial text"),
+            DbOwnership::Unknown("lsof terminated by signal".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_nonzero_exit_with_diagnostic_is_unknown() {
+        let unknown = classify_lsof_output(
+            Some(1),
+            "",
+            "lsof: status error on /x: No such file or directory\n",
+        );
+        match unknown {
+            DbOwnership::Unknown(reason) => {
+                assert!(
+                    reason.contains("lsof: status error on /x"),
+                    "reason must surface the diagnostic line, got: {reason}"
+                );
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_signal_death_distinct_from_clean_not_owned() {
+        // Regression guard: signal death and the ordinary silent-exit
+        // NotOwned signature must never collapse to the same variant even
+        // though both present as "both streams empty".
+        assert_ne!(
+            classify_lsof_output(None, "", ""),
+            classify_lsof_output(Some(1), "", "")
         );
     }
 }
