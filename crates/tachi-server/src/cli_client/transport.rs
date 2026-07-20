@@ -1,7 +1,7 @@
 //! Streamable HTTP MCP transport calls used by CLI and stdio proxy surfaces.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequestParams, ListToolsResult, RawContent};
@@ -172,6 +172,21 @@ pub(crate) async fn call_daemon_tool(
     Ok(first_text_block(&result.content).unwrap_or_else(|| "{}".to_string()))
 }
 
+/// Phase timings for one Streamable-HTTP daemon tool call (#1255 receipt seam).
+///
+/// Separates MCP session handshake cost from the post-handshake `call_tool`
+/// duration so concurrency receipts can discriminate transport churn without
+/// changing product timeouts or pooling behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DaemonCallPhaseTiming {
+    /// Wall ms spent establishing the Streamable HTTP MCP session.
+    pub handshake_ms: u64,
+    /// Wall ms spent in `call_tool` after handshake (0 if handshake never completed).
+    pub call_ms: u64,
+    /// Total wall ms from entry to return (includes both phases + local setup).
+    pub total_ms: u64,
+}
+
 /// Call a daemon tool over Streamable HTTP without remapping the name or
 /// collapsing the result to text. stdio proxy mode uses this to stay a pure
 /// transport adapter while the daemon remains the semantic owner.
@@ -189,16 +204,48 @@ pub(crate) async fn call_daemon_tool_raw(
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
+    call_daemon_tool_raw_with_phases(info, params, proxy_project)
+        .await
+        .0
+}
+
+/// Same transport path as [`call_daemon_tool_raw`], plus handshake/call phase
+/// timings for #1255 concurrency receipts. Always returns phases (even on error)
+/// so a harness can emit a complete receipt set.
+pub(crate) async fn call_daemon_tool_raw_with_phases(
+    info: &DaemonInfo,
+    params: CallToolRequestParams,
+    proxy_project: Option<&str>,
+) -> (
+    Result<rmcp::model::CallToolResult, DaemonCallError>,
+    DaemonCallPhaseTiming,
+) {
+    let started = Instant::now();
     let tool_name = params.name.as_ref().to_string();
     let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
     let mut headers = HashMap::new();
     if let Some(project) = proxy_project {
-        headers.insert(
-            HeaderName::from_static(crate::session_identity::HEADER_PROJECT),
-            HeaderValue::from_str(project).map_err(|e| {
-                DaemonCallError::BeforeDispatch(format!("invalid proxy project header value: {e}"))
-            })?,
-        );
+        match HeaderValue::from_str(project) {
+            Ok(value) => {
+                headers.insert(
+                    HeaderName::from_static(crate::session_identity::HEADER_PROJECT),
+                    value,
+                );
+            }
+            Err(e) => {
+                let total_ms = elapsed_ms(started);
+                return (
+                    Err(DaemonCallError::BeforeDispatch(format!(
+                        "invalid proxy project header value: {e}"
+                    ))),
+                    DaemonCallPhaseTiming {
+                        handshake_ms: 0,
+                        call_ms: 0,
+                        total_ms,
+                    },
+                );
+            }
+        }
     }
     // #1251: forward this proxy process's OWN recursion depth to the daemon on
     // every call, over the same per-call header rail as X-Tachi-Project. The
@@ -211,37 +258,68 @@ pub(crate) async fn call_daemon_tool_raw(
     if let Ok(depth) = std::env::var(crate::session_identity::ENV_DISPATCH_DEPTH) {
         let depth = depth.trim();
         if !depth.is_empty() {
-            headers.insert(
-                HeaderName::from_static(crate::session_identity::HEADER_DISPATCH_DEPTH),
-                HeaderValue::from_str(depth).map_err(|e| {
-                    DaemonCallError::BeforeDispatch(format!(
-                        "invalid dispatch depth header value: {e}"
-                    ))
-                })?,
-            );
+            match HeaderValue::from_str(depth) {
+                Ok(value) => {
+                    headers.insert(
+                        HeaderName::from_static(crate::session_identity::HEADER_DISPATCH_DEPTH),
+                        value,
+                    );
+                }
+                Err(e) => {
+                    let total_ms = elapsed_ms(started);
+                    return (
+                        Err(DaemonCallError::BeforeDispatch(format!(
+                            "invalid dispatch depth header value: {e}"
+                        ))),
+                        DaemonCallPhaseTiming {
+                            handshake_ms: 0,
+                            call_ms: 0,
+                            total_ms,
+                        },
+                    );
+                }
+            }
         }
     }
     if !headers.is_empty() {
         transport_config = transport_config.custom_headers(headers);
     }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
-    let client = ServiceExt::serve((), transport).await.map_err(|e| {
-        DaemonCallError::BeforeDispatch(format!("daemon handshake failed at {}: {e}", info.url))
-    })?;
+    let handshake_started = Instant::now();
+    let client = match ServiceExt::serve((), transport).await {
+        Ok(client) => client,
+        Err(e) => {
+            let handshake_ms = elapsed_ms(handshake_started);
+            let total_ms = elapsed_ms(started);
+            return (
+                Err(DaemonCallError::BeforeDispatch(format!(
+                    "daemon handshake failed at {}: {e}",
+                    info.url
+                ))),
+                DaemonCallPhaseTiming {
+                    handshake_ms,
+                    call_ms: 0,
+                    total_ms,
+                },
+            );
+        }
+    };
+    let handshake_ms = elapsed_ms(handshake_started);
 
     let call_timeout = daemon_call_timeout(&params);
     let peer = client.peer().clone();
-    let result = tokio::time::timeout(call_timeout, peer.call_tool(params))
-        .await
-        .map_err(|_| {
-            DaemonCallError::AfterDispatch(format!(
-                "daemon call '{tool_name}' timed out after {:?}",
-                call_timeout
-            ))
-        })?
-        .map_err(|e| {
-            DaemonCallError::AfterDispatch(format!("daemon call '{tool_name}' failed: {e}"))
-        })?;
+    let call_started = Instant::now();
+    let result = match tokio::time::timeout(call_timeout, peer.call_tool(params)).await {
+        Err(_) => Err(DaemonCallError::AfterDispatch(format!(
+            "daemon call '{tool_name}' timed out after {:?}",
+            call_timeout
+        ))),
+        Ok(Err(e)) => Err(DaemonCallError::AfterDispatch(format!(
+            "daemon call '{tool_name}' failed: {e}"
+        ))),
+        Ok(Ok(result)) => Ok(result),
+    };
+    let call_ms = elapsed_ms(call_started);
 
     // Dropping the client is enough to close the short-lived CLI HTTP session.
     // Calling `cancel()` here has caused daemon-side lifecycle confusion with
@@ -249,7 +327,18 @@ pub(crate) async fn call_daemon_tool_raw(
     // the daemon exiting and leaving a stale pid file.
     drop(client);
 
-    Ok(result)
+    (
+        result,
+        DaemonCallPhaseTiming {
+            handshake_ms,
+            call_ms,
+            total_ms: elapsed_ms(started),
+        },
+    )
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// List daemon tools over Streamable HTTP. stdio proxy mode uses daemon-side
