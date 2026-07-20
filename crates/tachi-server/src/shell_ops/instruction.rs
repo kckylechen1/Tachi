@@ -72,32 +72,13 @@ pub(super) fn build_instruction_md(
 
     s.push_str("## Validation Commands\n\n");
     if validation.is_empty() {
-        match stage {
-            "ship" | "dispatch" | "review" => {
-                s.push_str("- `cargo test -p tachi-server`\n");
-            }
-            _ => {
-                s.push_str("- (none specified)\n");
-            }
-        }
+        s.push_str("- `cargo test -p tachi-server`\n");
     } else {
         for v in validation {
             s.push_str(&format!("- `{}`\n", v));
         }
     }
     s.push('\n');
-
-    if stage == "ship" {
-        s.push_str("## Release Flow\n\n");
-        s.push_str("Follow this PR-first release sequence unless the human explicitly authorizes a direct push to the protected branch:\n\n");
-        s.push_str("1. Finish the feature branch.\n");
-        s.push_str("2. Run tests and required verification.\n");
-        s.push_str("3. Push the feature branch.\n");
-        s.push_str("4. Open a PR.\n");
-        s.push_str("5. Pass the PR gate: CI checks and review gate.\n");
-        s.push_str("6. Merge the PR.\n");
-        s.push_str("7. Deploy / release.\n\n");
-    }
 
     s.push_str("## Expected Outputs\n\n");
     s.push_str("Write all artifacts under the run directory:\n\n");

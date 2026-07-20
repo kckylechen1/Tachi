@@ -9,7 +9,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_shell_artifact(
     let raw = crate::shell_ops::handle_tachi_shell(
         server,
         TachiShellParams {
-            action: "plan".to_string(),
+            action: "dispatch".to_string(),
             format: Some("json".to_string()),
             flow_id: None,
             task: Some("Poke smoke shell artifact probe".to_string()),
@@ -38,7 +38,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_shell_artifact(
     evaluate_shell_probe_response(response)
 }
 
-/// Pure evaluation of a `tachi_shell action=plan` response into the probe's
+/// Pure evaluation of a non-async `tachi_shell action=dispatch` response into the probe's
 /// pass/fail verdict. Split out from `probe_shell_artifact` so the gating
 /// logic (in particular the `failure_class` tolerance check) is unit
 /// testable with crafted responses, without needing a live `MemoryServer`.
@@ -114,7 +114,7 @@ fn evaluate_shell_probe_response(response: Value) -> Result<Value, String> {
             "injected_warning": if injected_warning.is_empty() { Value::Null } else { json!(injected_warning) },
         },
         "repro_steps": [
-            "tachi_shell action=plan in isolated TACHI_RUN_ROOT",
+            "tachi_shell action=dispatch async_dispatch=false in isolated TACHI_RUN_ROOT",
             "check instruction.md and status.json"
         ],
     }))
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn passes_when_injection_actually_loaded() {
         let injected_temp = tempfile::tempdir().expect("temp injected dir");
-        let injected_path = injected_temp.path().join("superpowers-plan.md");
+        let injected_path = injected_temp.path().join("superpowers-dispatch.md");
         std::fs::write(&injected_path, "# sop").expect("write injected sop");
         let (_guard, response) = response_with_injected(json!({
             "required": true,

@@ -129,16 +129,12 @@ Beyond SKILL.md files, Superpowers includes:
 
 ### 2.4 Tachi Integration Notes
 
-Superpowers provides **workflow skeleton** (brainstorm → plan → execute → review → ship). Tachi's `shell_ops` 5-stage lifecycle maps directly:
+Superpowers provides a broader **workflow skeleton** (brainstorm → plan → execute → review → ship). Tachi Shell does not mirror that lifecycle: it retains only dispatch packet generation and read-only status, with the execution SOP mapped for dispatch:
 
 ```rust
 fn meta_skill_for_stage(stage: &str) -> Option<&'static str> {
     match stage {
-        "brainstorm" => Some("skill/superpowers/skills/brainstorming/SKILL.md"),
-        "plan"       => Some("skill/superpowers/skills/writing-plans/SKILL.md"),
         "dispatch"   => Some("skill/superpowers/skills/executing-plans/SKILL.md"),
-        "review"     => Some("skill/superpowers/skills/requesting-code-review/SKILL.md"),
-        "ship"       => Some("skill/superpowers/skills/finishing-a-development-branch/SKILL.md"),
         _ => None,
     }
 }
@@ -808,7 +804,7 @@ docs/ADD_A_MODEL.md            # Backend integration guide
 ### 8.6 Tachi Internal
 
 ```
-crates/tachi-server/src/shell_ops/mod.rs    # 5-stage lifecycle
+crates/tachi-server/src/shell_ops/mod.rs    # dispatch packet + read-only status
 crates/tachi-server/src/dispatch_ops/       # Agent dispatch
 crates/tachi-server/src/claude_pool.rs      # Bounded concurrency
 crates/tachi-params/src/             # MCP tool schemas

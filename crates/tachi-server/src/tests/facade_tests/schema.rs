@@ -151,7 +151,7 @@ fn tachi_skill_action_schema_declares_bundle_and_loadout() {
 }
 
 #[test]
-fn tachi_shell_schema_omits_removed_kanban_action_and_filter() {
+fn tachi_shell_schema_exposes_only_dispatch_and_status() {
     let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiShellParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let properties = value["properties"].as_object().expect("shell properties");
@@ -159,8 +159,10 @@ fn tachi_shell_schema_omits_removed_kanban_action_and_filter() {
         .as_array()
         .expect("shell action enum");
 
-    assert_eq!(actions.len(), 6);
-    assert!(!actions.contains(&json!("kanban")));
+    assert_eq!(actions, &vec![json!("dispatch"), json!("status")]);
+    for removed in ["brainstorm", "plan", "review", "ship", "kanban"] {
+        assert!(!actions.contains(&json!(removed)));
+    }
     assert!(!properties.contains_key("state_filter"));
     assert!(properties.contains_key("limit"));
 }

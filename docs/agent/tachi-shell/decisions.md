@@ -41,11 +41,11 @@ Tachi has two merge paths and agents must not mix them:
 
 Superpowers and Gastown-style workflow SOPs are mandatory shell gates, not optional discoverable skills.
 
-They should be injected by `tachi_shell` according to stage and persisted as flow artifacts.
+The dispatch SOP is injected by `tachi_shell(action="dispatch")` and persisted with its flow packet. Other lifecycle skills are invoked on their owning surfaces, not represented as Shell actions.
 
-## PR-first ship flow
+## PR-first ship flow (not a Shell action)
 
-`ship` should default to PR-first delivery:
+Canonical shipping should default to PR-first delivery through `tachi_gh(action="ship")` and its verification/merge companions:
 
 1. Finish feature branch.
 2. Run tests and required verification.
