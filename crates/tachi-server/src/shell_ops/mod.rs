@@ -13,8 +13,8 @@
 //! This module deliberately does **not** re-implement clanker dispatch,
 //! or skill discovery — it composes existing infra.
 
-use crate::{MemoryServer, TachiDispatchParams, TachiShellDispatchSliceParams, TachiShellParams};
 use crate::task_lifecycle::{shell_runs_root, validate_flow_id};
+use crate::{MemoryServer, TachiDispatchParams, TachiShellDispatchSliceParams, TachiShellParams};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -44,7 +44,7 @@ use self::instruction::build_instruction_md;
 pub(crate) use self::actions::handle_tachi_shell;
 #[cfg(test)]
 use self::actions::{handle_status_action, resolve_slice_id};
+pub(crate) use self::flow::scan_open_loops;
 #[cfg(test)]
 pub(crate) use self::flow::tachi_run_root_env_lock;
-pub(crate) use self::flow::scan_open_loops;
 pub(crate) use shell_github::*;
