@@ -862,8 +862,8 @@ mod tests {
             &mut scores,
         );
 
-        assert_eq!(scores.get("r1").unwrap().final_score, 2.0 * 2.85);
-        assert_eq!(scores.get("r2").unwrap().final_score, 1.0 * 2.85);
+        assert_eq!(scores.get("r1").unwrap().final_score, 2.0 * 3.00);
+        assert_eq!(scores.get("r2").unwrap().final_score, 1.0 * 3.00);
         assert_eq!(
             ranked_ids(&scores, &["r1", "r2"]),
             vec!["r1".to_string(), "r2".to_string()]

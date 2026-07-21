@@ -682,6 +682,7 @@ mod tests {
     /// cargo test -p tachi-server --lib concurrency_receipt
     /// ```
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::await_holding_lock)]
     async fn transport_concurrency_receipt_serial_and_burst() {
         crate::ensure_tls_provider();
 
