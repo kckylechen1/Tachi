@@ -455,6 +455,31 @@ async fn wait_until_server_saw(
     }
 }
 
+/// Poll TCP accept readiness instead of a fixed sleep (review non-blocking #1338).
+async fn wait_for_daemon_tcp_ready(info: &DaemonInfo) {
+    let endpoint = sanitize_daemon_endpoint(&info.url);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match tokio::net::TcpStream::connect(&endpoint).await {
+            Ok(_) => return,
+            Err(err) if Instant::now() >= deadline => {
+                panic!("receipt daemon TCP not ready at {endpoint} within 2s: {err}");
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    }
+}
+
+/// Cancel the daemon token on panic/early return so teardown is not skipped
+/// when assertions fail after spawn (review non-blocking #1338).
+struct CancelDaemonOnDrop(CancellationToken);
+
+impl Drop for CancelDaemonOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 async fn run_serial_baseline(
     info: &DaemonInfo,
     n: usize,
@@ -679,18 +704,46 @@ mod tests {
     async fn transport_concurrency_receipt_serial_and_burst() {
         crate::ensure_tls_provider();
 
-        let temp = tempfile::tempdir().expect("tempdir");
-        let global: PathBuf = temp.path().join("global/memory.db");
+        // Isolate app home: MemoryServer::new → path_utils::tachi_home() →
+        // LlmCallRecorder writes `<home>/foundry-runs/`. Without a temp
+        // TACHI_HOME + env lock, nextest would mutate the real ~/.tachi.
+        let _env_lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp TACHI_HOME");
+        let _tachi_home =
+            crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _sigil_home = crate::test_support::EnvRestore::remove("SIGIL_HOME");
+        let _app_home = crate::test_support::EnvRestore::remove("TACHI_APP_HOME");
+
+        let global: PathBuf = temp_home.path().join("global/memory.db");
         std::fs::create_dir_all(global.parent().expect("parent")).expect("mkdir");
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        assert_eq!(
+            crate::path_utils::tachi_home(),
+            temp_home.path(),
+            "harness must bind tachi_home to the tempdir, not ambient ~/.tachi"
+        );
+        assert_eq!(
+            server.tachi_home_dir(),
+            temp_home.path(),
+            "MemoryServer home_dir must match isolated TACHI_HOME"
+        );
+        let foundry_runs = temp_home.path().join("foundry-runs");
+        assert!(
+            foundry_runs.is_dir(),
+            "LlmCallRecorder must create foundry-runs under the temp home; path={}",
+            foundry_runs.display()
+        );
+
         // 40ms enter-hold widens the overlap window so concurrent sessions can
         // prove a real in-flight high-water mark ≥ 2 on the tool handler.
         let observer = ReceiptObserver::new(40);
         let (daemon, ct, daemon_task) =
             spawn_receipt_http_daemon(server, &global, Arc::clone(&observer)).await;
+        let _cancel_on_drop = CancelDaemonOnDrop(ct.clone());
 
-        // Give the axum listener a beat to accept.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        wait_for_daemon_tcp_ready(&daemon).await;
 
         let harness_epoch = Instant::now();
         let mut next_id = 0usize;
@@ -765,13 +818,29 @@ mod tests {
 
         let expected_endpoint = sanitize_daemon_endpoint(&daemon.url);
         let expected_daemon_id = opaque_daemon_id(&daemon.url);
+        let mut seen_call_ids = HashSet::new();
         for receipt in serial.iter().chain(concurrent.iter()) {
+            // Pin the full receipt shape (review non-blocking #1338).
+            assert!(
+                seen_call_ids.insert(receipt.call_id),
+                "duplicate call_id in receipts: {}",
+                receipt.call_id
+            );
+            assert!(
+                matches!(receipt.mode, "serial" | "concurrent"),
+                "mode must be serial|concurrent: {:?}",
+                receipt.mode
+            );
             assert_eq!(receipt.tool, "runtime_info");
             assert_eq!(receipt.daemon_endpoint, expected_endpoint);
             assert_eq!(receipt.daemon_id, expected_daemon_id);
+            assert_eq!(receipt.daemon_id.len(), 16);
             assert_eq!(receipt.daemon_pid, daemon.pid);
             assert!(!receipt.daemon_endpoint.contains("://"));
             assert!(!receipt.daemon_endpoint.contains('/'));
+            assert!(receipt.end_unix_ms >= receipt.start_unix_ms);
+            assert!(receipt.end_rel_ms >= receipt.start_rel_ms);
+            assert!(receipt.duration_ms > 0 || receipt.outcome != CallOutcome::Ok);
             if let Some(ref class) = receipt.message_class {
                 assert!(
                     is_allowlisted_message_class(class),
@@ -787,6 +856,7 @@ mod tests {
                 );
             }
         }
+        assert_eq!(seen_call_ids.len(), expected);
 
         let mut all = Vec::with_capacity(expected);
         all.append(&mut serial);
@@ -804,12 +874,14 @@ mod tests {
         );
 
         println!(
-            "1255_concurrency_receipt_server_obs tool_calls={} max_in_flight={} unique_markers={}",
+            "1255_concurrency_receipt_server_obs tool_calls={} max_in_flight={} unique_markers={} tachi_home={}",
             observer.tool_call_count(),
             max_in_flight,
-            markers.len()
+            markers.len(),
+            temp_home.path().display()
         );
 
+        // Explicit graceful join (CancelDaemonOnDrop also cancels on panic).
         ct.cancel();
         let join = tokio::time::timeout(Duration::from_secs(2), daemon_task)
             .await
