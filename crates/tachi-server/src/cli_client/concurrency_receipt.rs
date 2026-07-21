@@ -416,9 +416,10 @@ async fn spawn_receipt_http_daemon(
     );
     let router = axum::Router::new().nest_service("/mcp", service);
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, router)
+        axum::serve(listener, router)
             .with_graceful_shutdown(async move { ct_shutdown.cancelled_owned().await })
-            .await;
+            .await
+            .expect("receipt daemon axum::serve failed");
     });
 
     (
@@ -810,6 +811,9 @@ mod tests {
         );
 
         ct.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(2), daemon_task).await;
+        let join = tokio::time::timeout(Duration::from_secs(2), daemon_task)
+            .await
+            .expect("receipt daemon shutdown timed out after 2s");
+        join.expect("receipt daemon task join failed");
     }
 }
