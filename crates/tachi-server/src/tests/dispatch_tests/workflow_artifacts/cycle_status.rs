@@ -44,7 +44,7 @@ fn write_intake_flow(flow_id: &str, issue: &crate::task_lifecycle::IssueSnapshot
 }
 
 fn write_passed_verification(flow_id: &str) {
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
     std::fs::write(
         run_dir.join("verification.json"),
         serde_json::to_string_pretty(&json!({

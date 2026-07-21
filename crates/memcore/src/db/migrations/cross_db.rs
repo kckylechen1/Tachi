@@ -80,11 +80,20 @@ pub(super) fn migrate_v4_quarantine_cross_db(
                     "UPDATE memories SET path = ?1, metadata = ?2 WHERE id = ?3",
                     params![new_path, new_meta, id],
                 )?;
+                let quarantine_path = format!("/_quarantine/cross-db{original_suffix}");
                 if let Err(e) = conn.execute(
                     "UPDATE memories_fts SET path = ?1 WHERE id = ?2",
-                    params![&format!("/_quarantine/cross-db{original_suffix}"), id],
+                    params![&quarantine_path, id],
                 ) {
                     eprintln!("warning: failed to update FTS for quarantined row {id}: {e}");
+                }
+                if let Err(e) = conn.execute(
+                    "UPDATE memories_symbolic_fts SET path = ?1 WHERE id = ?2",
+                    params![&quarantine_path, id],
+                ) {
+                    eprintln!(
+                        "warning: failed to update symbolic FTS for quarantined row {id}: {e}"
+                    );
                 }
                 moved += 1;
             }

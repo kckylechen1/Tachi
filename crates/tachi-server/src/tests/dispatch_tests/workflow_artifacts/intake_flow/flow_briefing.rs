@@ -46,7 +46,7 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
     crate::task_lifecycle::write_link_pr_artifacts(flow_id, &pr, None)
         .expect("write link_pr artifacts");
 
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
     let status: Value =
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
             .expect("status json");

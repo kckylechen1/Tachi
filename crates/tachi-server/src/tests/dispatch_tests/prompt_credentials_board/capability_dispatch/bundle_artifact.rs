@@ -14,7 +14,8 @@ async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
         "flow_20260609T000003Z_capability_bundle_card_{}",
         uuid::Uuid::new_v4().as_simple()
     );
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id.as_str()).expect("flow run dir");
+    let run_dir =
+        crate::task_lifecycle::run_dir_for_flow_id(flow_id.as_str()).expect("flow run dir");
     std::fs::create_dir_all(&run_dir).expect("create flow run dir");
     std::fs::write(
         run_dir.join("status.json"),

@@ -22,7 +22,7 @@
 //! second GitHub checks reader or a second recorder.
 
 use super::*;
-use crate::shell_ops::shell_runs_root;
+use crate::task_lifecycle::{shell_runs_root, validate_flow_id};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -94,7 +94,7 @@ pub(crate) fn discover_watch_targets(runs_root: &Path) -> Vec<WatchTarget> {
         };
         // Only flows whose id validates — a stray directory must never become a
         // watch target (it could be an attacker-planted path).
-        if crate::shell_ops::validate_flow_id(&flow_id).is_err() {
+        if validate_flow_id(&flow_id).is_err() {
             continue;
         }
         // Terminal flows are no longer tracked: closure already wrote back the

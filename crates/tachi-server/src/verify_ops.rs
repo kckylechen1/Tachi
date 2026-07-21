@@ -5,7 +5,7 @@
 //! and reads their results under `.tachi/runs/<flow_id>/verification.json` so
 //! leaders, briefing, and safe-merge gates consume the same evidence.
 
-use crate::shell_ops::{run_dir_for_flow_id, shell_runs_root};
+use crate::task_lifecycle::{run_dir_for_flow_id, shell_runs_root};
 use crate::{MemoryServer, TachiVerifyParams};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};

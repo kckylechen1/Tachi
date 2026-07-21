@@ -8,7 +8,8 @@
 //!
 //! Rules implemented:
 //! - **R1** FTS rebuild — drops + recreates `memories_fts`, fixes drift on
-//!   hapi/tachi/openclaw/sigil/antigravity and missing fts5 on quant.
+//!   hapi/tachi/openclaw/sigil/antigravity and missing fts5 on quant. Also
+//!   reconciles `memories_symbolic_fts` trigram drift in the same pass.
 //! - **R2** Backfill NULL `retention_policy` per per-project DB (PR-1 only
 //!   ran on the global DB).
 //! - **R3** Quarantine resolution — list, restore, restore-all (cross-DB
@@ -95,6 +96,7 @@ impl std::error::Error for RepairExit {}
 pub enum RepairError {
     Sqlite(rusqlite::Error),
     Io(std::io::Error),
+    Memory(memcore::MemoryError),
 }
 
 impl std::fmt::Display for RepairError {
@@ -102,6 +104,7 @@ impl std::fmt::Display for RepairError {
         match self {
             RepairError::Sqlite(e) => write!(f, "sqlite: {e}"),
             RepairError::Io(e) => write!(f, "io: {e}"),
+            RepairError::Memory(e) => write!(f, "memcore: {e}"),
         }
     }
 }
@@ -116,6 +119,11 @@ impl From<rusqlite::Error> for RepairError {
 impl From<std::io::Error> for RepairError {
     fn from(e: std::io::Error) -> Self {
         RepairError::Io(e)
+    }
+}
+impl From<memcore::MemoryError> for RepairError {
+    fn from(e: memcore::MemoryError) -> Self {
+        RepairError::Memory(e)
     }
 }
 

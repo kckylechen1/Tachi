@@ -1377,7 +1377,7 @@ fn flow_dispatch_slot_blocks_duplicate_active_task() {
         "flow_20260610T000000Z_duplicate_slot_{}",
         uuid::Uuid::new_v4().as_simple()
     );
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(&flow_id).expect("flow run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(&flow_id).expect("flow run dir");
     std::fs::create_dir_all(&run_dir).expect("create flow dir");
 
     let first = reserve_flow_dispatch_slot(Some(&flow_id), "same task", "dispatch-one")
@@ -1426,7 +1426,7 @@ fn flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing() {
     let task = "same task";
     let old_dispatch_id = "dispatch-stale-lock";
     let new_dispatch_id = "dispatch-new-lock";
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(&flow_id).expect("flow run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(&flow_id).expect("flow run dir");
     let lock_dir = run_dir.join(".dispatch-dedupe");
     std::fs::create_dir_all(&lock_dir).expect("create lock dir");
     let task_hash = crate::utils::stable_hash(task);

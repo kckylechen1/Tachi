@@ -102,6 +102,7 @@ impl RepairRule for JunkCleanup {
     fn apply(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut report = self.dry_run(ctx)?;
         let has_memories_fts = has_table(ctx, "memories_fts");
+        let has_memories_symbolic_fts = has_table(ctx, "memories_symbolic_fts");
         let has_memories_vec = has_table(ctx, "memories_vec");
         let has_access_history = has_table(ctx, "access_history");
         let has_memory_edges = has_table(ctx, "memory_edges");
@@ -125,6 +126,13 @@ impl RepairRule for JunkCleanup {
         if has_memories_fts {
             tx.execute(
                 "DELETE FROM memories_fts WHERE id IN (SELECT id FROM cleanup_targets)",
+                [],
+            )?;
+        }
+        if has_memories_symbolic_fts {
+            // Keep trigram projection in lockstep with memories deletes (#1335).
+            tx.execute(
+                "DELETE FROM memories_symbolic_fts WHERE id IN (SELECT id FROM cleanup_targets)",
                 [],
             )?;
         }

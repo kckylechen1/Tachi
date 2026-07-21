@@ -4,7 +4,7 @@ pub(super) fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>,
     let Some(flow_id) = flow_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(Vec::new());
     };
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id)?;
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id)?;
     let mut out = vec![json!({
         "kind": "run_dir",
         "path": run_dir.to_string_lossy(),

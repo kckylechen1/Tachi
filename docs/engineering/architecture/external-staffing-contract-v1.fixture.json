@@ -63,7 +63,7 @@
     ],
     "legacy_secondary_ledger_roots": [
       "crates/tachi-server/src/arena_ops/state.rs::arena_root",
-      "crates/tachi-server/src/shell_ops/flow.rs::shell_runs_root"
+      "crates/tachi-server/src/task_lifecycle/flow_artifacts.rs::shell_runs_root"
     ],
     "legacy_staffing_projection_writer_sites": [
       "crates/tachi-server/src/arena_ops/actions/board.rs::refresh_board::write_json_file_owner_only#1",
