@@ -250,6 +250,46 @@ mod tests {
     }
 
     #[test]
+    fn read_only_plan_allows_manifest_read_only_target_but_apply_refuses_it() {
+        let (_dir, app_home, db_path, plan_path) = fixture();
+        let manifest_path = app_home.join("manifest.json");
+        let mut manifest = Manifest::load(&manifest_path).unwrap();
+        manifest.dbs[0].allow_write = false;
+        manifest.save(&manifest_path).unwrap();
+
+        let output = app_home.join("read-only-plan.json");
+        plan(&db_path.to_string_lossy(), &output, None, None, &app_home).unwrap();
+        assert!(output.exists());
+
+        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("not writable by manifest authority"));
+        let archived: i64 = rusqlite::Connection::open(db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+    }
+
+    #[test]
+    fn apply_refuses_non_tachi_manifest_target_without_mutation() {
+        let (_dir, app_home, db_path, plan_path) = fixture();
+        let manifest_path = app_home.join("manifest.json");
+        let mut manifest = Manifest::load(&manifest_path).unwrap();
+        manifest.dbs[0].schema_kind = "openclaw_legacy".into();
+        manifest.save(&manifest_path).unwrap();
+
+        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        assert!(error.to_string().contains("not a Tachi-schema manifest DB"));
+        let archived: i64 = rusqlite::Connection::open(db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+    }
+
+    #[test]
     fn apply_refuses_scoped_daemon_lock() {
         let (_dir, app_home, db_path, plan_path) = fixture();
         let _holder = DaemonLock::acquire(scoped_daemon_lock_path(&app_home, &db_path))
