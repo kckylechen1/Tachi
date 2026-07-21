@@ -1,6 +1,6 @@
 use crate::daemon_lock::{DualDaemonLock, DualLockError};
 use crate::db_ownership::{daemon_ownership, DbOwnership};
-use crate::manifest::{DbRole, Manifest};
+use crate::manifest::{DbRole, Manifest, MANIFEST_SCHEMA_VERSION};
 use memcore::store::exact_dedupe::ExactDedupePlan;
 use memcore::MemoryStore;
 use std::fs::OpenOptions;
@@ -10,16 +10,45 @@ use std::path::{Path, PathBuf};
 fn target_and_daemon_scope(
     db: &str,
     app_home: &Path,
+    require_write: bool,
 ) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
-    let manifest_path = if app_home.join("manifest.json").exists() {
-        app_home.join("manifest.json")
-    } else {
-        Manifest::default_path(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-    };
-    let manifest = Manifest::load_or_empty(&manifest_path);
+    let manifest_path = app_home.join("manifest.json");
+    let manifest = Manifest::load(&manifest_path)?;
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported manifest schema version {} at {}",
+            manifest.schema_version,
+            manifest_path.display()
+        )
+        .into());
+    }
     let entry = super::inventory::resolve_one(&manifest, db)
         .ok_or_else(|| format!("--db '{db}' did not resolve to exactly one manifest DB"))?;
     let target = std::fs::canonicalize(entry.path)?;
+    let authorized = manifest
+        .dbs
+        .iter()
+        .find(|entry| std::fs::canonicalize(&entry.path).is_ok_and(|path| path == target))
+        .ok_or_else(|| {
+            format!(
+                "exact-dedupe target {} is not authorized by manifest",
+                target.display()
+            )
+        })?;
+    if authorized.schema_kind != "tachi" {
+        return Err(format!(
+            "exact-dedupe target {} is not a Tachi-schema manifest DB",
+            target.display()
+        )
+        .into());
+    }
+    if require_write && !authorized.allow_write {
+        return Err(format!(
+            "exact-dedupe target {} is not writable by manifest authority",
+            target.display()
+        )
+        .into());
+    }
     let daemon_scope = manifest
         .dbs
         .iter()
@@ -37,7 +66,7 @@ pub fn plan(
     prefix: Option<&str>,
     app_home: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (target, _) = target_and_daemon_scope(db, app_home)?;
+    let (target, _) = target_and_daemon_scope(db, app_home, false)?;
     if output == target || std::fs::canonicalize(output).is_ok_and(|path| path == target) {
         return Err("exact-dedupe output must not be the target DB".into());
     }
@@ -63,7 +92,7 @@ pub fn apply(
     if !yes {
         return Err("exact-dedupe apply requires --yes".into());
     }
-    let (target, daemon_scope) = target_and_daemon_scope(db, app_home)?;
+    let (target, daemon_scope) = target_and_daemon_scope(db, app_home, true)?;
     let plan: ExactDedupePlan = serde_json::from_slice(&std::fs::read(plan_path)?)?;
     plan.validate()?;
     if std::fs::canonicalize(&plan.target_db_identity)? != target {
@@ -118,9 +147,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app_home = dir.path().join(".tachi");
         std::fs::create_dir_all(&app_home).unwrap();
-        Manifest::empty()
-            .save(&app_home.join("manifest.json"))
-            .unwrap();
         let db_path = dir.path().join(memcore::MEMORY_DB_FILENAME);
         let store = MemoryStore::open(&db_path.to_string_lossy()).unwrap();
         for id in ["winner", "loser"] {
@@ -136,9 +162,25 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let dedupe_plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+        let dedupe_plan = store
+            .plan_exact_dedupe(identity.clone(), None, None)
+            .unwrap();
         let plan_path = dir.path().join("plan.json");
         std::fs::write(&plan_path, serde_json::to_vec_pretty(&dedupe_plan).unwrap()).unwrap();
+        let mut manifest = Manifest::empty();
+        manifest.dbs.push(DbEntry {
+            path: identity,
+            role: DbRole::Project,
+            owner: "tachi".into(),
+            schema_kind: "tachi".into(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: String::new(),
+            last_classification: "healthy".into(),
+            scope_hint: "project:test".into(),
+            notes: String::new(),
+        });
+        manifest.save(&app_home.join("manifest.json")).unwrap();
         (dir, app_home, db_path, plan_path)
     }
 
@@ -175,6 +217,36 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("requires --yes"));
+    }
+
+    #[test]
+    fn apply_refuses_malformed_manifest_without_mutation() {
+        let (_dir, app_home, db_path, plan_path) = fixture();
+        std::fs::write(app_home.join("manifest.json"), b"not json").unwrap();
+
+        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        assert!(error.to_string().contains("manifest"));
+        let archived: i64 = rusqlite::Connection::open(db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+    }
+
+    #[test]
+    fn apply_refuses_unregistered_target_without_mutation() {
+        let (_dir, app_home, db_path, plan_path) = fixture();
+        Manifest::empty()
+            .save(&app_home.join("manifest.json"))
+            .unwrap();
+
+        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        assert!(error.to_string().contains("not authorized by manifest"));
+        let archived: i64 = rusqlite::Connection::open(db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
     }
 
     #[test]

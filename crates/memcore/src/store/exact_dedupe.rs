@@ -381,24 +381,53 @@ impl MemoryStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let vec_expr = if self.vec_available {
+            "EXISTS(SELECT 1 FROM memories_vec v WHERE v.id=m.id)"
+        } else {
+            "0"
+        };
+        let candidate_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE id=?1");
+        let live_group_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE text=?1 AND archived=0 AND superseded_by IS NULL");
         for g in &plan.groups {
-            let vec_expr = if self.vec_available {
-                "EXISTS(SELECT 1 FROM memories_vec v WHERE v.id=m.id)"
-            } else {
-                "0"
+            let winner = tx
+                .query_row(&candidate_sql, [&g.winner.id], candidate_from_row)
+                .optional()?;
+            let Some((_, exact_text, _)) = winner else {
+                return Err(MemoryError::InvalidArg(format!(
+                    "planned row missing: {}",
+                    g.winner.id
+                )));
             };
-            let sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE id=?1");
-            for planned in &g.ranked_candidates {
-                let actual = tx
-                    .query_row(&sql, [&planned.row.id], candidate_from_row)
-                    .optional()?;
-                let Some((_, _, candidate)) = actual else {
-                    return Err(MemoryError::InvalidArg(format!(
-                        "planned row missing: {}",
-                        planned.row.id
-                    )));
-                };
-                if candidate_evidence(&candidate, planned.rank) != *planned {
+
+            let mut statement = tx.prepare(&live_group_sql)?;
+            let mut actual = statement
+                .query_map([&exact_text], candidate_from_row)?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(normalized_path, _, _)| normalized_path == &g.normalized_path)
+                .map(|(_, _, candidate)| candidate)
+                .collect::<Vec<_>>();
+            actual.sort_by(order);
+
+            let planned_ids = g
+                .ranked_candidates
+                .iter()
+                .map(|candidate| candidate.row.id.as_str())
+                .collect::<HashSet<_>>();
+            let actual_ids = actual
+                .iter()
+                .map(|candidate| candidate.row.id.as_str())
+                .collect::<HashSet<_>>();
+            if actual.len() != g.ranked_candidates.len() || actual_ids != planned_ids {
+                return Err(MemoryError::InvalidArg(format!(
+                    "exact-dedupe group membership drifted: {}/{}",
+                    g.normalized_path, g.text_digest
+                )));
+            }
+
+            for (index, candidate) in actual.iter().enumerate() {
+                let planned = &g.ranked_candidates[index];
+                if candidate_evidence(candidate, index + 1) != *planned {
                     return Err(MemoryError::InvalidArg(format!(
                         "planned candidate evidence drifted: {}",
                         planned.row.id
@@ -670,6 +699,38 @@ mod tests {
             .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(archived, 0);
+    }
+
+    #[test]
+    fn apply_rejects_new_exact_group_members_without_mutating_any_loser() {
+        for (id, retention_policy) in [("new-member", None), ("new-winner", Some("pinned"))] {
+            let (_dir, identity, mut store) = disk_store();
+            insert(&store, "winner", "/Wiki//child/", "same");
+            insert(&store, "loser", "/wiki/child", "same");
+            let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+
+            insert(&store, id, "/WIKI/child", "same");
+            if let Some(policy) = retention_policy {
+                store
+                    .conn
+                    .execute(
+                        "UPDATE memories SET retention_policy=?1 WHERE id=?2",
+                        params![policy, id],
+                    )
+                    .unwrap();
+            }
+
+            let error = store.apply_exact_dedupe(&plan).unwrap_err();
+            assert!(
+                error.to_string().contains("group membership drifted"),
+                "unexpected refusal for {id}: {error}"
+            );
+            let archived: i64 = store
+                .conn
+                .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(archived, 0, "apply partially mutated group for {id}");
+        }
     }
 
     #[test]
