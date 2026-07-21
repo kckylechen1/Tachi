@@ -256,7 +256,9 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
         // after the move — budget may only drop on deletion, not relocation.
         let is_legacy_owner = function.symbol.contains("/arena_ops/")
             || function.symbol.contains("/shell_ops/")
-            || function.symbol.contains("/task_lifecycle/flow_artifacts.rs");
+            || function
+                .symbol
+                .contains("/task_lifecycle/flow_artifacts.rs");
         let is_staffing_flow_projection = function
             .symbol
             .contains("/task_lifecycle/flow_artifacts/dispatch_markers.rs::")

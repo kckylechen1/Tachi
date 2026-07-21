@@ -12,8 +12,8 @@
 //! Non-goals (explicit): do not raise `DAEMON_CALL_TIMEOUT`, do not add a
 //! session pool, do not change idle-reaper / rate-limit policy.
 
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -31,9 +31,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use super::detect::DaemonInfo;
-use super::transport::{
-    call_daemon_tool_raw_with_phases, DaemonCallError, DaemonCallPhaseTiming,
-};
+use super::transport::{call_daemon_tool_raw_with_phases, DaemonCallError, DaemonCallPhaseTiming};
 
 /// Allowlisted receipt error tags — never copy arbitrary error text.
 pub(crate) const MSG_DAEMON_CALL_TIMEOUT: &str = "daemon_call_timeout";
@@ -127,10 +125,7 @@ impl ReceiptObserver {
     }
 
     fn unique_markers(&self) -> HashSet<u64> {
-        self.markers
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        self.markers.lock().map(|g| g.clone()).unwrap_or_default()
     }
 }
 
@@ -205,11 +200,7 @@ pub(crate) fn sanitize_daemon_endpoint(url: &str) -> String {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url);
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(rest)
-        .trim();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest).trim();
     // Drop userinfo (`user:pass@`) so receipts never fingerprint credentials.
     let host_port = match authority.rsplit_once('@') {
         Some((_, host_port)) => host_port,
@@ -381,11 +372,7 @@ async fn spawn_receipt_http_daemon(
     server: crate::MemoryServer,
     global_db_path: &Path,
     observer: Arc<ReceiptObserver>,
-) -> (
-    DaemonInfo,
-    CancellationToken,
-    tokio::task::JoinHandle<()>,
-) {
+) -> (DaemonInfo, CancellationToken, tokio::task::JoinHandle<()>) {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
@@ -435,11 +422,7 @@ async fn spawn_receipt_http_daemon(
     )
 }
 
-async fn wait_until_server_saw(
-    observer: &ReceiptObserver,
-    expected: u64,
-    label: &str,
-) {
+async fn wait_until_server_saw(observer: &ReceiptObserver, expected: u64, label: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let seen = observer.tool_call_count();
@@ -447,9 +430,7 @@ async fn wait_until_server_saw(
             return;
         }
         if Instant::now() >= deadline {
-            panic!(
-                "server did not observe {expected} {label} tool calls within 5s; saw {seen}"
-            );
+            panic!("server did not observe {expected} {label} tool calls within 5s; saw {seen}");
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -711,8 +692,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp_home = tempfile::tempdir().expect("temp TACHI_HOME");
-        let _tachi_home =
-            crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let _sigil_home = crate::test_support::EnvRestore::remove("SIGIL_HOME");
         let _app_home = crate::test_support::EnvRestore::remove("TACHI_APP_HOME");
 
@@ -761,9 +741,14 @@ mod tests {
         );
 
         let max_after_serial = observer.max_in_flight();
-        let mut concurrent =
-            run_concurrent_burst(&daemon, CALLERS, CALLS_PER_CALLER, harness_epoch, &mut next_id)
-                .await;
+        let mut concurrent = run_concurrent_burst(
+            &daemon,
+            CALLERS,
+            CALLS_PER_CALLER,
+            harness_epoch,
+            &mut next_id,
+        )
+        .await;
 
         let expected = SERIAL_N + CALLERS * CALLS_PER_CALLER;
         wait_until_server_saw(&observer, expected as u64, "total").await;
