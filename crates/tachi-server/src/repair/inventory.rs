@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::daemon_lock::{process_alive, read_pid_file};
+use crate::daemon_lock::{legacy_daemon_lock_path, process_alive, read_pid_file};
 use crate::manifest::{classify_db_schema, DbEntry, DbRole, Manifest, SchemaKind};
 
 /// Stable human-friendly label for a DB entry.
@@ -131,11 +131,71 @@ pub fn resolve_one(manifest: &Manifest, want: &str) -> Option<DbEntry> {
     }
 }
 
-/// True iff a tachi daemon is currently holding `~/.tachi/daemon.lock`.
+/// True iff any tachi daemon lock under `app_home` records a live PID.
+///
+/// Checks the legacy `daemon.lock` and every scoped `daemon-<hash>.lock`
+/// (same discovery shape as `status_ops::daemon::collect_daemon_inventory`).
+/// Used as a coarse “any daemon running” note for skipping R6 VACUUM — does
+/// not require `global_db_path` and does not reimplement flock acquisition.
 pub fn daemon_alive(app_home: &Path) -> bool {
-    let lock_path = app_home.join("daemon.lock");
-    match read_pid_file(&lock_path) {
+    let legacy = legacy_daemon_lock_path(app_home);
+    if lock_file_holds_live_pid(&legacy) {
+        return true;
+    }
+    let Ok(read_dir) = std::fs::read_dir(app_home) else {
+        return false;
+    };
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(scope) = name
+            .strip_prefix("daemon-")
+            .and_then(|value| value.strip_suffix(".lock"))
+        {
+            // Scoped locks are `daemon-<hex>.lock` (see daemon_scope_id).
+            if !scope.is_empty()
+                && scope.chars().all(|c| c.is_ascii_hexdigit())
+                && lock_file_holds_live_pid(&entry.path())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn lock_file_holds_live_pid(lock_path: &Path) -> bool {
+    match read_pid_file(lock_path) {
         Some(pid) => process_alive(pid),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn daemon_alive_true_for_scoped_lock_with_live_self_pid() {
+        let dir = tempdir().unwrap();
+        let app_home = dir.path();
+        // No legacy lock — only a scoped daemon-<hash>.lock with this process.
+        let scoped = app_home.join("daemon-abc123def456.lock");
+        std::fs::write(&scoped, format!("{}\n", std::process::id())).unwrap();
+        assert!(
+            !legacy_daemon_lock_path(app_home).exists(),
+            "legacy lock must be absent for this discrimination"
+        );
+        assert!(
+            daemon_alive(app_home),
+            "scoped lock with live self-pid must count as daemon_alive"
+        );
+    }
+
+    #[test]
+    fn daemon_alive_false_when_no_lock_files() {
+        let dir = tempdir().unwrap();
+        assert!(!daemon_alive(dir.path()));
     }
 }
