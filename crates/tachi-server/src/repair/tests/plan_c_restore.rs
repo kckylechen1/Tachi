@@ -308,6 +308,262 @@ fn quarantine_restore_syncs_symbolic_fts_path() {
     );
 }
 
+/// Replace `memories_symbolic_fts` with a plain table + aborting DELETE
+/// trigger so `sync_memories_symbolic_fts` / `delete_memories_symbolic_fts`
+/// fail without weakening those helpers (#1335 oracle fault-path).
+fn arm_symbolic_fts_delete_failure(conn: &Connection, seed_id: &str) {
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS memories_symbolic_fts;
+        CREATE TABLE memories_symbolic_fts (
+            id TEXT PRIMARY KEY,
+            path TEXT,
+            summary TEXT,
+            text TEXT,
+            keywords TEXT,
+            entities TEXT,
+            topic TEXT
+        );
+        "#,
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories_symbolic_fts(id, path, summary, text, keywords, entities, topic)
+         VALUES (?1, 'seed', '', '', '[]', '[]', '')",
+        params![seed_id],
+    )
+    .unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TRIGGER memories_symbolic_fts_fail_delete
+        BEFORE DELETE ON memories_symbolic_fts
+        BEGIN
+            SELECT RAISE(ABORT, 'injected symbolic fts failure');
+        END;
+        "#,
+    )
+    .unwrap();
+}
+
+/// #1335 oracle: same-DB restore must roll back the memories UPDATE when
+/// symbolic sync fails after the old projection was deleted.
+#[test]
+fn quarantine_restore_rolls_back_when_symbolic_sync_fails() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    let dir = TempDir::new().unwrap();
+    let (db_path, conn) = fresh_db(&dir, "same-fail.db");
+
+    let quarantine_path = "/_quarantine/cross-db/scratch/restore-fail";
+    let meta = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/scratch/restore-fail",
+            "expected_db": db_path.display().to_string(),
+            "actual_db": db_path.display().to_string(),
+            "detected_at": "2026-01-01T00:00:00Z",
+        }
+    });
+    insert_memory(
+        &conn,
+        "qs-fail",
+        quarantine_path,
+        "restore fault path",
+        &meta.to_string(),
+        None,
+        None,
+    );
+    arm_symbolic_fts_delete_failure(&conn, "qs-fail");
+    drop(conn);
+
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: db_path.display().to_string(),
+            role: DbRole::Project,
+            owner: "test".into(),
+            schema_kind: "tachi".into(),
+            vec_enabled: false,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "tachi".into(),
+            scope_hint: "project:same-fail".into(),
+            notes: String::new(),
+        }],
+    };
+
+    let err = crate::repair::quarantine::cmd_restore(&manifest, "qs-fail", true, true)
+        .expect_err("symbolic sync failure must abort restore");
+    assert!(
+        err.to_string().contains("injected symbolic fts failure")
+            || err.to_string().contains("ABORT"),
+        "error should surface injected failure, got: {err}"
+    );
+
+    let conn = Connection::open(&db_path).unwrap();
+    let (path, meta): (String, String) = conn
+        .query_row(
+            "SELECT path, metadata FROM memories WHERE id = 'qs-fail'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("primary row must still exist after rolled-back restore");
+    assert_eq!(path, quarantine_path, "memories.path must not commit on sync failure");
+    let v: serde_json::Value = serde_json::from_str(&meta).unwrap();
+    assert!(
+        v.get("quarantine").is_some(),
+        "quarantine metadata must not be stripped when sync fails: {meta}"
+    );
+}
+
+/// #1335 oracle: purge must not commit memories DELETE when symbolic delete fails.
+#[test]
+fn quarantine_purge_rolls_back_when_symbolic_delete_fails() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    let dir = TempDir::new().unwrap();
+    let (db_path, conn) = fresh_db(&dir, "purge-fail.db");
+
+    let meta = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/scratch/purge-fail",
+            "expected_db": db_path.display().to_string(),
+            "actual_db": db_path.display().to_string(),
+            "detected_at": "2020-01-01T00:00:00Z",
+        }
+    });
+    insert_memory(
+        &conn,
+        "qp-fail",
+        "/_quarantine/cross-db/scratch/purge-fail",
+        "purge fault path",
+        &meta.to_string(),
+        None,
+        None,
+    );
+    arm_symbolic_fts_delete_failure(&conn, "qp-fail");
+    drop(conn);
+
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: db_path.display().to_string(),
+            role: DbRole::Project,
+            owner: "test".into(),
+            schema_kind: "tachi".into(),
+            vec_enabled: false,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "tachi".into(),
+            scope_hint: "project:purge-fail".into(),
+            notes: String::new(),
+        }],
+    };
+
+    let err = crate::repair::quarantine::cmd_purge(&manifest, 1, true, true)
+        .expect_err("symbolic delete failure must abort purge");
+    assert!(
+        err.to_string().contains("injected symbolic fts failure")
+            || err.to_string().contains("ABORT"),
+        "error should surface injected failure, got: {err}"
+    );
+
+    let n: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = 'qp-fail'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "memories row must not commit-delete when symbolic delete fails");
+}
+
+/// #1335 oracle: cross-DB move source deletion must roll back when symbolic
+/// delete fails (destination insert may have committed in its own tx).
+#[test]
+fn quarantine_restore_all_rolls_back_source_when_symbolic_delete_fails() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    let dir = TempDir::new().unwrap();
+    let (src_path, src_conn) = fresh_db(&dir, "src-fail.db");
+    let (dst_path, _dst_conn) = fresh_db(&dir, "dst-fail.db");
+
+    let dst_canon = std::fs::canonicalize(&dst_path).unwrap();
+    let meta = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/restored/fail",
+            "expected_db": dst_canon.display().to_string(),
+            "actual_db": src_path.display().to_string(),
+            "detected_at": "2026-01-01T00:00:00Z",
+        }
+    });
+    insert_memory(
+        &src_conn,
+        "qx-fail",
+        "/_quarantine/cross-db/restored/fail",
+        "cross-db fault path",
+        &meta.to_string(),
+        None,
+        None,
+    );
+    arm_symbolic_fts_delete_failure(&src_conn, "qx-fail");
+    drop(src_conn);
+
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![
+            DbEntry {
+                path: src_path.display().to_string(),
+                role: DbRole::Project,
+                owner: "test".into(),
+                schema_kind: "tachi".into(),
+                vec_enabled: false,
+                allow_write: true,
+                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_classification: "tachi".into(),
+                scope_hint: "project:src-fail".into(),
+                notes: String::new(),
+            },
+            DbEntry {
+                path: dst_path.display().to_string(),
+                role: DbRole::Project,
+                owner: "test".into(),
+                schema_kind: "tachi".into(),
+                vec_enabled: false,
+                allow_write: true,
+                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_classification: "tachi".into(),
+                scope_hint: "project:dst-fail".into(),
+                notes: String::new(),
+            },
+        ],
+    };
+
+    // restore-all aggregates per-row failures into RepairExit(2); the invariant
+    // under test is that the source primary DELETE did not commit.
+    crate::repair::quarantine::cmd_restore_all(&manifest, "project:dst-fail", true, true)
+        .expect_err("symbolic delete failure on source must fail restore-all");
+
+    let n_src: i64 = Connection::open(&src_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = 'qx-fail'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n_src, 1,
+        "source memories DELETE must not commit when symbolic delete fails"
+    );
+}
+
 /// B5: pin the historical legacy→current rewrite for stale `expected_db`
 /// values so future refactors of `rewrite_legacy_expected_db` cannot
 /// silently drop the only mapping that matters in the wild — the
