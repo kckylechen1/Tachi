@@ -27,6 +27,9 @@ pub(crate) use transport::{
     call_daemon_tool, call_daemon_tool_raw, list_daemon_tools, DaemonCallError,
 };
 
+#[cfg(test)]
+mod concurrency_receipt;
+
 /// True when this process is the long-lived HTTP daemon (not stdio MCP / CLI).
 pub(crate) fn is_daemon_process() -> bool {
     std::env::var("TACHI_DAEMON")
