@@ -26,11 +26,13 @@
 //!     configured reasoning-lane LLM provider (network egress + credentials)
 //!     — the elaborate `write_fake_claude_binary` / sentinel-release dance
 //!     below no longer influences either test's outcome at all, since
-//!     nothing in the production code path ever executes that file. Without
-//!     a configured provider these two are a known LANE-OUTAGE red pair, not
-//!     a regression this fix is trying to close (rewriting them against a
-//!     real mock provider seam — none exists in `tachi-llm` today — is
-//!     tracked as the tachi#1288 follow-up, not done here).
+//!     nothing in the production code path ever executes that file. Both are
+//!     `#[ignore]` by default pending a usable `REASONING_FALLBACK_API_KEY`
+//!     or non-placeholder `SILICONFLOW_API_KEY` (see
+//!     `require_usable_reasoning_lane_key`); run with `--run-ignored` /
+//!     `--ignored`. A forced ignored run without keys panics loud (never
+//!     silent-green). Rewriting them against a real mock provider seam —
+//!     none exists in `tachi-llm` today — remains the tachi#1288 follow-up.
 //!
 //! Each test isolates `TACHI_HOME` to a fresh temp dir and holds
 //! `global_test_lock()` because `CLAUDE_BIN` / `DISPATCH_V2_ENABLED` /
@@ -43,6 +45,44 @@ use super::{
 };
 use crate::test_support::EnvRestore;
 use serde_json::{json, Value};
+
+/// Placeholder injected by `tests/mod.rs::ensure_test_env` — not a usable key.
+const TEST_SILICONFLOW_PLACEHOLDER: &str = "test-siliconflow-key";
+
+/// Usable reasoning-lane key = non-empty `REASONING_FALLBACK_API_KEY`, or
+/// non-empty `SILICONFLOW_API_KEY` that is not the test placeholder.
+///
+/// Missing → loud SKIP + panic so `--ignored` without keys is red, never green.
+fn require_usable_reasoning_lane_key() {
+    let fallback = std::env::var("REASONING_FALLBACK_API_KEY").unwrap_or_default();
+    let silicon = std::env::var("SILICONFLOW_API_KEY").unwrap_or_default();
+    let fallback_ok = !fallback.trim().is_empty();
+    let silicon_ok =
+        !silicon.trim().is_empty() && silicon.trim() != TEST_SILICONFLOW_PLACEHOLDER;
+    if fallback_ok || silicon_ok {
+        return;
+    }
+    let mut missing = Vec::new();
+    if fallback.trim().is_empty() {
+        missing.push("REASONING_FALLBACK_API_KEY (empty/unset)");
+    }
+    if silicon.trim().is_empty() {
+        missing.push("SILICONFLOW_API_KEY (empty/unset)");
+    } else if silicon.trim() == TEST_SILICONFLOW_PLACEHOLDER {
+        missing.push("SILICONFLOW_API_KEY (test placeholder, not usable)");
+    }
+    eprintln!(
+        "SKIP: needs usable REASONING_FALLBACK_API_KEY or SILICONFLOW_API_KEY \
+         (not test placeholder); missing/unusable: {}",
+        missing.join(", ")
+    );
+    panic!(
+        "precondition failed: usable reasoning-lane API key required \
+         (REASONING_FALLBACK_API_KEY or non-placeholder SILICONFLOW_API_KEY); \
+         missing/unusable: {}",
+        missing.join(", ")
+    );
+}
 
 /// Write a fake `claude` CLI at `path` that either succeeds with a
 /// minimal-but-valid plan envelope, or exits non-zero.
@@ -227,11 +267,12 @@ async fn plan_stage_failure_closes_both_status_and_kanban_row() {
 ///
 /// tachi#1288 (Fix C): "faked" above is aspirational, not actual — see the
 /// module doc's CLI-era-fixture note. This test needs `call_plan_llm` to
-/// really succeed, so it's a known LANE-OUTAGE red without a configured
-/// reasoning-lane provider.
+/// really succeed, so it is ignored by default without a usable reasoning key.
+#[ignore = "needs usable REASONING_FALLBACK_API_KEY or SILICONFLOW_API_KEY (not test placeholder); run with --run-ignored / --ignored --nocapture"]
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
+    require_usable_reasoning_lane_key();
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -343,13 +384,14 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
 /// test only asserts the vocabulary is consistent; GC aging itself is
 /// covered at the `kanban::gc` unit level, not re-driven end-to-end here.
 ///
-/// tachi#1288 (Fix C): same LANE-OUTAGE caveat as
-/// `successful_dispatch_seeds_status_and_kanban_before_plan_completes` above
-/// — this needs `call_plan_llm` to really succeed via a configured
-/// reasoning-lane provider; see the module doc's CLI-era-fixture note.
+/// tachi#1288 (Fix C): same live-key precondition as
+/// `successful_dispatch_seeds_status_and_kanban_before_plan_completes` —
+/// ignored by default; see the module doc.
+#[ignore = "needs usable REASONING_FALLBACK_API_KEY or SILICONFLOW_API_KEY (not test placeholder); run with --run-ignored / --ignored --nocapture"]
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn plan_review_pending_response_projects_input_required_kanban_state() {
+    require_usable_reasoning_lane_key();
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

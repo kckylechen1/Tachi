@@ -11,6 +11,24 @@ async fn tachi_task_dispatch_requires_leader_confirmation_for_blocked_issue_flow
     let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
     let server = make_server();
+    // Default `make_server()` uses the standard tool profile, which denies
+    // `tachi_task`/`dispatch` before the confirmation gate. Admin is required
+    // so this test reaches `dispatch requires leader confirmation`.
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+    if !tachi_hub::facade_action_allowed(
+        "tachi_task",
+        Some("dispatch"),
+        server.active_tool_profile(),
+    ) {
+        eprintln!(
+            "SKIP: tachi_task/dispatch still denied after set_tool_profile(admin); \
+             cannot reach confirmation gate"
+        );
+        panic!(
+            "precondition failed: tachi_task/dispatch must be allowed under admin \
+             tool profile to exercise the confirmation gate"
+        );
+    }
     let flow_id = "flow_20260614T000001Z_blocked_dispatch_gate";
     let issue = crate::task_lifecycle::IssueSnapshot {
         repo: "kckylechen1/tachi".to_string(),
