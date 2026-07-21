@@ -140,6 +140,48 @@ impl MemoryStore {
         })
     }
 
+    /// Open an existing database for a narrowly-scoped maintenance write.
+    /// This never creates a file, initializes schema, or runs migrations.
+    pub fn open_existing_read_write(db_path: &str) -> Result<Self, MemoryError> {
+        crate::db::enable_simple_auto_extension()
+            .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
+        db::register_sqlite_vec();
+        let conn =
+            Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        db::configure_connection(&conn)?;
+        let stored = db::migrations::read_schema_version(&conn)?;
+        if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
+            return Err(MemoryError::InvalidArg(format!(
+                "exact-dedupe apply requires schema {}, found {stored}",
+                db::migrations::EXPECTED_SCHEMA_VERSION
+            )));
+        }
+        // A version stamp is not proof of shape. Prepare the complete memories
+        // projection exact-dedupe reads and writes before returning a writable
+        // handle; this validates only and deliberately performs no
+        // init/migration.
+        conn.prepare(
+            "SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,archived,superseded_by,valid_until,updated_at FROM memories WHERE 0",
+        )
+        .map_err(|error| {
+            MemoryError::InvalidArg(format!(
+                "exact-dedupe apply requires current memories schema: {error}"
+            ))
+        })?;
+        // Registration above makes vec0 available to this connection, but a
+        // maintenance open must not create its virtual table. Preparing a
+        // read-only query proves the already-existing table and module are
+        // usable; a missing or unloadable memories_vec simply disables vector
+        // evidence for this apply.
+        let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
+        Ok(Self {
+            conn,
+            vec_available,
+            db_label: "unknown".to_string(),
+            path_validation: false,
+        })
+    }
+
     /// In-memory database (useful for tests and scripts).
     pub fn open_in_memory() -> Result<Self, MemoryError> {
         crate::db::enable_simple_auto_extension()
@@ -211,5 +253,63 @@ impl MemoryStore {
         db::retry_memory_locked("upsert_idless", &db_label, || {
             db::upsert_idless(&mut self.conn, entry, self.vec_available, identity)
         })
+    }
+}
+
+#[cfg(test)]
+mod exact_dedupe_open_tests {
+    use super::*;
+
+    #[test]
+    fn existing_read_write_does_not_recreate_missing_memories_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("current.db");
+        let store = MemoryStore::open(&path.to_string_lossy()).unwrap();
+        store
+            .connection()
+            .execute("DROP TABLE memories_vec", [])
+            .unwrap();
+        drop(store);
+
+        let maintenance = MemoryStore::open_existing_read_write(&path.to_string_lossy()).unwrap();
+        assert!(!maintenance.vec_available);
+        let table_count: i64 = maintenance
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories_vec'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+    }
+
+    #[test]
+    fn existing_read_write_rejects_spoofed_current_version_without_initializing_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spoofed.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE decoy(value TEXT); PRAGMA user_version = {}",
+            db::migrations::EXPECTED_SCHEMA_VERSION
+        ))
+        .unwrap();
+        drop(conn);
+
+        let error = match MemoryStore::open_existing_read_write(&path.to_string_lossy()) {
+            Ok(_) => panic!("spoofed schema was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("current memories schema"));
+
+        let conn = Connection::open(&path).unwrap();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(tables, vec!["decoy"]);
     }
 }

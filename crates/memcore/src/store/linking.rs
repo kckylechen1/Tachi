@@ -3,9 +3,24 @@
 
 use std::collections::HashSet;
 
+use rusqlite::OptionalExtension;
+
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
 impl MemoryStore {
+    /// Inspect the lifecycle supersession edge for any row, including rows
+    /// excluded from active recall because they are archived.
+    pub fn supersession_target(&self, id: &str) -> Result<Option<Option<String>>, MemoryError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Mark `id` as superseded by `superseded_by` and close its validity
     /// window, but only when the row has not been superseded already.
     ///
