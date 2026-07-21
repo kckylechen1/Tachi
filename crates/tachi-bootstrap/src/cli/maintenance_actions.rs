@@ -313,7 +313,36 @@ pub enum EvalAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum DedupeAction {
+    /// Plan exact same-path byte-identical duplicates without writing the DB.
+    Exact {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        output: std::path::PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        path_prefix: Option<String>,
+    },
+    /// Apply a saved exact-dedupe plan atomically.
+    Apply {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        plan: std::path::PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum RepairAction {
+    /// Plan or apply deterministic duplicate repair.
+    Dedupe {
+        #[command(subcommand)]
+        action: DedupeAction,
+    },
     /// Quarantine resolution helpers (PR-3 v4 migration aftermath).
     Quarantine {
         #[command(subcommand)]
