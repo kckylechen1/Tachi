@@ -6,7 +6,7 @@ async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
     let (server, _temp_home) = make_server_with_temp_home();
     let tmp = tempfile::tempdir().expect("temp dispatch cwd");
     let flow_id = "flow_20260608T000008Z_dispatch_card_test";
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("flow run dir");
     std::fs::create_dir_all(&run_dir).expect("create flow run dir");
     std::fs::write(
         run_dir.join("status.json"),

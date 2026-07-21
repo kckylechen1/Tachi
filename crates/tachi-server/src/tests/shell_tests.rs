@@ -1,7 +1,8 @@
 //! End-to-end discrimination tests for the retained `tachi_shell` surface.
 
 use super::{make_server, shell_params};
-use crate::shell_ops::{handle_tachi_shell, shell_runs_root};
+use crate::shell_ops::handle_tachi_shell;
+use crate::task_lifecycle::shell_runs_root;
 use serde_json::Value;
 
 fn unique_flow_id(tag: &str) -> String {

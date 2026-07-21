@@ -47,7 +47,7 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
     let pr = pr_snapshot(919);
     crate::task_lifecycle::write_link_pr_artifacts(flow_id, &pr, None)
         .expect("write link_pr artifacts");
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
     crate::shell_ops::merge_github_status(
         &run_dir,
         json!({

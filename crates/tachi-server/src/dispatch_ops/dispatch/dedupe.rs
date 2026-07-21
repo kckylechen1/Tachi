@@ -214,7 +214,7 @@ pub(super) fn reserve_flow_dispatch_slot(
     let Some(flow_id) = flow_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(None);
     };
-    let Ok(run_dir) = crate::shell_ops::run_dir_for_flow_id(flow_id) else {
+    let Ok(run_dir) = crate::task_lifecycle::run_dir_for_flow_id(flow_id) else {
         return Ok(None);
     };
     let lock_dir = run_dir.join(".dispatch-dedupe");

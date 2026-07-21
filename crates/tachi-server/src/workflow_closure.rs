@@ -250,7 +250,7 @@ async fn draft_from_result(
     flow_id: &str,
     issue_ref: &str,
 ) -> Option<(String, String, &'static str)> {
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).ok()?;
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).ok()?;
     let result = std::fs::read_to_string(run_dir.join("result.md")).ok()?;
     let trimmed = result.trim();
     if trimmed.is_empty() {

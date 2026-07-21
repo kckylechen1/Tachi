@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 #[tokio::test]
 async fn scan_open_loops_flags_unclosed_and_spec_drift() {
     let (_server, _home) = make_server_with_temp_home();
-    let runs_root = crate::shell_ops::shell_runs_root();
+    let runs_root = crate::task_lifecycle::shell_runs_root();
     std::fs::create_dir_all(&runs_root).expect("create runs root");
 
     let unclosed = runs_root.join("flow_20260101T000000Z_unclosed_aaaa1111");
@@ -88,7 +88,7 @@ async fn scan_open_loops_flags_unclosed_and_spec_drift() {
 async fn close_loop_drafts_wiki_from_result_when_missing() {
     let (server, _home) = make_server_with_temp_home();
     let flow_id = "flow_20260101T000000Z_draft_dddd4444";
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
     std::fs::create_dir_all(&run_dir).unwrap();
     std::fs::write(
         run_dir.join("result.md"),
@@ -142,7 +142,7 @@ async fn close_loop_drafts_wiki_from_result_when_missing() {
 async fn close_loop_drafts_wiki_from_notes_when_result_missing() {
     let (server, _home) = make_server_with_temp_home();
     let flow_id = "flow_20260101T000000Z_notes_draft_eeee5555";
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
     std::fs::create_dir_all(&run_dir).unwrap();
     // No result.md — notes must be enough.
 

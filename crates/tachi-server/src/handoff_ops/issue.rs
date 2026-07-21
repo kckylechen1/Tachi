@@ -1,7 +1,8 @@
 use crate::gh_ops::gh_client_for_server;
 use crate::gh_safe_merge::GhClient;
 use crate::server_state::{HandoffMemo, MemoryServer};
-use crate::shell_ops::{append_github_event, merge_github_status, run_dir_for_flow_id};
+use crate::shell_ops::{append_github_event, merge_github_status};
+use crate::task_lifecycle::run_dir_for_flow_id;
 use crate::tool_params::HandoffPromoteIssueParams;
 use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};
