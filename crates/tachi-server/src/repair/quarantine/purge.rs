@@ -68,6 +68,12 @@ pub fn cmd_purge(
                     q.id
                 );
             }
+            if let Err(e) = memcore::db::delete_memories_symbolic_fts(&tx, &q.id) {
+                eprintln!(
+                    "warning: failed to delete symbolic FTS row for purged quarantine row {}: {e}",
+                    q.id
+                );
+            }
             purged += 1;
         }
         tx.commit()?;

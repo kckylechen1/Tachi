@@ -184,6 +184,128 @@ fn r3_cross_db_restore_all_moves_row() {
         v.get("quarantine").is_none(),
         "destination metadata should not contain quarantine block: {dst_meta}"
     );
+
+    // #1335 oracle: restore must project into memories_symbolic_fts so trigram
+    // MATCH can retrieve the row (path is a symbolic-indexed column).
+    let dst = Connection::open(&dst_path).unwrap();
+    let sym_path: String = dst
+        .query_row(
+            "SELECT path FROM memories_symbolic_fts WHERE id = 'qx'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("restored row must exist in memories_symbolic_fts");
+    assert_eq!(
+        sym_path, "/restored/a",
+        "symbolic FTS path must match restored memories.path"
+    );
+    let match_hits: i64 = dst
+        .query_row(
+            "SELECT COUNT(*) FROM memories_symbolic_fts \
+             WHERE memories_symbolic_fts MATCH '\"restored\"' AND id = 'qx'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        match_hits, 1,
+        "trigram MATCH on restored path must hit the moved row"
+    );
+}
+
+/// Discrimination for #1335 repair-writer blocker: same-DB quarantine restore
+/// must refresh `memories_symbolic_fts` after rewriting `path`.
+#[test]
+fn quarantine_restore_syncs_symbolic_fts_path() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    let dir = TempDir::new().unwrap();
+    let (db_path, mut conn) = fresh_db(&dir, "same.db");
+
+    let meta = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/scratch/restore-symbolic-path",
+            "expected_db": db_path.display().to_string(),
+            "actual_db": db_path.display().to_string(),
+            "detected_at": "2026-01-01T00:00:00Z",
+        }
+    });
+    insert_memory(
+        &conn,
+        "qs",
+        "/_quarantine/cross-db/scratch/restore-symbolic-path",
+        "unique restore symbolic token alphabetazebra",
+        &meta.to_string(),
+        None,
+        None,
+    );
+    // Seed a stale symbolic projection (pre-restore path) so a no-op sync
+    // cannot accidentally pass — restore must rewrite the indexed path.
+    {
+        let tx = conn.transaction().unwrap();
+        memcore::db::sync_memories_symbolic_fts(&tx, "qs").unwrap();
+        tx.commit().unwrap();
+    }
+    let stale_path: String = conn
+        .query_row(
+            "SELECT path FROM memories_symbolic_fts WHERE id = 'qs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        stale_path.contains("/_quarantine/"),
+        "precondition: symbolic FTS still has quarantine path: {stale_path}"
+    );
+    drop(conn);
+
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: db_path.display().to_string(),
+            role: DbRole::Project,
+            owner: "test".into(),
+            schema_kind: "tachi".into(),
+            vec_enabled: false,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "tachi".into(),
+            scope_hint: "project:same".into(),
+            notes: String::new(),
+        }],
+    };
+
+    crate::repair::quarantine::cmd_restore(&manifest, "qs", true, true).unwrap();
+
+    let conn = Connection::open(&db_path).unwrap();
+    let (mem_path, sym_path): (String, String) = conn
+        .query_row(
+            "SELECT m.path, s.path FROM memories m \
+             JOIN memories_symbolic_fts s ON s.id = m.id \
+             WHERE m.id = 'qs'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("restored row must join memories ↔ memories_symbolic_fts");
+    assert_eq!(mem_path, "/scratch/restore-symbolic-path");
+    assert_eq!(
+        sym_path, "/scratch/restore-symbolic-path",
+        "symbolic FTS must track the restored path"
+    );
+    let match_hits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_symbolic_fts \
+             WHERE memories_symbolic_fts MATCH '\"restore-symbolic-path\"' AND id = 'qs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        match_hits, 1,
+        "trigram MATCH must retrieve the path-restored row"
+    );
 }
 
 /// B5: pin the historical legacy→current rewrite for stale `expected_db`

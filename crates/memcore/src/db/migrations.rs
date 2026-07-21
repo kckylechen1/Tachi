@@ -1733,13 +1733,8 @@ mod tests {
             register_sqlite_vec();
             let mut conn = Connection::open(&path).expect("open");
             let _ = try_load_sqlite_vec(&conn);
-            init_schema_with_label_mut(
-                &mut conn,
-                "global",
-                &path,
-                &DbOpenContext::create_fresh(),
-            )
-            .expect("provision fresh");
+            init_schema_with_label_mut(&mut conn, "global", &path, &DbOpenContext::create_fresh())
+                .expect("provision fresh");
             // Downgrade to a stamped-v21 shape without the symbolic projection.
             const V22_SENTINEL: &str = "v22_memories_symbolic_fts";
             conn.execute(
@@ -1842,7 +1837,10 @@ mod tests {
         .unwrap();
 
         let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert!(report.handoff_paths_standardized >= 1 || was_run(&conn, "v3_handoff_path_standardize").unwrap());
+        assert!(
+            report.handoff_paths_standardized >= 1
+                || was_run(&conn, "v3_handoff_path_standardize").unwrap()
+        );
         assert!(was_run(&conn, "v22_memories_symbolic_fts").unwrap());
 
         let path: String = conn

@@ -108,11 +108,14 @@ fn sync_memories_fts(
 
 /// Refresh one row in `memories_symbolic_fts` from the live `memories` row.
 /// No-op when the virtual table is absent (legacy fixtures / mid-migration).
-fn sync_memories_symbolic_fts(
-    tx: &rusqlite::Transaction<'_>,
+///
+/// Public so repair writers (`tachi repair` quarantine restore/purge/junk)
+/// share the same tx-scoped projection as normal CRUD (#1335 oracle).
+pub fn sync_memories_symbolic_fts(
+    conn: &rusqlite::Connection,
     id: &str,
 ) -> Result<(), MemoryError> {
-    let exists: bool = tx
+    let exists: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
             [],
@@ -122,8 +125,11 @@ fn sync_memories_symbolic_fts(
     if !exists {
         return Ok(());
     }
-    tx.execute("DELETE FROM memories_symbolic_fts WHERE id = ?1", params![id])?;
-    tx.execute(
+    conn.execute(
+        "DELETE FROM memories_symbolic_fts WHERE id = ?1",
+        params![id],
+    )?;
+    conn.execute(
         r#"INSERT INTO memories_symbolic_fts(id, path, summary, text, keywords, entities, topic)
            SELECT id, path, summary, text, keywords, entities, topic
            FROM memories WHERE id = ?1"#,
@@ -132,11 +138,12 @@ fn sync_memories_symbolic_fts(
     Ok(())
 }
 
-fn delete_memories_symbolic_fts(
-    tx: &rusqlite::Transaction<'_>,
+/// Drop one row from `memories_symbolic_fts`. No-op when the table is absent.
+pub fn delete_memories_symbolic_fts(
+    conn: &rusqlite::Connection,
     id: &str,
 ) -> Result<(), MemoryError> {
-    let exists: bool = tx
+    let exists: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
             [],
@@ -146,7 +153,10 @@ fn delete_memories_symbolic_fts(
     if !exists {
         return Ok(());
     }
-    tx.execute("DELETE FROM memories_symbolic_fts WHERE id = ?1", params![id])?;
+    conn.execute(
+        "DELETE FROM memories_symbolic_fts WHERE id = ?1",
+        params![id],
+    )?;
     Ok(())
 }
 
@@ -1111,16 +1121,9 @@ mod idless_upsert_tests {
              before the early-return commit"
         );
 
-        let hits = search_symbolic_candidates(
-            conn,
-            "uniformuniquesymbol",
-            10,
-            false,
-            true,
-            None,
-            None,
-        )
-        .unwrap();
+        let hits =
+            search_symbolic_candidates(conn, "uniformuniquesymbol", 10, false, true, None, None)
+                .unwrap();
         assert!(
             hits.iter().any(|e| e.id == "sym-sync-loser"),
             "include_superseded symbolic recall must find the early-return loser; got {:?}",

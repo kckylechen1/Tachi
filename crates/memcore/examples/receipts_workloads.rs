@@ -1397,7 +1397,9 @@ mod grid_tests {
             plan.iter().any(|line| {
                 line.contains("VIRTUAL TABLE INDEX")
                     && (line.contains('M') || line.contains("memories_symbolic_fts"))
-            }) || plan.iter().any(|line| line.contains("VIRTUAL TABLE INDEX 0:M")),
+            }) || plan
+                .iter()
+                .any(|line| line.contains("VIRTUAL TABLE INDEX 0:M")),
             "expected trigram MATCH virtual-table probe (INDEX …M…), got: {plan:?}"
         );
         assert!(
@@ -1444,8 +1446,7 @@ mod grid_tests {
              fixture has {recent_63k}"
         );
         assert_eq!(
-            v["notes"]["kb_paragraphs_63k"],
-            "unfinished_acceptable_for_1331_rework",
+            v["notes"]["kb_paragraphs_63k"], "unfinished_acceptable_for_1331_rework",
             "CONCERN 6: document unfinished kb_paragraphs@63k without blocking"
         );
     }

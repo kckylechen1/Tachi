@@ -428,12 +428,7 @@ fn symbolic_pre_cap_id_tie_break_is_stable() {
 #[test]
 fn symbolic_single_cjk_char_keeps_like_eligibility() {
     let mut conn = setup();
-    insert(
-        &mut conn,
-        "cjk-note",
-        "今日要记一件重要的事",
-        &["journal"],
-    );
+    insert(&mut conn, "cjk-note", "今日要记一件重要的事", &["journal"]);
 
     let hits = crate::db::search_symbolic_candidates(&conn, "记", 10, false, false, None, None)
         .expect("CJK symbolic search succeeds");
