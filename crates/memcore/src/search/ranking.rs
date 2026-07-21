@@ -307,7 +307,7 @@ fn apply_decision_and_research_boosts(
     /// provisional research-path boost under /wiki/**/research/**
     /// (calibrated so labeled research notes beat denser architecture wikis
     /// on the ops-audit adjacent-wiki case).
-    const RESEARCH_PATH_BOOST: f64 = 2.85;
+    const RESEARCH_PATH_BOOST: f64 = 3.00;
 
     let research_query = query_looks_research_shaped(query);
 
