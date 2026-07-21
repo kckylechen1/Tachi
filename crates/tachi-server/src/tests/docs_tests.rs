@@ -13,6 +13,7 @@ mod http_direct_connect;
 mod hypermem_gate;
 mod kernel_surface;
 mod library_identity_runtime;
+mod memories_writer_census;
 mod organize;
 mod portable_kernel_split;
 mod release_distribution;
