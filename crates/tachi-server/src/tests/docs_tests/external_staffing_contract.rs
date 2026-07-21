@@ -251,8 +251,12 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
     let mut ledger_writers = Vec::new();
     let mut linked_result_copies = Vec::new();
     for function in functions {
-        let is_legacy_owner =
-            function.symbol.contains("/arena_ops/") || function.symbol.contains("/shell_ops/");
+        // Runs-root ownership relocated from shell_ops → task_lifecycle
+        // (PR #1339 / #1337). Keep counting the live secondary ledger root
+        // after the move — budget may only drop on deletion, not relocation.
+        let is_legacy_owner = function.symbol.contains("/arena_ops/")
+            || function.symbol.contains("/shell_ops/")
+            || function.symbol.contains("/task_lifecycle/flow_artifacts.rs");
         let is_staffing_flow_projection = function
             .symbol
             .contains("/task_lifecycle/flow_artifacts/dispatch_markers.rs::")

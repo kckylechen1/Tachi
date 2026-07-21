@@ -62,7 +62,8 @@
       "crates/tachi-server/src/tools/workflow_facade.rs::tachi_task"
     ],
     "legacy_secondary_ledger_roots": [
-      "crates/tachi-server/src/arena_ops/state.rs::arena_root"
+      "crates/tachi-server/src/arena_ops/state.rs::arena_root",
+      "crates/tachi-server/src/task_lifecycle/flow_artifacts.rs::shell_runs_root"
     ],
     "legacy_staffing_projection_writer_sites": [
       "crates/tachi-server/src/arena_ops/actions/board.rs::refresh_board::write_json_file_owner_only#1",
@@ -109,7 +110,7 @@
     "production_adopters": 5,
     "request_builders": 5,
     "launch_advertising_facades": 3,
-    "legacy_secondary_ledger_roots": 1,
+    "legacy_secondary_ledger_roots": 2,
     "legacy_staffing_projection_writer_sites": 34,
     "linked_result_copies": 1,
     "direction": "budgets may only decrease as deletion leaves land"
@@ -120,6 +121,12 @@
       "root_symbol": "arena_root",
       "authority": false,
       "retirement_leaf": "D"
+    },
+    {
+      "owner": "tachi_shell",
+      "root_symbol": "shell_runs_root",
+      "authority": false,
+      "retirement_leaf": "B"
     }
   ],
   "non_goals": [
