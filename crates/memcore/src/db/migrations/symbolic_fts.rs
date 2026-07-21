@@ -32,7 +32,11 @@ pub(super) fn migrate_v22_memories_symbolic_fts(conn: &Connection) -> Result<usi
 
 /// Drop every symbolic-FTS row and re-insert from live `memories`. No-op when
 /// the virtual table is absent (should not happen after the CREATE above).
-pub(super) fn rebuild_memories_symbolic_fts(conn: &Connection) -> Result<usize, MemoryError> {
+///
+/// Public: reused (not reimplemented) by `tachi repair`'s R1 FTS-rebuild rule
+/// (`tachi-server::repair::fts`) so the trigram projection gets the same
+/// full-rebuild coverage as `memories_fts` (#1335 oracle).
+pub fn rebuild_memories_symbolic_fts(conn: &Connection) -> Result<usize, MemoryError> {
     let present: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",

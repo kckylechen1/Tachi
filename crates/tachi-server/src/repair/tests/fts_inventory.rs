@@ -45,6 +45,56 @@ fn r1_missing_fts_table_rebuilt() {
     assert_eq!(app.applied, 1);
 }
 
+/// #1335 oracle: R1 must reconcile `memories_symbolic_fts` drift, not just
+/// `memories_fts`. `insert_memory` bypasses both manual sync paths (no
+/// triggers on either table), so a fresh DB already has symbolic drift after
+/// raw inserts — R1 must detect and fix it in the same pass.
+#[test]
+fn r1_symbolic_fts_drift_detected_and_rebuilt() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "symbolic_drift.db");
+    insert_memory(&conn, "m1", "/x/a", "hello", "{}", None, None);
+    insert_memory(&conn, "m2", "/x/b", "world", "{}", None, None);
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    assert!(
+        dry.findings.iter().any(|f| f.kind == "symbolic_fts_drift"),
+        "dry-run should detect symbolic_fts_drift, got {dry:?}"
+    );
+
+    let app = FtsRebuild.apply(&mut ctx).unwrap();
+    assert!(app.errors.is_empty(), "apply errors: {:?}", app.errors);
+
+    let symbolic_count: i64 = ctx
+        .conn
+        .query_row("SELECT COUNT(*) FROM memories_symbolic_fts", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        symbolic_count, 2,
+        "expected 2 symbolic_fts rows after rebuild"
+    );
+    let match_hits: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_symbolic_fts \
+             WHERE memories_symbolic_fts MATCH '\"hello\"' AND id = 'm1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(match_hits, 1, "trigram MATCH must retrieve rebuilt row");
+
+    let dry2 = FtsRebuild.dry_run(&mut ctx).unwrap();
+    assert!(
+        dry2.findings.is_empty(),
+        "post-rebuild should be clean: {dry2:?}"
+    );
+}
+
 #[test]
 fn inventory_accepts_explicit_absolute_tachi_db_outside_manifest() {
     let dir = TempDir::new().unwrap();

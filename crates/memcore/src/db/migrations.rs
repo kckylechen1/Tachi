@@ -125,6 +125,7 @@ use pack_retire::*;
 use sentinel::*;
 pub(in crate::db) use session_claims_identity::dedupe_session_claims_identity_conflicts;
 use session_claims_identity::*;
+pub use symbolic_fts::rebuild_memories_symbolic_fts;
 use symbolic_fts::*;
 
 const MIGRATION_NS: &str = "migrations";
