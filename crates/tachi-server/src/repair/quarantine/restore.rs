@@ -45,12 +45,12 @@ pub fn cmd_restore(
          WHERE id = ?2",
         params![target.original_path, id],
     )?;
-    if let Err(e) = tx.execute(
+    // Propagate lexical FTS path update so memories cannot commit while
+    // leaving a stale FTS path (#1335 oracle NOT-READY).
+    tx.execute(
         "UPDATE memories_fts SET path = ?1 WHERE id = ?2",
         params![target.original_path, id],
-    ) {
-        eprintln!("warning: failed to update FTS for restored quarantine row {id}: {e}");
-    }
+    )?;
     // Path is a symbolic-indexed column — refresh the trigram projection from
     // the live memories row rather than a partial UPDATE (#1335 oracle).
     // Propagate sync failure so the memories UPDATE cannot commit without a
@@ -309,14 +309,9 @@ fn move_one(
     // Source transaction: delete.
     let src_tx = src_conn.transaction()?;
     src_tx.execute("DELETE FROM memories WHERE id = ?1", params![&q.id])?;
-    if let Err(e) = src_tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&q.id]) {
-        eprintln!(
-            "warning: failed to delete FTS row for moved quarantine row {}: {e}",
-            q.id
-        );
-    }
-    // Propagate symbolic delete failure so source-row DELETE cannot commit
-    // while leaving a stale trigram projection (#1335 oracle NOT-READY).
+    // Propagate lexical + symbolic FTS deletes so source-row DELETE cannot
+    // commit while leaving either projection behind (#1335).
+    src_tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&q.id])?;
     memcore::db::delete_memories_symbolic_fts(&src_tx, &q.id)?;
     src_tx.commit()?;
 
