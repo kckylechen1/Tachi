@@ -68,6 +68,9 @@ pub fn cmd_purge(
                     q.id
                 );
             }
+            // Propagate symbolic delete failure so the memories DELETE cannot
+            // commit without removing the trigram projection (#1335 oracle NOT-READY).
+            memcore::db::delete_memories_symbolic_fts(&tx, &q.id)?;
             purged += 1;
         }
         tx.commit()?;

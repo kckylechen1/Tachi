@@ -1,0 +1,10 @@
+{
+  "kill_test": "rows_scaling_at_synthetic_production_like_warmed_p50",
+  "rows": [630, 6300, 63000],
+  "absent_term_p50_us": [65, 66, 77],
+  "recent_hit_200_p50_us": [2602, 2564, 2617],
+  "notes": {
+    "kb_paragraphs_63k": "unfinished_acceptable_for_1331_rework",
+    "source": "PR #1335 release receipts_workloads synthetic_production_like warmed cross-section"
+  }
+}

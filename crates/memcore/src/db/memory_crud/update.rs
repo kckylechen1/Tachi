@@ -102,6 +102,7 @@ pub fn update_with_revision(
                FROM memories WHERE id = ?1"#,
             params![id],
         )?;
+        super::sync_memories_symbolic_fts(&tx, id)?;
 
         if let Some(vec_blob) = new_vec {
             tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![id])?;
@@ -208,6 +209,7 @@ pub fn update_enrichment_fields(
                FROM memories WHERE id = ?1"#,
             params![id],
         )?;
+        super::sync_memories_symbolic_fts(&tx, id)?;
     }
 
     if let Some(vec_blob) = new_vec {

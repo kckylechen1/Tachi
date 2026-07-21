@@ -39,6 +39,9 @@
 //!   `mirror_eval_adjudications` tables (#1066) — first-class mirror eval
 //!   intake for harness-native subagents (register/observe/adjudicate/get).
 //! - v21: AgentIdentity / WorkClaim holder-evidence spine (#1253).
+//! - v22: `memories_symbolic_fts` trigram projection create + full rebuild
+//!   (#1331) — versioned so stamped-v21 DBs cannot silently acquire the
+//!   table via idempotent init DDL without a migration stamp/authority gate.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -82,7 +85,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 21;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 22;
 
 mod basic;
 mod cross_db;
@@ -100,6 +103,7 @@ mod mirror_eval;
 mod pack_retire;
 mod sentinel;
 mod session_claims_identity;
+mod symbolic_fts;
 
 use basic::*;
 use cross_db::*;
@@ -121,6 +125,8 @@ use pack_retire::*;
 use sentinel::*;
 pub(in crate::db) use session_claims_identity::dedupe_session_claims_identity_conflicts;
 use session_claims_identity::*;
+pub use symbolic_fts::rebuild_memories_symbolic_fts;
+use symbolic_fts::*;
 
 const MIGRATION_NS: &str = "migrations";
 const SANITY_QUARANTINE_FRACTION: f64 = 0.5;
@@ -150,6 +156,7 @@ pub struct MigrationReport {
     pub idless_identity_constraint_added: usize,
     pub mirror_eval_tables_created: usize,
     pub identity_workclaim_columns_added: usize,
+    pub memories_symbolic_fts_rows: usize,
 }
 
 /// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
@@ -508,6 +515,18 @@ pub(crate) fn run_data_migrations_in_tx(
         conn,
         "v21_identity_workclaim_spine",
         migrate_v21_identity_workclaim_spine,
+    )?
+    .unwrap_or(0);
+
+    // After every earlier migration that can rewrite indexed memory fields
+    // (path/summary/text/keywords/…), rebuild the symbolic trigram projection
+    // from live `memories` so upgrade cannot leave permanently stale rows
+    // (#1331 BUG 4). Fresh DBs still get the table from BASE_SCHEMA_SQL; this
+    // sentinel is the authority/version story for stamped-v21 → v22.
+    report.memories_symbolic_fts_rows = apply_versioned_migration(
+        conn,
+        "v22_memories_symbolic_fts",
+        migrate_v22_memories_symbolic_fts,
     )?
     .unwrap_or(0);
 
@@ -1656,6 +1675,14 @@ mod tests {
         "v12_session_claims_unique_identity",
         "v13_hard_state_ns_updated_index",
         "v14_dispatch_outcomes_reported_outcome",
+        "v15_exec_envs_env_class",
+        "v16_dispatch_outcomes_identity_receipt",
+        "v17_dispatch_outcomes_attribution_basis",
+        "v18_dispatch_adjudications",
+        "v19_idless_memory_identity",
+        "v20_mirror_eval",
+        "v21_identity_workclaim_spine",
+        "v22_memories_symbolic_fts",
     ];
 
     /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner
@@ -1690,6 +1717,156 @@ mod tests {
             "EXPECTED_SCHEMA_VERSION ({EXPECTED_SCHEMA_VERSION}) must equal the number of \
              sentinel migrations run_data_migrations actually marks run ({sentinel_count}) — \
              bump the const (and add a vN doc line) when a new migration is appended"
+        );
+    }
+
+    /// #1331 BUG 3: stamped-v21 DBs must not silently acquire
+    /// `memories_symbolic_fts` under Deny; Allow must create+backfill and stamp 22.
+    #[test]
+    fn v21_to_v22_symbolic_fts_requires_authority_and_stamps() {
+        use crate::db::{init_schema_with_label_mut, DbOpenContext};
+
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let _ = crate::db::enable_simple_auto_extension();
+            register_sqlite_vec();
+            let mut conn = Connection::open(&path).expect("open");
+            let _ = try_load_sqlite_vec(&conn);
+            init_schema_with_label_mut(&mut conn, "global", &path, &DbOpenContext::create_fresh())
+                .expect("provision fresh");
+            // Downgrade to a stamped-v21 shape without the symbolic projection.
+            const V22_SENTINEL: &str = "v22_memories_symbolic_fts";
+            conn.execute(
+                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+                params![MIGRATION_NS, V22_SENTINEL],
+            )
+            .unwrap();
+            conn.execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")
+                .unwrap();
+            write_schema_version(&conn, 21).unwrap();
+            insert_row(&conn, "legacy-row", "/notes/v21", "general", "{}");
+        }
+
+        // Deny must refuse before DDL recreates the table.
+        let deny_err = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_deny(),
+        ) {
+            Ok(_) => panic!("Deny must refuse stamped-v21 → v22"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                deny_err,
+                MemoryError::SchemaMigrationOptInRequired { stored: 21, .. }
+            ),
+            "unexpected deny error: {deny_err}"
+        );
+        {
+            let inspect = Connection::open(&path).unwrap();
+            let present: bool = inspect
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_symbolic_fts'",
+                    [],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            assert!(
+                !present,
+                "Deny must not silently CREATE memories_symbolic_fts on a stamped-v21 DB"
+            );
+            assert_eq!(read_schema_version(&inspect).unwrap(), 21);
+        }
+
+        let _store = crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_allow("test:1331-v22"),
+        )
+        .expect("Allow must migrate v21 → v22");
+        let verify = Connection::open(&path).unwrap();
+        assert_eq!(read_schema_version(&verify).unwrap(), 22);
+        assert!(was_run(&verify, "v22_memories_symbolic_fts").unwrap());
+        let rows: i64 = verify
+            .query_row("SELECT COUNT(*) FROM memories_symbolic_fts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            rows >= 1,
+            "v22 must backfill existing memories into the symbolic projection"
+        );
+    }
+
+    /// #1331 BUG 4: after a legacy path rewrite in the same upgrade, symbolic
+    /// retrieval must use the post-migration path (v22 full rebuild).
+    #[test]
+    fn v22_rebuild_makes_post_migration_path_symbolically_retrievable() {
+        let (mut conn, tmp) = open_test_db();
+        // Clear path + symbolic sentinels so both replay in order.
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN \
+             ('v3_handoff_path_standardize', 'v22_memories_symbolic_fts')",
+            params![MIGRATION_NS],
+        )
+        .unwrap();
+        write_schema_version(&conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO memories
+              (id, path, summary, text, importance, timestamp, category, topic,
+               keywords, entities, source, scope, archived,
+               created_at, updated_at, access_count, last_access, revision,
+               metadata, retention_policy, domain)
+             VALUES ('handoff-row', '/handoff', 's', 'handoffuniqueterm body', 0.5,
+                     '2026-01-01T00:00:00Z', 'fact', '', '[]', '[]', 'manual', 'general', 0,
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1,
+                     '{}', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        // Stale pre-rewrite projection (simulates ensure_fts_backfilled-before-v3).
+        conn.execute(
+            "INSERT INTO memories_symbolic_fts
+             (id, path, summary, text, keywords, entities, topic)
+             VALUES ('handoff-row', '/handoff', 's', 'handoffuniqueterm body', '[]', '[]', '')",
+            [],
+        )
+        .unwrap();
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert!(
+            report.handoff_paths_standardized >= 1
+                || was_run(&conn, "v3_handoff_path_standardize").unwrap()
+        );
+        assert!(was_run(&conn, "v22_memories_symbolic_fts").unwrap());
+
+        let path: String = conn
+            .query_row(
+                "SELECT path FROM memories_symbolic_fts WHERE id = 'handoff-row'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(path, "/handoff/unknown");
+
+        let hits = crate::db::search_symbolic_candidates(
+            &conn,
+            "handoffuniqueterm",
+            10,
+            false,
+            false,
+            Some("/handoff/unknown"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            hits.iter().any(|e| e.id == "handoff-row"),
+            "symbolic retrieval must use the post-v3 path; got {:?}",
+            hits.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
         );
     }
     /// A deterministic stand-in for the transient lock/I/O/authorizer

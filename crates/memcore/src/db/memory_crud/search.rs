@@ -8,6 +8,7 @@ use crate::types::MemoryEntry;
 
 use super::{
     normalize_utc_iso, row_to_entry, serialize_f32, simple_query_input, MEMORY_SELECT_COLUMNS,
+    MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
 /// sqlite-vec's vec0 virtual table picks its nearest-`k` window FIRST, from
@@ -339,6 +340,140 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
 
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
+
+    // Prefer the trigram index when every term is trigram-eligible (#1331).
+    // SQLite's FTS5 trigram tokenizer requires ≥3 Unicode characters per
+    // MATCH token; `symbolic_terms` still admits ≥3 UTF-8 *bytes* (so a
+    // single CJK character enters the term list). Short-grapheme queries
+    // must keep the pre-#1331 LIKE table-scan path or MATCH returns empty
+    // while LIKE would have hit. Path-prefix-only queries keep the ordinary
+    // `memories` path. Legacy fixtures without the virtual table also fall
+    // back to the LIKE scan.
+    if !terms.is_empty()
+        && memories_symbolic_fts_available(conn)
+        && terms_trigram_match_eligible(&terms)
+    {
+        return search_symbolic_via_trigram(
+            conn,
+            &terms,
+            relevance_query,
+            limit,
+            include_archived,
+            include_superseded,
+            path_like.as_deref(),
+            as_of_utc.as_deref(),
+        );
+    }
+
+    search_symbolic_via_table_scan(
+        conn,
+        &terms,
+        relevance_query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_like.as_deref(),
+        as_of_utc.as_deref(),
+    )
+}
+
+fn memories_symbolic_fts_available(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Production SQL body for trigram-accelerated symbolic retrieval (#1331).
+///
+/// Shared with the receipts harness EXPLAIN assertion so the plan test cannot
+/// drift from a handwritten mirror. `{columns}` is substituted with either the
+/// full [`MEMORY_SELECT_COLUMNS_QUALIFIED`] list (runtime) or `m.id` (plan).
+pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
+         FROM memories_symbolic_fts
+         JOIN memories m ON m.id = memories_symbolic_fts.id
+         WHERE (?1 = 1 OR m.archived = 0)
+           AND (?2 = 1 OR m.superseded_by IS NULL)
+           AND (?3 IS NULL OR m.path LIKE ?3)
+           AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
+           AND m.id NOT LIKE 'anchor:%'
+           AND memories_symbolic_fts MATCH ?5
+         ORDER BY tachi_symbolic_score(?6, m.id, m.path, m.topic, m.summary, m.text, m.keywords, m.entities) DESC, julianday(m.timestamp) DESC, m.id ASC
+         LIMIT ?7";
+
+/// Build the production trigram SELECT statement for the given column list.
+pub fn symbolic_trigram_select_sql(columns: &str) -> String {
+    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE.replace("{columns}", columns)
+}
+
+/// Trigram-accelerated symbolic candidate retrieval (#1331).
+///
+/// Uses FTS5 `MATCH` on `memories_symbolic_fts` (trigram tokenizer). Quoted
+/// phrase MATCH is contiguous substring search across the same columns the
+/// table-scan path LIKEs — equivalent for terms with ≥3 Unicode characters
+/// (gated by [`terms_trigram_match_eligible`]), without `ESCAPE` (which
+/// disables the trigram LIKE optimization and falls back to a virtual-table
+/// scan). Scoring and the final row payload still read from `memories`,
+/// preserving #1154's relevance-first ORDER BY / LIMIT contract.
+#[allow(clippy::too_many_arguments)]
+fn search_symbolic_via_trigram(
+    conn: &Connection,
+    terms: &[String],
+    relevance_query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_like: Option<&str>,
+    as_of_utc: Option<&str>,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let match_query = symbolic_trigram_match_query(terms);
+    let sql = symbolic_trigram_select_sql(MEMORY_SELECT_COLUMNS_QUALIFIED);
+
+    let params: Vec<Value> = vec![
+        (include_archived as i64).into(),
+        (include_superseded as i64).into(),
+        path_like.map(str::to_owned).into(),
+        as_of_utc.map(str::to_owned).into(),
+        match_query.into(),
+        relevance_query.to_owned().into(),
+        (limit.max(1) as i64).into(),
+    ];
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), row_to_entry)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Build an FTS5 trigram MATCH expression that OR's quoted phrases.
+/// Quoting keeps `%` / `_` / FTS operators inside the term literal so
+/// eligibility matches the table-scan path's escaped LIKE semantics.
+fn symbolic_trigram_match_query(terms: &[String]) -> String {
+    terms
+        .iter()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// Pre-#1331 full-table LIKE scan. Kept as the path-prefix-only path and as
+/// a fallback when `memories_symbolic_fts` is absent (legacy test fixtures).
+#[allow(clippy::too_many_arguments)]
+fn search_symbolic_via_table_scan(
+    conn: &Connection,
+    terms: &[String],
+    relevance_query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_like: Option<&str>,
+    as_of_utc: Option<&str>,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
     let mut sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS} FROM memories
          WHERE (?1 = 1 OR archived = 0)
@@ -351,13 +486,13 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     let mut params: Vec<Value> = vec![
         (include_archived as i64).into(),
         (include_superseded as i64).into(),
-        path_like.into(),
-        as_of_utc.clone().into(),
+        path_like.map(str::to_owned).into(),
+        as_of_utc.map(str::to_owned).into(),
     ];
 
     if !terms.is_empty() {
         let mut term_clauses = Vec::new();
-        for term in &terms {
+        for term in terms {
             let pattern = format!("%{}%", escape_like_pattern(term));
             params.push(pattern.into());
             let idx = params.len();
@@ -442,15 +577,31 @@ fn symbolic_terms(query: &str) -> Vec<String> {
     terms
 }
 
+/// FTS5 trigram MATCH needs ≥3 Unicode characters per term. Byte-length
+/// gating in [`symbolic_terms`] is necessary but not sufficient (one CJK
+/// character is 3 UTF-8 bytes / 1 char).
+fn terms_trigram_match_eligible(terms: &[String]) -> bool {
+    !terms.is_empty() && terms.iter().all(|term| term.chars().count() >= 3)
+}
+
 fn symbolic_term_match_clause(parameter_index: usize) -> String {
+    symbolic_term_match_clause_on_alias("", parameter_index)
+}
+
+fn symbolic_term_match_clause_on_alias(alias: &str, parameter_index: usize) -> String {
+    let prefix = if alias.is_empty() {
+        String::new()
+    } else {
+        format!("{alias}.")
+    };
     format!(
-        "(id LIKE ?{parameter_index} ESCAPE '\\'
-          OR path LIKE ?{parameter_index} ESCAPE '\\'
-          OR summary LIKE ?{parameter_index} ESCAPE '\\'
-          OR text LIKE ?{parameter_index} ESCAPE '\\'
-          OR keywords LIKE ?{parameter_index} ESCAPE '\\'
-          OR entities LIKE ?{parameter_index} ESCAPE '\\'
-          OR topic LIKE ?{parameter_index} ESCAPE '\\')"
+        "({prefix}id LIKE ?{parameter_index} ESCAPE '\\'
+          OR {prefix}path LIKE ?{parameter_index} ESCAPE '\\'
+          OR {prefix}summary LIKE ?{parameter_index} ESCAPE '\\'
+          OR {prefix}text LIKE ?{parameter_index} ESCAPE '\\'
+          OR {prefix}keywords LIKE ?{parameter_index} ESCAPE '\\'
+          OR {prefix}entities LIKE ?{parameter_index} ESCAPE '\\'
+          OR {prefix}topic LIKE ?{parameter_index} ESCAPE '\\')"
     )
 }
 

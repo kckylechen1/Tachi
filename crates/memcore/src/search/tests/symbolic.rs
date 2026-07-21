@@ -421,3 +421,34 @@ fn symbolic_pre_cap_id_tie_break_is_stable() {
         "ID must be the deterministic final tie-break after equal relevance and timestamp"
     );
 }
+
+/// #1331 BUG 1: a single CJK character is 3 UTF-8 bytes so it passes
+/// `symbolic_terms`'s byte gate, but FTS5 trigram MATCH requires ≥3 Unicode
+/// characters — MATCH-only eligibility is empty while LIKE still hits.
+#[test]
+fn symbolic_single_cjk_char_keeps_like_eligibility() {
+    let mut conn = setup();
+    insert(&mut conn, "cjk-note", "今日要记一件重要的事", &["journal"]);
+
+    let hits = crate::db::search_symbolic_candidates(&conn, "记", 10, false, false, None, None)
+        .expect("CJK symbolic search succeeds");
+    assert!(
+        hits.iter().any(|e| e.id == "cjk-note"),
+        "single-CJK query must still retrieve via the LIKE path; got ids: {:?}",
+        hits.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+
+    // Discrimination: forcing the trigram MATCH path for this term goes red.
+    let match_hits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_symbolic_fts WHERE memories_symbolic_fts MATCH ?1",
+            rusqlite::params![r#""记""#],
+            |row| row.get(0),
+        )
+        .expect("MATCH query must prepare even when it matches nothing");
+    assert_eq!(
+        match_hits, 0,
+        "trigram MATCH on a 1-char CJK term must be empty — that is why short \
+         graphemes must not take the MATCH path"
+    );
+}

@@ -1,5 +1,8 @@
 //! R1 — FTS rebuild. Detects drift between `memories` and `memories_fts`,
 //! and a missing `memories_fts` virtual table altogether (the quant case).
+//! Also detects drift in the `memories_symbolic_fts` trigram projection and
+//! rebuilds it in the same pass, reusing memcore's v22 full-rebuild helper
+//! (#1335 oracle: repair writers must not desync the trigram index).
 
 use serde_json::json;
 
@@ -53,6 +56,37 @@ fn fts_state(ctx: &DbContext) -> Result<(i64, Option<i64>), RepairError> {
         .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
         .map_err(RepairError::from)?;
     Ok((mem_count, Some(fts_count)))
+}
+
+/// Same shape as `fts_state` but for the `memories_symbolic_fts` trigram
+/// projection. Returns `None` for the symbolic count when the table doesn't
+/// exist (pre-v22 DB, or mid-migration) — that is out of scope for R1, which
+/// only reconciles drift on a projection that is already present.
+fn symbolic_fts_state(ctx: &DbContext) -> Result<(i64, Option<i64>), RepairError> {
+    let mem_count: i64 = ctx
+        .conn
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .map_err(RepairError::from)?;
+
+    let exists: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_symbolic_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(RepairError::from)?;
+    if exists == 0 {
+        return Ok((mem_count, None));
+    }
+
+    let symbolic_count: i64 = ctx
+        .conn
+        .query_row("SELECT COUNT(*) FROM memories_symbolic_fts", [], |r| {
+            r.get(0)
+        })
+        .map_err(RepairError::from)?;
+    Ok((mem_count, Some(symbolic_count)))
 }
 
 /// Count orphaned FTS5 shadow tables (those whose virtual parent
@@ -115,6 +149,19 @@ impl RepairRule for FtsRebuild {
             }
             _ => {}
         }
+        let (mem, symbolic_opt) = symbolic_fts_state(ctx)?;
+        if let Some(symbolic) = symbolic_opt {
+            if symbolic != mem {
+                let drift = (mem - symbolic).abs() as usize;
+                r.findings.push(
+                    Finding::new("symbolic_fts_drift", drift).with_detail(json!({
+                        "memories": mem,
+                        "symbolic_fts": symbolic,
+                        "delta": mem - symbolic,
+                    })),
+                );
+            }
+        }
         Ok(r)
     }
 
@@ -146,6 +193,11 @@ impl RepairRule for FtsRebuild {
         }
         tx.execute_batch(FTS_CREATE)?;
         let inserted = tx.execute(FTS_INSERT, [])?;
+        // Reuse memcore's v22 full-rebuild helper (no-op if the table is
+        // absent) so the trigram projection is reconciled atomically with
+        // `memories_fts` — same transaction, same crash-safety guarantee
+        // (#1335 oracle: repair rebuild previously only covered memories_fts).
+        memcore::db::migrations::rebuild_memories_symbolic_fts(&tx)?;
         tx.commit()?;
         let (mem, fts_opt) = fts_state(ctx)?;
         if fts_opt != Some(mem) {
@@ -155,6 +207,15 @@ impl RepairRule for FtsRebuild {
             ));
         } else {
             r.applied = inserted;
+        }
+        let (mem, symbolic_opt) = symbolic_fts_state(ctx)?;
+        if let Some(symbolic) = symbolic_opt {
+            if symbolic != mem {
+                r.errors.push(format!(
+                    "post-rebuild symbolic count mismatch: memories={} symbolic_fts={}",
+                    mem, symbolic
+                ));
+            }
         }
         Ok(r)
     }

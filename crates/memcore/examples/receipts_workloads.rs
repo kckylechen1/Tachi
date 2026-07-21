@@ -979,58 +979,28 @@ fn pad_to_bytes(base: &str, target_bytes: usize, i: usize) -> String {
     out
 }
 
-/// Structural mirror of the WHERE/ORDER BY shape in
-/// `crates/memcore/src/db/memory_crud/search.rs`
-/// (`search_symbolic_candidates_with_relevance`, as of this commit — hand-
-/// check both if that function's shape moves; it is `pub(crate)` and its SQL
-/// is built inline, so an example cannot call into it directly to extract
-/// the real statement). Two deliberate simplifications from the real
-/// statement, neither of which changes SQLite's chosen access strategy (SCAN
-/// vs SEARCH; sorted vs unsorted), which is all `EXPLAIN QUERY PLAN` reports:
-///
-///   1. `SELECT id` instead of the full column list — column selection does
-///      not affect the WHERE/ORDER BY strategy on a table with no relevant
-///      secondary index over these text columns.
-///   2. One representative term OR-clause (`?5`) instead of up to 12 —
-///      SQLite's strategy for N OR'd unanchored `LIKE '%...%'` predicates
-///      across non-indexed columns is the same for any N >= 1; more terms
-///      change per-row work, not per-row access strategy.
+/// Production trigram SELECT with `m.id` columns — same statement template
+/// as `search_symbolic_via_trigram` (`memcore::db::symbolic_trigram_select_sql`).
+/// Selecting `m.id` instead of the full column list does not change SQLite's
+/// SCAN/SEARCH strategy, which is all `EXPLAIN QUERY PLAN` reports.
 ///
 /// `tachi_symbolic_score` must already be registered on `conn` — it is a
 /// side effect of any prior `search_symbolic_candidates` call, and every
 /// grid cell makes one before this runs.
-const SYMBOLIC_SCAN_MIRROR_SQL: &str = r#"SELECT id FROM memories
- WHERE (?1 = 1 OR archived = 0)
-   AND (?2 = 1 OR superseded_by IS NULL)
-   AND (?3 IS NULL OR path LIKE ?3)
-   AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))
-   AND id NOT LIKE 'anchor:%'
-   AND (id LIKE ?5 ESCAPE '\' OR path LIKE ?5 ESCAPE '\' OR summary LIKE ?5 ESCAPE '\' OR text LIKE ?5 ESCAPE '\' OR keywords LIKE ?5 ESCAPE '\' OR entities LIKE ?5 ESCAPE '\' OR topic LIKE ?5 ESCAPE '\')
- ORDER BY tachi_symbolic_score(?6, id, path, topic, summary, text, keywords, entities) DESC, julianday(timestamp) DESC, id ASC
- LIMIT ?7"#;
+fn symbolic_trigram_plan_sql() -> String {
+    memcore::db::symbolic_trigram_select_sql("m.id")
+}
 
-/// `EXPLAIN QUERY PLAN` rows (the `detail` column only) for
-/// `SYMBOLIC_SCAN_MIRROR_SQL`. Same extraction pattern as
+/// `EXPLAIN QUERY PLAN` rows (the `detail` column only) for the production
+/// trigram SELECT. Same extraction pattern as
 /// `crates/memcore/src/db/migrations.rs`'s `query_plan` test helper
 /// (`row.get::<_, String>(3)` — modern SQLite's `EXPLAIN QUERY PLAN` result
 /// columns are `id, parent, notused, detail`).
-///
-/// `SYMBOLIC_SCAN_MIRROR_SQL` declares 7 positional placeholders (`?1..?7`)
-/// mirroring `search_symbolic_candidates_with_relevance`'s real bind list
-/// (`crates/memcore/src/db/memory_crud/search.rs:259-285`); rusqlite 0.38
-/// rejects a placeholder-count mismatch, so this binds one representative,
-/// correctly-typed value per slot (matching that function's actual types:
-/// `?1`/`?2` archived/superseded flags as `i64`, `?3`/`?4` optional
-/// path/as-of filters left `NULL` to exercise the `IS NULL OR ...`
-/// short-circuit branch, `?5` a LIKE pattern, `?6` the relevance-scorer
-/// query text, `?7` the `LIMIT`). `EXPLAIN QUERY PLAN` reports the access
-/// strategy SQLite would choose for this shape; it does not execute the
-/// query body, so the bound values only need to type-check, not encode a
-/// real query.
-fn symbolic_scan_mirror_query_plan(conn: &Connection) -> Vec<String> {
+fn symbolic_scan_query_plan(conn: &Connection) -> Vec<String> {
+    let sql = symbolic_trigram_plan_sql();
     let mut stmt = conn
-        .prepare(&format!("EXPLAIN QUERY PLAN {SYMBOLIC_SCAN_MIRROR_SQL}"))
-        .expect("prepare mirror EXPLAIN QUERY PLAN");
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("prepare production EXPLAIN QUERY PLAN");
     let rows = stmt
         .query_map(
             params![
@@ -1038,15 +1008,15 @@ fn symbolic_scan_mirror_query_plan(conn: &Connection) -> Vec<String> {
                 0i64,
                 Option::<String>::None,
                 Option::<String>::None,
-                "%x%",
-                "x",
+                "\"xxx\"",
+                "xxx",
                 1i64,
             ],
             |row| row.get::<_, String>(3),
         )
-        .expect("run mirror EXPLAIN QUERY PLAN");
+        .expect("run production EXPLAIN QUERY PLAN");
     rows.collect::<Result<Vec<_>, _>>()
-        .expect("collect mirror EXPLAIN QUERY PLAN rows")
+        .expect("collect production EXPLAIN QUERY PLAN rows")
 }
 
 /// Run the full 3x3x4x2 grid; prints 72 per-cell JSONL objects plus one
@@ -1136,7 +1106,7 @@ fn run_symbolic_scan_grid() {
             // per (rows, byte_distribution) rather than truly globally,
             // because SQLite's row-count estimate CAN in principle steer its
             // strategy at very different table sizes even without ANALYZE.
-            let plan = symbolic_scan_mirror_query_plan(conn);
+            let plan = symbolic_scan_query_plan(conn);
             for mut cell in cells {
                 cell["query_plan"] = json!(plan);
                 println!("{cell}");
@@ -1399,22 +1369,18 @@ mod grid_tests {
         );
     }
 
-    /// Scope note (cross-vendor review checkpoint 2): this only asserts the
-    /// SCAN-vs-SEARCH access strategy (`EXPLAIN QUERY PLAN`'s `detail`
-    /// column contains `"SCAN memories"`), not the full `ORDER BY` sort
-    /// order or the real statement's up-to-12-term OR-clause shape. If
-    /// `search.rs`'s WHERE/ORDER BY shape drifts in a way that changes the
-    /// sort strategy but not the SCAN-vs-SEARCH choice, this test stays
-    /// green on the stale mirror — see `SYMBOLIC_SCAN_MIRROR_SQL`'s doc for
-    /// why the two known simplifications (single-column SELECT, one
-    /// representative term) don't themselves change either.
+    /// Scope note (cross-vendor review checkpoint 2 / #1331): this asserts
+    /// the trigram-virtual-table access strategy (`EXPLAIN QUERY PLAN`'s
+    /// `detail` mentions `memories_symbolic_fts` / `VIRTUAL TABLE INDEX`)
+    /// against the **production** SQL template, not a handwritten mirror.
+    /// Pre-#1331 this locked a full `SCAN memories`; the bound leaf replaces
+    /// that with the trigram index probe.
     #[test]
-    fn mirror_query_plan_shows_no_index_can_serve_this_query() {
+    fn production_query_plan_uses_symbolic_trigram_index() {
         let mut store = MemoryStore::open_in_memory().expect("open grid test store");
         seed_grid_corpus(&mut store, GRID_ROW_COUNTS[0], ByteDistribution::OneLine);
         let conn = store.connection();
-        // Registers `tachi_symbolic_score` as a side effect (see
-        // `SYMBOLIC_SCAN_MIRROR_SQL`'s doc).
+        // Registers `tachi_symbolic_score` as a side effect.
         search_symbolic_candidates(
             conn,
             "oldtargetterm",
@@ -1426,11 +1392,62 @@ mod grid_tests {
         )
         .expect("register scorer fn via a real symbolic scan");
 
-        let plan = symbolic_scan_mirror_query_plan(conn);
+        let plan = symbolic_scan_query_plan(conn);
         assert!(
-            plan.iter().any(|line| line.contains("SCAN memories")),
-            "expected a full table scan (unanchored LIKE across non-indexed \
-             columns cannot use an index), got: {plan:?}"
+            plan.iter().any(|line| {
+                line.contains("VIRTUAL TABLE INDEX")
+                    && (line.contains('M') || line.contains("memories_symbolic_fts"))
+            }) || plan
+                .iter()
+                .any(|line| line.contains("VIRTUAL TABLE INDEX 0:M")),
+            "expected trigram MATCH virtual-table probe (INDEX …M…), got: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line == "SCAN memories"),
+            "full memories table scan must not remain the primary access \
+             strategy after #1331, got: {plan:?}"
+        );
+    }
+
+    /// Frozen kill-test thresholds from the PR #1335 release
+    /// `synthetic_production_like` / warmed cross-section. Cheap: does not
+    /// re-run the 59-minute grid; asserts the committed fixture still
+    /// satisfies the #1331 gates (and documents kb_paragraphs@63k unfinished).
+    #[test]
+    fn kill_test_fixture_satisfies_p50_gates() {
+        let raw = include_str!("../testdata/symbolic_scan_kill_test_1331.json");
+        let v: serde_json::Value = serde_json::from_str(raw).expect("fixture JSON");
+        assert_eq!(
+            v["kill_test"],
+            "rows_scaling_at_synthetic_production_like_warmed_p50"
+        );
+        let absent = v["absent_term_p50_us"]
+            .as_array()
+            .expect("absent_term_p50_us array");
+        let recent = v["recent_hit_200_p50_us"]
+            .as_array()
+            .expect("recent_hit_200_p50_us array");
+        assert_eq!(absent.len(), 3);
+        assert_eq!(recent.len(), 3);
+
+        // Pre-#1331 baselines from the #1142 evidence table (µs).
+        const BASELINE_ABSENT_63K: f64 = 42_785.0;
+        const BASELINE_RECENT_63K: f64 = 48_519.0;
+        let absent_63k = absent[2].as_u64().expect("absent 63k") as f64;
+        let recent_63k = recent[2].as_u64().expect("recent 63k") as f64;
+        assert!(
+            absent_63k <= 0.5 * BASELINE_ABSENT_63K,
+            "63k absent_term p50 must be ≤ 0.5× pre-#1331 baseline ({}); fixture has {absent_63k}",
+            0.5 * BASELINE_ABSENT_63K
+        );
+        assert!(
+            recent_63k <= BASELINE_RECENT_63K,
+            "63k recent_hit_200 p50 must be ≤ pre-#1331 baseline ({BASELINE_RECENT_63K}); \
+             fixture has {recent_63k}"
+        );
+        assert_eq!(
+            v["notes"]["kb_paragraphs_63k"], "unfinished_acceptable_for_1331_rework",
+            "CONCERN 6: document unfinished kb_paragraphs@63k without blocking"
         );
     }
 }

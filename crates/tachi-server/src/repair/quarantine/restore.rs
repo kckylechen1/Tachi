@@ -51,6 +51,11 @@ pub fn cmd_restore(
     ) {
         eprintln!("warning: failed to update FTS for restored quarantine row {id}: {e}");
     }
+    // Path is a symbolic-indexed column — refresh the trigram projection from
+    // the live memories row rather than a partial UPDATE (#1335 oracle).
+    // Propagate sync failure so the memories UPDATE cannot commit without a
+    // valid symbolic row (#1335 oracle NOT-READY).
+    memcore::db::sync_memories_symbolic_fts(&tx, id)?;
     tx.commit()?;
     if json_out {
         println!("{}", serde_json::to_string_pretty(&action)?);
@@ -288,6 +293,9 @@ fn move_one(
          FROM memories WHERE id = ?1",
         params![&id_value],
     )?;
+    // Restored inserts must land in the trigram index or symbolic recall
+    // silently misses them (#1335 oracle).
+    memcore::db::sync_memories_symbolic_fts(&dest_tx, &id_value)?;
     let n: i64 = dest_tx.query_row(
         "SELECT COUNT(*) FROM memories WHERE id = ?1",
         params![&id_value],
@@ -307,6 +315,9 @@ fn move_one(
             q.id
         );
     }
+    // Propagate symbolic delete failure so source-row DELETE cannot commit
+    // while leaving a stale trigram projection (#1335 oracle NOT-READY).
+    memcore::db::delete_memories_symbolic_fts(&src_tx, &q.id)?;
     src_tx.commit()?;
 
     Ok(())

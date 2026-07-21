@@ -950,6 +950,7 @@ fn sigil_1289_normalized_schema(
                 "SELECT name FROM sqlite_master \
                  WHERE type='table' AND name NOT LIKE 'sqlite_%' \
                    AND name NOT LIKE 'memories_fts%' \
+                   AND name NOT LIKE 'memories_symbolic_fts%' \
                  ORDER BY name",
             )
             .unwrap();

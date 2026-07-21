@@ -55,6 +55,24 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             tokenize = 'simple'
         );
 
+        -- Trigram FTS5 index for symbolic candidate retrieval (#1331).
+        -- Accelerates unanchored LIKE '%term%' across the same columns the
+        -- symbolic channel matches, without changing LIKE eligibility or the
+        -- relevance-first pre-cap ORDER BY from #1154. Stores raw memories
+        -- column bytes (including JSON keywords/entities) so LIKE semantics
+        -- match a table scan of `memories`. case_sensitive 0 mirrors SQLite's
+        -- default ASCII-case-insensitive LIKE.
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_symbolic_fts USING fts5(
+            id,
+            path,
+            summary,
+            text,
+            keywords,
+            entities,
+            topic,
+            tokenize = 'trigram case_sensitive 0'
+        );
+
         -- Memory graph edges for causal/temporal/entity relationships
         CREATE TABLE IF NOT EXISTS memory_edges (
             source_id  TEXT NOT NULL,
