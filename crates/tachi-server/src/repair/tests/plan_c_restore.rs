@@ -409,7 +409,10 @@ fn quarantine_restore_rolls_back_when_symbolic_sync_fails() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .expect("primary row must still exist after rolled-back restore");
-    assert_eq!(path, quarantine_path, "memories.path must not commit on sync failure");
+    assert_eq!(
+        path, quarantine_path,
+        "memories.path must not commit on sync failure"
+    );
     let v: serde_json::Value = serde_json::from_str(&meta).unwrap();
     assert!(
         v.get("quarantine").is_some(),
@@ -479,7 +482,10 @@ fn quarantine_purge_rolls_back_when_symbolic_delete_fails() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(n, 1, "memories row must not commit-delete when symbolic delete fails");
+    assert_eq!(
+        n, 1,
+        "memories row must not commit-delete when symbolic delete fails"
+    );
 }
 
 /// #1335 oracle: cross-DB move source deletion must roll back when symbolic

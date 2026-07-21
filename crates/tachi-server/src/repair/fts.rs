@@ -153,12 +153,13 @@ impl RepairRule for FtsRebuild {
         if let Some(symbolic) = symbolic_opt {
             if symbolic != mem {
                 let drift = (mem - symbolic).abs() as usize;
-                r.findings
-                    .push(Finding::new("symbolic_fts_drift", drift).with_detail(json!({
+                r.findings.push(
+                    Finding::new("symbolic_fts_drift", drift).with_detail(json!({
                         "memories": mem,
                         "symbolic_fts": symbolic,
                         "delta": mem - symbolic,
-                    })));
+                    })),
+                );
             }
         }
         Ok(r)
