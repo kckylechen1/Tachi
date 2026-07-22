@@ -543,13 +543,17 @@ fn seed_entry(s: &Seed) -> MemoryEntry {
     e
 }
 
-fn seed_corpus(conn: &mut Connection) {
+// `pub(super)` so the P3 Step-0 probe (`p3_probe.rs`) reuses the EXACT same
+// corpus + search options as this ratchet — the probe must measure the real
+// post-P2 ranking on the identical fixture, not a divergent copy. Test-only
+// visibility; no runtime behavior changes.
+pub(super) fn seed_corpus(conn: &mut Connection) {
     for s in SEEDS {
         insert_entry(conn, seed_entry(s));
     }
 }
 
-fn search_opts(surface: Option<Surface>) -> SearchOptions {
+pub(super) fn search_opts(surface: Option<Surface>) -> SearchOptions {
     SearchOptions {
         top_k: 40,
         candidates_per_channel: 128,
