@@ -22,7 +22,17 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         &["router"],
     );
 
-    let and_only = search_fts(&conn, "cleanup cli safe", 10, false, false, None, None).unwrap();
+    let and_only = search_fts(
+        &conn,
+        "cleanup cli safe",
+        10,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     assert!(
         and_only.contains_key("all-terms"),
         "simple_query FTS should match the row containing every query term"
@@ -48,6 +58,7 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         // (no `Instant::now` reads, no group Vec) — that is the mechanism,
         // not a measured zero-overhead claim (tachi#1097 S1).
         false,
+        None,
     )
     .unwrap()
     .0;
@@ -71,6 +82,7 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         None,
         &tuned_config,
         false,
+        None,
     )
     .unwrap()
     .0;
@@ -112,7 +124,17 @@ fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
         &["diagnostic"],
     );
 
-    let and_only = search_fts(&conn, "中文查询 missing", 10, false, false, None, None).unwrap();
+    let and_only = search_fts(
+        &conn,
+        "中文查询 missing",
+        10,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     assert!(
         !and_only.contains_key("cjk-target"),
         "simple_query FTS requires the missing ASCII term and should zero the CJK target"
@@ -128,6 +150,7 @@ fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
         None,
         &RecallConfig::default(),
         false,
+        None,
     )
     .unwrap()
     .0;
@@ -162,7 +185,7 @@ fn fts_or_fallback_recovers_pure_han_query_with_tokenizer_units() {
     );
 
     let query = "量子风暴故障";
-    let primary = search_fts(&conn, query, 10, false, false, None, None).unwrap();
+    let primary = search_fts(&conn, query, 10, false, false, None, None, None).unwrap();
     assert!(
         primary.is_empty(),
         "the missing 故/障 units must zero the primary conjunctive FTS query"
@@ -221,7 +244,7 @@ fn fts_or_fallback_recovers_pure_han_query_with_tokenizer_units() {
         ..RecallConfig::default()
     };
     let disabled_scores = search_fts_with_expansion_config(
-        &conn, query, 10, false, false, None, None, &disabled, false,
+        &conn, query, 10, false, false, None, None, &disabled, false, None,
     )
     .unwrap()
     .0;
@@ -244,7 +267,7 @@ fn repeated_han_units_stay_on_the_primary_fts_path() {
     );
 
     let query = "哈哈";
-    let primary = search_fts(&conn, query, 10, false, false, None, None).unwrap();
+    let primary = search_fts(&conn, query, 10, false, false, None, None, None).unwrap();
     assert!(
         primary.contains_key("repeated-han-target"),
         "duplicate Han query units match the same primary FTS term"

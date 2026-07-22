@@ -6,7 +6,17 @@ fn upsert_and_fts() {
     let e = make_entry("abc", "Rust is a systems programming language");
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "systems programming", 5, false, false, None, None).unwrap();
+    let results = search_fts(
+        &conn,
+        "systems programming",
+        5,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     assert!(results.contains_key("abc"), "expected 'abc' in FTS results");
 }
 
@@ -26,7 +36,7 @@ fn search_fts_returns_row_decode_errors() {
     )
     .unwrap();
 
-    let err = search_fts(&conn, "needle", 5, false, false, None, None)
+    let err = search_fts(&conn, "needle", 5, false, false, None, None, None)
         .expect_err("row decode errors must propagate instead of being dropped");
     assert!(
         err.to_string().contains("Invalid column type")
@@ -91,7 +101,7 @@ fn jaccard_dedup_refreshes_candidate_fts() {
         .unwrap();
     assert_eq!(superseded_by.as_deref(), Some("canonical"));
 
-    let results = search_fts(&conn, "mergedtag", 5, false, false, None, None).unwrap();
+    let results = search_fts(&conn, "mergedtag", 5, false, false, None, None, None).unwrap();
     assert!(
         results.contains_key("canonical"),
         "merged keyword should be searchable through the canonical row"
@@ -119,6 +129,7 @@ fn search_fts_respects_as_of_validity_window() {
         false,
         None,
         Some("2026-01-15T00:00:00.000Z"),
+        None,
     )
     .unwrap();
     assert!(january.contains_key("temporal-old"));
@@ -132,6 +143,7 @@ fn search_fts_respects_as_of_validity_window() {
         false,
         None,
         Some("2026-03-01T00:00:00.000Z"),
+        None,
     )
     .unwrap();
     assert!(!march.contains_key("temporal-old"));
@@ -172,6 +184,7 @@ fn search_vec_respects_as_of_validity_window() {
         false,
         None,
         Some("2026-01-15T00:00:00.000Z"),
+        None,
     )
     .unwrap();
     assert!(january.contains_key("temporal-vec-old"));
@@ -185,6 +198,7 @@ fn search_vec_respects_as_of_validity_window() {
         false,
         None,
         Some("2026-03-01T00:00:00.000Z"),
+        None,
     )
     .unwrap();
     assert!(!march.contains_key("temporal-vec-old"));
@@ -210,7 +224,7 @@ fn search_vec_knn_with_k_constraint() {
     upsert(&mut conn, &e, true).unwrap();
 
     let query = vec![0.1_f32; 1024];
-    let results = search_vec(&conn, &query, 3, false, false, None, None).unwrap();
+    let results = search_vec(&conn, &query, 3, false, false, None, None, None).unwrap();
     assert!(results.contains_key("vec-1"));
 }
 
@@ -233,6 +247,7 @@ fn search_fts_respects_path_prefix() {
         false,
         Some("/project"),
         None,
+        None,
     )
     .unwrap();
     assert!(results.contains_key("proj-1"));
@@ -248,7 +263,8 @@ fn search_symbolic_candidates_treats_like_wildcards_as_literals() {
     let literal = make_entry("literal-wildcard", "literal ___ marker text");
     upsert(&mut conn, &literal, false).unwrap();
 
-    let results = search_symbolic_candidates(&conn, "___", 10, false, false, None, None).unwrap();
+    let results =
+        search_symbolic_candidates(&conn, "___", 10, false, false, None, None, None).unwrap();
     let ids = results
         .into_iter()
         .map(|entry| entry.id)
@@ -270,10 +286,10 @@ fn raw_search_channels_exclude_superseded_by_default() {
     upsert(&mut conn, &new, false).unwrap();
     supersede_memory(&conn, "old", "new").unwrap();
 
-    let results = search_fts(&conn, "TrendLock", 5, false, false, None, None).unwrap();
+    let results = search_fts(&conn, "TrendLock", 5, false, false, None, None, None).unwrap();
     assert!(results.contains_key("new"));
     assert!(!results.contains_key("old"));
 
-    let with_superseded = search_fts(&conn, "TrendLock", 5, false, true, None, None).unwrap();
+    let with_superseded = search_fts(&conn, "TrendLock", 5, false, true, None, None, None).unwrap();
     assert!(with_superseded.contains_key("old"));
 }

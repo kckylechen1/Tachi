@@ -20,6 +20,7 @@ mod ops_audit_corpus;
 mod phase_receipts;
 mod raw_vector_floor;
 mod supersession;
+mod surface;
 mod symbolic;
 
 fn setup() -> Connection {

@@ -42,6 +42,7 @@ mod read_ops;
 mod sandbox_ops;
 mod search_ops;
 mod stats_ops;
+mod surface_ops;
 mod tier;
 mod vec_archived_overfetch;
 mod write_ops;

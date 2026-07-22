@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
+use crate::namespace::{surface_sql_splice, Surface};
 use crate::types::MemoryEntry;
 
 use super::{
@@ -43,6 +44,7 @@ const VEC_OVERFETCH_MAX_ATTEMPTS: usize = 3;
 /// Returns (doc_id -> cosine_distance) for the top `top_k` results.
 /// Cosine *distance* is in [0, 2]; we convert to similarity [0, 1]:
 ///   similarity = 1 - distance/2
+#[allow(clippy::too_many_arguments)]
 pub fn search_vec(
     conn: &Connection,
     query_vec: &[f32],
@@ -51,6 +53,7 @@ pub fn search_vec(
     include_superseded: bool,
     path_prefix: Option<&str>,
     as_of: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
@@ -65,6 +68,7 @@ pub fn search_vec(
         include_superseded,
         path_like.as_deref(),
         as_of_utc.as_deref(),
+        surface,
     )?;
 
     // Widen unconditionally whenever the current pass came up short --
@@ -90,6 +94,7 @@ pub fn search_vec(
                 include_superseded,
                 path_like.as_deref(),
                 as_of_utc.as_deref(),
+                surface,
             )?;
         }
     }
@@ -114,6 +119,7 @@ pub fn search_vec(
 /// applied in SQL exactly as before tachi#1245 -- only `k` varies across
 /// widen attempts. Returns rows ordered ascending by distance (vec0 +
 /// `ORDER BY v.distance` guarantee this).
+#[allow(clippy::too_many_arguments)]
 fn run_search_vec_query(
     conn: &Connection,
     blob: &[u8],
@@ -122,8 +128,14 @@ fn run_search_vec_query(
     include_superseded: bool,
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<Vec<(String, f64)>, MemoryError> {
-    let mut stmt = conn.prepare(
+    // `surface` gates an extra `AND (...)` predicate mirroring [`Surface`]'s
+    // Rust classifier (`surface_sql_splice`). `None` produces an empty
+    // string -- the query text is byte-identical to before this parameter
+    // existed, preserving the fused-pool behavior exactly.
+    let surface_clause = surface_sql_splice(surface, true);
+    let mut stmt = conn.prepare(&format!(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
            JOIN memories m ON m.id = v.id
@@ -133,9 +145,9 @@ fn run_search_vec_query(
                AND (?4 = 1 OR m.superseded_by IS NULL)
                AND (?5 IS NULL OR m.path LIKE ?5)
                AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
-               AND m.id NOT LIKE 'anchor:%'
+               AND m.id NOT LIKE 'anchor:%'{surface_clause}
              ORDER BY v.distance"#,
-    )?;
+    ))?;
 
     let rows = stmt.query_map(
         params![
@@ -162,6 +174,7 @@ fn run_search_vec_query(
 
 /// Full-text search using the FTS5 virtual table.
 /// Returns (doc_id -> normalised BM25 score [0, 1]).
+#[allow(clippy::too_many_arguments)]
 pub fn search_fts(
     conn: &Connection,
     query: &str,
@@ -170,6 +183,7 @@ pub fn search_fts(
     include_superseded: bool,
     path_prefix: Option<&str>,
     as_of: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let safe_query = simple_query_input(query);
 
@@ -186,9 +200,11 @@ pub fn search_fts(
         include_superseded,
         path_prefix,
         as_of,
+        surface,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_fts_raw_match(
     conn: &Connection,
     match_query: &str,
@@ -197,6 +213,7 @@ pub(crate) fn search_fts_raw_match(
     include_superseded: bool,
     path_prefix: Option<&str>,
     as_of: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     if match_query.trim().is_empty() {
         return Ok(HashMap::new());
@@ -210,6 +227,7 @@ pub(crate) fn search_fts_raw_match(
         include_superseded,
         path_prefix,
         as_of,
+        surface,
     )
 }
 
@@ -223,6 +241,7 @@ fn search_fts_match(
     include_superseded: bool,
     path_prefix: Option<&str>,
     as_of: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
@@ -231,6 +250,11 @@ fn search_fts_match(
     } else {
         "?1"
     };
+    // `surface` gates an extra `AND (...)` predicate mirroring [`Surface`]'s
+    // Rust classifier (`surface_sql_splice`). `None` produces an empty
+    // string -- the query text is byte-identical to before this parameter
+    // existed, preserving the fused-pool behavior exactly.
+    let surface_clause = surface_sql_splice(surface, true);
     // The ordinary path uses simple_query() for automatic CJK segmentation.
     // Raw match mode is only for internally constructed, sanitized FTS expressions.
     let mut stmt = conn.prepare(&format!(
@@ -242,7 +266,7 @@ fn search_fts_match(
               AND (?4 = 1 OR m.superseded_by IS NULL)
               AND (?5 IS NULL OR m.path LIKE ?5)
               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
-              AND m.id NOT LIKE 'anchor:%'
+              AND m.id NOT LIKE 'anchor:%'{surface_clause}
              ORDER BY bm25(memories_fts)
             LIMIT ?3"#,
     ))?;
@@ -295,6 +319,7 @@ fn search_fts_match(
 /// unbounded result set in Rust. Replacing this with `ORDER BY timestamp DESC
 /// LIMIT` makes an older strong symbolic-only result structurally unable to
 /// compete at all (tachi#1144).
+#[allow(clippy::too_many_arguments)]
 pub fn search_symbolic_candidates(
     conn: &Connection,
     query: &str,
@@ -303,6 +328,7 @@ pub fn search_symbolic_candidates(
     include_superseded: bool,
     path_prefix: Option<&str>,
     as_of: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     search_symbolic_candidates_with_relevance(
         conn,
@@ -313,6 +339,7 @@ pub fn search_symbolic_candidates(
         include_superseded,
         path_prefix,
         as_of,
+        surface,
     )
 }
 
@@ -329,6 +356,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     include_superseded: bool,
     path_prefix: Option<&str>,
     as_of: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let terms = symbolic_terms(query);
 
@@ -362,6 +390,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
             include_superseded,
             path_like.as_deref(),
             as_of_utc.as_deref(),
+            surface,
         );
     }
 
@@ -374,6 +403,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         include_superseded,
         path_like.as_deref(),
         as_of_utc.as_deref(),
+        surface,
     )
 }
 
@@ -391,6 +421,10 @@ fn memories_symbolic_fts_available(conn: &Connection) -> bool {
 /// Shared with the receipts harness EXPLAIN assertion so the plan test cannot
 /// drift from a handwritten mirror. `{columns}` is substituted with either the
 /// full [`MEMORY_SELECT_COLUMNS_QUALIFIED`] list (runtime) or `m.id` (plan).
+/// `{surface_clause}` is substituted via [`surface_sql_splice`] -- empty
+/// string when `surface` is `None`, so callers that pass `None` (including
+/// the receipts EXPLAIN plan test) get the byte-identical pre-surface query
+/// shape.
 pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
          FROM memories_symbolic_fts
          JOIN memories m ON m.id = memories_symbolic_fts.id
@@ -399,13 +433,16 @@ pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
            AND (?3 IS NULL OR m.path LIKE ?3)
            AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
            AND m.id NOT LIKE 'anchor:%'
-           AND memories_symbolic_fts MATCH ?5
+           AND memories_symbolic_fts MATCH ?5{surface_clause}
          ORDER BY tachi_symbolic_score(?6, m.id, m.path, m.topic, m.summary, m.text, m.keywords, m.entities) DESC, julianday(m.timestamp) DESC, m.id ASC
          LIMIT ?7";
 
-/// Build the production trigram SELECT statement for the given column list.
-pub fn symbolic_trigram_select_sql(columns: &str) -> String {
-    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE.replace("{columns}", columns)
+/// Build the production trigram SELECT statement for the given column list
+/// and surface scope. `surface = None` reproduces the pre-surface query text.
+pub fn symbolic_trigram_select_sql(columns: &str, surface: Option<Surface>) -> String {
+    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE
+        .replace("{columns}", columns)
+        .replace("{surface_clause}", &surface_sql_splice(surface, true))
 }
 
 /// Trigram-accelerated symbolic candidate retrieval (#1331).
@@ -427,9 +464,10 @@ fn search_symbolic_via_trigram(
     include_superseded: bool,
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let match_query = symbolic_trigram_match_query(terms);
-    let sql = symbolic_trigram_select_sql(MEMORY_SELECT_COLUMNS_QUALIFIED);
+    let sql = symbolic_trigram_select_sql(MEMORY_SELECT_COLUMNS_QUALIFIED, surface);
 
     let params: Vec<Value> = vec![
         (include_archived as i64).into(),
@@ -473,14 +511,18 @@ fn search_symbolic_via_table_scan(
     include_superseded: bool,
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
+    surface: Option<Surface>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
+    // Unqualified (`qualified = false`): this path SELECTs from bare
+    // `memories`, no `m.` join alias.
+    let surface_clause = surface_sql_splice(surface, false);
     let mut sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS} FROM memories
          WHERE (?1 = 1 OR archived = 0)
            AND (?2 = 1 OR superseded_by IS NULL)
            AND (?3 IS NULL OR path LIKE ?3)
            AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))
-           AND id NOT LIKE 'anchor:%'"
+           AND id NOT LIKE 'anchor:%'{surface_clause}"
     );
 
     let mut params: Vec<Value> = vec![
