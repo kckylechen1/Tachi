@@ -682,6 +682,20 @@ mod tests {
     /// cargo test -p tachi-server --lib concurrency_receipt
     /// ```
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    // `global_test_lock()` is a process-wide `std::sync::Mutex<()>` (see
+    // `utils::locks`) that serializes every test mutating global env. This test
+    // sets a temp `TACHI_HOME` (plus clears `SIGIL_HOME`/`TACHI_APP_HOME`) and
+    // must keep that env window stable across `.await`, because
+    // `MemoryServer::new`, `spawn_receipt_http_daemon`, and the serial/burst runs
+    // all re-resolve `path_utils::tachi_home()` from that env while awaiting. The
+    // guard is acquired exactly once at the top of the test and is the ONLY
+    // `global_test_lock()` acquisition on this async path — neither
+    // `ensure_tls_provider` nor `spawn_receipt_http_daemon` (nor the axum task it
+    // spawns) re-acquires it — so holding it across await cannot self-deadlock.
+    // Concurrent tests merely block on `.lock()` until this test's env window
+    // closes, which is exactly the intended serialization; the lint fires on the
+    // held-across-await guard but the pattern is deliberate and safe here.
+    #[allow(clippy::await_holding_lock)]
     async fn transport_concurrency_receipt_serial_and_burst() {
         crate::ensure_tls_provider();
 
