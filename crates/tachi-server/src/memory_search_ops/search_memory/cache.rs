@@ -7,7 +7,14 @@ pub(super) fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
 
 /// Master gate for the recall-cache read short-circuit + write-through.
 /// Off by default; enabled per-deployment via `~/.tachi/config.env`.
-pub(super) fn recall_cache_read_enabled() -> bool {
+///
+/// `pub(crate)` (not `pub(super)`): tachi#1435 slice 3 / #2059's save-side
+/// cache invalidation lives in the sibling `save_memory` module and must gate
+/// on the exact same flag — a save-time invalidation that ran unconditionally
+/// (or independently re-read the env var) would drift from this read/write
+/// gate by construction. Re-exported at `memory_search_ops` via
+/// `search_memory::recall_cache_read_enabled`.
+pub(crate) fn recall_cache_read_enabled() -> bool {
     parse_env_bool("TACHI_ENABLE_RECALL_CACHE").unwrap_or(false)
 }
 

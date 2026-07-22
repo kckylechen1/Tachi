@@ -50,4 +50,12 @@ impl MemoryStore {
     pub fn recall_cache_purge_stale(&self, cutoff_rfc3339: &str) -> Result<usize, MemoryError> {
         db::recall_cache_purge_stale(&self.conn, cutoff_rfc3339)
     }
+
+    /// Write-side cache bust: clear every recall-cache row unconditionally
+    /// (tachi#1435 slice 3 / #2059). Callers invoke this after a save commits
+    /// so the next search never replays a pre-save cached answer. See
+    /// `db::recall_cache_invalidate_all`.
+    pub fn recall_cache_invalidate_all(&self) -> Result<usize, MemoryError> {
+        db::recall_cache_invalidate_all(&self.conn)
+    }
 }

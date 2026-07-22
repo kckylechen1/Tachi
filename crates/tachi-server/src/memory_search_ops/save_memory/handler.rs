@@ -256,6 +256,37 @@ pub(crate) async fn handle_save_memory(
         upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
     }
 
+    // #1435 slice 3 / #2059: write-side recall-cache bust. The recall cache
+    // lives in the global store regardless of where this entry landed (see
+    // `search_memory::handlers::handle_search_memory_with_access`'s doc: "The
+    // cache lives in the global DB so cross-DB merged results have a single
+    // home") — a just-committed save must never stay masked behind a stale
+    // cached search result. Both dedupe short-circuits above (`find_exact_path_text_duplicate`
+    // and `IdlessUpsertResult::Duplicate`) already returned before this point,
+    // so an exact-duplicate no-write correctly never invalidates. Gated on the
+    // same `recall_cache_read_enabled` flag as the cache's own read/write path
+    // so a deployment with the cache off never pays for a DELETE against a
+    // table it never populates. Failure degrades loudly instead of pretending
+    // the cache is clean or rolling back the save: `recall_fence` in the
+    // receipt goes "unconfirmed" and the error is logged.
+    let recall_fence: &'static str = if crate::memory_search_ops::recall_cache_read_enabled() {
+        match server.with_global_store(|store| {
+            store
+                .recall_cache_invalidate_all()
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(_) => "cleared",
+            Err(err) => {
+                tracing::warn!(
+                    "[save_memory] recall_cache invalidation failed after save id={id}: {err}"
+                );
+                "unconfirmed"
+            }
+        }
+    } else {
+        "disabled"
+    };
+
     let continuity_event = if emit_continuity {
         Some(crate::continuity_ops::emit_memory_saved_event(
             server,
@@ -284,6 +315,7 @@ pub(crate) async fn handle_save_memory(
         &entry,
         &timestamp,
         target_db,
+        named_project.as_deref(),
         enrichment_enqueued,
         needs_embedding,
         needs_summary,
@@ -292,6 +324,7 @@ pub(crate) async fn handle_save_memory(
         secret_redactions,
         &requested_scope,
         scope_warning,
+        recall_fence,
     );
     if let Some(event) = continuity_event {
         response.insert("continuity_event".into(), event);

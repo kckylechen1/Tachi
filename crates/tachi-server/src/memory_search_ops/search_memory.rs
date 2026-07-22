@@ -9,6 +9,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use cache::recall_cache_read_enabled;
 pub(crate) use exact::has_high_confidence_exact_token_top;
 pub(crate) use handlers::{handle_search_memory, handle_search_memory_with_access};
 pub(crate) use rows::{
