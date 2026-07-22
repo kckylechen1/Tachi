@@ -2,6 +2,86 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn exact_dedupe_cli_is_nested_under_repair_dedupe() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "dedupe",
+        "exact",
+        "--db",
+        "project:test",
+        "--output",
+        "plan.json",
+        "--limit",
+        "1",
+        "--path-prefix",
+        "/wiki",
+    ])
+    .expect("nested exact-dedupe plan should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Dedupe {
+                action: DedupeAction::Exact { db, output, limit: Some(1), path_prefix: Some(prefix) }
+            }), ..
+        }) if db == "project:test" && output == std::path::Path::new("plan.json") && prefix == "/wiki"
+    ));
+    assert!(
+        Cli::try_parse_from(["tachi", "repair", "exact", "--db", "x", "--output", "p"]).is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["tachi", "repair", "apply", "--db", "x", "--plan", "p", "--yes"])
+            .is_err()
+    );
+
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "dedupe",
+        "apply",
+        "--db",
+        "project:test",
+        "--plan",
+        "plan.json",
+        "--yes",
+        "--receipt-out",
+        "receipt.json",
+    ])
+    .expect("nested exact-dedupe apply should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Dedupe {
+                action: DedupeAction::Apply { db, plan, yes: true, receipt_out }
+            }), ..
+        }) if db == "project:test"
+            && plan == std::path::Path::new("plan.json")
+            && receipt_out == std::path::Path::new("receipt.json")
+    ));
+
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "dedupe",
+        "restore",
+        "--db",
+        "project:test",
+        "--receipt",
+        "receipt.json",
+        "--yes",
+    ])
+    .expect("nested exact-dedupe restore should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Dedupe {
+                action: DedupeAction::Restore { db, receipt, yes: true }
+            }), ..
+        }) if db == "project:test" && receipt == std::path::Path::new("receipt.json")
+    ));
+}
+
+#[test]
 fn capture_archive_commands_parse_and_mutations_require_confirm() {
     let plan = Cli::try_parse_from([
         "tachi",
