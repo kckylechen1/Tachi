@@ -12,15 +12,22 @@
 //!    merge lives in the tachi-server multi-DB suite
 //!    (`ops_audit_discrimination`); this case freezes the rank-dilution shape
 //!    inside pure hybrid ranking.
-//! 2. **Adjacent wiki steal**: a labeled research/wiki note not at rank 1 when
-//!    a related architecture wiki has higher agreement noise.
+//! 2. **Adjacent wiki steal → surface split**: a labeled *research note*
+//!    (owner-ratified `Surface::Memory`) competing with denser architecture
+//!    wikis (`Surface::Docs`). Phase 2 dissolves the steal by scoping the
+//!    query to Memory — the Docs wikis are excluded, so the note surfaces
+//!    top-3 on relevance rather than needing a research-path magic multiplier
+//!    (retired). Rank-1 within Memory awaits the later provenance-band.
 //! 3. **Governance miss@10**: task framing / governance decision missing from
 //!    top-10 when component-registry stubs and old roadmap dominate.
 //!
-//! # Assertion layers (post same-store precision fix)
-//! - **Ratchet / product layers** (plain `#[test]`): rank-1 for decision +
-//!   research; hit@5 for governance. Pre-fix red baseline was ranks 6 / 7 /
-//!   miss@10 — do not re-introduce those shapes.
+//! # Assertion layers (post same-store precision fix + Phase 2 surface split)
+//! - **Ratchet / product layers** (plain `#[test]`): rank-1 for the decision
+//!   (fused pool); top-3 for the research note within `Surface::Memory`
+//!   (above the registry-stub noise — not rank-1, because the un-capped
+//!   DECISION_BOOST still outranks a labeled research note; that lift is the
+//!   later provenance-band's job); hit@5 for governance. Pre-fix red baseline
+//!   was ranks 6 / 7 / miss@10 — do not re-introduce those shapes.
 //! - **Report** (`#[ignore]` diagnostic): prints ranks for floor refresh.
 //!
 //! # Determinism
@@ -29,6 +36,7 @@
 //! (tachi#718) keeps id order byte-stable.
 
 use super::*;
+use crate::namespace::Surface;
 
 fn ts_days_ago(days_ago: i64) -> String {
     let base = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00").unwrap();
@@ -106,14 +114,21 @@ const SEEDS: &[Seed] = &[
         days_ago: 40,
         tier: "consolidated",
     },
-    // ---- Case 2: adjacent wiki steals rank from labeled research note ----
-    // Research note is the *labeled* target (Hindsight study). Architecture
-    // wikis share the evaluation-protocol vocabulary plus cross-link the
-    // Hindsight name, so agreement noise steals rank 1 on current fusion.
+    // ---- Case 2: research note vs. adjacent architecture wikis ----
+    // The labeled target is a *research note* — owner-ratified as
+    // `Surface::Memory` (not a wiki entry, not `guide`-category). The three
+    // architecture wikis below are genuine reference docs (`Surface::Docs`).
+    // Phase 2 dissolves the old "adjacent wiki steal": scoping the query to
+    // `Surface::Memory` excludes the Docs wikis entirely, so the research note
+    // surfaces near the top WITHIN Memory — no research-path magic multiplier.
+    // Its category is `research` and path is `/notes/...`, so `surface_of`
+    // classifies it Memory (not `is_wiki_entry`, category != `guide`). The
+    // Case-3 registry-stub rows (also `/notes/**`, Memory) supply the
+    // discrimination noise this case must out-rank.
     Seed {
         id: "ops-wiki-research-hindsight",
-        path: "/wiki/research/hindsight-eval",
-        category: "wiki",
+        path: "/notes/research/hindsight-eval",
+        category: "research",
         text: "Hindsight study findings: a short research note on how agents mis-rank recent decisions when older architecture pages agree with each other",
         keywords: &["hindsight", "study", "findings"],
         entities: &["Hindsight"],
@@ -460,7 +475,10 @@ const SEEDS: &[Seed] = &[
 enum DefectClass {
     /// Recent project decision buried under older roadmap/review noise.
     RankDilution,
-    /// Labeled research wiki not at rank 1 vs adjacent architecture wiki.
+    /// Labeled research note (Memory surface) must land top-3 in its surface,
+    /// above the registry-stub noise; the adjacent architecture wikis are Docs
+    /// and excluded by surface scoping. (Not rank-1: DECISION_BOOST outranks
+    /// it within Memory — restoring rank-1 is the later provenance-band.)
     AdjacentWikiSteal,
     /// Governance framing missing from top-10 under registry stubs.
     GovernanceMiss,
@@ -471,6 +489,12 @@ struct CaseSpec {
     name: &'static str,
     query: &'static str,
     expected: &'static str,
+    /// Retrieval surface to scope the query to. `None` = today's fused pool
+    /// (unchanged behavior). The `hindsight-research-wiki` case runs under
+    /// `Some(Surface::Memory)` so the Docs architecture wikis are excluded and
+    /// the research note wins on relevance within Memory (Phase 2 dissolution
+    /// of the research-path boost).
+    surface: Option<Surface>,
 }
 
 const CASES: &[CaseSpec] = &[
@@ -479,15 +503,20 @@ const CASES: &[CaseSpec] = &[
         name: "open-issue-priority-decision",
         query: "what is the current open issue priority project decision for this sprint",
         expected: "ops-project-decision-priority",
+        surface: None,
     },
     CaseSpec {
         class: DefectClass::AdjacentWikiSteal,
         name: "hindsight-research-wiki",
-        // Task-shaped research query: architecture pages share the protocol
-        // vocabulary and cross-link Hindsight, stealing rank 1 from the short
-        // labeled research note (ops-audit adjacent-wiki shape).
+        // Research-shaped query scoped to Memory: the Docs architecture wikis
+        // that used to steal rank 1 are excluded by the surface filter, so the
+        // labeled research note surfaces near the top within Memory (top-3,
+        // above the registry-stub noise) — no research-path boost needed. It
+        // is NOT rank-1: the un-capped DECISION_BOOST lifts a decision seed
+        // above it (see the ratchet arm for why that is a later piece).
         query: "hindsight research evaluation protocol for memory recall quality",
         expected: "ops-wiki-research-hindsight",
+        surface: Some(Surface::Memory),
     },
     CaseSpec {
         class: DefectClass::GovernanceMiss,
@@ -497,6 +526,7 @@ const CASES: &[CaseSpec] = &[
         query:
             "governance framing for component registry cutover when stubs and old roadmap dominate",
         expected: "ops-gov-framing-cutover",
+        surface: None,
     },
 ];
 
@@ -519,28 +549,34 @@ fn seed_corpus(conn: &mut Connection) {
     }
 }
 
-fn search_opts() -> SearchOptions {
+fn search_opts(surface: Option<Surface>) -> SearchOptions {
     SearchOptions {
         top_k: 40,
         candidates_per_channel: 128,
         record_access: false,
         mmr_threshold: None,
+        surface,
         ..Default::default()
     }
 }
 
 /// 1-based rank of `expected` under production order (no test-side re-sort),
 /// or `None` if absent from the returned pool.
-fn rank_of(conn: &Connection, query: &str, expected: &str) -> Option<usize> {
-    let results = hybrid_search(conn, query, &search_opts()).unwrap();
+fn rank_of(
+    conn: &Connection,
+    query: &str,
+    expected: &str,
+    surface: Option<Surface>,
+) -> Option<usize> {
+    let results = hybrid_search(conn, query, &search_opts(surface)).unwrap();
     results
         .iter()
         .position(|r| r.entry.id == expected)
         .map(|i| i + 1)
 }
 
-fn returned_ids(conn: &Connection, query: &str) -> Vec<String> {
-    hybrid_search(conn, query, &search_opts())
+fn returned_ids(conn: &Connection, query: &str, surface: Option<Surface>) -> Vec<String> {
+    hybrid_search(conn, query, &search_opts(surface))
         .unwrap()
         .into_iter()
         .map(|r| r.entry.id)
@@ -548,25 +584,33 @@ fn returned_ids(conn: &Connection, query: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Floors after same-store precision (#708 Phase D + decision/research boosts).
-// Pre-fix red baseline (report on pre-#708 branch): ranks 6 / 7 / miss@10.
-// Post-fix floors ratchet upward — never re-introduce the buried shapes.
+// Floors after same-store precision (#708 Phase D decision boost) and the
+// Phase 2 surface split. Pre-fix red baseline (report on pre-#708 branch):
+// ranks 6 / 7 / miss@10. The research case now ratchets TOP-3 WITHIN
+// `Surface::Memory` (above the registry-stub noise; the research-path boost
+// was retired) — not rank-1, because the un-capped DECISION_BOOST (out of P2
+// scope) still lifts a decision seed above a labeled research note; that
+// rank-1 lift is the later provenance-band's job. The decision and governance
+// cases stay on the fused pool (`surface: None`). Floors ratchet upward per
+// their case surface — never re-introduce the buried shapes.
 // ---------------------------------------------------------------------------
 
-/// RATCHET LAYER — green after the same-store precision fix. Locks product
-/// ranks so regressions re-burying decisions/research turn CI red.
+/// RATCHET LAYER — green after the same-store precision fix + surface split.
+/// Locks product ranks so regressions re-burying decisions/research turn CI
+/// red. Each case is scored under its own `surface` scope (see each arm for
+/// the exact criterion — rank-1 for dilution, top-3 for the research note).
 #[test]
 fn ops_audit_corpus_ratchet_floors() {
     let mut conn = setup();
     seed_corpus(&mut conn);
 
     for case in CASES {
-        let rank = rank_of(&conn, case.query, case.expected);
-        let ids = returned_ids(&conn, case.query);
+        let rank = rank_of(&conn, case.query, case.expected, case.surface);
+        let ids = returned_ids(&conn, case.query, case.surface);
         let top10: Vec<&str> = ids.iter().take(10).map(String::as_str).collect();
 
         match case.class {
-            DefectClass::RankDilution | DefectClass::AdjacentWikiSteal => {
+            DefectClass::RankDilution => {
                 assert_eq!(
                     rank,
                     Some(1),
@@ -574,6 +618,46 @@ fn ops_audit_corpus_ratchet_floors() {
                     case.name,
                     case.expected
                 );
+            }
+            DefectClass::AdjacentWikiSteal => {
+                // Owner-ratified criterion (b): the labeled research note must
+                // land in the TOP-3 of its Memory surface AND strictly above
+                // every registry-stub noise row — NOT rank-1. Within Memory the
+                // un-capped DECISION_BOOST (1.55x, out of P2 scope) lifts
+                // `ops-project-decision-priority` above the research note, so
+                // rank-1 is unreachable here; restoring a labeled research note
+                // to rank-1 is the provenance-band's job (a later piece). This
+                // arm deliberately targets top-3 and does not hide that
+                // looseness. The current fixture is observed to place the note
+                // at rank 2 (behind only the DECISION_BOOST'd decision seed),
+                // but rank 2 is NOT asserted — (b) is top-3, and pinning an
+                // exact rank would re-introduce the whack-a-mole this piece
+                // dissolves.
+                assert!(
+                    matches!(rank, Some(r) if r <= 3),
+                    "case `{}`: expected `{}` in top-3 within Surface::Memory \
+                     (rank-1 needs the later provenance-band — DECISION_BOOST \
+                     outranks the research note), got rank={rank:?}; top10={top10:?}",
+                    case.name,
+                    case.expected
+                );
+                // The `ops-registry-stub-*` rows are `/notes/**` (Memory) and
+                // ARE retrieved into this query's pool (confirmed at runtime —
+                // they appeared below the note in the observed top-N), so this
+                // loop is a live "above every stub" check, not vacuous.
+                let expected_pos = ids.iter().position(|id| id == case.expected);
+                for (i, id) in ids.iter().enumerate() {
+                    if id.starts_with("ops-registry-stub-") {
+                        assert!(
+                            expected_pos.is_some_and(|p| p < i),
+                            "case `{}`: `{}` (pos {expected_pos:?}) must rank above \
+                             registry-stub noise row `{id}` (pos {i}) within Memory; \
+                             top10={top10:?}",
+                            case.name,
+                            case.expected
+                        );
+                    }
+                }
             }
             DefectClass::GovernanceMiss => {
                 assert!(
@@ -587,6 +671,37 @@ fn ops_audit_corpus_ratchet_floors() {
     }
 }
 
+/// Companion to the ratchet's `hindsight-research-wiki` case: the SAME query
+/// scoped to `Surface::Docs` returns an architecture wiki at rank 1 and drops
+/// the research note entirely. Documents that the Phase 2 split sends the
+/// wikis to their own surface — the note and the wikis no longer compete in
+/// one pool, which is what retired the research-path boost.
+#[test]
+fn hindsight_query_under_docs_surface_tops_an_architecture_wiki() {
+    let mut conn = setup();
+    seed_corpus(&mut conn);
+
+    let query = "hindsight research evaluation protocol for memory recall quality";
+    let ids = returned_ids(&conn, query, Some(Surface::Docs));
+    let top = ids.first().map(String::as_str);
+
+    assert!(
+        matches!(
+            top,
+            Some(
+                "ops-wiki-arch-recall-quality"
+                    | "ops-wiki-arch-hybrid"
+                    | "ops-wiki-arch-eval-harness"
+            )
+        ),
+        "expected an architecture wiki at rank 1 under Surface::Docs, got {top:?}; ids={ids:?}"
+    );
+    assert!(
+        !ids.contains(&"ops-wiki-research-hindsight".to_string()),
+        "research note is Surface::Memory and must NOT appear under Docs; got {ids:?}"
+    );
+}
+
 /// Determinism lock — identical query → identical id order across reruns.
 #[test]
 fn ops_audit_corpus_recall_order_is_deterministic() {
@@ -595,9 +710,9 @@ fn ops_audit_corpus_recall_order_is_deterministic() {
 
     const N: usize = 8;
     for case in CASES {
-        let baseline = returned_ids(&conn, case.query);
+        let baseline = returned_ids(&conn, case.query, case.surface);
         for run in 1..N {
-            let ids = returned_ids(&conn, case.query);
+            let ids = returned_ids(&conn, case.query, case.surface);
             assert_eq!(
                 ids, baseline,
                 "case `{}` nondeterministic on run {run}/{N}",
@@ -616,8 +731,8 @@ fn ops_audit_corpus_report() {
 
     println!("ops_audit_corpus report (tachi#897)");
     for case in CASES {
-        let rank = rank_of(&conn, case.query, case.expected);
-        let ids = returned_ids(&conn, case.query);
+        let rank = rank_of(&conn, case.query, case.expected, case.surface);
+        let ids = returned_ids(&conn, case.query, case.surface);
         let top5: Vec<&str> = ids.iter().take(5).map(String::as_str).collect();
         println!(
             "  [{:?}] {} expected={} rank={:?} top5={:?}",

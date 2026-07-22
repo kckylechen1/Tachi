@@ -150,7 +150,7 @@ pub(super) fn rank_candidate_entries(
     apply_access_feedback(&entries_ref, &mut scores);
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
-    apply_decision_and_research_boosts(query, &entries_ref, &mut scores);
+    apply_decision_boost(&entries_ref, &mut scores);
     apply_lexical_overlap_boost(
         query,
         opts.path_prefix.as_deref(),
@@ -288,15 +288,17 @@ fn apply_quality_boosts(
     }
 }
 
-/// Same-store precision helpers for ops-audit / #708 Phase D follow-ons.
+/// Same-store precision helper for ops-audit / #708 Phase D follow-ons:
+/// high-importance **decisions** must surface over keyword-flooded wiki/stubs.
 ///
-/// - High-importance **decisions** must surface over keyword-flooded wiki/stubs.
-/// - When the **query** looks research-shaped, `/wiki/**/research/**` notes
-///   get a path boost so denser architecture wikis do not always steal rank 1.
+/// (The former research-path boost that lifted `/wiki/**/research/**` notes
+/// over denser architecture wikis was retired in Phase 2 — research notes are
+/// a distinct retrieval surface, `Surface::Memory`, so the ops-audit
+/// adjacent-wiki steal is dissolved by surface scoping, not a magic
+/// multiplier. See `ops_audit_corpus.rs` `hindsight-research-wiki`.)
 ///
-/// Provisional multipliers — calibrate only via ops_audit + golden_corpus.
-fn apply_decision_and_research_boosts(
-    query: &str,
+/// Provisional multiplier — calibrate only via ops_audit + golden_corpus.
+fn apply_decision_boost(
     entries_ref: &HashMap<String, &MemoryEntry>,
     scores: &mut HashMap<String, HybridScore>,
 ) {
@@ -304,20 +306,6 @@ fn apply_decision_and_research_boosts(
     const DECISION_IMPORTANCE_FLOOR: f64 = 0.85;
     /// provisional decision boost (tachi#708/#896 same-store precision).
     const DECISION_BOOST: f64 = 1.55;
-    /// provisional research-path boost under /wiki/**/research/**
-    /// (calibrated so labeled research notes beat denser architecture wikis
-    /// on the ops-audit adjacent-wiki case).
-    ///
-    /// tachi#1344: 2.85 left `hindsight-research-wiki` at rank2 (expected
-    /// final 0.03683 vs. competitor 0.03733). Rank-attribution harness
-    /// (`/Users/kckylechen/.claude/jobs/94957fc1/tmp/attrib-data.jsonl`)
-    /// showed 3.00 flips it to rank1 (expected final 0.03877 > competitor
-    /// 0.03733) with zero golden-corpus coupling — golden has no
-    /// /wiki/research paths, and golden_corpus_meets_spec_targets /
-    /// golden_corpus_recall_order_is_deterministic stay green at 3.00.
-    const RESEARCH_PATH_BOOST: f64 = 3.00;
-
-    let research_query = query_looks_research_shaped(query);
 
     for (id, entry) in entries_ref {
         let mut mult = 1.0_f64;
@@ -325,9 +313,6 @@ fn apply_decision_and_research_boosts(
             && entry.importance >= DECISION_IMPORTANCE_FLOOR
         {
             mult *= DECISION_BOOST;
-        }
-        if research_query && is_research_wiki_path(&entry.path) {
-            mult *= RESEARCH_PATH_BOOST;
         }
         if mult > 1.0 {
             if let Some(score) = scores.get_mut(id) {
@@ -337,28 +322,6 @@ fn apply_decision_and_research_boosts(
             }
         }
     }
-}
-
-fn query_looks_research_shaped(query: &str) -> bool {
-    let q = query.to_ascii_lowercase();
-    q.contains("research")
-        || q.contains("hindsight")
-        || q.contains("study")
-        || q.contains("paper")
-        || q.contains("arxiv")
-        || q.contains("evaluation protocol")
-}
-
-fn is_research_wiki_path(path: &str) -> bool {
-    // Allocation-free case-insensitive scan (Gemini #903): avoid
-    // `to_ascii_lowercase()` per candidate under load. Match any path segment
-    // whose name starts with `research` (covers /research, /research-*, /research_*).
-    if path.len() < 6 || !path.as_bytes()[..6].eq_ignore_ascii_case(b"/wiki/") {
-        return false;
-    }
-    path.as_bytes()
-        .windows(9)
-        .any(|w| w.eq_ignore_ascii_case(b"/research"))
 }
 
 /// Phase C (#708): lexical-overlap precision boost via soft-stem token coverage
@@ -547,9 +510,10 @@ fn apply_tier_boosts(
     scores: &mut HashMap<String, HybridScore>,
 ) {
     for (id, entry) in entries_ref {
-        // Wiki pattern/consolidated pages already carry dense keyword bags; keep
-        // tier boosts milder so labeled research notes can compete (ops-audit
-        // adjacent-wiki). Non-wiki pattern knowledge retains the stronger lift.
+        // Wiki pattern/consolidated pages already carry dense keyword bags, so
+        // keep their tier boosts milder to avoid over-lifting keyword-dense
+        // reference docs within their own result set. Non-wiki pattern
+        // knowledge (decisions, notes, research) retains the stronger lift.
         let tier_multiplier = match (entry.tier.as_str(), entry.is_wiki()) {
             ("pattern", true) => 1.05,
             ("pattern", false) => 1.15,
@@ -641,12 +605,11 @@ mod tests {
 
     // tachi#911 follow-up to #903: the golden/ops-audit corpora only guard
     // recall@10 / MRR floors and rank-1 promotion for specific known-broken
-    // cases; nothing asserted that the DECISION_BOOST (1.55x) / RESEARCH_PATH_BOOST
-    // (3.00x, tachi#1344) multipliers leave an *already-correct* rank order unchanged.
-    // These tests exercise `apply_decision_and_research_boosts` directly
-    // (unit-level, no DB) against seeded scores whose pre-boost order already
-    // matches the intended/golden order, and assert the boost does not
-    // reshuffle it.
+    // cases; nothing asserted that the DECISION_BOOST (1.55x) multiplier
+    // leaves an *already-correct* rank order unchanged. These tests exercise
+    // `apply_decision_boost` directly (unit-level, no DB) against seeded
+    // scores whose pre-boost order already matches the intended/golden order,
+    // and assert the boost does not reshuffle it.
 
     fn entry(id: &str, path: &str, category: &str, importance: f64) -> MemoryEntry {
         MemoryEntry {
@@ -711,9 +674,9 @@ mod tests {
 
     #[test]
     fn boosts_are_noop_when_no_entry_qualifies() {
-        // None of these entries are decision-category-above-floor, and the
-        // query is not research-shaped, so neither boost should apply at
-        // all: scores and the already-correct rank order must be untouched.
+        // None of these entries are decision-category-above-floor, so the
+        // decision boost must not apply at all: scores and the already-correct
+        // rank order must be untouched.
         let entries: HashMap<String, MemoryEntry> = [
             entry("a", "/notes/a", "fact", 0.9),
             entry("b", "/notes/b", "fact", 0.6),
@@ -731,11 +694,7 @@ mod tests {
         scores.insert("c".to_string(), score(1.0));
         let before = scores.clone();
 
-        apply_decision_and_research_boosts(
-            "ordinary lookup query with no special terms",
-            &entries_ref,
-            &mut scores,
-        );
+        apply_decision_boost(&entries_ref, &mut scores);
 
         assert_eq!(
             scores.get("a").unwrap().final_score,
@@ -778,11 +737,7 @@ mod tests {
         scores.insert("d2".to_string(), score(2.0));
         scores.insert("d3".to_string(), score(1.0));
 
-        apply_decision_and_research_boosts(
-            "ordinary lookup query with no special terms",
-            &entries_ref,
-            &mut scores,
-        );
+        apply_decision_boost(&entries_ref, &mut scores);
 
         // Every score moved (boost applied) ...
         assert_eq!(scores.get("d1").unwrap().final_score, 3.0 * 1.55);
@@ -822,11 +777,7 @@ mod tests {
         scores.insert("ops-roadmap-noise".to_string(), score(1.0));
         scores.insert("ops-review-noise".to_string(), score(0.9));
 
-        apply_decision_and_research_boosts(
-            "what is the current open issue priority project decision for this sprint",
-            &entries_ref,
-            &mut scores,
-        );
+        apply_decision_boost(&entries_ref, &mut scores);
 
         assert_eq!(
             ranked_ids(
@@ -842,39 +793,6 @@ mod tests {
                 "ops-roadmap-noise".to_string(),
                 "ops-review-noise".to_string(),
             ]
-        );
-    }
-
-    #[test]
-    fn research_path_boost_preserves_relative_order_among_equally_qualifying_entries() {
-        // Two wiki/research-path entries under a research-shaped query both
-        // qualify for RESEARCH_PATH_BOOST; the uniform multiplier must not
-        // invert their existing relative order.
-        let entries: HashMap<String, MemoryEntry> = [
-            entry("r1", "/wiki/research/hindsight-eval", "fact", 0.7),
-            entry("r2", "/wiki/research/protocol-notes", "fact", 0.7),
-        ]
-        .into_iter()
-        .map(|e| (e.id.clone(), e))
-        .collect();
-        let entries_ref: HashMap<String, &MemoryEntry> =
-            entries.iter().map(|(k, v)| (k.clone(), v)).collect();
-
-        let mut scores: HashMap<String, HybridScore> = HashMap::new();
-        scores.insert("r1".to_string(), score(2.0));
-        scores.insert("r2".to_string(), score(1.0));
-
-        apply_decision_and_research_boosts(
-            "hindsight research evaluation protocol for memory recall quality",
-            &entries_ref,
-            &mut scores,
-        );
-
-        assert_eq!(scores.get("r1").unwrap().final_score, 2.0 * 3.00);
-        assert_eq!(scores.get("r2").unwrap().final_score, 1.0 * 3.00);
-        assert_eq!(
-            ranked_ids(&scores, &["r1", "r2"]),
-            vec!["r1".to_string(), "r2".to_string()]
         );
     }
 
