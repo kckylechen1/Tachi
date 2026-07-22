@@ -4,11 +4,14 @@
 //! [`refuse_github_mutation`]; there is no write path on this adapter.
 
 use serde_json::Value;
+use tachi_params::{IssueSnapshotV1, PullRequestSnapshotV1};
 
 use super::parse::{
-    assemble_case_bundle, CaseCorpusBundle, ProvenanceEventKindV1, ProvenanceEventV1,
+    parse_pr_snapshot_from_gh_json, CaseCorpusBundle, ParseError, ProvenanceEventKindV1,
+    ProvenanceEventV1,
 };
 use super::pilot::CorpusCaseV1;
+use crate::refinery_ops::parse::parse_issue_snapshot_from_gh_json;
 
 /// Forbidden GitHub mutation verbs — the adapter surface must refuse each.
 pub const FORBIDDEN_GITHUB_MUTATIONS: &[&str] = &[
@@ -134,10 +137,37 @@ impl<R: GithubCorpusReader> GithubCorpusReader for MutationProbe<R> {
     }
 }
 
+/// Build baseline IssueOpened / PrOpened events from **already-parsed**
+/// snapshots. `revision_hash` is the real `*_snapshot_hash` — never a
+/// fabricated `open-{n}` label.
+pub fn baseline_events_from_snapshots(
+    issue: &IssueSnapshotV1,
+    pull_request: Option<&PullRequestSnapshotV1>,
+    captured_at: &str,
+) -> Vec<ProvenanceEventV1> {
+    let mut events = vec![ProvenanceEventV1 {
+        kind: ProvenanceEventKindV1::IssueOpened,
+        revision_hash: issue.issue_snapshot_hash.clone(),
+        target_ref: issue.issue_ref.clone(),
+        occurred_at: captured_at.to_string(),
+    }];
+    if let Some(pr) = pull_request {
+        events.push(ProvenanceEventV1 {
+            kind: ProvenanceEventKindV1::PrOpened,
+            revision_hash: pr.pr_snapshot_hash.clone(),
+            target_ref: pr.pr_ref.clone(),
+            occurred_at: captured_at.to_string(),
+        });
+    }
+    events
+}
+
 /// Fetch a case bundle using ONLY [`GithubCorpusReader`] read methods.
 ///
 /// `event_hints` is an ordered list of provenance hops already known to the
-/// caller (no network event polling invented here).
+/// caller (no network event polling invented here). When empty, baseline
+/// open events are derived from the real snapshot hashes of the fetched
+/// content — never fabricated strings labeled as hashes.
 pub fn fetch_case_bundle(
     reader: &dyn GithubCorpusReader,
     case: &CorpusCaseV1,
@@ -145,47 +175,29 @@ pub fn fetch_case_bundle(
     captured_at: &str,
 ) -> Result<CaseCorpusBundle, String> {
     let issue_json = reader.read_issue_json(&case.repo, case.issue_number)?;
-    let pr = match case.pr_number {
+    let issue = parse_issue_snapshot_from_gh_json(&case.repo, case.issue_number, &issue_json);
+    let pull_request = match case.pr_number {
         Some(n) => {
             let json = reader.read_pr_json(&case.repo, n)?;
-            Some((n, json))
+            Some(
+                parse_pr_snapshot_from_gh_json(&case.repo, n, &json)
+                    .map_err(|e: ParseError| e.to_string())?,
+            )
         }
         None => None,
     };
-    let pr_ref = pr.as_ref().map(|(n, json)| (*n, json));
-    Ok(assemble_case_bundle(
-        &case.case_id,
-        &case.repo,
-        case.issue_number,
-        &issue_json,
-        pr_ref,
-        ensure_baseline_events(case, &event_hints, captured_at),
-        captured_at,
-    ))
-}
 
-fn ensure_baseline_events(
-    case: &CorpusCaseV1,
-    hints: &[ProvenanceEventV1],
-    captured_at: &str,
-) -> Vec<ProvenanceEventV1> {
-    if !hints.is_empty() {
-        return hints.to_vec();
-    }
-    // Minimal baseline when caller supplies no hints: issue opened (+ optional PR).
-    let mut events = vec![ProvenanceEventV1 {
-        kind: ProvenanceEventKindV1::IssueOpened,
-        revision_hash: format!("open-{}", case.issue_number),
-        target_ref: format!("{}#{}", case.repo, case.issue_number),
-        occurred_at: captured_at.to_string(),
-    }];
-    if let Some(pr) = case.pr_number {
-        events.push(ProvenanceEventV1 {
-            kind: ProvenanceEventKindV1::PrOpened,
-            revision_hash: format!("pr-open-{pr}"),
-            target_ref: format!("{}#{pr}", case.repo),
-            occurred_at: captured_at.to_string(),
-        });
-    }
-    events
+    let events = if event_hints.is_empty() {
+        baseline_events_from_snapshots(&issue, pull_request.as_ref(), captured_at)
+    } else {
+        event_hints
+    };
+
+    Ok(CaseCorpusBundle {
+        case_id: case.case_id.clone(),
+        issue,
+        pull_request,
+        events,
+        captured_at: captured_at.to_string(),
+    })
 }

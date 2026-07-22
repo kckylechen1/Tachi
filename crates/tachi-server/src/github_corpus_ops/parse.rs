@@ -44,6 +44,8 @@ impl ProvenanceEventKindV1 {
 pub struct ProvenanceEventV1 {
     pub kind: ProvenanceEventKindV1,
     /// Immutable revision hash bound to this hop (issue/PR/comment/commit).
+    /// When labeled as an issue/PR snapshot hash, this MUST be the real
+    /// `compute_snapshot_hash` output — never a synthesized label.
     pub revision_hash: String,
     /// Optional target ref (issue_ref / pr_ref / comment_id / commit sha).
     pub target_ref: String,
@@ -60,13 +62,51 @@ pub struct CaseCorpusBundle {
     pub captured_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    MissingProvenanceField { field: &'static str, pr_ref: String },
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingProvenanceField { field, pr_ref } => write!(
+                f,
+                "refusing PR snapshot for {pr_ref}: required provenance field `{field}` is missing or empty"
+            ),
+        }
+    }
+}
+
+fn require_nonempty_str<'a>(
+    result: &'a Value,
+    keys: &[&str],
+    field: &'static str,
+    pr_ref: &str,
+) -> Result<&'a str, ParseError> {
+    for key in keys {
+        if let Some(s) = result.get(*key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Ok(s);
+            }
+        }
+    }
+    Err(ParseError::MissingProvenanceField {
+        field,
+        pr_ref: pr_ref.to_string(),
+    })
+}
+
 /// Parse a `gh pr view --json ...` (or fixture-equivalent) payload into
 /// [`PullRequestSnapshotV1`]. Pure: no I/O.
+///
+/// Required provenance fields (`head_sha` / `base_sha` / `updated_at`) are
+/// refused when absent or empty — never defaulted to `""` and hashed.
 pub fn parse_pr_snapshot_from_gh_json(
     repo: &str,
     number: u64,
     result: &Value,
-) -> PullRequestSnapshotV1 {
+) -> Result<PullRequestSnapshotV1, ParseError> {
     let pr_ref = format!("{repo}#{number}");
     let title = result
         .get("title")
@@ -84,24 +124,13 @@ pub fn parse_pr_snapshot_from_gh_json(
         .and_then(|v| v.as_str())
         .unwrap_or("UNKNOWN")
         .to_ascii_uppercase();
-    let head_sha = result
-        .get("headRefOid")
-        .or_else(|| result.get("head_sha"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let base_sha = result
-        .get("baseRefOid")
-        .or_else(|| result.get("base_sha"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let updated_at = result
-        .get("updatedAt")
-        .or_else(|| result.get("updated_at"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    let head_sha =
+        require_nonempty_str(result, &["headRefOid", "head_sha"], "head_sha", &pr_ref)?.to_string();
+    let base_sha =
+        require_nonempty_str(result, &["baseRefOid", "base_sha"], "base_sha", &pr_ref)?.to_string();
+    let updated_at =
+        require_nonempty_str(result, &["updatedAt", "updated_at"], "updated_at", &pr_ref)?
+            .to_string();
 
     let merged = result
         .get("merged")
@@ -119,7 +148,7 @@ pub fn parse_pr_snapshot_from_gh_json(
         })
         .map(str::to_string);
 
-    let reviews = parse_reviews(result);
+    let reviews = parse_reviews(result)?;
     let checks = parse_checks(result);
 
     let pr_body_hash = sha256_hex(body.as_bytes());
@@ -140,41 +169,52 @@ pub fn parse_pr_snapshot_from_gh_json(
         pr_body_hash,
         pr_snapshot_hash: String::new(),
     };
-    snapshot.pr_snapshot_hash = snapshot.compute_snapshot_hash().unwrap_or_default();
-    snapshot
+    snapshot.pr_snapshot_hash =
+        snapshot
+            .compute_snapshot_hash()
+            .map_err(|_| ParseError::MissingProvenanceField {
+                field: "pr_snapshot_hash",
+                pr_ref: format!("{repo}#{number}"),
+            })?;
+    Ok(snapshot)
 }
 
-fn parse_reviews(result: &Value) -> Vec<PrReviewV1> {
+fn parse_reviews(result: &Value) -> Result<Vec<PrReviewV1>, ParseError> {
     let Some(items) = result.get("reviews").and_then(|v| v.as_array()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    items
-        .iter()
-        .map(|r| {
-            let author = r
-                .get("author")
-                .and_then(|a| a.get("login").or_else(|| a.as_str().map(|_| a)))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or_else(|| r.get("author").and_then(|v| v.as_str()).map(str::to_string));
-            let state = r
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("UNKNOWN")
-                .to_string();
-            let submitted_at = r
-                .get("submittedAt")
-                .or_else(|| r.get("submitted_at"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            PrReviewV1 {
-                author,
-                state,
-                submitted_at,
-            }
-        })
-        .collect()
+    let mut out = Vec::with_capacity(items.len());
+    for r in items {
+        let author = r
+            .get("author")
+            .and_then(|a| a.get("login").or_else(|| a.as_str().map(|_| a)))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| r.get("author").and_then(|v| v.as_str()).map(str::to_string));
+        let state = r
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN")
+            .to_string();
+        // submitted_at is part of the review row's semantic contribution to
+        // the PR snapshot hash — refuse empty rather than silently hashing "".
+        let submitted_at = r
+            .get("submittedAt")
+            .or_else(|| r.get("submitted_at"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ParseError::MissingProvenanceField {
+                field: "review.submitted_at",
+                pr_ref: "reviews[]".to_string(),
+            })?
+            .to_string();
+        out.push(PrReviewV1 {
+            author,
+            state,
+            submitted_at,
+        });
+    }
+    Ok(out)
 }
 
 fn parse_checks(result: &Value) -> Vec<PrCheckV1> {
@@ -213,7 +253,7 @@ fn parse_checks(result: &Value) -> Vec<PrCheckV1> {
 }
 
 /// Assemble a [`CaseCorpusBundle`] from already-fetched issue/PR JSON plus
-/// an ordered event list. Pure: no I/O.
+/// an ordered event list. Pure: no I/O. Refuses under-fetched PR JSON.
 pub fn assemble_case_bundle(
     case_id: &str,
     repo: &str,
@@ -222,16 +262,19 @@ pub fn assemble_case_bundle(
     pr: Option<(u64, &Value)>,
     events: Vec<ProvenanceEventV1>,
     captured_at: &str,
-) -> CaseCorpusBundle {
+) -> Result<CaseCorpusBundle, ParseError> {
     let issue = parse_issue_snapshot_from_gh_json(repo, issue_number, issue_json);
-    let pull_request = pr.map(|(n, json)| parse_pr_snapshot_from_gh_json(repo, n, json));
-    CaseCorpusBundle {
+    let pull_request = match pr {
+        Some((n, json)) => Some(parse_pr_snapshot_from_gh_json(repo, n, json)?),
+        None => None,
+    };
+    Ok(CaseCorpusBundle {
         case_id: case_id.to_string(),
         issue,
         pull_request,
         events,
         captured_at: captured_at.to_string(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -261,7 +304,7 @@ mod tests {
                 "status": "COMPLETED"
             }]
         });
-        let snap = parse_pr_snapshot_from_gh_json("owner/repo", 42, &json);
+        let snap = parse_pr_snapshot_from_gh_json("owner/repo", 42, &json).expect("parse");
         assert_eq!(snap.pr_ref, "owner/repo#42");
         assert!(snap.merged);
         assert_eq!(snap.merge_commit_sha.as_deref(), Some("merge111"));
@@ -269,5 +312,35 @@ mod tests {
         assert_eq!(snap.pr_snapshot_hash, snap.compute_snapshot_hash().unwrap());
         // External URL stays as text; parser never fetches.
         assert!(snap.body.contains("https://example.com/untrusted"));
+    }
+
+    /// E1 discrimination: missing head/base/updated_at must REFUSE, not
+    /// silently hash empty defaults into a valid-looking snapshot.
+    #[test]
+    fn missing_pr_provenance_fields_are_refused() {
+        let base = json!({
+            "title": "Fix gate",
+            "body": "body",
+            "state": "OPEN",
+            "headRefOid": "deadbeef",
+            "baseRefOid": "cafebabe",
+            "updatedAt": "2026-07-13T00:00:00Z",
+        });
+
+        for field in ["headRefOid", "baseRefOid", "updatedAt"] {
+            let mut bad = base.clone();
+            bad.as_object_mut().unwrap().remove(field);
+            let err = parse_pr_snapshot_from_gh_json("owner/repo", 1, &bad)
+                .expect_err(&format!("missing {field} must refuse"));
+            assert!(
+                matches!(err, ParseError::MissingProvenanceField { .. }),
+                "missing {field}: {err}"
+            );
+        }
+
+        // Present-but-empty is also refused.
+        let mut empty_head = base.clone();
+        empty_head["headRefOid"] = json!("");
+        assert!(parse_pr_snapshot_from_gh_json("owner/repo", 1, &empty_head).is_err());
     }
 }

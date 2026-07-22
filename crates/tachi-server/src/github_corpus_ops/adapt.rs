@@ -3,14 +3,18 @@
 //! No I/O. Never establishes a precedent. Closed/merged produces OUTCOME
 //! evidence only; reopen/revert APPENDs Contradicts without rewriting prior
 //! refs. Idempotent on equal bundles.
+//!
+//! `source_revision` (and thus `candidate_id`) binds the issue/PR snapshot
+//! hashes **and** the ordered provenance event chain, so a pure revert with
+//! unchanged snapshots still yields a distinct candidate.
 
 use tachi_params::{
-    EvidenceRefV1, EvidenceRelationV1, ImmutableRevisionV1, LessonCandidateKindV1,
+    EvidenceRefV1, EvidenceRelationV1, ImmutableRevisionV1, IssueSnapshotV1, LessonCandidateKindV1,
     LessonCandidateStatusV1, LessonCandidateV1, LessonCoverageV1, LessonEngineReceiptV1,
-    SourceKindV1,
+    PullRequestSnapshotV1, SourceKindV1,
 };
 
-use super::parse::{CaseCorpusBundle, ProvenanceEventKindV1};
+use super::parse::{CaseCorpusBundle, ProvenanceEventKindV1, ProvenanceEventV1};
 use super::pilot::CorpusManifestV1;
 
 /// Optional prose override. When absent, fields are derived deterministically
@@ -50,10 +54,17 @@ impl std::fmt::Display for AdaptError {
 }
 
 /// Concrete per-case adapt result (generic `EvidenceEnvelopeV1<T>` deferred).
+///
+/// Carries the full issue/PR snapshots (not just hashes) so a consumer can
+/// recover and verify the semantic fields behind the revision bindings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubCorpusCaseResult {
     pub case_id: String,
     pub evidence_refs: Vec<EvidenceRefV1>,
+    /// Full issue snapshot (revision-bound contract C3).
+    pub issue: IssueSnapshotV1,
+    /// Full PR snapshot when present (revision-bound contract C3).
+    pub pull_request: Option<PullRequestSnapshotV1>,
     pub issue_snapshot_hash: String,
     pub pr_snapshot_hash: Option<String>,
     /// True when closed/merged produced OUTCOME evidence (Supports), never
@@ -110,11 +121,27 @@ fn group_seed(
     seed
 }
 
-fn source_revision_string(issue_hash: &str, pr_hash: Option<&str>) -> String {
-    match pr_hash {
+/// Bind source_revision to issue/PR snapshot hashes **and** the ordered
+/// event chain (kind + revision_hash + occurred_at per hop). A pure revert
+/// that leaves snapshots unchanged must still produce a distinct revision.
+fn source_revision_string(
+    issue_hash: &str,
+    pr_hash: Option<&str>,
+    events: &[ProvenanceEventV1],
+) -> String {
+    let mut s = match pr_hash {
         Some(pr) => format!("issue:{issue_hash}+pr:{pr}"),
         None => format!("issue:{issue_hash}"),
+    };
+    for event in events {
+        s.push('|');
+        s.push_str(event.kind.as_str());
+        s.push(':');
+        s.push_str(&event.revision_hash);
+        s.push('@');
+        s.push_str(&event.occurred_at);
     }
+    s
 }
 
 fn derived_draft(case: &super::pilot::CorpusCaseV1, bundle: &CaseCorpusBundle) -> CaseDraft {
@@ -123,6 +150,44 @@ fn derived_draft(case: &super::pilot::CorpusCaseV1, bundle: &CaseCorpusBundle) -
         proposed_ruling: case.reference_decision.clone(),
         why: case.selection_reason.clone(),
         how_to_apply: case.cold_start_material_decision.clone(),
+    }
+}
+
+/// Bytes of every counted source surface (issue title/body, selected
+/// comments, PR title/body). Used as `LessonCoverageV1.source_bytes`.
+fn counted_source_text(bundle: &CaseCorpusBundle) -> String {
+    let mut source_text = format!("{}\n{}", bundle.issue.title, bundle.issue.body);
+    for c in &bundle.issue.selected_comment_revisions {
+        source_text.push('\n');
+        source_text.push_str(&c.body);
+    }
+    if let Some(pr) = &bundle.pull_request {
+        source_text.push('\n');
+        source_text.push_str(&pr.title);
+        source_text.push('\n');
+        source_text.push_str(&pr.body);
+    }
+    source_text
+}
+
+/// Honest coverage: `full` only when the prose situation consumed every
+/// counted source byte; otherwise partial (`covered_bytes < source_bytes`).
+fn coverage_for_draft(draft: &CaseDraft, counted_source: &str) -> LessonCoverageV1 {
+    let source_bytes = counted_source.len();
+    let covered_bytes = if draft.situation.as_str() == counted_source {
+        source_bytes
+    } else {
+        // Prose only covers what was put into `situation` (derived draft =
+        // issue title+body only; comments/PR bodies are counted but unused).
+        draft.situation.len().min(source_bytes)
+    };
+    if covered_bytes >= source_bytes {
+        LessonCoverageV1::full(source_bytes)
+    } else {
+        LessonCoverageV1 {
+            source_bytes,
+            covered_bytes,
+        }
     }
 }
 
@@ -174,8 +239,6 @@ fn build_evidence_chain(bundle: &CaseCorpusBundle) -> (Vec<EvidenceRefV1>, bool,
     for event in &bundle.events {
         match event.kind {
             ProvenanceEventKindV1::IssueOpened | ProvenanceEventKindV1::PrOpened => {
-                // Structural hops already covered by issue/PR snapshot refs;
-                // keep an explicit DerivedFrom link bound to the event hash.
                 let (target_kind, revision) = if event.kind == ProvenanceEventKindV1::PrOpened {
                     (
                         SourceKindV1::Pr,
@@ -305,7 +368,7 @@ fn build_evidence_chain(bundle: &CaseCorpusBundle) -> (Vec<EvidenceRefV1>, bool,
 /// Adapt one frozen corpus case into typed evidence + a Pending candidate.
 ///
 /// `engine_receipt` is used as-is; unknown/fallback/missing → preview_only
-/// via [`lesson_identity_status`]. External URLs in bodies stay as text.
+/// via [`LessonCandidateV1::identity_status`]. External URLs in bodies stay as text.
 pub fn adapt_corpus_case(
     project: &str,
     manifest: &CorpusManifestV1,
@@ -341,19 +404,14 @@ pub fn adapt_corpus_case(
         .pull_request
         .as_ref()
         .map(|p| p.pr_snapshot_hash.clone());
-    let source_revision = source_revision_string(&issue_snapshot_hash, pr_snapshot_hash.as_deref());
+    let source_revision = source_revision_string(
+        &issue_snapshot_hash,
+        pr_snapshot_hash.as_deref(),
+        &bundle.events,
+    );
 
-    let mut source_text = format!("{}\n{}", bundle.issue.title, bundle.issue.body);
-    for c in &bundle.issue.selected_comment_revisions {
-        source_text.push('\n');
-        source_text.push_str(&c.body);
-    }
-    if let Some(pr) = &bundle.pull_request {
-        source_text.push('\n');
-        source_text.push_str(&pr.title);
-        source_text.push('\n');
-        source_text.push_str(&pr.body);
-    }
+    let counted_source = counted_source_text(bundle);
+    let coverage = coverage_for_draft(&draft, &counted_source);
 
     let group_id = hash16(&group_seed(
         project,
@@ -365,7 +423,6 @@ pub fn adapt_corpus_case(
     id_seed.push_str(&frame_field(&source_revision));
     let candidate_id = hash16(&id_seed);
 
-    // Keep receipt as-is; identity_status collapses missing/fallback to preview_only.
     let candidate = LessonCandidateV1 {
         candidate_id,
         candidate_group_id: group_id,
@@ -377,7 +434,7 @@ pub fn adapt_corpus_case(
         refs: evidence_refs.clone(),
         source_row_id: bundle.case_id.clone(),
         source_revision,
-        coverage: LessonCoverageV1::full(source_text.len()),
+        coverage,
         candidate_status: LessonCandidateStatusV1::Pending,
         engine_receipt,
     };
@@ -388,6 +445,8 @@ pub fn adapt_corpus_case(
     Ok(GithubCorpusCaseResult {
         case_id: bundle.case_id.clone(),
         evidence_refs,
+        issue: bundle.issue.clone(),
+        pull_request: bundle.pull_request.clone(),
         issue_snapshot_hash,
         pr_snapshot_hash,
         outcome_evidence,

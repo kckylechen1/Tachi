@@ -1,13 +1,18 @@
 //! RED→GREEN discrimination tests for the #1059 GitHub corpus adapter.
+//!
+//! Includes review rework cases that FAIL on a0f8e43e (C1/C2/C3/E1/E2) and
+//! pass after the contract fixes.
 
 use super::adapt::{adapt_corpus_case, CorpusPilotReport};
 use super::fixtures::{
-    chain_bundle, fixture_bundle_for_case, fixture_reader_for_case, sample_issue_json,
+    chain_bundle, fixture_bundle_for_case, fixture_reader_for_case, pure_revert_pair,
+    sample_issue_json, sample_pr_json,
 };
-use super::parse::assemble_case_bundle;
+use super::parse::{assemble_case_bundle, parse_pr_snapshot_from_gh_json, ProvenanceEventKindV1};
 use super::pilot::{freeze_corpus_manifest, valid_20_cases, CorpusFreezeError, CORPUS_PILOT_SIZE};
 use super::reader::{
-    fetch_case_bundle, refuse_github_mutation, MutationProbe, FORBIDDEN_GITHUB_MUTATIONS,
+    baseline_events_from_snapshots, fetch_case_bundle, refuse_github_mutation, MutationProbe,
+    FORBIDDEN_GITHUB_MUTATIONS,
 };
 use tachi_params::{
     EvidenceRelationV1, ImmutableRevisionV1, LessonCandidateStatusV1, LessonEngineReceiptV1,
@@ -69,7 +74,6 @@ fn provenance_connected_and_revision_bound() {
         }
     }
 
-    // Connected hops: issue → comment → pr → merge → reopen/revert
     let sections: Vec<_> = result
         .evidence_refs
         .iter()
@@ -98,7 +102,8 @@ fn edited_comment_invalidates_snapshot_idempotent_replay() {
         None,
         vec![],
         "2026-07-13T04:00:00Z",
-    );
+    )
+    .expect("base assemble");
     let edited = assemble_case_bundle(
         &case_id,
         "owner/repo",
@@ -107,7 +112,8 @@ fn edited_comment_invalidates_snapshot_idempotent_replay() {
         None,
         vec![],
         "2026-07-13T04:00:00Z",
-    );
+    )
+    .expect("edited assemble");
     assert_ne!(
         base.issue.issue_snapshot_hash, edited.issue.issue_snapshot_hash,
         "edited comment body/updated_at must invalidate issue_snapshot_hash"
@@ -145,6 +151,19 @@ fn revert_reopen_appends_overturn_does_not_rewrite() {
     let closed = chain_bundle(&chain_case_id(), false);
     let reopened = chain_bundle(&chain_case_id(), true);
 
+    // C1 fixture contract: overturn must NOT flip issue state (still CLOSED).
+    assert_eq!(closed.issue.state, "CLOSED");
+    assert_eq!(reopened.issue.state, "CLOSED");
+    assert_eq!(
+        closed.issue.issue_snapshot_hash, reopened.issue.issue_snapshot_hash,
+        "overturn fixture must keep issue snapshot unchanged"
+    );
+    assert_eq!(
+        closed.pull_request.as_ref().map(|p| &p.pr_snapshot_hash),
+        reopened.pull_request.as_ref().map(|p| &p.pr_snapshot_hash),
+        "overturn fixture must keep PR snapshot unchanged"
+    );
+
     let closed_result = adapt_corpus_case("proj", &manifest, &closed, None, None).expect("closed");
     let reopen_result =
         adapt_corpus_case("proj", &manifest, &reopened, None, None).expect("reopened");
@@ -152,7 +171,6 @@ fn revert_reopen_appends_overturn_does_not_rewrite() {
     assert!(reopen_result.overturn_appended);
     assert!(reopen_result.evidence_refs.len() > closed_result.evidence_refs.len());
 
-    // Prior outcome Supports hops (merge/close) remain; overturn APPENDs.
     for section in ["pr_merged", "issue_closed"] {
         let prior = closed_result
             .evidence_refs
@@ -180,13 +198,157 @@ fn revert_reopen_appends_overturn_does_not_rewrite() {
         r.relation == EvidenceRelationV1::Contradicts
             && r.section_or_span.as_deref() == Some("revert")
     }));
-    // Old closed revision hash from the event chain is still present.
+    // Old closed revision (real issue snapshot hash) is still present.
+    let closed_hash = &closed.issue.issue_snapshot_hash;
     assert!(reopen_result.evidence_refs.iter().any(|r| {
         matches!(
             &r.immutable_revision,
-            ImmutableRevisionV1::IssueSnapshotHash(h) if h == "rev-closed"
+            ImmutableRevisionV1::IssueSnapshotHash(h) if h == closed_hash
         )
     }));
+}
+
+/// C1 discrimination: pure revert with **unchanged** issue/PR snapshots must
+/// yield a distinct `candidate_id` / `source_revision`. Fails on a0f8e43e
+/// (source_revision bound only to snapshot hashes).
+#[test]
+fn pure_revert_unchanged_snapshots_yields_distinct_candidate_id() {
+    let manifest = frozen_manifest();
+    let (base, with_revert) = pure_revert_pair(&chain_case_id());
+
+    assert_eq!(
+        base.issue.issue_snapshot_hash,
+        with_revert.issue.issue_snapshot_hash
+    );
+    assert_eq!(
+        base.pull_request.as_ref().map(|p| &p.pr_snapshot_hash),
+        with_revert
+            .pull_request
+            .as_ref()
+            .map(|p| &p.pr_snapshot_hash)
+    );
+    assert_eq!(base.issue.state, "CLOSED");
+    assert_eq!(with_revert.issue.state, "CLOSED");
+
+    let r1 = adapt_corpus_case("proj", &manifest, &base, None, None).expect("base");
+    let r2 = adapt_corpus_case("proj", &manifest, &with_revert, None, None).expect("revert");
+
+    assert_ne!(
+        r1.candidate.source_revision, r2.candidate.source_revision,
+        "event-chain must enter source_revision so pure revert differs"
+    );
+    assert_ne!(
+        r1.candidate.candidate_id, r2.candidate.candidate_id,
+        "pure revert must not collide on candidate_id when snapshots are unchanged"
+    );
+    assert!(r2.overturn_appended);
+    assert!(r2.evidence_refs.iter().any(|r| {
+        r.relation == EvidenceRelationV1::Contradicts
+            && r.section_or_span.as_deref() == Some("revert")
+    }));
+}
+
+/// C2 discrimination: baseline events must carry real snapshot hashes, never
+/// fabricated `open-{n}` / `pr-open-{n}` labels.
+#[test]
+fn baseline_events_use_real_snapshot_hashes_not_fabricated_labels() {
+    let cases = valid_20_cases();
+    let case = cases
+        .iter()
+        .find(|c| c.pr_number.is_some())
+        .expect("need a case with PR");
+    let reader = fixture_reader_for_case(case);
+    let bundle = fetch_case_bundle(&reader, case, vec![], "2026-07-13T00:00:00Z")
+        .expect("fetch with empty hints builds baseline from content");
+
+    let issue_opened = bundle
+        .events
+        .iter()
+        .find(|e| e.kind == ProvenanceEventKindV1::IssueOpened)
+        .expect("baseline IssueOpened");
+    let pr_opened = bundle
+        .events
+        .iter()
+        .find(|e| e.kind == ProvenanceEventKindV1::PrOpened)
+        .expect("baseline PrOpened");
+
+    assert_eq!(
+        issue_opened.revision_hash, bundle.issue.issue_snapshot_hash,
+        "IssueOpened revision_hash must equal computed issue_snapshot_hash"
+    );
+    assert_eq!(
+        pr_opened.revision_hash,
+        bundle
+            .pull_request
+            .as_ref()
+            .expect("PR present")
+            .pr_snapshot_hash,
+        "PrOpened revision_hash must equal computed pr_snapshot_hash"
+    );
+    assert_ne!(
+        issue_opened.revision_hash,
+        format!("open-{}", case.issue_number),
+        "must not fabricate open-{{n}} as a snapshot hash"
+    );
+    assert_ne!(
+        pr_opened.revision_hash,
+        format!("pr-open-{}", case.pr_number.unwrap()),
+        "must not fabricate pr-open-{{n}} as a snapshot hash"
+    );
+    // SHA-256 hex is 64 chars.
+    assert_eq!(issue_opened.revision_hash.len(), 64);
+    assert_eq!(pr_opened.revision_hash.len(), 64);
+
+    // Helper itself binds real hashes.
+    let baseline = baseline_events_from_snapshots(
+        &bundle.issue,
+        bundle.pull_request.as_ref(),
+        "2026-07-13T00:00:00Z",
+    );
+    assert_eq!(baseline[0].revision_hash, bundle.issue.issue_snapshot_hash);
+}
+
+/// C3 discrimination: result must carry full Issue/PR snapshots, not only hashes.
+#[test]
+fn result_carries_full_issue_and_pr_snapshots() {
+    let manifest = frozen_manifest();
+    let bundle = chain_bundle(&chain_case_id(), false);
+    let result = adapt_corpus_case("proj", &manifest, &bundle, None, None).expect("adapt");
+
+    assert_eq!(result.issue, bundle.issue);
+    assert_eq!(result.pull_request, bundle.pull_request);
+    assert_eq!(result.issue_snapshot_hash, result.issue.issue_snapshot_hash);
+    assert!(!result.issue.body.is_empty());
+    assert!(!result.issue.updated_at.is_empty());
+    let pr = result.pull_request.as_ref().expect("PR snapshot required");
+    assert!(!pr.head_sha.is_empty());
+    assert!(!pr.base_sha.is_empty());
+    assert!(!pr.reviews.is_empty());
+    assert!(!pr.checks.is_empty());
+    assert_eq!(
+        result.pr_snapshot_hash.as_deref(),
+        Some(pr.pr_snapshot_hash.as_str())
+    );
+}
+
+/// E2 discrimination: derived prose consumes only issue title/body, so
+/// coverage must be partial when comments/PR bodies are counted.
+#[test]
+fn derived_draft_reports_partial_coverage_when_comments_and_pr_not_in_prose() {
+    let manifest = frozen_manifest();
+    let bundle = chain_bundle(&chain_case_id(), false);
+    let result = adapt_corpus_case("proj", &manifest, &bundle, None, None).expect("adapt");
+
+    assert!(
+        !result.candidate.coverage.is_full(),
+        "derived draft only consumes issue title/body; must not claim full coverage \
+         over comments+PR (source_bytes={}, covered_bytes={})",
+        result.candidate.coverage.source_bytes,
+        result.candidate.coverage.covered_bytes
+    );
+    assert!(result.candidate.coverage.covered_bytes < result.candidate.coverage.source_bytes);
+    let expected_covered = format!("{}\n{}", bundle.issue.title, bundle.issue.body).len();
+    assert_eq!(result.candidate.coverage.covered_bytes, expected_covered);
 }
 
 #[test]
@@ -250,8 +412,6 @@ fn candidate_never_established_and_preview_identity() {
 
 #[test]
 fn no_portable_kernel_github_dependency() {
-    // Adapter types live in tachi-server / tachi-params — portable evidence
-    // kinds (`SourceKindV1::Issue` / `Pr`), never memcore GitHub SDK types.
     let manifest = frozen_manifest();
     let bundle = chain_bundle(&chain_case_id(), false);
     let result = adapt_corpus_case("proj", &manifest, &bundle, None, None).expect("adapt");
@@ -265,7 +425,6 @@ fn no_portable_kernel_github_dependency() {
         .iter()
         .any(|r| r.target_kind == SourceKindV1::Pr));
 
-    // Structural: this module path is not memcore.
     adapter_module_path_is_not_memcore();
 }
 
@@ -331,7 +490,6 @@ fn freeze_and_adapt_all_20_yields_pilot_report() {
     assert_eq!(report.cases, 20);
     assert_eq!(report.candidates_emitted, 20);
     assert!(report.outcome_evidence_count > 0);
-    // No threshold auto-decision fields exist on the report.
 }
 
 #[test]
@@ -344,4 +502,25 @@ fn unselected_case_is_refused() {
         err,
         super::adapt::AdaptError::NotInFrozenManifest { .. }
     ));
+}
+
+/// E1 also exercised via under-fetched assemble path.
+#[test]
+fn assemble_refuses_pr_missing_head_sha() {
+    let mut pr = sample_pr_json(1, "OPEN", false, "2026-07-13T00:00:00Z");
+    pr.as_object_mut().unwrap().remove("headRefOid");
+    let issue = sample_issue_json(1, "OPEN", "body", "2026-07-13T00:00:00Z");
+    let err = assemble_case_bundle(
+        "corpus-case-0",
+        "owner/repo",
+        1,
+        &issue,
+        Some((1, &pr)),
+        vec![],
+        "2026-07-13T00:00:00Z",
+    )
+    .expect_err("missing head_sha must refuse");
+    assert!(err.to_string().contains("head_sha"));
+    // Direct parser path too.
+    assert!(parse_pr_snapshot_from_gh_json("owner/repo", 1, &pr).is_err());
 }

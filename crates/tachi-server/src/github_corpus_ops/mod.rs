@@ -38,14 +38,14 @@ pub use adapt::{
     adapt_corpus_case, AdaptError, CaseDraft, CorpusPilotReport, GithubCorpusCaseResult,
 };
 pub use parse::{
-    assemble_case_bundle, parse_pr_snapshot_from_gh_json, CaseCorpusBundle, ProvenanceEventKindV1,
-    ProvenanceEventV1,
+    assemble_case_bundle, parse_pr_snapshot_from_gh_json, CaseCorpusBundle, ParseError,
+    ProvenanceEventKindV1, ProvenanceEventV1,
 };
 pub use pilot::{
     freeze_corpus_manifest, valid_20_cases, CorpusCaseV1, CorpusFreezeError, CorpusManifestV1,
     CORPUS_PILOT_SIZE,
 };
 pub use reader::{
-    fetch_case_bundle, refuse_github_mutation, FixtureCorpusReader, GithubCorpusReader,
-    MutationProbe, FORBIDDEN_GITHUB_MUTATIONS,
+    baseline_events_from_snapshots, fetch_case_bundle, refuse_github_mutation, FixtureCorpusReader,
+    GithubCorpusReader, MutationProbe, FORBIDDEN_GITHUB_MUTATIONS,
 };
