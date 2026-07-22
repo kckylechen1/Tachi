@@ -360,6 +360,11 @@ struct HttpSessionIdentity {
     client: Option<String>,
     agent_identity_id: Option<String>,
     project: Option<String>,
+    /// A caller that sent a malformed project identity must not silently
+    /// become an unbound session. In particular, HTTP permits opaque obs-text
+    /// bytes that `HeaderValue::to_str` cannot decode as UTF-8; collapsing
+    /// that case to `None` would bypass named-project validation entirely.
+    project_error: Option<String>,
     /// #1120 PR1: `X-Tachi-Workspace-Root` / `_meta.tachiWorkspaceRoot`. Only
     /// consulted when `project` is absent — an explicit named-project binding
     /// always wins, matching how a caller-supplied `project=` argument always
@@ -368,15 +373,11 @@ struct HttpSessionIdentity {
     /// Review finding [3] (#1207): set when `X-Tachi-Workspace-Root` /
     /// `_meta.tachiWorkspaceRoot` was PRESENT but unusable — blank/whitespace,
     /// or (header only) not valid UTF-8 text — as opposed to simply absent.
-    /// `workspace_root` collapses "absent" and "malformed" to the same `None`
-    /// (matching the pre-existing `X-Tachi-Project`/profile/client parsing
-    /// this PR's header reuses the shape of); that is fine for a caller that
-    /// never declared a root, but a caller that DID send one and got it
-    /// silently ignored must not fall through to an unbound session — this
-    /// carries the reason so `apply_http_session_identity` can fail closed
-    /// instead. Scoped to `workspace_root` only (this PR's new surface); the
-    /// analogous gap on `X-Tachi-Project`/profile/client is pre-existing
-    /// behavior out of this PR's blast radius.
+    /// `workspace_root` collapses "absent" and "malformed" to the same `None`;
+    /// that is fine for a caller that never declared a root, but a caller that
+    /// DID send one and got it silently ignored must not fall through to an
+    /// unbound session — this carries the reason so
+    /// `apply_http_session_identity` can fail closed instead.
     workspace_root_error: Option<String>,
     /// #1251: the raw `X-Tachi-Dispatch-Depth` header value for the recursive-
     /// dispatch gate. Stored raw (like the other identity fields); a present
@@ -421,6 +422,12 @@ impl MemoryServer {
         context: &RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
         let identity = http_session_identity(request, context);
+        if let Some(err) = identity.project_error.as_deref() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("malformed X-Tachi-Project identity: {err}"),
+                None,
+            ));
+        }
         // Review finding [3] (#1207): a caller-supplied but malformed/blank
         // `X-Tachi-Workspace-Root` (or its `_meta` twin) must fail the whole
         // `initialize` call, not silently disappear into an unbound session
@@ -440,13 +447,14 @@ impl MemoryServer {
             .transpose()?;
         let project = match project_binding_source(&identity) {
             ProjectBindingSource::Named(project) => {
-                Self::resolve_named_project_db_path(project).map_err(|err| {
-                    rmcp::ErrorData::invalid_params(
-                        format!("invalid HTTP direct-connect project binding: {err}"),
-                        None,
-                    )
-                })?;
-                Some(project.to_string())
+                let (canonical_project, _) =
+                    Self::resolve_named_project_binding(project).map_err(|err| {
+                        rmcp::ErrorData::invalid_params(
+                            format!("invalid HTTP direct-connect project binding: {err}"),
+                            None,
+                        )
+                    })?;
+                Some(canonical_project)
             }
             ProjectBindingSource::WorkspaceRoot(root) => Some(
                 self.resolve_or_register_workspace_root(root)
@@ -492,8 +500,17 @@ fn http_session_identity(
         identity.agent_identity_id =
             header_string(parts, crate::session_identity::HEADER_AGENT_IDENTITY)
                 .or(identity.agent_identity_id);
-        identity.project =
-            header_string(parts, crate::session_identity::HEADER_PROJECT).or(identity.project);
+        match header_string_result(parts, crate::session_identity::HEADER_PROJECT) {
+            Ok(Some(value)) => {
+                identity.project = Some(value);
+                identity.project_error = None;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                identity.project = None;
+                identity.project_error = Some(err);
+            }
+        }
         // #1251: read the per-call recursion-depth marker off the wire. This is
         // the ONLY correct place to learn the caller's depth in the daemon-proxy
         // topology — `handle_tachi_dispatch` runs in the daemon carrying the
@@ -532,8 +549,15 @@ fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessio
         .or_else(|| meta_string(meta, "tachi.client"));
     identity.agent_identity_id = meta_string(meta, crate::session_identity::META_AGENT_IDENTITY)
         .or_else(|| meta_string(meta, "tachi.agentIdentity"));
-    identity.project = meta_string(meta, crate::session_identity::META_PROJECT)
-        .or_else(|| meta_string(meta, "tachi.project"));
+    match meta_string_result(meta, crate::session_identity::META_PROJECT) {
+        Ok(Some(value)) => identity.project = Some(value),
+        Ok(None) => match meta_string_result(meta, "tachi.project") {
+            Ok(Some(value)) => identity.project = Some(value),
+            Ok(None) => {}
+            Err(err) => identity.project_error = Some(err),
+        },
+        Err(err) => identity.project_error = Some(err),
+    }
     // Review finding [3] (#1207): unlike the fields above, a PRESENT-but-
     // malformed `_meta.tachiWorkspaceRoot` (non-string type, or blank) must
     // be recorded as an error, not silently treated the same as "the caller
@@ -1210,6 +1234,21 @@ mod tests {
         assert!(identity.profile.is_none());
         assert!(identity.client.is_none());
         assert!(identity.project.is_none());
+        assert!(identity.project_error.is_none());
+    }
+
+    #[test]
+    fn initialize_meta_malformed_project_is_recorded_as_an_error_not_absence() {
+        for value in [json!("   "), json!(12345)] {
+            let mut map = serde_json::Map::new();
+            map.insert(crate::session_identity::META_PROJECT.to_string(), value);
+            let identity = identity_from_initialize_meta(Some(&rmcp::model::Meta(map)));
+            assert!(identity.project.is_none());
+            assert!(
+                identity.project_error.is_some(),
+                "a present malformed project must not become an unbound session"
+            );
+        }
     }
 
     /// #1120 PR1: `_meta.tachiWorkspaceRoot` parses into `HttpSessionIdentity`
@@ -1321,6 +1360,23 @@ mod tests {
         assert!(err.contains("UTF-8"), "unexpected error message: {err}");
     }
 
+    #[test]
+    fn non_utf8_project_header_is_recorded_as_an_error_not_absence() {
+        let parts = axum::http::Request::builder()
+            .header(
+                crate::session_identity::HEADER_PROJECT,
+                axum::http::HeaderValue::from_bytes("量化".as_bytes())
+                    .expect("HTTP permits opaque obs-text bytes"),
+            )
+            .body(())
+            .expect("build request")
+            .into_parts()
+            .0;
+        let err = header_string_result(&parts, crate::session_identity::HEADER_PROJECT)
+            .expect_err("an undecodable project header must fail closed");
+        assert!(err.contains("UTF-8"), "unexpected error message: {err}");
+    }
+
     /// Review finding [3] (#1207) twin: a present-but-blank header value is
     /// malformed, not absent.
     #[test]
@@ -1399,6 +1455,7 @@ mod tests {
             client: None,
             agent_identity_id: None,
             project: Some("sigil".to_string()),
+            project_error: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
             dispatch_depth: None,
@@ -1416,6 +1473,7 @@ mod tests {
             client: None,
             agent_identity_id: None,
             project: None,
+            project_error: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
             dispatch_depth: None,

@@ -38,6 +38,36 @@ async fn tachi_init_project_db_creates_expected_path() {
 }
 
 #[tokio::test]
+async fn custom_db_relpath_reopens_from_manifest_without_alias() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let root = temp_home.temp_home.join("Custom Path Repo");
+    std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
+
+    let response = server
+        .tachi_init_project_db(Parameters(InitProjectDbParams {
+            project_root: Some(root.display().to_string()),
+            db_relpath: "data/project.db".to_string(),
+        }))
+        .await
+        .expect("custom contained DB path should initialize");
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response JSON");
+    let project = json["project"]
+        .as_str()
+        .expect("canonical project identity");
+    let db_path = root.join("data/project.db");
+    assert!(db_path.exists());
+
+    let alias = crate::path_utils::plan_c_global_db_path(project);
+    let _ = std::fs::remove_file(alias);
+    let reopened = crate::MemoryServer::resolve_named_project_db_path(project)
+        .expect("manifest scope must reopen a custom DB path without an alias");
+    assert_eq!(
+        std::fs::canonicalize(reopened).unwrap(),
+        std::fs::canonicalize(db_path).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn tachi_init_project_db_activates_project_store_and_read_pool() {
     let server = make_server();
     let root = std::env::temp_dir().join(format!("tachi-project-runtime-{}", uuid::Uuid::new_v4()));
@@ -85,7 +115,7 @@ async fn tachi_init_project_db_activates_project_store_and_read_pool() {
 }
 
 #[tokio::test]
-async fn tachi_init_project_db_reports_plan_c_split_brain() {
+async fn tachi_init_project_db_rejects_plan_c_split_brain_before_open() {
     let (server, temp_home) = make_server_with_temp_home();
     let root = temp_home
         .temp_home
@@ -98,28 +128,28 @@ async fn tachi_init_project_db_reports_plan_c_split_brain() {
     std::fs::create_dir_all(alias_db.parent().expect("alias parent")).expect("create alias parent");
     memcore::MemoryStore::open(alias_db.to_str().expect("alias db")).expect("open alias db");
 
-    let response = server
+    let error = server
         .tachi_init_project_db(Parameters(InitProjectDbParams {
             project_root: Some(root.display().to_string()),
             db_relpath: ".tachi/memory.db".to_string(),
         }))
         .await
-        .expect("tachi_init_project_db should report split-brain without failing");
-    let json: serde_json::Value =
-        serde_json::from_str(&response).expect("tachi_init_project_db response should be JSON");
-    assert_eq!(
-        json["plan_c_split_brain"]["project_name"],
-        json!("Split_Brain_Repo")
-    );
+        .expect_err("ambiguous legacy alias ownership must fail before DB open");
     assert!(
-        json["note"]
-            .as_str()
-            .is_some_and(|note| note.contains("Plan C split-brain detected")),
-        "note should surface split-brain guidance: {json}"
+        error.contains("refusing ownership guess"),
+        "unexpected split-brain refusal: {error}"
     );
     assert!(
         !alias_db.is_symlink(),
         "init must not silently replace a regular alias DB"
+    );
+    assert!(
+        !root.join(".tachi/memory.db").exists(),
+        "init must fail before opening or creating the repo-local DB"
+    );
+    assert!(
+        !root.join(".tachi").exists(),
+        "identity preflight failure must not create the DB parent directory"
     );
 }
 

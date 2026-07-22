@@ -567,10 +567,39 @@ async fn run_startup_hygiene(
         explicit_project_db,
     ) {
         if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
-            if let crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) =
-                crate::path_utils::ensure_plan_c_symlink(db_path, root)
-            {
-                eprintln!("[!] {}", issue.warning_message());
+            // Fail-closed (#1228 invariant #5): an ambiguous or unresolvable
+            // Plan C project identity for the daemon's own launch repo must
+            // abort startup, never silently boot with guessed addressing. This
+            // is the ONE `ensure_plan_c_symlink` call site with no preceding
+            // `preflight_project_identity` gate, so the identity check is made
+            // explicit here rather than left to the symlink outcome.
+            if let Err(error) = crate::path_utils::plan_c_alias_db_for_root(root) {
+                return Err(format!(
+                    "Plan C project identity for {} is ambiguous or unresolvable; refusing to \
+                     start with guessed project addressing: {error}",
+                    root.display()
+                )
+                .into());
+            }
+            match crate::path_utils::ensure_plan_c_symlink(db_path, root) {
+                crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
+                    eprintln!("[!] {}", issue.warning_message());
+                }
+                // A best-effort symlink syscall failure (identity already
+                // resolved cleanly above) is non-fatal — repo-local/manifest
+                // addressing does not depend on the alias symlink — but it must
+                // be surfaced loudly, not silently dropped.
+                crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
+                    eprintln!(
+                        "[!] Plan C alias symlink could not be created at {}: {} (the project \
+                         remains reachable by its repo-local path)",
+                        path.display(),
+                        error
+                    );
+                }
+                crate::path_utils::PlanCLinkOutcome::AlreadyLinked
+                | crate::path_utils::PlanCLinkOutcome::Created(_)
+                | crate::path_utils::PlanCLinkOutcome::Skipped(_) => {}
             }
         }
     }

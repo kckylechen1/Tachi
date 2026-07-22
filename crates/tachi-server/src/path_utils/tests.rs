@@ -189,13 +189,45 @@ fn plan_c_regular_alias_file_reports_split_brain() {
 }
 
 #[test]
+fn plan_c_alias_resolution_rejects_divergent_compatibility_candidates() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let current = plan_c_dir_name_from_root(&repo).expect("current identity");
+        let previous = plan_c_previous_dir_name_from_root(&repo).expect("previous identity");
+        assert_ne!(current, previous);
+
+        for (name, bytes) in [
+            (&current, b"current".as_slice()),
+            (&previous, b"previous".as_slice()),
+        ] {
+            let db = plan_c_global_db_path(name);
+            std::fs::create_dir_all(db.parent().unwrap()).expect("alias parent");
+            std::fs::write(db, bytes).expect("alias DB");
+        }
+
+        let error = plan_c_alias_db_for_root(&repo)
+            .expect_err("divergent current and compatibility aliases must fail closed");
+        assert!(
+            error.contains("ambiguous across divergent aliases"),
+            "{error}"
+        );
+    });
+}
+
+#[test]
 fn validate_project_db_relpath_rejects_parent_dir() {
     assert!(validate_project_db_relpath(Path::new("../secrets.db")).is_err());
 }
 
 #[test]
 fn plan_c_dir_name_sanitizes_spaces() {
-    let root = PathBuf::from("/tmp/My Cool Repo");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("My Cool Repo");
+    std::fs::create_dir(&root).expect("root");
     // Legacy name is the bare sanitized basename; the current name carries a
     // stable-hash suffix but still starts with the sanitized basename.
     assert_eq!(
@@ -210,8 +242,11 @@ fn plan_c_dir_name_sanitizes_spaces() {
 fn plan_c_dir_name_same_basename_distinct_roots_differ() {
     // Two different absolute roots that share a basename must produce
     // DISTINCT alias dir names so they no longer collide on one alias path.
-    let a = PathBuf::from("/tmp/workspace-a/api");
-    let b = PathBuf::from("/tmp/workspace-b/api");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let a = tmp.path().join("workspace-a/api");
+    let b = tmp.path().join("workspace-b/api");
+    std::fs::create_dir_all(&a).expect("a root");
+    std::fs::create_dir_all(&b).expect("b root");
     let name_a = plan_c_dir_name_from_root(&a).expect("a");
     let name_b = plan_c_dir_name_from_root(&b).expect("b");
     assert!(name_a.starts_with("api-"), "{name_a}");
@@ -225,15 +260,49 @@ fn plan_c_dir_name_same_basename_distinct_roots_differ() {
 #[test]
 fn plan_c_dir_name_is_stable_for_same_root() {
     // The same root must always hash to the same alias dir name.
-    let root = PathBuf::from("/tmp/workspace/service");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workspace/service");
+    std::fs::create_dir_all(&root).expect("root");
     let first = plan_c_dir_name_from_root(&root).expect("first");
     let second = plan_c_dir_name_from_root(&root).expect("second");
     assert_eq!(first, second);
     assert!(first.starts_with("service-"), "{first}");
-    // 8 hex chars of suffix after the "service-" prefix.
+    // A cryptographic, collision-resistant suffix follows the readable prefix.
     let suffix = first.strip_prefix("service-").expect("suffix");
-    assert_eq!(suffix.len(), 8);
+    assert_eq!(suffix.len(), 24);
     assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "{suffix}");
+}
+
+#[test]
+fn plan_c_identity_bounds_prefix_and_never_generates_unnamed_for_non_ascii_roots() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let non_ascii_root = tmp.path().join("workspace/量化");
+    std::fs::create_dir_all(&non_ascii_root).expect("non-ASCII root");
+    let non_ascii = plan_c_dir_name_from_root(&non_ascii_root).expect("non-ASCII project identity");
+    assert!(non_ascii.starts_with("project-"), "{non_ascii}");
+    assert!(!non_ascii.starts_with("unnamed-"), "{non_ascii}");
+
+    let long_root = tmp.path().join("a".repeat(200));
+    std::fs::create_dir(&long_root).expect("long root");
+    let long = plan_c_dir_name_from_root(&long_root).expect("bounded project identity");
+    let (prefix, suffix) = long.rsplit_once('-').expect("hash suffix");
+    assert!(prefix.len() <= 48, "prefix was not bounded: {prefix}");
+    assert_eq!(suffix.len(), 24);
+}
+
+#[test]
+fn plan_c_identity_uses_physical_root_identity_for_unicode_normalization_forms() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let nfc_root = tmp.path().join("one/caf\u{e9}");
+    let nfd_root = tmp.path().join("two/cafe\u{301}");
+    std::fs::create_dir_all(&nfc_root).expect("NFC root");
+    std::fs::create_dir_all(&nfd_root).expect("NFD root");
+    let nfc = plan_c_dir_name_from_root(&nfc_root).expect("NFC identity");
+    let nfd = plan_c_dir_name_from_root(&nfd_root).expect("NFD identity");
+    assert_ne!(
+        nfc, nfd,
+        "distinct physical root paths remain distinct even when display names are canonically equivalent"
+    );
 }
 
 /// Regression for issue #493: on case-insensitive filesystems (macOS APFS,
@@ -244,28 +313,19 @@ fn plan_c_dir_name_is_stable_for_same_root() {
 /// identity and intermittently breaking strict resolver paths. The Plan C
 /// alias rule now case-folds the canonical path before hashing on those
 /// platforms, so case-only spelling differences map to one stable alias.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(unix)]
 #[test]
-fn plan_c_dir_name_case_stable_on_case_insensitive_fs() {
-    // Non-existent paths keep canonicalize on its fallback branch (the raw
-    // input), so the result is deterministic regardless of the test host.
-    let upper = Path::new("/Users/plan_c/Quant_Analyzer_2026");
-    let lower = Path::new("/Users/plan_c/quant_analyzer_2026");
-    let name_upper = plan_c_dir_name_from_root(upper).expect("upper name");
-    let name_lower = plan_c_dir_name_from_root(lower).expect("lower name");
-    let (_, suffix_upper) = name_upper.rsplit_once('-').expect("upper suffix");
-    let (_, suffix_lower) = name_lower.rsplit_once('-').expect("lower suffix");
+fn plan_c_identity_is_identical_through_differently_named_symlink() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let physical = tmp.path().join("Physical-Repo");
+    let alias = tmp.path().join("different-display-name");
+    std::fs::create_dir(&physical).expect("physical root");
+    std::os::unix::fs::symlink(&physical, &alias).expect("root symlink");
+    let physical_name = plan_c_dir_name_from_root(&physical).expect("physical identity");
+    let alias_name = plan_c_dir_name_from_root(&alias).expect("symlink identity");
     assert_eq!(
-        suffix_upper, suffix_lower,
-        "stable-hash suffix must be identical for case-only path differences"
-    );
-    // The basename is intentionally NOT folded (preserves legacy casing and
-    // existing assertions); under case-insensitive FS semantics the two alias
-    // names still denote the same directory.
-    assert_eq!(
-        name_upper.to_lowercase(),
-        name_lower.to_lowercase(),
-        "alias must be equal under case-insensitive FS semantics"
+        physical_name, alias_name,
+        "both readable prefix and digest must derive from the canonical physical root"
     );
 }
 
@@ -276,12 +336,115 @@ fn plan_c_dir_name_case_stable_on_case_insensitive_fs() {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[test]
 fn plan_c_dir_name_case_distinct_on_case_sensitive_fs() {
-    let upper = Path::new("/tmp/plan_c/Repo");
-    let lower = Path::new("/tmp/plan_c/repo");
-    let name_upper = plan_c_dir_name_from_root(upper).expect("upper name");
-    let name_lower = plan_c_dir_name_from_root(lower).expect("lower name");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let upper = tmp.path().join("Repo");
+    let lower = tmp.path().join("repo");
+    std::fs::create_dir(&upper).expect("upper root");
+    std::fs::create_dir(&lower).expect("lower root");
+    let name_upper = plan_c_dir_name_from_root(&upper).expect("upper name");
+    let name_lower = plan_c_dir_name_from_root(&lower).expect("lower name");
     assert_ne!(
         name_upper, name_lower,
         "case-sensitive platforms must not collapse case-only paths into one alias"
     );
+}
+
+/// Hole 1 (#1356 salvage): the gen-2 raw-canonical FNV-8 alias scheme (#424,
+/// commit b1c3bb26) must be a compatibility candidate. On case-insensitive
+/// hosts a repo whose canonical path contains ASCII uppercase materialized a
+/// gen-2 suffix that differs from the gen-3 case-folded suffix (#493) and from
+/// the gen-4 BLAKE2s suffix (this PR). The salvage draft's {gen-4, gen-3, gen-1}
+/// chain missed it, so resolution would ignore real on-disk data and let the
+/// caller register a fresh empty DB — orphaning it (fail-closed violation).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn plan_c_gen2_raw_canonical_alias_is_recognized_not_orphaned() {
+    with_env_lock(|| {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        // An uppercase segment makes the raw vs case-folded canonical paths
+        // differ, so this host+path genuinely exercises the gen-2 gap.
+        let repo = tmp.path().join("Gen2Repo");
+        std::fs::create_dir(&repo).expect("repo");
+
+        let gen2 = plan_c_previous_raw_dir_name_from_root(&repo).expect("gen-2 identity");
+        let gen3 = plan_c_previous_dir_name_from_root(&repo).expect("gen-3 identity");
+        let gen4 = plan_c_dir_name_from_root(&repo).expect("gen-4 identity");
+        assert_ne!(
+            gen2, gen3,
+            "test host does not exercise the gen-2/gen-3 split"
+        );
+        assert_ne!(gen2, gen4);
+
+        // Only the gen-2 alias exists on disk (real historical data).
+        let gen2_db = plan_c_global_db_path(&gen2);
+        std::fs::create_dir_all(gen2_db.parent().unwrap()).expect("gen-2 alias parent");
+        std::fs::write(&gen2_db, b"gen-2 data").expect("gen-2 alias DB");
+
+        let resolved = plan_c_alias_db_for_root(&repo).expect("gen-2 alias must resolve, not fail");
+        assert_eq!(
+            std::fs::canonicalize(&resolved).unwrap(),
+            std::fs::canonicalize(&gen2_db).unwrap(),
+            "gen-2 alias data must be reused, never orphaned by a fresh gen-4 path"
+        );
+    });
+}
+
+/// Hole 1 (#1356 salvage): a genuinely new project — no on-disk alias under ANY
+/// of the four naming generations — must still resolve to a fresh gen-4 path so
+/// the fail-closed candidate set never over-closes and blocks new registration.
+#[test]
+fn plan_c_genuinely_absent_project_resolves_to_fresh_gen4_path() {
+    with_env_lock(|| {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("BrandNew");
+        std::fs::create_dir(&repo).expect("repo");
+
+        let gen4 = plan_c_dir_name_from_root(&repo).expect("gen-4 identity");
+        let resolved = plan_c_alias_db_for_root(&repo).expect("fresh registration path");
+        assert_eq!(resolved, plan_c_global_db_path(&gen4));
+    });
+}
+
+/// Hole 2 (#1356 salvage): when compatibility aliases diverge, the identity is
+/// ambiguous. `plan_c_split_brain` must NOT silently report "no split-brain"
+/// (the pre-fix `.ok()?` swallow) — it returns None but the ambiguity is a
+/// hard error at the routing gate `plan_c_alias_db_for_root`, which is exactly
+/// the fail-closed signal the daemon startup path aborts on.
+#[test]
+fn plan_c_split_brain_defers_to_routing_gate_on_ambiguous_identity() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local db parent");
+        std::fs::write(&local_db, b"repo-local").expect("local db");
+
+        let current = plan_c_dir_name_from_root(&repo).expect("current identity");
+        let previous = plan_c_previous_dir_name_from_root(&repo).expect("previous identity");
+        assert_ne!(current, previous);
+        for (name, bytes) in [
+            (&current, b"one".as_slice()),
+            (&previous, b"two".as_slice()),
+        ] {
+            let db = plan_c_global_db_path(name);
+            std::fs::create_dir_all(db.parent().unwrap()).expect("alias parent");
+            std::fs::write(db, bytes).expect("divergent alias DB");
+        }
+
+        // The routing gate fails closed on the ambiguity...
+        let gate = plan_c_alias_db_for_root(&repo);
+        assert!(
+            gate.is_err(),
+            "ambiguous identity must fail closed at the gate"
+        );
+        // ...and the diagnostic surface does not fabricate a clean result.
+        assert!(plan_c_split_brain(&local_db, &repo).is_none());
+    });
 }
