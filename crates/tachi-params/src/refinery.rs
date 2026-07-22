@@ -320,6 +320,71 @@ impl IssueSnapshotV1 {
     }
 }
 
+// ─── §3: PullRequestSnapshotV1 (semantic PR state) ──────────────────────────
+
+/// One review row contributing to a PR's semantic snapshot hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrReviewV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub state: String,
+    pub submitted_at: String,
+}
+
+/// One check-run / status-check row contributing to a PR's semantic snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrCheckV1 {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+    pub status: String,
+}
+
+/// Current-work PR snapshot per §3: body, state, head/base SHAs, reviews,
+/// checks, merge state, and `updated_at`. `pr_head_sha` (via `head_sha`)
+/// remains a code revision; `pr_snapshot_hash` is the PR-*state* revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestSnapshotV1 {
+    pub pr_ref: String,
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub head_sha: String,
+    pub base_sha: String,
+    pub reviews: Vec<PrReviewV1>,
+    pub checks: Vec<PrCheckV1>,
+    pub merged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_commit_sha: Option<String>,
+    pub updated_at: String,
+    pub pr_body_hash: String,
+    pub pr_snapshot_hash: String,
+}
+
+impl PullRequestSnapshotV1 {
+    /// Recompute `pr_snapshot_hash` per §3: SHA-256 over canonical JSON of
+    /// the PR's *semantic state* — body, state, head/base SHAs, reviews,
+    /// checks, merge fields, updated_at. Identity fields (pr_ref/repo/number)
+    /// and the hash fields themselves are excluded from the hash basis
+    /// (mirrors [`IssueSnapshotV1::compute_snapshot_hash`]).
+    pub fn compute_snapshot_hash(&self) -> Result<String, String> {
+        let basis = serde_json::json!({
+            "body": self.body,
+            "state": self.state,
+            "head_sha": self.head_sha,
+            "base_sha": self.base_sha,
+            "reviews": self.reviews,
+            "checks": self.checks,
+            "merged": self.merged,
+            "merge_commit_sha": self.merge_commit_sha,
+            "updated_at": self.updated_at,
+        });
+        canonical_json_sha256(&basis)
+    }
+}
+
 // ─── §4.2: Issue Refinery packet payloads ──────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -846,6 +911,67 @@ mod tests {
             base.compute_snapshot_hash().unwrap(),
             changed_body.compute_snapshot_hash().unwrap(),
             "a body change must change the semantic-state snapshot hash"
+        );
+    }
+
+    fn sample_pull_request_snapshot() -> PullRequestSnapshotV1 {
+        PullRequestSnapshotV1 {
+            pr_ref: "owner/repo#10".to_string(),
+            repo: "owner/repo".to_string(),
+            number: 10,
+            title: "t".to_string(),
+            body: "same body".to_string(),
+            state: "OPEN".to_string(),
+            head_sha: "aaa111".to_string(),
+            base_sha: "bbb222".to_string(),
+            reviews: vec![PrReviewV1 {
+                author: Some("alice".to_string()),
+                state: "APPROVED".to_string(),
+                submitted_at: "2026-07-13T01:00:00Z".to_string(),
+            }],
+            checks: vec![PrCheckV1 {
+                name: "ci".to_string(),
+                conclusion: Some("SUCCESS".to_string()),
+                status: "COMPLETED".to_string(),
+            }],
+            merged: false,
+            merge_commit_sha: None,
+            updated_at: "2026-07-13T00:00:00Z".to_string(),
+            pr_body_hash: String::new(),
+            pr_snapshot_hash: String::new(),
+        }
+    }
+
+    #[test]
+    fn pull_request_snapshot_hash_ignores_identity_fields_but_covers_semantic_state() {
+        let base = sample_pull_request_snapshot();
+        let mut renumbered = base.clone();
+        renumbered.pr_ref = "owner/repo#99".to_string();
+        renumbered.number = 99;
+        assert_eq!(
+            base.compute_snapshot_hash().unwrap(),
+            renumbered.compute_snapshot_hash().unwrap(),
+            "identity fields must not affect the PR semantic-state snapshot hash"
+        );
+
+        let mut changed_body = base.clone();
+        changed_body.body = "different body".to_string();
+        assert_ne!(
+            base.compute_snapshot_hash().unwrap(),
+            changed_body.compute_snapshot_hash().unwrap(),
+            "a one-byte body change must invalidate the PR snapshot hash"
+        );
+    }
+
+    #[test]
+    fn pull_request_snapshot_hash_is_stable_across_recomputation() {
+        let mut snap = sample_pull_request_snapshot();
+        let h1 = snap.compute_snapshot_hash().unwrap();
+        snap.pr_snapshot_hash = h1.clone();
+        let h2 = snap.compute_snapshot_hash().unwrap();
+        assert_eq!(
+            h1, h2,
+            "recomputing over the same semantic state must be stable"
         );
     }
 
