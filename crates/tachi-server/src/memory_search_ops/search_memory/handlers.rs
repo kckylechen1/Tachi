@@ -1,4 +1,7 @@
-use super::cache::{recall_cache_key, recall_cache_read_enabled, recall_cache_ttl_secs};
+use super::cache::{
+    recall_cache_epoch, recall_cache_key, recall_cache_read_enabled,
+    recall_cache_ttl_secs, recall_cache_write_through_is_safe,
+};
 use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
@@ -60,6 +63,17 @@ pub(crate) async fn handle_search_memory_with_access(
         && !memcore::should_skip_query(&params.query))
     .then(|| recall_cache_key(&params, top_k, project_only));
 
+    // tachi#1435 slice 4 / #2059 codex round 2: snapshot the cache epoch
+    // BEFORE touching the store at all (read lookup or the miss-path
+    // fresh-compute below). If a concurrent save/enrichment/contradiction
+    // commits + invalidates anywhere between this snapshot and this search's
+    // own write-through, the epoch compare at the write-through site (below)
+    // will see a mismatch and discard this run's (now possibly stale)
+    // result instead of resurrecting it into the cache. See
+    // `search_memory::cache`'s module doc for the full race + the
+    // cross-process safety boundary this in-memory counter relies on.
+    let epoch_at_read = recall_cache_epoch();
+
     if let Some(ref key) = cache_key {
         let ttl = recall_cache_ttl_secs();
         if let Ok(Some(hit)) = server.with_global_store_read(|store| {
@@ -104,19 +118,33 @@ pub(crate) async fn handle_search_memory_with_access(
     // Skip empty result sets so a transiently-empty answer never masks
     // newly-added memories until the TTL elapses. `reranked` records whether
     // this run actually reranked, so the read side can honor rerank intent.
+    //
+    // Epoch guard (tachi#1435 slice 4 / #2059 codex round 2): `rows` above
+    // was computed from a store snapshot taken sometime after
+    // `epoch_at_read` — if a save/enrichment/contradiction committed AND
+    // invalidated in the meantime, writing `rows` now would resurrect
+    // exactly the stale content that invalidation was trying to clear.
+    // Discarding here is always safe: the next miss just recomputes fresh.
     if let Some(key) = cache_key {
         if !rows.is_empty() {
-            let _ = server.with_global_store(|store| {
-                store
-                    .recall_cache_store(
-                        &key,
-                        &params.query,
-                        &serialized,
-                        rows.len() as i64,
-                        params.enable_rerank,
-                    )
-                    .map_err(|e| e.to_string())
-            });
+            if recall_cache_write_through_is_safe(epoch_at_read) {
+                let _ = server.with_global_store(|store| {
+                    store
+                        .recall_cache_store(
+                            &key,
+                            &params.query,
+                            &serialized,
+                            rows.len() as i64,
+                            params.enable_rerank,
+                        )
+                        .map_err(|e| e.to_string())
+                });
+            } else {
+                tracing::debug!(
+                    "[recall_cache] discarding stale write-through for {key} — \
+                     epoch advanced (concurrent invalidation) between read and write"
+                );
+            }
         }
     }
     render_search_response(&params.query, params.format.as_deref(), serialized)

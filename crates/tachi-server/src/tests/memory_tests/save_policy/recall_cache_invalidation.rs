@@ -125,6 +125,17 @@ async fn new_save_is_visible_immediately_even_behind_a_warm_recall_cache() {
         first.iter().any(|row| row["id"] == a_id),
         "seed row A must be visible on the first (cache-warming) search: {first:#?}"
     );
+    // codex CONCERN: prove the cache actually engaged (a non-empty row count)
+    // rather than the assertions below passing vacuously because the cache
+    // was never populated in the first place.
+    let warmed_entries = server
+        .with_global_store_read(|store| store.recall_cache_stats().map_err(|e| e.to_string()))
+        .expect("stats after warming search")
+        .entries;
+    assert!(
+        warmed_entries > 0,
+        "the warming search must have actually populated recall_cache, got {warmed_entries} rows"
+    );
 
     // Save B: the very next identical search must see it, not a replay of
     // the just-warmed cache entry from before B existed.
@@ -278,5 +289,102 @@ async fn exact_duplicate_save_does_not_bust_the_recall_cache() {
     assert_eq!(
         entries_after, entries_before,
         "dedupe short-circuit must not invalidate the recall cache"
+    );
+}
+
+// ── T5: successful save's receipt literally says recall_fence=="cleared" ──
+#[tokio::test]
+async fn successful_save_receipt_recall_fence_is_cleared() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+
+    let server = make_server();
+    let path = format!(
+        "/scratch/tachi/recall-cache-inval/{}/t5",
+        uuid::Uuid::new_v4()
+    );
+
+    let saved = handle_save_memory(&server, save_params(&path, "recall_fence literal contract probe"))
+        .await
+        .expect("save");
+    let saved_json: Value = serde_json::from_str(&saved).expect("save json");
+    assert_eq!(
+        saved_json["recall_fence"], "cleared",
+        "a successful save with the cache enabled must report recall_fence==\"cleared\" verbatim: {saved_json:#}"
+    );
+}
+
+// ── T6: a named-project save still clears the GLOBAL recall cache ─────────
+// (cross-store face — the cache lives in the global store regardless of
+// where write-affinity routes the entry itself).
+#[tokio::test]
+async fn named_project_save_clears_global_recall_cache() {
+    // `make_server_with_temp_home()` returns a `TempHomeGuard` that itself
+    // holds `crate::utils::global_test_lock()` for its lifetime (see
+    // `TempHomeGuard::new()` — `home_test_lock()` IS that same mutex) — do
+    // NOT also acquire it here, that std::sync::Mutex is not reentrant and
+    // a second `.lock()` on this thread would deadlock the test.
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+
+    let (server, _temp_home) = make_server_with_temp_home();
+    let project_name = format!("t6proj-{}", uuid::Uuid::new_v4().simple());
+    let project_db = crate::path_utils::plan_c_global_db_path(&project_name);
+    std::fs::create_dir_all(project_db.parent().expect("project db parent"))
+        .expect("create named project db dir");
+    // Touch a schema-initialized store at the named-project alias path so
+    // `resolve_named_project_db_path` finds it.
+    memcore::MemoryStore::open(project_db.to_str().expect("utf8 project db path"))
+        .expect("open named project db");
+
+    // Seed the GLOBAL recall cache directly — this is what the named-project
+    // save below must clear even though the entry itself lands elsewhere.
+    server
+        .with_global_store(|store| {
+            store
+                .recall_cache_store(
+                    "rc:t6-probe",
+                    "t6 probe query",
+                    "[{\"id\":\"seed\"}]",
+                    1,
+                    false,
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("seed global recall cache row");
+    let entries_before = server
+        .with_global_store_read(|store| store.recall_cache_stats().map_err(|e| e.to_string()))
+        .expect("stats before")
+        .entries;
+    assert!(
+        entries_before >= 1,
+        "seed row must exist in the global cache before the named-project save"
+    );
+
+    let mut params = save_params(
+        "/scratch/t6/named-project-probe",
+        "named project save must clear the global cache",
+    );
+    params.project = Some(project_name.clone());
+    params.project_explicit = true;
+
+    let saved = handle_save_memory(&server, params)
+        .await
+        .expect("save to named project");
+    let saved_json: Value = serde_json::from_str(&saved).expect("save json");
+    assert_eq!(
+        saved_json["read_target"]["project"], project_name,
+        "entry must actually land in the named project, not global: {saved_json:#}"
+    );
+    assert_eq!(saved_json["recall_fence"], "cleared", "{saved_json:#}");
+
+    let entries_after = server
+        .with_global_store_read(|store| store.recall_cache_stats().map_err(|e| e.to_string()))
+        .expect("stats after")
+        .entries;
+    assert_eq!(
+        entries_after, 0,
+        "a named-project save must still clear the GLOBAL recall cache (cross-store invalidation)"
     );
 }
