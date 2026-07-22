@@ -328,7 +328,10 @@ fn write_through_is_rejected_after_a_concurrent_invalidation_bumped_the_epoch() 
     // invalidating mid-flight, through the real choke point (not a hand-rolled
     // counter bump).
     let fence = invalidate_recall_cache_after_write(&server, "t8-simulated-concurrent-writer");
-    assert_eq!(fence, "cleared", "invalidation must have actually run and bumped the epoch");
+    assert_eq!(
+        fence, "cleared",
+        "invalidation must have actually run and bumped the epoch"
+    );
 
     assert!(
         !recall_cache_write_through_is_safe(epoch_at_read),
@@ -378,11 +381,11 @@ fn locked_write_through_rejects_a_write_snapshotted_before_invalidation_complete
     // the write-through attempt below ever runs — the straightforward,
     // already-completed-by-the-time-we-write case the mutual exclusion must
     // get right.
-    let fence = invalidate_recall_cache_after_write(
-        &server,
-        "t8-locked-write-through-red-proof",
+    let fence = invalidate_recall_cache_after_write(&server, "t8-locked-write-through-red-proof");
+    assert_eq!(
+        fence, "cleared",
+        "invalidation must have actually run and bumped the epoch"
     );
-    assert_eq!(fence, "cleared", "invalidation must have actually run and bumped the epoch");
 
     let wrote = recall_cache_write_through(
         &server,

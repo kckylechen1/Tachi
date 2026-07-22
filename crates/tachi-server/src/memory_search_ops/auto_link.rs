@@ -833,7 +833,10 @@ pub(crate) fn run_auto_linking(
     // sharing the same choke point + epoch bump as `save_memory`'s,
     // enrichment's, and contradiction's invalidation.
     if any_superseded {
-        crate::memory_search_ops::invalidate_recall_cache_after_write(server, "auto_link_supersede");
+        crate::memory_search_ops::invalidate_recall_cache_after_write(
+            server,
+            "auto_link_supersede",
+        );
     }
 
     // #1097 r1 codex review ① + r4 ③: the post-loop finalization (redacted
@@ -1529,6 +1532,7 @@ mod tests {
     /// (the post-supersede search still returns the superseded row from the
     /// cache warmed before the supersede ran).
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn auto_link_supersede_busts_a_warm_recall_cache() {
         let _lock = crate::utils::global_test_lock()
             .lock()
@@ -1554,8 +1558,7 @@ mod tests {
             .search_memory(Parameters(search_params_for(&needle)))
             .await
             .expect("warm search");
-        let first_rows: serde_json::Value =
-            serde_json::from_str(&first).expect("warm search json");
+        let first_rows: serde_json::Value = serde_json::from_str(&first).expect("warm search json");
         let first_rows = first_rows.as_array().expect("warm search rows array");
         assert!(
             first_rows.iter().any(|r| r["id"] == old_id),
