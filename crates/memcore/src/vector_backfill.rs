@@ -35,9 +35,9 @@ pub struct VectorBackfillCounts {
 /// [`crate::is_anchor_entry`]: anchors are graph endpoints, not embeddable
 /// memory content, so neither their vector presence nor absence is backfill
 /// work.
-const ANCHOR_SQL_WHERE: &str = "id LIKE 'anchor:%' OR path = '/anchors' OR path LIKE '/anchors/%'";
+const ANCHOR_SQL_WHERE: &str = "id GLOB 'anchor:*' OR path = '/anchors' OR path GLOB '/anchors/*'";
 const ANCHOR_SQL_WHERE_M: &str =
-    "m.id LIKE 'anchor:%' OR m.path = '/anchors' OR m.path LIKE '/anchors/%'";
+    "m.id GLOB 'anchor:*' OR m.path = '/anchors' OR m.path GLOB '/anchors/*'";
 
 fn eligible_where(scope: VectorBackfillScope, qualified: bool) -> String {
     let anchor_where = if qualified {
@@ -268,5 +268,63 @@ mod tests {
             .vector_backfill_entries(cache_scope, None)
             .expect("entries");
         assert_eq!(cache_counts.pending, cache_entries.len());
+    }
+
+    #[test]
+    fn anchor_membership_is_case_sensitive_like_the_rust_classifier() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("case-sensitive-anchors.db");
+        let store = MemoryStore::open(db_path.to_str().expect("utf8")).expect("open");
+
+        insert_memory(
+            &store,
+            "anchor:canonical",
+            "/notes",
+            "manual",
+            "note",
+            "{}",
+            false,
+        );
+        insert_memory(
+            &store,
+            "canonical-path-anchor",
+            "/anchors/project/x",
+            "manual",
+            "note",
+            "{}",
+            false,
+        );
+        insert_memory(
+            &store,
+            "Anchor:mixed-case-id",
+            "/notes",
+            "manual",
+            "note",
+            "{}",
+            false,
+        );
+        insert_memory(
+            &store,
+            "mixed-case-path",
+            "/Anchors/project/x",
+            "manual",
+            "note",
+            "{}",
+            false,
+        );
+
+        let scope = VectorBackfillScope::default();
+        let counts = store.vector_backfill_counts(scope).expect("counts");
+        let mut ids: Vec<_> = store
+            .vector_backfill_entries(scope, None)
+            .expect("entries")
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        ids.sort();
+
+        assert_eq!(counts.total, 2);
+        assert_eq!(counts.pending, 2);
+        assert_eq!(ids, ["Anchor:mixed-case-id", "mixed-case-path"]);
     }
 }
