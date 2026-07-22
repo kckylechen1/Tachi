@@ -38,6 +38,7 @@ pub mod store;
 pub mod types;
 #[cfg(feature = "admin")]
 pub mod vault;
+pub mod vector_backfill;
 
 #[cfg(feature = "admin")]
 pub use agent_profile::{
@@ -152,6 +153,7 @@ pub use vault::{
     VaultKeyRotation, SECRET_TYPES, SECRET_TYPE_API_KEY, SECRET_TYPE_COOKIE, SECRET_TYPE_JSON_BLOB,
     SECRET_TYPE_OAUTH_TOKEN, SECRET_TYPE_OTHER,
 };
+pub use vector_backfill::{VectorBackfillCounts, VectorBackfillEntry, VectorBackfillScope};
 
 use rusqlite::Connection;
 

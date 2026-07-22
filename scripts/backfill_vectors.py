@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Backfill missing vector embeddings for Tachi memory DBs.
+"""DEPRECATED manual-rescue backfill for Tachi memory DBs.
+
+Use the Rust command instead:
+    tachi backfill-vectors --db <db_path> [--dry-run]
+
+This script remains only for a manual rescue when the Rust CLI cannot run.
 
 Usage:
     python3 scripts/backfill_vectors.py <db_path> [--dry-run] [--batch-size 64]

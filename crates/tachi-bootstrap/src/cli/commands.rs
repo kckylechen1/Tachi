@@ -190,11 +190,14 @@ pub enum Commands {
     /// Backfill missing vector embeddings using Voyage API
     BackfillVectors {
         /// Target DB path (defaults to global DB)
-        #[arg(long, value_name = "PATH", conflicts_with = "project")]
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["project", "all_projects"])]
         db: Option<PathBuf>,
         /// Target named project DB under ~/.tachi/projects/<name>/memory.db
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all_projects")]
         project: Option<String>,
+        /// Run against every manifest-owned writable Tachi DB.
+        #[arg(long)]
+        all_projects: bool,
         /// Batch size for Voyage API calls (max 128)
         #[arg(long, default_value_t = 64)]
         batch_size: usize,

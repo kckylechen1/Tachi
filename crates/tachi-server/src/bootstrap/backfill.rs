@@ -4,7 +4,7 @@ use crate::vector_backfill::{
     VectorSweepStateUpdate,
 };
 use futures::{stream, StreamExt};
-use memcore::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent};
+use memcore::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, VectorBackfillScope};
 use std::error::Error;
 use std::fmt::Display;
 use std::io::{Error as IoError, ErrorKind};
@@ -56,47 +56,18 @@ fn backfill_write_open_context(schema_migration: &MigrationAuthority) -> DbOpenC
 }
 
 /// Total / with-vector counts for `tachi backfill-vectors`'s Total/Missing
-/// report, over "durable" rows.
-///
-/// #736 requirement 3: this MUST use the SAME durable-row predicate `tachi
-/// status`'s vector-coverage warning uses
-/// (`crate::status_ops::RECALL_CACHE_WHERE[_M]`), not a narrower
-/// single-condition `source != 'foundry_recall_rerank_cache'` filter. The two
-/// surfaces previously counted different bases: the narrow filter only
-/// excludes rows whose `source` column is exactly the recall-cache marker
-/// string, while the broad predicate also excludes rows identified by
-/// id/topic/path pattern or a metadata flag. A DB with recall-cache rows
-/// shaped the second way could show, say, 39 missing under `tachi status`
-/// and 0 missing here for the identical file. Sharing the constant makes the
-/// two surfaces agree by construction (see
-/// `bootstrap::backfill::tests::g3_counting_basis_matches_status_recall_cache_predicate`).
+/// report, over the portable memcore backfill population. That population
+/// preserves status's full recall-cache classification (id/source/topic/path/
+/// metadata/cache-key) while also keeping selection and count membership in
+/// one implementation.
 fn durable_vector_counts(
     store: &MemoryStore,
     skip_recall_cache: bool,
 ) -> Result<(i64, i64), Box<dyn Error>> {
-    if !skip_recall_cache {
-        return Ok(store.vector_stats()?);
-    }
-    let total: i64 = store.connection().query_row(
-        &format!(
-            "SELECT COUNT(*) FROM memories WHERE NOT ({})",
-            crate::status_ops::RECALL_CACHE_WHERE
-        ),
-        [],
-        |r| r.get(0),
-    )?;
-    let with_vec: i64 = store.connection().query_row(
-        &format!(
-            "SELECT COUNT(DISTINCT v.id)
-             FROM memories_vec v
-             JOIN memories m ON m.id = v.id
-             WHERE NOT ({})",
-            crate::status_ops::RECALL_CACHE_WHERE_M
-        ),
-        [],
-        |r| r.get(0),
-    )?;
-    Ok((total, with_vec))
+    let counts = store.vector_backfill_counts(VectorBackfillScope {
+        include_cache: !skip_recall_cache,
+    })?;
+    Ok((counts.total as i64, counts.with_vector as i64))
 }
 
 /// Backfill missing vector embeddings for a given DB.
@@ -186,7 +157,7 @@ pub(super) async fn run_backfill_vectors(
         }
     }
 
-    let (total, final_vec) = store.vector_stats()?;
+    let (total, final_vec) = durable_vector_counts(&store, skip_recall_cache)?;
     record_cli_vector_sweep_state(db_path, skip_recall_cache, processed, failed, last_error);
     println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
     Ok(())
