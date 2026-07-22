@@ -150,7 +150,7 @@ pub(super) fn rank_candidate_entries(
     apply_access_feedback(&entries_ref, &mut scores);
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
-    apply_decision_boost(&entries_ref, &mut scores);
+    apply_decision_boost(query, &entries_ref, &mut scores);
     apply_lexical_overlap_boost(
         query,
         opts.path_prefix.as_deref(),
@@ -288,8 +288,73 @@ fn apply_quality_boosts(
     }
 }
 
+/// Phase 2 P3 — topical-evidence gate for agent-judged boosts.
+///
+/// The `category == "decision"` signal is an *agent-authored prior*, not
+/// evidence that any retrieval channel matched the query. On the ops-audit
+/// hindsight fixture the decision seed reaches rank 2 inside `Surface::Memory`
+/// purely on DECISION_BOOST × the recency tie-break, with ZERO topical
+/// standing: its only symbolic score is the dense-map noise floor of a single
+/// shared token. This gate withholds the boost from candidates a real
+/// retrieval channel never matched, so an agent category can no longer
+/// out-rank a genuinely-retrieved research note.
+///
+/// A candidate has topical evidence when ANY real channel matched:
+/// * `fts > FTS_TOPICAL_EPSILON` — a genuine bm25 hit. The epsilon rejects the
+///   IDF-null crumb (measured ~1.2e-7 for a term present in every doc) while
+///   admitting a real match (measured ~0.55);
+/// * `vector > 0.0` — any dense-embedding similarity;
+/// * `symbolic * |Q_expanded| >= MIN_SYMBOLIC_OVERLAP` — at least two distinct
+///   expanded-query tokens overlap. `symbolic` is (distinct matched tokens /
+///   distinct expanded query size), so `symbolic * |Q_expanded|` recovers the
+///   raw distinct matched-token count; a single shared token (the corpus floor,
+///   `overlap == 1`) is the dense-map noise crumb and does NOT count.
+///
+/// # On `FTS_TOPICAL_EPSILON` (codex Concern A)
+/// The epsilon is **fixture-calibrated, not structurally derived**: `fts` here
+/// is the raw `-bm25` channel score and there is no guaranteed distributional
+/// gap at exactly `1e-3` separating an IDF-null crumb from a genuine weak match.
+/// The gate is safe anyway because it is an **OR of three channels**: a real
+/// match that happens to be weak in fts still opens the gate through
+/// `symbolic * |Q_expanded| >= 1.5` (≥2 distinct query tokens) or `vector > 0`.
+/// The *only* candidate this epsilon can false-negative is one whose SOLE signal
+/// is an fts score in the narrow band `(1e-3, genuine)` with exactly one
+/// distinct symbolic token and no vector — i.e. a near-IDF-null crumb, not a
+/// meaningful topical match. So the epsilon bounds a benign residual, and the
+/// two evidence-bearing channels carry any real weak-fts match. (If a future
+/// corpus shows genuine matches landing in that band, ε needs a structural
+/// re-derivation, not a fixture retune — that is Glinda's constant to move.)
+pub(super) const FTS_TOPICAL_EPSILON: f64 = 1e-3; // measured: bm25 IDF-null crumb 1.2e-7 vs genuine 0.55
+pub(super) const MIN_SYMBOLIC_OVERLAP: f64 = 1.5; // symbolic*|Q_expanded| >= 1.5  ==  >=2 distinct query tokens (1 = corpus floor)
+
+pub(super) fn has_topical_evidence(score: &HybridScore, expanded_query_tokens: usize) -> bool {
+    score.fts > FTS_TOPICAL_EPSILON
+        || score.vector > 0.0
+        || score.symbolic * expanded_query_tokens as f64 >= MIN_SYMBOLIC_OVERLAP
+}
+
+/// The symbolic scorer's exact denominator: the count of **distinct** expanded-
+/// query tokens. `scorer::symbolic_score_fields` (scorer/text.rs:90-112) builds
+/// `query_tokens` as a DEDUPLICATED `HashSet` of `tokenize(expanded_query)` and
+/// divides the overlap by its length, so `symbolic = distinct_overlap /
+/// distinct_Q`. The gate reconstructs `distinct_overlap = symbolic * this`, so
+/// it MUST use the same deduplicated count — a plain `tokenize().len()` (which
+/// keeps duplicate query terms) inflates the product and would leak
+/// DECISION_BOOST onto a single-distinct-token overlap when the query repeats a
+/// term (e.g. "alpha alpha beta": non-dedup 3 vs distinct 2). Single source of
+/// truth: the probe reconstructs the gate through this same helper.
+pub(super) fn distinct_expanded_query_tokens(query: &str) -> usize {
+    crate::scorer::tokenize(&symbolic_query_with_expansion(query))
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
 /// Same-store precision helper for ops-audit / #708 Phase D follow-ons:
-/// high-importance **decisions** must surface over keyword-flooded wiki/stubs.
+/// high-importance **decisions** must surface over keyword-flooded wiki/stubs —
+/// but ONLY when the decision itself was matched by a real retrieval channel
+/// (P3: gate on `has_topical_evidence`). A decision that stands purely on its
+/// agent-authored category, with no channel match, keeps its mechanical score.
 ///
 /// (The former research-path boost that lifted `/wiki/**/research/**` notes
 /// over denser architecture wikis was retired in Phase 2 — research notes are
@@ -299,6 +364,7 @@ fn apply_quality_boosts(
 ///
 /// Provisional multiplier — calibrate only via ops_audit + golden_corpus.
 fn apply_decision_boost(
+    query: &str,
     entries_ref: &HashMap<String, &MemoryEntry>,
     scores: &mut HashMap<String, HybridScore>,
 ) {
@@ -307,18 +373,25 @@ fn apply_decision_boost(
     /// provisional decision boost (tachi#708/#896 same-store precision).
     const DECISION_BOOST: f64 = 1.55;
 
+    // Distinct expanded-query token count — the symbolic scorer's own
+    // (deduplicated) denominator, so `symbolic * q_tokens` in the gate recovers
+    // the true distinct matched-token count (see `distinct_expanded_query_tokens`).
+    let q_tokens = distinct_expanded_query_tokens(query);
+
     for (id, entry) in entries_ref {
-        let mut mult = 1.0_f64;
-        if entry.category.eq_ignore_ascii_case("decision")
-            && entry.importance >= DECISION_IMPORTANCE_FLOOR
+        if !(entry.category.eq_ignore_ascii_case("decision")
+            && entry.importance >= DECISION_IMPORTANCE_FLOOR)
         {
-            mult *= DECISION_BOOST;
+            continue;
         }
-        if mult > 1.0 {
-            if let Some(score) = scores.get_mut(id) {
-                if score.final_score.is_finite() && score.final_score > 0.0 {
-                    score.final_score *= mult;
-                }
+        if let Some(score) = scores.get_mut(id) {
+            // P3 gate: the agent-authored decision category is a prior, not
+            // evidence. Only lift a candidate a real channel matched.
+            if !has_topical_evidence(score, q_tokens) {
+                continue;
+            }
+            if score.final_score.is_finite() && score.final_score > 0.0 {
+                score.final_score *= DECISION_BOOST;
             }
         }
     }
@@ -653,6 +726,21 @@ mod tests {
         }
     }
 
+    /// A score whose channels carry real topical evidence (fts above the P3
+    /// gate epsilon), so `apply_decision_boost`'s topical-evidence gate opens.
+    /// Order-preservation tests use this because P3 gates the boost on a real
+    /// channel match — a zero-channel `score()` now legitimately keeps its
+    /// mechanical value.
+    fn score_ev(final_score: f64) -> HybridScore {
+        HybridScore {
+            vector: 0.0,
+            fts: 0.55,
+            symbolic: 0.0,
+            decay: 0.0,
+            final_score,
+        }
+    }
+
     fn lexical_entry(id: &str, text: &str) -> MemoryEntry {
         let mut entry = entry(id, &format!("/notes/{id}"), "fact", 0.5);
         entry.summary = text.to_string();
@@ -694,7 +782,9 @@ mod tests {
         scores.insert("c".to_string(), score(1.0));
         let before = scores.clone();
 
-        apply_decision_boost(&entries_ref, &mut scores);
+        // Query is irrelevant here: no entry is a qualifying decision, so the
+        // boost never applies regardless of the topical-evidence gate.
+        apply_decision_boost("open issue priority decision", &entries_ref, &mut scores);
 
         assert_eq!(
             scores.get("a").unwrap().final_score,
@@ -732,12 +822,15 @@ mod tests {
         let entries_ref: HashMap<String, &MemoryEntry> =
             entries.iter().map(|(k, v)| (k.clone(), v)).collect();
 
+        // Each carries real topical evidence (fts above the gate epsilon), so
+        // the P3 gate opens and the boost fires — the property under test is
+        // that a uniform boost does not invert an already-correct order.
         let mut scores: HashMap<String, HybridScore> = HashMap::new();
-        scores.insert("d1".to_string(), score(3.0));
-        scores.insert("d2".to_string(), score(2.0));
-        scores.insert("d3".to_string(), score(1.0));
+        scores.insert("d1".to_string(), score_ev(3.0));
+        scores.insert("d2".to_string(), score_ev(2.0));
+        scores.insert("d3".to_string(), score_ev(1.0));
 
-        apply_decision_boost(&entries_ref, &mut scores);
+        apply_decision_boost("open issue priority decision", &entries_ref, &mut scores);
 
         // Every score moved (boost applied) ...
         assert_eq!(scores.get("d1").unwrap().final_score, 3.0 * 1.55);
@@ -772,12 +865,19 @@ mod tests {
         let entries_ref: HashMap<String, &MemoryEntry> =
             entries.iter().map(|(k, v)| (k.clone(), v)).collect();
 
+        // The decision seed carries real topical evidence, so the P3 gate
+        // opens and it is boosted; the noise rows are `fact` category and never
+        // qualify. The boost must not invert the already-correct order.
         let mut scores: HashMap<String, HybridScore> = HashMap::new();
-        scores.insert("ops-project-decision-priority".to_string(), score(1.2));
+        scores.insert("ops-project-decision-priority".to_string(), score_ev(1.2));
         scores.insert("ops-roadmap-noise".to_string(), score(1.0));
         scores.insert("ops-review-noise".to_string(), score(0.9));
 
-        apply_decision_boost(&entries_ref, &mut scores);
+        apply_decision_boost(
+            "open issue priority project decision sprint",
+            &entries_ref,
+            &mut scores,
+        );
 
         assert_eq!(
             ranked_ids(
@@ -877,5 +977,149 @@ mod tests {
 
         assert_eq!(scores["target"].final_score, 1.0);
         assert_eq!(scores["other"].final_score, 1.0);
+    }
+
+    // ---- Phase 2 P3: topical-evidence gate -------------------------------
+
+    fn channel_score(fts: f64, symbolic: f64, vector: f64) -> HybridScore {
+        HybridScore {
+            vector,
+            fts,
+            symbolic,
+            decay: 0.0,
+            final_score: 1.0,
+        }
+    }
+
+    #[test]
+    fn has_topical_evidence_matches_measured_tuples() {
+        // All tuples are the real post-P2 measurements from the p3 probe.
+        // Dense-map noise floor: IDF-null bm25 crumb + a single shared token
+        // (overlap 0.1*10 = 1.0 < 1.5) → CLOSED.
+        assert!(!has_topical_evidence(&channel_score(1.2e-7, 0.1, 0.0), 10));
+        // Genuine bm25 hit (fts 0.55 > 1e-3) → OPEN.
+        assert!(has_topical_evidence(&channel_score(0.55, 0.2, 0.0), 10));
+        // Symbolic-only, two-token overlap (0.2*10 = 2.0 >= 1.5) → OPEN.
+        assert!(has_topical_evidence(&channel_score(0.0, 0.2, 0.0), 10));
+        // Vector-only similarity → OPEN.
+        assert!(has_topical_evidence(&channel_score(0.0, 0.0, 0.5), 10));
+        // Single-token overlap floor (0.1*10 = 1.0 < 1.5) → CLOSED (boundary).
+        assert!(!has_topical_evidence(&channel_score(0.0, 0.1, 0.0), 10));
+    }
+
+    #[test]
+    fn gate_failing_candidates_rank_purely_mechanically() {
+        // Property: a candidate that FAILS the topical-evidence gate keeps its
+        // exact mechanical final_score after `apply_decision_boost`, for ANY
+        // category/importance — zero-evidence candidates rank purely
+        // mechanically. Replaces the retired band-bound property test; a
+        // deterministic grid stands in for a proptest generator (no proptest
+        // dependency in this crate).
+        let query = "open issue priority project decision sprint governance";
+        // Use the production denominator so the test's gate pre-check matches
+        // exactly what `apply_decision_boost` computes internally.
+        let q_tokens = distinct_expanded_query_tokens(query);
+        assert!(q_tokens > 0);
+        // symbolic value whose overlap (symbolic * q_tokens) stays below the
+        // two-token threshold, so the symbolic half of the gate fails.
+        let sym_below_overlap = (MIN_SYMBOLIC_OVERLAP / q_tokens as f64) * 0.99;
+
+        let ftss = [0.0_f64, 5e-4, FTS_TOPICAL_EPSILON]; // all <= epsilon → fts half fails
+        let syms = [0.0_f64, sym_below_overlap]; // overlap < 1.5 → symbolic half fails
+        let categories = ["decision", "DECISION", "fact", "note"];
+        let importances = [0.5_f64, 0.85, 0.9, 1.0];
+        let finals = [0.1_f64, 1.0, 3.0, 12.5];
+
+        for &fts in &ftss {
+            for &sym in &syms {
+                for &cat in &categories {
+                    for &imp in &importances {
+                        for &fin in &finals {
+                            // vector stays 0.0 — a positive vector would OPEN the gate.
+                            let mut sc = channel_score(fts, sym, 0.0);
+                            sc.final_score = fin;
+                            assert!(
+                                !has_topical_evidence(&sc, q_tokens),
+                                "grid point unexpectedly passes the gate: \
+                                 fts={fts} sym={sym} q={q_tokens}"
+                            );
+
+                            let e = entry("x", "/notes/x", cat, imp);
+                            let entries: HashMap<String, MemoryEntry> =
+                                [(e.id.clone(), e)].into_iter().collect();
+                            let entries_ref: HashMap<String, &MemoryEntry> =
+                                entries.iter().map(|(k, v)| (k.clone(), v)).collect();
+                            let mut scores: HashMap<String, HybridScore> =
+                                [("x".to_string(), sc)].into_iter().collect();
+
+                            apply_decision_boost(query, &entries_ref, &mut scores);
+
+                            assert_eq!(
+                                scores["x"].final_score, fin,
+                                "zero-evidence candidate (cat={cat} imp={imp}) must keep its \
+                                 mechanical final_score {fin}; the gate must have closed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_query_term_does_not_leak_boost_via_nondedup_count() {
+        // Regression for BUG F (codex cross-vendor review): the gate's q_tokens
+        // MUST be the deduplicated distinct expanded-token count — the symbolic
+        // scorer's own denominator (scorer/text.rs:90) — not `tokenize().len()`.
+        // A query with a repeated term makes `tokenize().len() > distinct_Q`;
+        // reconstructing overlap as `symbolic * non_dedup` then inflates a
+        // single-distinct-token match past the threshold and leaks DECISION_BOOST.
+        let query = "alpha alpha beta"; // neither token expands (scorer/text map)
+        let expanded = symbolic_query_with_expansion(query);
+        let non_dedup = crate::scorer::tokenize(&expanded).len();
+        let distinct = distinct_expanded_query_tokens(query);
+
+        // Premise guards: without an actual duplicate the regression can't
+        // manifest and the test would be vacuous.
+        assert!(
+            non_dedup > distinct,
+            "test premise: expected a repeated expanded token \
+             (non_dedup={non_dedup} > distinct={distinct}); expanded={expanded:?}"
+        );
+
+        // A decision candidate matching exactly ONE distinct query token:
+        // symbolic = 1/distinct, so deduped overlap = symbolic*distinct = 1.0
+        // (< 1.5 → gate CLOSED after the fix), while the buggy non-dedup overlap
+        // = symbolic*non_dedup would reach the threshold and OPEN the gate.
+        let symbolic = 1.0 / distinct as f64;
+        assert!(
+            symbolic * non_dedup as f64 >= MIN_SYMBOLIC_OVERLAP,
+            "test premise: non-dedup overlap {} must reach the threshold to \
+             exercise the leak (else the test proves nothing)",
+            symbolic * non_dedup as f64
+        );
+        // Sanity: the deduped (correct) overlap is a single token, below floor.
+        assert!(symbolic * distinct as f64 <= 1.0 + f64::EPSILON);
+
+        let e = entry("dec", "/notes/dec", "decision", 0.9);
+        let entries: HashMap<String, MemoryEntry> = [(e.id.clone(), e)].into_iter().collect();
+        let entries_ref: HashMap<String, &MemoryEntry> =
+            entries.iter().map(|(k, v)| (k.clone(), v)).collect();
+        let mut sc = channel_score(0.0, symbolic, 0.0);
+        sc.final_score = 2.0;
+        let mut scores: HashMap<String, HybridScore> =
+            [("dec".to_string(), sc)].into_iter().collect();
+
+        apply_decision_boost(query, &entries_ref, &mut scores);
+
+        assert_eq!(
+            scores["dec"].final_score,
+            2.0,
+            "BUG F: a single-distinct-token overlap under a repeated-term query must NOT \
+             receive DECISION_BOOST — the gate must use the deduplicated distinct count \
+             (symbolic*distinct = 1.0 < {MIN_SYMBOLIC_OVERLAP}), not tokenize().len()={non_dedup} \
+             which inflates the overlap to {} and would leak the boost.",
+            symbolic * non_dedup as f64
+        );
     }
 }
