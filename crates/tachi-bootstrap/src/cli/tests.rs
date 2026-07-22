@@ -2,6 +2,41 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn vault_exec_cli_parses_require_and_trailing_command() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "exec",
+        "--keychain",
+        "--consumer",
+        "clanker",
+        "--require",
+        "ZHIPUAI_API_KEY,XAI_API_KEY",
+        "--",
+        "opencode",
+        "run",
+        "--auto",
+    ])
+    .expect("vault exec invocation should parse");
+
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Vault {
+            action: VaultAction::Exec {
+                keychain: true,
+                consumer: Some(consumer),
+                require,
+                command,
+                ..
+            }
+        }) if consumer == "clanker"
+            && require == ["ZHIPUAI_API_KEY", "XAI_API_KEY"]
+            && command == ["opencode", "run", "--auto"]
+    ));
+    assert!(Cli::try_parse_from(["tachi", "vault", "exec", "--keychain"]).is_err());
+}
+
+#[test]
 fn exact_dedupe_cli_is_nested_under_repair_dedupe() {
     let parsed = Cli::try_parse_from([
         "tachi",

@@ -3,6 +3,7 @@ use memcore::MemoryStore;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use tachi_bootstrap::cli::Cli;
 
 mod backfill;
@@ -24,6 +25,36 @@ mod tidy;
 mod vault_sync;
 
 mod vault_cli;
+
+#[derive(Debug)]
+pub(crate) struct VaultExecExit {
+    code: i32,
+    status: ExitStatus,
+}
+
+impl VaultExecExit {
+    pub(crate) fn from_status(status: ExitStatus) -> Self {
+        Self {
+            // A signal has no portable process exit code to re-emit. Keep the
+            // conventional non-zero failure code while preserving every real
+            // child exit code unchanged.
+            code: status.code().unwrap_or(1),
+            status,
+        }
+    }
+
+    pub(crate) fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+impl std::fmt::Display for VaultExecExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "vault exec child exited with {}", self.status)
+    }
+}
+
+impl std::error::Error for VaultExecExit {}
 
 // Re-exports preserving the legacy public surface so external callers
 // (`main.rs`, `tests.rs`) keep resolving symbols via `crate::bootstrap::<name>`.
