@@ -128,8 +128,8 @@ pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
 };
 pub use recall_cache::{
-    recall_cache_get, recall_cache_purge_stale, recall_cache_put, recall_cache_record_hit,
-    recall_cache_stats, RecallCacheHit, RecallCacheStats,
+    recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
+    recall_cache_record_hit, recall_cache_stats, RecallCacheHit, RecallCacheStats,
 };
 pub use sandbox::{
     check_sandbox_access, evaluate_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit,

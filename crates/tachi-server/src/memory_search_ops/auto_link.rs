@@ -594,6 +594,17 @@ pub(crate) fn run_auto_linking(
     // `finalize_auto_link_receipt` so the raw (possibly caller-hostile) id is
     // never stored on the receipt before redaction.
     let task_start = sample.then(Instant::now);
+    // tachi#1435 slice 5 / #2059 codex round 3, tooth A (BUG fix): auto-link's
+    // supersede write (`mark_superseded_closing_validity` below) closes an
+    // old memory's validity the same way a contradiction-detection supersede
+    // does — it changes what a subsequent search surfaces, so a stale cached
+    // search result showing the now-superseded row must not survive it.
+    // Tracked once across this whole run (both loops below, not per edge)
+    // and invalidated once at the end, gated on the row having ACTUALLY been
+    // closed (`mark_superseded_closing_validity`'s affected-row count > 0) —
+    // re-superseding an already-superseded row is a no-op that changed
+    // nothing search-visible and must not pay for a cache bust.
+    let mut any_superseded = false;
     let mut receipt = sample.then(|| AutoLinkReceipt {
         entry_id: String::new(),
         entity_count: entity_list.len(),
@@ -771,13 +782,14 @@ pub(crate) fn run_auto_linking(
                 // side channel is sampled bookkeeping only. An outer Err before
                 // the closure runs leaves the default `InsertFailed` outcome.
                 let mut edge_outcome = EdgeWriteOutcome::InsertFailed;
+                let mut superseded_rows: usize = 0;
                 let save_edge_action = |store: &mut MemoryStore| -> Result<(), String> {
                     store.add_edge(&edge).map_err(|e| e.to_string())?;
                     if sample {
                         edge_outcome = EdgeWriteOutcome::InsertOkPostWriteFailed;
                     }
                     if supersedes {
-                        store
+                        superseded_rows = store
                             .mark_superseded_closing_validity(&result.entry.id, &entry.id, &now)
                             .map_err(|e| e.to_string())?;
                     } else if reinforces {
@@ -799,6 +811,9 @@ pub(crate) fn run_auto_linking(
                 } else {
                     server.with_store_for_scope(target_db, save_edge_action)
                 };
+                if superseded_rows > 0 {
+                    any_superseded = true;
+                }
                 if let (Some(receipt), Some(write_timer)) = (receipt.as_mut(), write_timer) {
                     receipt.write_elapsed += write_timer.elapsed();
                 }
@@ -812,6 +827,15 @@ pub(crate) fn run_auto_linking(
             }
         }
     }
+
+    // tachi#1435 slice 5 / #2059 codex round 3, tooth A: run-granularity
+    // recall-cache bust (not per edge — see `any_superseded`'s doc above),
+    // sharing the same choke point + epoch bump as `save_memory`'s,
+    // enrichment's, and contradiction's invalidation.
+    if any_superseded {
+        crate::memory_search_ops::invalidate_recall_cache_after_write(server, "auto_link_supersede");
+    }
+
     // #1097 r1 codex review ① + r4 ③: the post-loop finalization (redacted
     // `entry_id` + `total_elapsed`) is routed through
     // `finalize_auto_link_receipt` so it is the SAME tested contract the unit
@@ -832,6 +856,9 @@ pub(crate) fn run_auto_linking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvRestore;
+    use crate::tool_params::SearchMemoryParams;
+    use rmcp::handler::server::wrapper::Parameters;
     use serde_json::json;
 
     fn test_entry(id: &str, text: &str) -> MemoryEntry {
@@ -1458,6 +1485,127 @@ mod tests {
         // caller-controllable, so it is still never emitted.
         assert_eq!(receipt.entry_id, REDACTED_ENTRY_ID);
         assert_eq!(receipt.entity_count, 2);
+    }
+
+    fn search_params_for(query: &str) -> SearchMemoryParams {
+        SearchMemoryParams {
+            query: query.to_string(),
+            query_vec: None,
+            top_k: 10,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+            // Explicit JSON so assertions can index rows by id instead of
+            // parsing the markdown digest (tachi#1201 k3 default).
+            format: Some("json".to_string()),
+        }
+    }
+
+    /// tachi#1435 slice 5 / #2059 codex round 3, "tooth A" (BUG, pre-fix RED):
+    /// auto-link's supersede write closes an old memory's validity the same
+    /// way a contradiction-detection supersede does (`memory_search_ops::
+    /// contradiction`) — a stale cached search result still showing the
+    /// now-superseded row must not survive it. Drives the exact same
+    /// `run_auto_linking` entry point `run_auto_linking_reports_live_read_write_and_total_timers`
+    /// above already exercises for its supersede fixture, reused here.
+    ///
+    /// `git stash`/`if false`-gate this file's `any_superseded` tracking +
+    /// its `invalidate_recall_cache_after_write` call at the end of
+    /// `run_auto_linking` and rerun this single test to see it fail pre-fix
+    /// (the post-supersede search still returns the superseded row from the
+    /// cache warmed before the supersede ran).
+    #[tokio::test]
+    async fn auto_link_supersede_busts_a_warm_recall_cache() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+
+        let server = crate::tests::make_server();
+        let needle = format!("AutoLinkSentinel{}", uuid::Uuid::new_v4().simple());
+        let path = format!("/alpha-{}", uuid::Uuid::new_v4());
+
+        // The row auto-link will supersede.
+        let old_id = format!("old-{}", uuid::Uuid::new_v4());
+        let mut old = test_entry(&old_id, &format!("{needle} original observation"));
+        old.entities = vec!["EntA".to_string(), "EntB".to_string()];
+        old.path = path.clone();
+        old.timestamp = "2026-01-01T00:00:00Z".to_string();
+        server
+            .with_global_store(|store| store.upsert(&old).map_err(|e| format!("seed old: {e}")))
+            .expect("seed old");
+
+        // Warm the cache: pre-supersede, the sentinel query hits the old row.
+        let first = server
+            .search_memory(Parameters(search_params_for(&needle)))
+            .await
+            .expect("warm search");
+        let first_rows: serde_json::Value =
+            serde_json::from_str(&first).expect("warm search json");
+        let first_rows = first_rows.as_array().expect("warm search rows array");
+        assert!(
+            first_rows.iter().any(|r| r["id"] == old_id),
+            "old row must be visible pre-supersede: {first_rows:#?}"
+        );
+
+        // The freshly-"saved" entry, mirroring what `save_memory` upserts
+        // before it triggers auto-link — same shared-entity/path/newer-
+        // timestamp shape `run_auto_linking_reports_live_read_write_and_total_timers`
+        // uses to force a supersede.
+        let fresh_id = uuid::Uuid::new_v4().to_string();
+        let mut fresh = test_entry(&fresh_id, &format!("{needle} newer observation"));
+        fresh.entities = old.entities.clone();
+        fresh.path = path;
+        fresh.timestamp = "2026-01-02T00:00:00Z".to_string();
+        server
+            .with_global_store(|store| store.upsert(&fresh).map_err(|e| format!("save fresh: {e}")))
+            .expect("save fresh");
+
+        let receipt = run_auto_linking(
+            &server,
+            &fresh,
+            &fresh.entities,
+            DbScope::Global,
+            None,
+            true,
+        )
+        .expect("sampled auto-link pass must return a receipt");
+        assert!(
+            receipt.edges_written >= 1,
+            "fixture must trigger a supersede edge write, got receipt={receipt:?}"
+        );
+
+        // Post-fix: the SAME query must no longer surface the superseded old
+        // row — not because a fresh compute always excludes it (it does),
+        // but because the very next search must not be served the
+        // pre-supersede cached answer that still contains it.
+        let second = server
+            .search_memory(Parameters(search_params_for(&needle)))
+            .await
+            .expect("post-supersede search");
+        let second_rows: serde_json::Value =
+            serde_json::from_str(&second).expect("post search json");
+        let second_rows = second_rows.as_array().expect("post search rows array");
+        assert!(
+            !second_rows.iter().any(|r| r["id"] == old_id),
+            "the superseded row must NOT appear in the very next identical \
+             search — it must not survive via the pre-supersede cached \
+             answer: {second_rows:#?}"
+        );
     }
 
     // -----------------------------------------------------------------------

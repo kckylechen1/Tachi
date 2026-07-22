@@ -256,6 +256,16 @@ pub(crate) async fn handle_save_memory(
         upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
     }
 
+    // #1435 slice 3 / #2059: write-side recall-cache bust, shared with the
+    // enrichment-flush and contradiction-supersede paths (see
+    // `search_memory::cache::invalidate_recall_cache_after_write`'s doc for
+    // the epoch guard + cross-process boundary). Both dedupe short-circuits
+    // above (`find_exact_path_text_duplicate` and
+    // `IdlessUpsertResult::Duplicate`) already returned before this point,
+    // so an exact-duplicate no-write correctly never invalidates.
+    let recall_fence =
+        crate::memory_search_ops::invalidate_recall_cache_after_write(server, "save");
+
     let continuity_event = if emit_continuity {
         Some(crate::continuity_ops::emit_memory_saved_event(
             server,
@@ -284,6 +294,7 @@ pub(crate) async fn handle_save_memory(
         &entry,
         &timestamp,
         target_db,
+        named_project.as_deref(),
         enrichment_enqueued,
         needs_embedding,
         needs_summary,
@@ -292,6 +303,7 @@ pub(crate) async fn handle_save_memory(
         secret_redactions,
         &requested_scope,
         scope_warning,
+        recall_fence,
     );
     if let Some(event) = continuity_event {
         response.insert("continuity_event".into(), event);

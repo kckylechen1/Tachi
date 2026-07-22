@@ -132,6 +132,20 @@ pub fn recall_cache_purge_stale(
     Ok(removed)
 }
 
+/// Unconditionally clear every recall-cache row (tachi#1435 slice 3 / #2059).
+///
+/// A save must never be masked by a stale cached search result — unlike
+/// `recall_cache_purge_stale` (age-gated housekeeping), this is the write-side
+/// cache-bust: it runs after every successful save commit, regardless of any
+/// row's TTL, so the very next search recomputes instead of replaying a
+/// pre-save answer. Blunt (whole-table) by design for this slice; precise
+/// per-key invalidation is explicitly out of scope (see the frozen spec's
+/// "不做" list).
+pub fn recall_cache_invalidate_all(conn: &Connection) -> Result<usize, MemoryError> {
+    let removed = conn.execute("DELETE FROM recall_cache", [])?;
+    Ok(removed)
+}
+
 /// Aggregate stats for diagnostics.
 pub fn recall_cache_stats(conn: &Connection) -> Result<RecallCacheStats, MemoryError> {
     let stats = conn.query_row(
@@ -254,5 +268,23 @@ mod tests {
         let cutoff = (now + chrono::Duration::seconds(1)).to_rfc3339();
         assert_eq!(recall_cache_purge_stale(c, &cutoff).unwrap(), 1);
         assert_eq!(recall_cache_stats(c).unwrap().entries, 0);
+    }
+
+    #[test]
+    fn invalidate_all_clears_every_row_regardless_of_ttl() {
+        let s = store();
+        let c = &s.conn;
+        let now = Utc::now();
+        // A fresh row (well within any TTL) and a stale one — invalidate_all
+        // must not TTL-gate; both must be gone afterward.
+        recall_cache_put(c, "rc:fresh", "q", "[1]", 1, false, &now.to_rfc3339()).unwrap();
+        let old = now - chrono::Duration::seconds(10_000);
+        recall_cache_put(c, "rc:stale", "q", "[2]", 1, false, &old.to_rfc3339()).unwrap();
+        assert_eq!(recall_cache_stats(c).unwrap().entries, 2);
+
+        let removed = recall_cache_invalidate_all(c).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(recall_cache_stats(c).unwrap().entries, 0);
+        assert!(recall_cache_get(c, "rc:fresh", 0, now).unwrap().is_none());
     }
 }

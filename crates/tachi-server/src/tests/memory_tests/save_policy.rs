@@ -7,4 +7,5 @@ mod dedup;
 mod legacy_fields;
 mod metadata_validation;
 mod provenance;
+mod recall_cache_invalidation;
 mod redaction_scrub;
