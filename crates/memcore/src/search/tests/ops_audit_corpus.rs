@@ -15,19 +15,20 @@
 //! 2. **Adjacent wiki steal → surface split**: a labeled *research note*
 //!    (owner-ratified `Surface::Memory`) competing with denser architecture
 //!    wikis (`Surface::Docs`). Phase 2 dissolves the steal by scoping the
-//!    query to Memory — the Docs wikis are excluded, so the note surfaces
-//!    top-3 on relevance rather than needing a research-path magic multiplier
-//!    (retired). Rank-1 within Memory awaits the later provenance-band.
+//!    query to Memory — the Docs wikis are excluded, so the note surfaces on
+//!    relevance rather than needing a research-path magic multiplier (retired).
+//!    Phase 2 P3 restores it to RANK 1 within Memory: the topical-evidence gate
+//!    withholds DECISION_BOOST from the zero-evidence decision seed that used to
+//!    sit above it.
 //! 3. **Governance miss@10**: task framing / governance decision missing from
 //!    top-10 when component-registry stubs and old roadmap dominate.
 //!
-//! # Assertion layers (post same-store precision fix + Phase 2 surface split)
+//! # Assertion layers (post same-store precision fix + Phase 2 surface split + P3 gate)
 //! - **Ratchet / product layers** (plain `#[test]`): rank-1 for the decision
-//!   (fused pool); top-3 for the research note within `Surface::Memory`
-//!   (above the registry-stub noise — not rank-1, because the un-capped
-//!   DECISION_BOOST still outranks a labeled research note; that lift is the
-//!   later provenance-band's job); hit@5 for governance. Pre-fix red baseline
-//!   was ranks 6 / 7 / miss@10 — do not re-introduce those shapes.
+//!   (fused pool); rank-1 for the research note within `Surface::Memory`
+//!   (above the registry-stub noise — P3's evidence gate drops the zero-evidence
+//!   DECISION_BOOST that used to outrank it); hit@5 for governance. Pre-fix red
+//!   baseline was ranks 6 / 7 / miss@10 — do not re-introduce those shapes.
 //! - **Report** (`#[ignore]` diagnostic): prints ranks for floor refresh.
 //!
 //! # Determinism
@@ -475,10 +476,11 @@ const SEEDS: &[Seed] = &[
 enum DefectClass {
     /// Recent project decision buried under older roadmap/review noise.
     RankDilution,
-    /// Labeled research note (Memory surface) must land top-3 in its surface,
+    /// Labeled research note (Memory surface) must land RANK 1 in its surface,
     /// above the registry-stub noise; the adjacent architecture wikis are Docs
-    /// and excluded by surface scoping. (Not rank-1: DECISION_BOOST outranks
-    /// it within Memory — restoring rank-1 is the later provenance-band.)
+    /// and excluded by surface scoping. (Rank-1 restored in P3: the
+    /// topical-evidence gate drops the zero-evidence DECISION_BOOST that used to
+    /// outrank the note within Memory.)
     AdjacentWikiSteal,
     /// Governance framing missing from top-10 under registry stubs.
     GovernanceMiss,
@@ -510,10 +512,10 @@ const CASES: &[CaseSpec] = &[
         name: "hindsight-research-wiki",
         // Research-shaped query scoped to Memory: the Docs architecture wikis
         // that used to steal rank 1 are excluded by the surface filter, so the
-        // labeled research note surfaces near the top within Memory (top-3,
-        // above the registry-stub noise) — no research-path boost needed. It
-        // is NOT rank-1: the un-capped DECISION_BOOST lifts a decision seed
-        // above it (see the ratchet arm for why that is a later piece).
+        // labeled research note surfaces within Memory — no research-path boost
+        // needed. P3 makes it RANK 1: the topical-evidence gate withholds
+        // DECISION_BOOST from the zero-evidence decision seed that used to sit
+        // above it (see the ratchet arm).
         query: "hindsight research evaluation protocol for memory recall quality",
         expected: "ops-wiki-research-hindsight",
         surface: Some(Surface::Memory),
@@ -543,13 +545,17 @@ fn seed_entry(s: &Seed) -> MemoryEntry {
     e
 }
 
-fn seed_corpus(conn: &mut Connection) {
+// `pub(super)` so the P3 Step-0 probe (`p3_probe.rs`) reuses the EXACT same
+// corpus + search options as this ratchet — the probe must measure the real
+// post-P2 ranking on the identical fixture, not a divergent copy. Test-only
+// visibility; no runtime behavior changes.
+pub(super) fn seed_corpus(conn: &mut Connection) {
     for s in SEEDS {
         insert_entry(conn, seed_entry(s));
     }
 }
 
-fn search_opts(surface: Option<Surface>) -> SearchOptions {
+pub(super) fn search_opts(surface: Option<Surface>) -> SearchOptions {
     SearchOptions {
         top_k: 40,
         candidates_per_channel: 128,
@@ -584,21 +590,23 @@ fn returned_ids(conn: &Connection, query: &str, surface: Option<Surface>) -> Vec
 }
 
 // ---------------------------------------------------------------------------
-// Floors after same-store precision (#708 Phase D decision boost) and the
-// Phase 2 surface split. Pre-fix red baseline (report on pre-#708 branch):
-// ranks 6 / 7 / miss@10. The research case now ratchets TOP-3 WITHIN
-// `Surface::Memory` (above the registry-stub noise; the research-path boost
-// was retired) — not rank-1, because the un-capped DECISION_BOOST (out of P2
-// scope) still lifts a decision seed above a labeled research note; that
-// rank-1 lift is the later provenance-band's job. The decision and governance
-// cases stay on the fused pool (`surface: None`). Floors ratchet upward per
-// their case surface — never re-introduce the buried shapes.
+// Floors after same-store precision (#708 Phase D decision boost), the Phase 2
+// surface split, and the Phase 2 P3 topical-evidence gate. Pre-fix red baseline
+// (report on pre-#708 branch): ranks 6 / 7 / miss@10. The research case now
+// ratchets RANK 1 WITHIN `Surface::Memory` (above the registry-stub noise; the
+// research-path boost was retired) — P3's evidence gate withholds
+// DECISION_BOOST from the zero-evidence decision seed that used to sit above
+// it, so the genuinely-retrieved note wins on relevance alone. The decision and
+// governance cases stay on the fused pool (`surface: None`) with real topical
+// evidence, so they retain their boost. Floors ratchet upward per their case
+// surface — never re-introduce the buried shapes.
 // ---------------------------------------------------------------------------
 
-/// RATCHET LAYER — green after the same-store precision fix + surface split.
-/// Locks product ranks so regressions re-burying decisions/research turn CI
-/// red. Each case is scored under its own `surface` scope (see each arm for
-/// the exact criterion — rank-1 for dilution, top-3 for the research note).
+/// RATCHET LAYER — green after the same-store precision fix + surface split +
+/// P3 evidence gate. Locks product ranks so regressions re-burying
+/// decisions/research turn CI red. Each case is scored under its own `surface`
+/// scope (see each arm for the exact criterion — rank-1 for dilution, rank-1
+/// within Memory for the research note, hit@5 for governance).
 #[test]
 fn ops_audit_corpus_ratchet_floors() {
     let mut conn = setup();
@@ -620,24 +628,23 @@ fn ops_audit_corpus_ratchet_floors() {
                 );
             }
             DefectClass::AdjacentWikiSteal => {
-                // Owner-ratified criterion (b): the labeled research note must
-                // land in the TOP-3 of its Memory surface AND strictly above
-                // every registry-stub noise row — NOT rank-1. Within Memory the
-                // un-capped DECISION_BOOST (1.55x, out of P2 scope) lifts
-                // `ops-project-decision-priority` above the research note, so
-                // rank-1 is unreachable here; restoring a labeled research note
-                // to rank-1 is the provenance-band's job (a later piece). This
-                // arm deliberately targets top-3 and does not hide that
-                // looseness. The current fixture is observed to place the note
-                // at rank 2 (behind only the DECISION_BOOST'd decision seed),
-                // but rank 2 is NOT asserted — (b) is top-3, and pinning an
-                // exact rank would re-introduce the whack-a-mole this piece
-                // dissolves.
-                assert!(
-                    matches!(rank, Some(r) if r <= 3),
-                    "case `{}`: expected `{}` in top-3 within Surface::Memory \
-                     (rank-1 needs the later provenance-band — DECISION_BOOST \
-                     outranks the research note), got rank={rank:?}; top10={top10:?}",
+                // P3 deliverable: the labeled research note is now RANK 1 within
+                // its Memory surface. Previously it sat at rank 2 behind
+                // `ops-project-decision-priority`, which reached rank 2 purely on
+                // the un-capped DECISION_BOOST × the recency tie-break, with ZERO
+                // topical evidence (its only symbolic score is the dense-map
+                // noise floor of a single shared token). The P3 topical-evidence
+                // gate (`ranking.rs::has_topical_evidence`) withholds
+                // DECISION_BOOST from that zero-evidence decision seed, so the
+                // genuinely-retrieved research note takes rank 1 on relevance —
+                // no compensating research-path multiplier. This is the tightest
+                // form of the invariant: an exact rank-1, not a top-3 band.
+                assert_eq!(
+                    rank,
+                    Some(1),
+                    "case `{}`: expected `{}` at rank 1 within Surface::Memory \
+                     (P3 evidence gate drops the zero-evidence DECISION_BOOST that \
+                     used to outrank the research note), got rank={rank:?}; top10={top10:?}",
                     case.name,
                     case.expected
                 );
