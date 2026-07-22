@@ -693,10 +693,7 @@ impl MemoryServer {
         // comment at this loop's start). Shares the same choke point +
         // epoch bump as `save_memory`'s and `contradiction`'s invalidation.
         if any_field_write {
-            crate::memory_search_ops::invalidate_recall_cache_after_write(
-                self,
-                "enrichment_flush",
-            );
+            crate::memory_search_ops::invalidate_recall_cache_after_write(self, "enrichment_flush");
         }
 
         tracing::info!("[enrichment-batcher] batch of {batch_size} complete");
@@ -1174,8 +1171,7 @@ mod tests {
 
         let sentinel = format!("EnrichFlushSentinel{}", uuid::Uuid::new_v4().simple());
 
-        let (port, mock) =
-            spawn_mock_extract_llm(json!({ "keywords": [sentinel.clone()] })).await;
+        let (port, mock) = spawn_mock_extract_llm(json!({ "keywords": [sentinel.clone()] })).await;
         let _base = EnvRestore::set(
             "EXTRACT_BASE_URL",
             &format!("http://127.0.0.1:{port}/chat/completions"),
@@ -1197,7 +1193,11 @@ mod tests {
             vec![],
         );
         server
-            .with_global_store(|store| store.upsert(&decoy).map_err(|e| format!("upsert decoy: {e}")))
+            .with_global_store(|store| {
+                store
+                    .upsert(&decoy)
+                    .map_err(|e| format!("upsert decoy: {e}"))
+            })
             .expect("seed decoy");
 
         // Target: does NOT contain the sentinel yet — the keyword
@@ -1210,7 +1210,9 @@ mod tests {
         );
         server
             .with_global_store(|store| {
-                store.upsert(&target).map_err(|e| format!("upsert target: {e}"))
+                store
+                    .upsert(&target)
+                    .map_err(|e| format!("upsert target: {e}"))
             })
             .expect("seed target");
 
@@ -1220,8 +1222,7 @@ mod tests {
             .search_memory(Parameters(search_params_for(&sentinel)))
             .await
             .expect("warm search");
-        let first_rows: serde_json::Value =
-            serde_json::from_str(&first).expect("warm search json");
+        let first_rows: serde_json::Value = serde_json::from_str(&first).expect("warm search json");
         let first_rows = first_rows.as_array().expect("warm search rows array");
         assert!(
             first_rows.iter().any(|r| r["id"] == decoy_id),

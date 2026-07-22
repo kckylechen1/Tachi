@@ -95,6 +95,7 @@ async fn search_rows(server: &crate::server_state::MemoryServer, query: &str) ->
 // its `handle_save_memory` call site) and rerun this single test to see it
 // fail pre-fix — see the dispatch report for the captured red output.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn new_save_is_visible_immediately_even_behind_a_warm_recall_cache() {
     let _lock = crate::utils::global_test_lock()
         .lock()
@@ -165,6 +166,7 @@ async fn new_save_is_visible_immediately_even_behind_a_warm_recall_cache() {
 
 // ── T2: handler-level save→search visibility + receipt contract ───────────
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn save_then_immediate_search_hits_and_receipt_declares_lexical_immediate() {
     let _lock = crate::utils::global_test_lock()
         .lock()
@@ -216,17 +218,27 @@ async fn save_receipt_read_target_matches_actual_landing_scope() {
         saved_json["db"], saved_json["read_target"]["scope"],
         "{saved_json:#}"
     );
-    assert_eq!(saved_json["read_target"]["scope"], "global", "{saved_json:#}");
+    assert_eq!(
+        saved_json["read_target"]["scope"], "global",
+        "{saved_json:#}"
+    );
     assert!(
         saved_json["read_target"].get("project").is_none(),
         "no named project on this fixture: {saved_json:#}"
     );
-    assert_eq!(saved_json["confirm"]["tool"], "get_memory", "{saved_json:#}");
-    assert_eq!(saved_json["confirm"]["id"], saved_json["id"], "{saved_json:#}");
+    assert_eq!(
+        saved_json["confirm"]["tool"], "get_memory",
+        "{saved_json:#}"
+    );
+    assert_eq!(
+        saved_json["confirm"]["id"], saved_json["id"],
+        "{saved_json:#}"
+    );
 }
 
 // ── T4: dedupe short-circuit does not invalidate (cache is preserved) ──────
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn exact_duplicate_save_does_not_bust_the_recall_cache() {
     let _lock = crate::utils::global_test_lock()
         .lock()
@@ -294,6 +306,7 @@ async fn exact_duplicate_save_does_not_bust_the_recall_cache() {
 
 // ── T5: successful save's receipt literally says recall_fence=="cleared" ──
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn successful_save_receipt_recall_fence_is_cleared() {
     let _lock = crate::utils::global_test_lock()
         .lock()
@@ -306,9 +319,12 @@ async fn successful_save_receipt_recall_fence_is_cleared() {
         uuid::Uuid::new_v4()
     );
 
-    let saved = handle_save_memory(&server, save_params(&path, "recall_fence literal contract probe"))
-        .await
-        .expect("save");
+    let saved = handle_save_memory(
+        &server,
+        save_params(&path, "recall_fence literal contract probe"),
+    )
+    .await
+    .expect("save");
     let saved_json: Value = serde_json::from_str(&saved).expect("save json");
     assert_eq!(
         saved_json["recall_fence"], "cleared",

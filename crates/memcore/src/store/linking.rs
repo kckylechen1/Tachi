@@ -195,7 +195,10 @@ mod tests {
         let first_affected = store
             .mark_superseded_closing_validity("old", "new", "2026-07-05T01:00:00Z")
             .expect("first supersession");
-        assert_eq!(first_affected, 1, "the first supersession must report 1 row actually updated");
+        assert_eq!(
+            first_affected, 1,
+            "the first supersession must report 1 row actually updated"
+        );
         let (superseded_by, valid_until) = superseded_state(&store, "old");
         assert_eq!(superseded_by.as_deref(), Some("new"));
         assert_eq!(valid_until.as_deref(), Some("2026-07-05T01:00:00Z"));

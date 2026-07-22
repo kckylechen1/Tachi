@@ -177,12 +177,17 @@ pub(super) fn recall_cache_write_through(
 /// save/enrichment/contradiction/auto-link already committed does not undo
 /// that commit, it only means a stale cached search result *might* survive
 /// until its TTL — logged, never silent.
-pub(crate) fn invalidate_recall_cache_after_write(server: &MemoryServer, context: &str) -> &'static str {
+pub(crate) fn invalidate_recall_cache_after_write(
+    server: &MemoryServer,
+    context: &str,
+) -> &'static str {
     if !recall_cache_read_enabled() {
         return "disabled";
     }
     match server.with_global_store(|store| {
-        store.recall_cache_invalidate_all().map_err(|e| e.to_string())?;
+        store
+            .recall_cache_invalidate_all()
+            .map_err(|e| e.to_string())?;
         // Bump INSIDE this closure — still holding `global_rw_gate`'s write
         // lock — so this DELETE+bump is one atomic unit against any
         // concurrent write-through's recheck+write critical section.
