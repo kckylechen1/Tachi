@@ -122,8 +122,15 @@ fn group_seed(
 }
 
 /// Bind source_revision to issue/PR snapshot hashes **and** the ordered
-/// event chain (kind + revision_hash + occurred_at per hop). A pure revert
-/// that leaves snapshots unchanged must still produce a distinct revision.
+/// event chain. Each hop contributes ONLY content/event identity —
+/// `kind + revision_hash + target_ref`. Crawl-time (`occurred_at` /
+/// `captured_at`) is deliberately EXCLUDED: the same content read at two
+/// different crawl times must yield the SAME candidate_id (idempotency),
+/// while a distinct event (e.g. a Revert hop appended to the chain, with its
+/// own kind + revision_hash + target_ref) still changes the identity — that
+/// is why a pure revert over unchanged snapshots still produces a distinct
+/// candidate. `revision_hash` and `target_ref` are length-framed so no pair
+/// of chains that genuinely differ can collide through delimiter injection.
 fn source_revision_string(
     issue_hash: &str,
     pr_hash: Option<&str>,
@@ -137,9 +144,8 @@ fn source_revision_string(
         s.push('|');
         s.push_str(event.kind.as_str());
         s.push(':');
-        s.push_str(&event.revision_hash);
-        s.push('@');
-        s.push_str(&event.occurred_at);
+        s.push_str(&frame_field(&event.revision_hash));
+        s.push_str(&frame_field(&event.target_ref));
     }
     s
 }
@@ -153,34 +159,51 @@ fn derived_draft(case: &super::pilot::CorpusCaseV1, bundle: &CaseCorpusBundle) -
     }
 }
 
-/// Bytes of every counted source surface (issue title/body, selected
-/// comments, PR title/body). Used as `LessonCoverageV1.source_bytes`.
-fn counted_source_text(bundle: &CaseCorpusBundle) -> String {
-    let mut source_text = format!("{}\n{}", bundle.issue.title, bundle.issue.body);
+/// Ordered counted-source segments, each paired with the byte cost it
+/// contributes to `source_bytes`. The issue title/body block has no leading
+/// separator; every later segment (selected comment, PR title, PR body) is
+/// preceded by one `\n` in the joined source, so its cost is `1 + len`.
+/// Empty segments (e.g. an absent PR body) are emitted with their raw cost
+/// here — [`coverage_for_draft`] is responsible for dropping them so an empty
+/// string never earns a `contains("")` credit.
+fn counted_source_segments(bundle: &CaseCorpusBundle) -> Vec<(String, usize)> {
+    let issue_block = format!("{}\n{}", bundle.issue.title, bundle.issue.body);
+    let mut segments = vec![(issue_block.clone(), issue_block.len())];
     for c in &bundle.issue.selected_comment_revisions {
-        source_text.push('\n');
-        source_text.push_str(&c.body);
+        segments.push((c.body.clone(), 1 + c.body.len()));
     }
     if let Some(pr) = &bundle.pull_request {
-        source_text.push('\n');
-        source_text.push_str(&pr.title);
-        source_text.push('\n');
-        source_text.push_str(&pr.body);
+        segments.push((pr.title.clone(), 1 + pr.title.len()));
+        segments.push((pr.body.clone(), 1 + pr.body.len()));
     }
-    source_text
+    segments
 }
 
-/// Honest coverage: `full` only when the prose situation consumed every
-/// counted source byte; otherwise partial (`covered_bytes < source_bytes`).
-fn coverage_for_draft(draft: &CaseDraft, counted_source: &str) -> LessonCoverageV1 {
-    let source_bytes = counted_source.len();
-    let covered_bytes = if draft.situation.as_str() == counted_source {
-        source_bytes
-    } else {
-        // Prose only covers what was put into `situation` (derived draft =
-        // issue title+body only; comments/PR bodies are counted but unused).
-        draft.situation.len().min(source_bytes)
-    };
+/// Honest coverage: a counted source segment counts as covered ONLY when its
+/// text is NON-EMPTY AND actually appears in the prose `situation`. `full`
+/// therefore requires every non-empty segment (issue title/body, each selected
+/// comment, PR title/body) to be consumed — a long custom situation whose byte
+/// length happens to exceed the counted source but never contains the
+/// comments/PR body reports `partial`, never `full`. Byte length alone never
+/// buys coverage.
+///
+/// An EMPTY segment (e.g. an absent/empty PR body — a legitimate parse case)
+/// consumed no source text, so it contributes 0 to BOTH sides: it is never
+/// credited via the vacuously-true `contains("")`, and it never inflates the
+/// denominator. `full` therefore does not spuriously depend on an empty body.
+fn coverage_for_draft(draft: &CaseDraft, bundle: &CaseCorpusBundle) -> LessonCoverageV1 {
+    let segments = counted_source_segments(bundle);
+    let mut source_bytes = 0usize;
+    let mut covered_bytes = 0usize;
+    for (text, cost) in &segments {
+        if text.is_empty() {
+            continue;
+        }
+        source_bytes += *cost;
+        if draft.situation.contains(text.as_str()) {
+            covered_bytes += *cost;
+        }
+    }
     if covered_bytes >= source_bytes {
         LessonCoverageV1::full(source_bytes)
     } else {
@@ -410,8 +433,7 @@ pub fn adapt_corpus_case(
         &bundle.events,
     );
 
-    let counted_source = counted_source_text(bundle);
-    let coverage = coverage_for_draft(&draft, &counted_source);
+    let coverage = coverage_for_draft(&draft, bundle);
 
     let group_id = hash16(&group_seed(
         project,

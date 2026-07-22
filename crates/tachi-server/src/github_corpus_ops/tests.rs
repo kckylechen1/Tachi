@@ -3,7 +3,7 @@
 //! Includes review rework cases that FAIL on a0f8e43e (C1/C2/C3/E1/E2) and
 //! pass after the contract fixes.
 
-use super::adapt::{adapt_corpus_case, CorpusPilotReport};
+use super::adapt::{adapt_corpus_case, CaseDraft, CorpusPilotReport};
 use super::fixtures::{
     chain_bundle, fixture_bundle_for_case, fixture_reader_for_case, pure_revert_pair,
     sample_issue_json, sample_pr_json,
@@ -349,6 +349,188 @@ fn derived_draft_reports_partial_coverage_when_comments_and_pr_not_in_prose() {
     assert!(result.candidate.coverage.covered_bytes < result.candidate.coverage.source_bytes);
     let expected_covered = format!("{}\n{}", bundle.issue.title, bundle.issue.body).len();
     assert_eq!(result.candidate.coverage.covered_bytes, expected_covered);
+}
+
+/// E2 over-claim regression: a long CUSTOM situation whose byte length exceeds
+/// the counted source but that never contains the selected comment / PR body
+/// must report `partial`, not `full`. The old `len().min(source_bytes)`
+/// heuristic scored this `full`; honest containment accounting must not.
+#[test]
+fn long_custom_situation_missing_comments_and_pr_reports_partial_not_full() {
+    let manifest = frozen_manifest();
+    let bundle = chain_bundle(&chain_case_id(), false);
+
+    // Issue title/body IS reproduced, then padded far past the counted source —
+    // but the selected comment body and PR title/body are absent from the prose.
+    let issue_block = format!("{}\n{}", bundle.issue.title, bundle.issue.body);
+    let situation = format!("{issue_block}\n{}", "z".repeat(4096));
+    let draft = CaseDraft {
+        situation,
+        proposed_ruling: "ruling".to_string(),
+        why: "why".to_string(),
+        how_to_apply: "apply".to_string(),
+    };
+
+    let result = adapt_corpus_case("proj", &manifest, &bundle, Some(draft), None).expect("adapt");
+
+    assert!(
+        result.candidate.situation.len() > result.candidate.coverage.source_bytes,
+        "situation is deliberately longer than the counted source"
+    );
+    assert!(
+        !result.candidate.coverage.is_full(),
+        "byte length alone must not buy full coverage (source_bytes={}, covered_bytes={})",
+        result.candidate.coverage.source_bytes,
+        result.candidate.coverage.covered_bytes,
+    );
+    assert!(result.candidate.coverage.covered_bytes < result.candidate.coverage.source_bytes);
+    // Only the issue block is contained, so covered == its byte cost exactly.
+    assert_eq!(result.candidate.coverage.covered_bytes, issue_block.len());
+}
+
+/// E2 empty-segment edge: an EMPTY PR body must not earn a `contains("")`
+/// credit (nor inflate the denominator). Coverage is still `partial` here
+/// because the selected comment body was never consumed; the empty PR body
+/// contributes 0 to both covered_bytes and source_bytes.
+#[test]
+fn long_pr_body_empty_handles_containment_correctly() {
+    let manifest = frozen_manifest();
+
+    let issue_json = sample_issue_json(42, "CLOSED", "Pilot body text", "2026-07-13T00:00:00Z");
+    let mut pr_json = sample_pr_json(77, "MERGED", true, "2026-07-13T01:00:00Z");
+    pr_json["body"] = serde_json::Value::String(String::new());
+
+    let bundle = assemble_case_bundle(
+        &chain_case_id(),
+        "owner/repo",
+        42,
+        &issue_json,
+        Some((77, &pr_json)),
+        vec![],
+        "2026-07-14T00:00:00Z",
+    )
+    .expect("assemble with empty PR body");
+    assert!(
+        bundle.pull_request.as_ref().unwrap().body.is_empty(),
+        "test precondition: PR body is empty"
+    );
+
+    // Situation reproduces the issue block AND the PR title, but the selected
+    // comment is left out and the PR body is empty.
+    let issue_block = format!("{}\n{}", bundle.issue.title, bundle.issue.body);
+    let pr_title = bundle.pull_request.as_ref().unwrap().title.clone();
+    let comment_body = bundle.issue.selected_comment_revisions[0].body.clone();
+    assert!(!comment_body.is_empty(), "test needs a non-empty comment");
+    let draft = CaseDraft {
+        situation: format!("{issue_block}\n{pr_title}"),
+        proposed_ruling: "ruling".to_string(),
+        why: "why".to_string(),
+        how_to_apply: "apply".to_string(),
+    };
+
+    let result = adapt_corpus_case("proj", &manifest, &bundle, Some(draft), None).expect("adapt");
+
+    assert!(
+        !result.candidate.coverage.is_full(),
+        "empty PR body must not spuriously complete coverage (source_bytes={}, covered_bytes={})",
+        result.candidate.coverage.source_bytes,
+        result.candidate.coverage.covered_bytes,
+    );
+    // covered = issue block + PR title; source additionally counts the
+    // (non-empty) selected comment. The empty PR body counts in NEITHER —
+    // no free separator byte, no contains("") credit.
+    let expected_covered = issue_block.len() + (1 + pr_title.len());
+    let expected_source = expected_covered + (1 + comment_body.len());
+    assert_eq!(result.candidate.coverage.covered_bytes, expected_covered);
+    assert_eq!(result.candidate.coverage.source_bytes, expected_source);
+}
+
+/// Idempotency regression: the SAME issue/PR content read at two DIFFERENT
+/// crawl times must yield the SAME candidate_id. Baseline events stamp
+/// `occurred_at = captured_at`, so before the fix (crawl-time in the identity
+/// string) the two adapts diverged. Identity binds content/event only.
+#[test]
+fn same_content_different_crawl_time_yields_identical_candidate_id() {
+    let manifest = frozen_manifest();
+    let cases = valid_20_cases();
+    let case = cases
+        .iter()
+        .find(|c| c.pr_number.is_some())
+        .expect("need a case with PR");
+    let reader = fixture_reader_for_case(case);
+
+    // Identical content, two crawl times. Baseline events carry occurred_at =
+    // captured_at, so the ONLY difference between the bundles is crawl-time.
+    let early = fetch_case_bundle(&reader, case, vec![], "2026-07-13T00:00:00Z").expect("early");
+    let late = fetch_case_bundle(&reader, case, vec![], "2026-08-01T09:30:00Z").expect("late");
+
+    assert_ne!(early.captured_at, late.captured_at);
+    assert_ne!(
+        early.events[0].occurred_at, late.events[0].occurred_at,
+        "baseline events must actually carry the differing crawl time"
+    );
+    assert_eq!(
+        early.issue.issue_snapshot_hash, late.issue.issue_snapshot_hash,
+        "content (and thus snapshot hash) is identical across crawl times"
+    );
+
+    let a = adapt_corpus_case("proj", &manifest, &early, None, None).expect("early adapt");
+    let b = adapt_corpus_case("proj", &manifest, &late, None, None).expect("late adapt");
+
+    assert_eq!(
+        a.candidate.source_revision, b.candidate.source_revision,
+        "crawl-time must not enter source_revision"
+    );
+    assert_eq!(
+        a.candidate.candidate_id, b.candidate.candidate_id,
+        "same content at different crawl times must yield the same candidate_id"
+    );
+}
+
+/// target_ref collision: two event chains that differ ONLY in one hop's
+/// `target_ref` (same kind, revision_hash, snapshots, crawl-time) must yield
+/// distinct candidate_ids. Before the fix, target_ref was omitted from the
+/// identity string and the chains collided.
+#[test]
+fn chains_differing_only_in_target_ref_yield_distinct_candidate_ids() {
+    let manifest = frozen_manifest();
+    let base = chain_bundle(&chain_case_id(), false);
+    let mut variant = base.clone();
+
+    let idx = variant
+        .events
+        .iter()
+        .position(|e| e.kind == ProvenanceEventKindV1::PrMerged)
+        .expect("chain has PrMerged");
+    assert_ne!(variant.events[idx].target_ref, "owner/repo#999");
+    variant.events[idx].target_ref = "owner/repo#999".to_string();
+
+    // Snapshots and every other event field stay identical — only target_ref moved.
+    assert_eq!(
+        base.issue.issue_snapshot_hash,
+        variant.issue.issue_snapshot_hash
+    );
+    assert_eq!(
+        base.pull_request.as_ref().map(|p| &p.pr_snapshot_hash),
+        variant.pull_request.as_ref().map(|p| &p.pr_snapshot_hash)
+    );
+    for (a, b) in base.events.iter().zip(variant.events.iter()) {
+        assert_eq!(a.kind, b.kind);
+        assert_eq!(a.revision_hash, b.revision_hash);
+        assert_eq!(a.occurred_at, b.occurred_at);
+    }
+
+    let r1 = adapt_corpus_case("proj", &manifest, &base, None, None).expect("base");
+    let r2 = adapt_corpus_case("proj", &manifest, &variant, None, None).expect("variant");
+
+    assert_ne!(
+        r1.candidate.source_revision, r2.candidate.source_revision,
+        "event target_ref must enter source_revision"
+    );
+    assert_ne!(
+        r1.candidate.candidate_id, r2.candidate.candidate_id,
+        "chains differing only in target_ref must not collide on candidate_id"
+    );
 }
 
 #[test]

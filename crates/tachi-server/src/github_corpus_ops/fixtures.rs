@@ -100,12 +100,18 @@ pub fn chain_bundle(case_id: &str, with_overturn: bool) -> CaseCorpusBundle {
         .as_ref()
         .and_then(|p| p.merge_commit_sha.clone())
         .unwrap_or_else(|| format!("merge{pr_number:04x}"));
+    // The structured-marker comment MUST have been selected — bind its REAL
+    // body_hash. Defaulting to "" here would silently mask a regression in
+    // comment selection (empty provenance passing as if it were real).
     let comment_body_hash = skeleton
         .issue
         .selected_comment_revisions
         .first()
         .map(|c| c.body_hash.clone())
-        .unwrap_or_default();
+        .filter(|h| !h.is_empty())
+        .expect(
+            "chain fixture issue must select its structured comment with a non-empty body_hash",
+        );
 
     let mut events = vec![
         ProvenanceEventV1 {
