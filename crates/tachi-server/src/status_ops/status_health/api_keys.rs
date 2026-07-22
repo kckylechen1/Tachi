@@ -75,6 +75,25 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         canonical_key: "XAI_API_KEY",
         aliases: &["GROK_API_KEY"],
     },
+    // #1355(b): the opencode `zhipuai-coding-plan` GLM lane provider must
+    // also be a recognized provider-key name so an unlocked-vault ZHIPUAI
+    // secret is injected into the lane subprocess env (via
+    // `load_unlocked_provider_env_secrets`, gated by
+    // `provider_api_key_env_names()`). That lets `opencode.json`'s
+    // `zhipuai-coding-plan` provider use `{env:ZHIPUAI_API_KEY}`
+    // substitution — no literal secret on disk for vault "收权" to blank.
+    // This is deliberately separate from the `ZAI_API_KEY` entry above:
+    // the vault stores a distinct `ZHIPUAI_API_KEY` secret (verified by SHA
+    // match against the working opencode literal) that is NOT the same
+    // value as `ZAI_API_KEY`, so no alias is added either direction.
+    ApiKeyDef {
+        key: "ZHIPUAI_API_KEY",
+        label: "Zhipu AI (GLM coding-plan) OpenAI-compatible LLM",
+        required: false,
+        deprecated: false,
+        canonical_key: "ZHIPUAI_API_KEY",
+        aliases: &[],
+    },
     ApiKeyDef {
         key: "OPENAI_API_KEY",
         label: "OpenAI-compatible agents",
