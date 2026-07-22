@@ -57,6 +57,24 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         canonical_key: "ZAI_API_KEY",
         aliases: &["BIGMODEL_API_KEY"],
     },
+    // #1355: the grok/xai opencode lane provider must be a recognized
+    // provider-key name so an unlocked-vault xAI secret is injected into the
+    // lane subprocess env (via `load_unlocked_provider_env_secrets`, gated by
+    // `provider_api_key_env_names()`). That lets `opencode.json`'s `xai`
+    // provider use `{env:XAI_API_KEY}` substitution — no literal secret on
+    // disk for vault "收权" to blank. `GROK_API_KEY` is carried as an alias
+    // (alternate ecosystem name, cf. GOOGLE/GEMINI) so whichever name the
+    // owner stored the vault secret under is admitted by the filter; the
+    // injected env-var name is always the vault entry's own name, so that
+    // name must match the `{env:...}` reference in opencode.json.
+    ApiKeyDef {
+        key: "XAI_API_KEY",
+        label: "xAI/Grok OpenAI-compatible LLM",
+        required: false,
+        deprecated: false,
+        canonical_key: "XAI_API_KEY",
+        aliases: &["GROK_API_KEY"],
+    },
     ApiKeyDef {
         key: "OPENAI_API_KEY",
         label: "OpenAI-compatible agents",

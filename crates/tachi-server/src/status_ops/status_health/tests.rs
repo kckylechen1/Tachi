@@ -433,3 +433,27 @@ fn model_lanes_reports_configured_local_rerank_provider() {
     );
     assert!(lanes["rerank"]["model"].is_null());
 }
+
+#[test]
+fn xai_and_zai_are_recognized_provider_env_names() {
+    // #1355: the grok/xai and zhipuai/GLM opencode lane providers use
+    // `{env:XAI_API_KEY}` / `{env:ZAI_API_KEY}` substitution in opencode.json
+    // so vault "收权" can never blank them (no literal on disk). That only
+    // works end-to-end if these names are in the provider-key filter that
+    // gates which unlocked-vault secrets get injected into the lane subprocess
+    // env (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
+    let names = provider_api_key_env_names();
+    assert!(
+        names.contains("XAI_API_KEY"),
+        "XAI_API_KEY must be a recognized provider env name so an unlocked-vault \
+         xAI secret materializes into the grok lane child env"
+    );
+    // Alternate ecosystem name is admitted too (whichever the owner stored).
+    assert!(
+        names.contains("GROK_API_KEY"),
+        "GROK_API_KEY alias must be admitted by the provider-key filter"
+    );
+    // Zhipu family already covered before #1355.
+    assert!(names.contains("ZAI_API_KEY"));
+    assert!(names.contains("BIGMODEL_API_KEY"));
+}
