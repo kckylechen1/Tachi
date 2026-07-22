@@ -9,7 +9,7 @@
 //!   card into the GLOBAL store as a wiki-class [`memcore::MemoryEntry`] at
 //!   `path = "/cards/<seat>"`, `category = "wiki"`, `metadata` carrying
 //!   `{source_file, source: "dispatch-ledger", content_hash}`, an
-//!   `authority: "advisory"` marker, and the already-extracted
+//!   `authority: "advisory"` marker, optional typed declaration fields, and the already-extracted
 //!   `counter_clauses_present`/`counter_clauses` pair this module (L2) reads
 //!   from directly — see [`counter_clauses_from_metadata`]. Content changes
 //!   bump `revision`;
@@ -22,8 +22,10 @@
 //! - **Projection (L2, this module)**: at dispatch-prompt-assembly time,
 //!   resolve the dispatch's seat candidates (the raw `profile` id and the
 //!   normalized vendor family — see [`super::overlays::resolve_dispatch_vendor`]),
-//!   match them against the seat suffixes of every `/cards/<seat>` mirror
-//!   row (exact match preferred over a prefix match; an ambiguous prefix
+//!   match them against the seat suffixes of legacy/untyped and typed `seat`
+//!   mirror rows only. Typed `model` and `harness` declarations remain
+//!   queryable mirror evidence but never compete in the legacy seat matcher.
+//!   Exact match is preferred over a prefix match; an ambiguous prefix
 //!   match against multiple seats is treated as no match — injecting the
 //!   wrong seat's countermeasures is worse than injecting none), and read
 //!   the already-extracted 反制条款 (counter-clause) text straight out of the
@@ -151,6 +153,18 @@ fn counter_clauses_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
+fn participates_in_seat_projection(entry: &memcore::MemoryEntry) -> bool {
+    match entry
+        .metadata
+        .get("card_kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        None | Some("seat") => true,
+        Some("model" | "harness") => false,
+        Some(_) => false,
+    }
+}
+
 /// Project the seat-matched lane card's countermeasures section into the
 /// dispatch prompt. Returns `None` (never an error) when the overlay is
 /// disabled, no vendor/profile is derivable, no mirror row matches, or the
@@ -215,6 +229,10 @@ pub(super) fn resolve_seat_card_readiness(
         // (category == "wiki" OR domain == "wiki" OR metadata.wiki == true) —
         // whichever signal the L1 mirror-sync writer uses to mark it.
         .filter(|entry| entry.is_wiki())
+        // Pre-frontmatter rows remain legacy seat cards. Typed model/harness
+        // declarations are visible in the mirror but cannot create prefix
+        // ambiguity in this seat-only overlay.
+        .filter(|entry| participates_in_seat_projection(entry))
         .filter_map(|entry| {
             entry
                 .path

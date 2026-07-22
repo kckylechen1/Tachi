@@ -1,3 +1,7 @@
+# Archived seed declaration. The model identity below was historically bound to
+# the Grok CLI transport. Captain clarified that Cursor and the former Grok CLI
+# both ran Composer 2.5; Grok 4.5 is a separate model. The reviewed Markdown
+# cards now keep model and harness evidence separate.
 schema = "tachi-lane-card/v1"
 
 [identity]

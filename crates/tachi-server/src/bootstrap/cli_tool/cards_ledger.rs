@@ -1,8 +1,8 @@
 //! `tachi cards sync` / `tachi cards list` (tachi#1202 Phase-1 / tachi#992).
 //!
 //! Mirrors leader-authored lane cards (`~/.agents/dispatch-ledger/cards/*.md`
-//! — free-form markdown, one file per model/vendor seat, NOT tracked in this
-//! repo) into read-only `/cards/<seat>` rows in the GLOBAL memory DB, so any
+//! — markdown with an optional typed frontmatter declaration, NOT tracked in
+//! this repo) into read-only `/cards/<seat>` rows in the GLOBAL memory DB, so any
 //! agent with a Tachi connection can look up a seat's playbook without
 //! filesystem access to the leader's home directory.
 //!
@@ -16,9 +16,11 @@
 //! - Mirror row: GLOBAL db, wiki-class entry, `path = /cards/<seat>` (seat =
 //!   the card's filename minus extension, e.g. `glm-5.2`, `codex-gpt56-sol`).
 //!   `metadata` carries `{source_file, source: "dispatch-ledger",
-//!   content_hash}` (this module also adds `authority: "advisory"` and
-//!   `counter_clauses_present`/`counter_clauses`, additive fields the
-//!   contract's `metadata 含 {...}` wording permits).
+//!   content_hash}` (this module also adds `authority: "advisory"`, typed
+//!   declaration fields `card_id`/`card_kind`/`card_status`/`card_aliases`,
+//!   and `counter_clauses_present`/`counter_clauses`; all are additive fields
+//!   the contract's `metadata 含 {...}` wording permits). The mirror path
+//!   deliberately remains filename-stem based for frozen v1 compatibility.
 //! - Content changed → `revision` increments. Unchanged → idempotent no-op
 //!   (no write at all — the DB layer would happily bump `revision` on ANY
 //!   upsert call regardless of whether content changed, so the "unchanged"
@@ -299,6 +301,130 @@ struct CardFile {
     text: String,
     hash: String,
     counter_clauses: Option<String>,
+    declaration: CardDeclaration,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CardDeclaration {
+    card_id: Option<String>,
+    kind: Option<String>,
+    status: Option<String>,
+    aliases: Vec<String>,
+}
+
+fn frontmatter_scalar(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|ch| ch == '"' || ch == '\'')
+        .to_string()
+}
+
+fn frontmatter_list(raw: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let raw = raw.trim();
+    if !(raw.starts_with('[') && raw.ends_with(']')) {
+        return Err("card frontmatter aliases must be an inline YAML list".into());
+    }
+    let inner = &raw[1..raw.len() - 1];
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let aliases = inner.split(',').map(frontmatter_scalar).collect::<Vec<_>>();
+    if aliases.iter().any(String::is_empty) {
+        return Err("card frontmatter aliases contain an empty value".into());
+    }
+    Ok(aliases)
+}
+
+/// Parse the declaration fields Tachi needs without introducing a second
+/// YAML implementation as a routing authority. Cards without frontmatter are
+/// accepted as legacy seat cards; once a leading `---` is present, the typed
+/// identity is strict and must be complete.
+fn parse_card_declaration(text: &str) -> Result<CardDeclaration, Box<dyn std::error::Error>> {
+    let mut lines = text.lines();
+    if lines.next() != Some("---") {
+        return Ok(CardDeclaration::default());
+    }
+
+    let mut fields = BTreeMap::new();
+    let mut closed = false;
+    for line in lines {
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (key, value) = trimmed
+            .split_once(':')
+            .ok_or("malformed card frontmatter line")?;
+        if fields
+            .insert(key.trim().to_string(), value.trim().to_string())
+            .is_some()
+        {
+            return Err(format!("duplicate card frontmatter field {}", key.trim()).into());
+        }
+    }
+    if !closed {
+        return Err("unterminated card frontmatter".into());
+    }
+
+    let card_id = frontmatter_scalar(
+        fields
+            .get("card_id")
+            .ok_or("typed card frontmatter is missing card_id")?,
+    );
+    let kind = frontmatter_scalar(
+        fields
+            .get("kind")
+            .ok_or("typed card frontmatter is missing kind")?,
+    );
+    let status = frontmatter_scalar(
+        fields
+            .get("status")
+            .ok_or("typed card frontmatter is missing status")?,
+    );
+    if !matches!(kind.as_str(), "model" | "harness" | "seat") {
+        return Err(format!("invalid card kind {kind}").into());
+    }
+    if !matches!(
+        status.as_str(),
+        "active" | "experimental" | "degraded" | "retired"
+    ) {
+        return Err(format!("invalid card status {status}").into());
+    }
+    if !card_id.starts_with(&format!("{kind}/")) {
+        return Err(format!("card_id {card_id} does not match kind {kind}").into());
+    }
+    let aliases = match fields.get("aliases") {
+        Some(raw) => frontmatter_list(raw)?,
+        None => Vec::new(),
+    };
+
+    Ok(CardDeclaration {
+        card_id: Some(card_id),
+        kind: Some(kind),
+        status: Some(status),
+        aliases,
+    })
+}
+
+fn declaration_metadata_matches(metadata: &Value, declaration: &CardDeclaration) -> bool {
+    let aliases_match = metadata
+        .get("card_aliases")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values.len() == declaration.aliases.len()
+                && values
+                    .iter()
+                    .zip(&declaration.aliases)
+                    .all(|(stored, expected)| stored.as_str() == Some(expected.as_str()))
+        })
+        .unwrap_or(false);
+    metadata.get("card_id").and_then(Value::as_str) == declaration.card_id.as_deref()
+        && metadata.get("card_kind").and_then(Value::as_str) == declaration.kind.as_deref()
+        && metadata.get("card_status").and_then(Value::as_str) == declaration.status.as_deref()
+        && aliases_match
 }
 
 fn read_card_file(dir: &Path, seat: &str) -> Result<CardFile, Box<dyn std::error::Error>> {
@@ -316,12 +442,15 @@ fn read_card_file(dir: &Path, seat: &str) -> Result<CardFile, Box<dyn std::error
     let bytes = std::fs::read(&path)?;
     let text = String::from_utf8(bytes.clone())
         .map_err(|_| format!("card {} is not strict UTF-8", path.display()))?;
+    let declaration = parse_card_declaration(&text)
+        .map_err(|e| format!("card {} has invalid frontmatter: {e}", path.display()))?;
     Ok(CardFile {
         seat: seat.to_string(),
         path,
         hash: content_hash_hex(&bytes),
         counter_clauses: extract_counter_clauses(&text),
         text,
+        declaration,
     })
 }
 
@@ -348,12 +477,15 @@ fn scan_card_files(dir: &Path) -> Result<Vec<CardFile>, Box<dyn std::error::Erro
             .map_err(|_| format!("card file {} is not strict UTF-8", path.display()))?;
         let hash = content_hash_hex(&bytes);
         let counter_clauses = extract_counter_clauses(&text);
+        let declaration = parse_card_declaration(&text)
+            .map_err(|e| format!("card file {} has invalid frontmatter: {e}", path.display()))?;
         files.push(CardFile {
             seat,
             path,
             text,
             hash,
             counter_clauses,
+            declaration,
         });
     }
     files.sort_by(|a, b| a.seat.cmp(&b.seat));
@@ -481,6 +613,7 @@ async fn sync_cards_selected(
                 && metadata.get("authority").and_then(Value::as_str) == Some("advisory")
                 && metadata.get("source_file").and_then(Value::as_str)
                     == Some(file.path.to_string_lossy().as_ref())
+                && declaration_metadata_matches(metadata, &file.declaration)
                 && metadata
                     .get("counter_clauses_present")
                     .and_then(Value::as_bool)
@@ -503,6 +636,10 @@ async fn sync_cards_selected(
             "source": CARDS_METADATA_SOURCE,
             "content_hash": file.hash,
             "authority": "advisory",
+            "card_id": file.declaration.card_id,
+            "card_kind": file.declaration.kind,
+            "card_status": file.declaration.status,
+            "card_aliases": file.declaration.aliases,
             "counter_clauses_present": file.counter_clauses.is_some(),
         });
         // Always insert this key — even when there's no current clause —
@@ -581,6 +718,7 @@ async fn sync_cards_selected(
                 || m.get("authority").and_then(Value::as_str) != Some("advisory")
                 || m.get("source_file").and_then(Value::as_str)
                     != Some(file.path.to_string_lossy().as_ref())
+                || !declaration_metadata_matches(m, &file.declaration)
                 || m.get("counter_clauses_present").and_then(Value::as_bool)
                     != Some(file.counter_clauses.is_some())
                 || m.get("counter_clauses").and_then(Value::as_str)
@@ -767,6 +905,40 @@ unrelated section after
     }
 
     #[test]
+    fn frontmatter_does_not_mask_counter_clause_sections() {
+        let text = "\
+---
+card_id: harness/codex-collaboration
+kind: harness
+status: active
+harness_id: codex
+aliases: [codex-cli, codex-app-server]
+---
+
+# Codex collaboration harness
+
+## 反制条款
+- use the live protocol schema
+
+## Evidence
+- unrelated
+";
+        let clauses = extract_counter_clauses(text).expect("should find clauses after frontmatter");
+        assert!(clauses.contains("use the live protocol schema"));
+        assert!(!clauses.contains("card_id"));
+        assert!(!clauses.contains("unrelated"));
+
+        let declaration = parse_card_declaration(text).expect("typed declaration");
+        assert_eq!(
+            declaration.card_id.as_deref(),
+            Some("harness/codex-collaboration")
+        );
+        assert_eq!(declaration.kind.as_deref(), Some("harness"));
+        assert_eq!(declaration.status.as_deref(), Some("active"));
+        assert_eq!(declaration.aliases, ["codex-cli", "codex-app-server"]);
+    }
+
+    #[test]
     fn concatenates_multiple_matching_headings_in_document_order() {
         // Mirrors gemini-3.5-flash.md's shape: two independent `反制条款`-ish
         // headings in one file. Contract doesn't pick "first match" —
@@ -791,7 +963,7 @@ unrelated section after
 
     #[test]
     fn matches_biguo_dai_without_requiring_the_bixudai_variant() {
-        // composer-cursor.md-style: heading text is "必须带" (必+须+带), which
+        // composer-2.5.md-style: heading text is "必须带" (必+须+带), which
         // does NOT contain the contiguous substring "必带" — only the
         // "反制条款" alternative in the regex should save this heading.
         let text = "## 反制条款(派工 prompt 必须带)\n- clause\n";
@@ -896,6 +1068,37 @@ unrelated section after
         rows.iter()
             .find(|row| row.seat == seat)
             .unwrap_or_else(|| panic!("no row for seat {seat} in {rows:?}"))
+    }
+
+    #[tokio::test]
+    async fn sync_persists_typed_declaration_metadata_idempotently() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards_dir = temp.path().join("cards");
+        std::fs::create_dir_all(&cards_dir).expect("cards dir");
+        let schema_migration = memcore::MigrationAuthority::Deny;
+        write_fixture(
+            &cards_dir,
+            "grok-cli",
+            "---\ncard_id: harness/grok-cli\nkind: harness\nstatus: degraded\nharness_id: grok-cli\naliases: [grok-acp]\n---\n\n# Grok CLI\n\n## 反制条款\n- probe before dispatch\n",
+        );
+
+        let first = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
+            .await
+            .expect("first typed sync");
+        assert_eq!(find_row(&first, "grok-cli").status, "created");
+        let mirrors = read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors");
+        let metadata = &mirrors["grok-cli"].metadata;
+        assert_eq!(metadata["card_id"], json!("harness/grok-cli"));
+        assert_eq!(metadata["card_kind"], json!("harness"));
+        assert_eq!(metadata["card_status"], json!("degraded"));
+        assert_eq!(metadata["card_aliases"], json!(["grok-acp"]));
+
+        let second = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
+            .await
+            .expect("second typed sync");
+        assert_eq!(find_row(&second, "grok-cli").status, "unchanged");
+        assert_eq!(find_row(&second, "grok-cli").revision, 1);
     }
 
     #[tokio::test]
