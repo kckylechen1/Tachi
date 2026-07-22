@@ -15,17 +15,24 @@ impl MemoryStore {
     /// intact. Unlike `supersede_memory`, this uses the caller-supplied
     /// timestamp and does not bump `revision`, matching the auto-link and
     /// contradiction write paths that record the supersession edge separately.
+    ///
+    /// Returns the number of rows actually updated (0 or 1 — `id` is the
+    /// primary key) so callers can tell "this call is what closed the row"
+    /// from "the row was already superseded, this was a no-op" — tachi#1435
+    /// slice 5 / #2059 codex round 3: the auto-link write path only busts the
+    /// recall cache when this returns `> 0`, since search-visible content
+    /// only changed on the former.
     pub fn mark_superseded_closing_validity(
         &self,
         id: &str,
         superseded_by: &str,
         at: &str,
-    ) -> Result<(), MemoryError> {
-        self.conn.execute(
+    ) -> Result<usize, MemoryError> {
+        let affected = self.conn.execute(
             "UPDATE memories SET superseded_by = ?1, updated_at = ?2, valid_until = COALESCE(valid_until, ?2) WHERE id = ?3 AND superseded_by IS NULL",
             rusqlite::params![superseded_by, at, id],
         )?;
-        Ok(())
+        Ok(affected)
     }
 
     /// Bump `$.confidence` in metadata by `increment` (capped at 1.0), falling
@@ -170,16 +177,22 @@ mod tests {
         store.upsert(&test_entry("old", vec![])).expect("seed old");
         store.upsert(&test_entry("new", vec![])).expect("seed new");
 
-        store
+        let first_affected = store
             .mark_superseded_closing_validity("old", "new", "2026-07-05T01:00:00Z")
             .expect("first supersession");
+        assert_eq!(first_affected, 1, "the first supersession must report 1 row actually updated");
         let (superseded_by, valid_until) = superseded_state(&store, "old");
         assert_eq!(superseded_by.as_deref(), Some("new"));
         assert_eq!(valid_until.as_deref(), Some("2026-07-05T01:00:00Z"));
 
-        store
+        let second_affected = store
             .mark_superseded_closing_validity("old", "other", "2026-07-06T00:00:00Z")
             .expect("second supersession");
+        assert_eq!(
+            second_affected, 0,
+            "an already-superseded row must report 0 rows affected (WHERE superseded_by IS NULL excludes it) — \
+             this is exactly the signal callers use to skip a no-op recall-cache invalidation"
+        );
         let (superseded_by, valid_until) = superseded_state(&store, "old");
         assert_eq!(superseded_by.as_deref(), Some("new"));
         assert_eq!(valid_until.as_deref(), Some("2026-07-05T01:00:00Z"));

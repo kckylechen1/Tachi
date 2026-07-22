@@ -1,6 +1,6 @@
 use super::cache::{
-    recall_cache_epoch, recall_cache_key, recall_cache_read_enabled,
-    recall_cache_ttl_secs, recall_cache_write_through_is_safe,
+    recall_cache_epoch, recall_cache_key, recall_cache_read_enabled, recall_cache_ttl_secs,
+    recall_cache_write_through,
 };
 use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
@@ -119,27 +119,31 @@ pub(crate) async fn handle_search_memory_with_access(
     // newly-added memories until the TTL elapses. `reranked` records whether
     // this run actually reranked, so the read side can honor rerank intent.
     //
-    // Epoch guard (tachi#1435 slice 4 / #2059 codex round 2): `rows` above
-    // was computed from a store snapshot taken sometime after
-    // `epoch_at_read` — if a save/enrichment/contradiction committed AND
-    // invalidated in the meantime, writing `rows` now would resurrect
-    // exactly the stale content that invalidation was trying to clear.
-    // Discarding here is always safe: the next miss just recomputes fresh.
+    // Epoch guard (tachi#1435 slice 4 / #2059 codex round 2, TOCTOU-closed in
+    // round 3 — see `search_memory::cache`'s module doc for the full
+    // mutual-exclusion invariant): `rows` above was computed from a store
+    // snapshot taken sometime after `epoch_at_read` — if a
+    // save/enrichment/contradiction/auto-link committed AND invalidated in
+    // the meantime, writing `rows` now would resurrect exactly the stale
+    // content that invalidation was trying to clear. The recheck MUST run
+    // INSIDE this `with_global_store` closure (not before it) — that closure
+    // holds the same `global_rw_gate` write lock
+    // `invalidate_recall_cache_after_write`'s DELETE+bump holds, so the two
+    // can never interleave; checking outside the lock and only writing
+    // inside it would reopen the exact race this guard exists to close.
+    // Discarding is always safe: the next miss just recomputes fresh.
     if let Some(key) = cache_key {
         if !rows.is_empty() {
-            if recall_cache_write_through_is_safe(epoch_at_read) {
-                let _ = server.with_global_store(|store| {
-                    store
-                        .recall_cache_store(
-                            &key,
-                            &params.query,
-                            &serialized,
-                            rows.len() as i64,
-                            params.enable_rerank,
-                        )
-                        .map_err(|e| e.to_string())
-                });
-            } else {
+            let wrote = recall_cache_write_through(
+                server,
+                epoch_at_read,
+                &key,
+                &params.query,
+                &serialized,
+                rows.len() as i64,
+                params.enable_rerank,
+            );
+            if matches!(wrote, Ok(false)) {
                 tracing::debug!(
                     "[recall_cache] discarding stale write-through for {key} — \
                      epoch advanced (concurrent invalidation) between read and write"
