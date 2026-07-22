@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use crate::{
     db::{fetch_by_ids, record_access_with_updates},
     error::MemoryError,
+    namespace::Surface,
     recall_config::RecallConfig,
     scorer::{DecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY},
     types::SearchResult,
@@ -44,6 +45,12 @@ pub struct SearchOptions {
     pub path_prefix: Option<String>,
     /// Optionally restrict results to a specific domain (e.g. "domain-pack")
     pub domain: Option<String>,
+    /// Optionally scope results to a retrieval surface (Memory vs. Docs; see
+    /// [`crate::namespace::Surface`]). `None` (the default) applies no
+    /// surface predicate at all -- today's fused ranking pool, unchanged.
+    /// This is memcore ranking rework Phase 2 PIECE 1: the foundation only,
+    /// ranking itself stays fused until a later piece opts in.
+    pub surface: Option<Surface>,
     /// Pre-computed query embedding; if None, skip vector channel.
     pub query_vec: Option<Vec<f32>>,
     /// Whether the sqlite-vec extension is available for vector search.
@@ -89,6 +96,7 @@ impl Default for SearchOptions {
             weights: HybridWeights::default(),
             path_prefix: None,
             domain: None,
+            surface: None,
             query_vec: None,
             vec_available: false,
             record_access: true,

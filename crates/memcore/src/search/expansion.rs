@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::{
     db::{search_fts, search_fts_raw_match},
     error::MemoryError,
+    namespace::Surface,
     recall_config::RecallConfig,
     scorer::tokenize,
 };
@@ -253,6 +254,7 @@ pub(super) fn search_fts_with_expansion_config(
     as_of: Option<&str>,
     recall_config: &RecallConfig,
     sample: bool,
+    surface: Option<Surface>,
 ) -> Result<FtsScoresWithGroups, MemoryError> {
     let mut merged = HashMap::new();
     let mut groups: Option<Vec<FtsExpansionGroupReceipt>> = sample.then(Vec::new);
@@ -274,6 +276,7 @@ pub(super) fn search_fts_with_expansion_config(
             include_superseded,
             path_prefix,
             as_of,
+            surface,
         )?;
         let group_elapsed = group_start.map(|s| s.elapsed());
         let group_hit_count = group_hits.len();
@@ -306,6 +309,7 @@ pub(super) fn search_fts_with_expansion_config(
                 include_superseded,
                 path_prefix,
                 as_of,
+                surface,
             )?;
             let fallback_elapsed = fallback_start.map(|s| s.elapsed());
             let fallback_hit_count = fallback_hits.len();

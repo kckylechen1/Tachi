@@ -1121,9 +1121,17 @@ mod idless_upsert_tests {
              before the early-return commit"
         );
 
-        let hits =
-            search_symbolic_candidates(conn, "uniformuniquesymbol", 10, false, true, None, None)
-                .unwrap();
+        let hits = search_symbolic_candidates(
+            conn,
+            "uniformuniquesymbol",
+            10,
+            false,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(
             hits.iter().any(|e| e.id == "sym-sync-loser"),
             "include_superseded symbolic recall must find the early-return loser; got {:?}",

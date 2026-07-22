@@ -59,7 +59,7 @@ fn upsert_idempotent() {
     e.text = "updated text".into();
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "updated", 5, false, false, None, None).unwrap();
+    let results = search_fts(&conn, "updated", 5, false, false, None, None, None).unwrap();
     assert!(results.contains_key("dup"));
 }
 

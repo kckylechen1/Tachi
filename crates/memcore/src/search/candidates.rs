@@ -50,6 +50,7 @@ pub(super) fn collect_candidates(
                 include_superseded,
                 opts.path_prefix.as_deref(),
                 as_of_utc,
+                opts.surface,
             )?
         } else {
             HashMap::new()
@@ -83,6 +84,7 @@ pub(super) fn collect_candidates(
         as_of_utc,
         recall_config(opts),
         sample,
+        opts.surface,
     )?;
     let fts_candidate_count = fts_scores.len();
 
@@ -102,6 +104,7 @@ pub(super) fn collect_candidates(
         include_superseded,
         opts.path_prefix.as_deref(),
         as_of_utc,
+        opts.surface,
     )?;
     let symbolic_elapsed = symbolic_start.map(|s| s.elapsed());
     let symbolic_candidate_count = symbolic_candidate_entries.len();
