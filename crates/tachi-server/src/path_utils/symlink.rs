@@ -17,8 +17,14 @@ pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> Pla
     }
     // Prefer the hashed alias dir, but keep using a pre-existing legacy un-hashed
     // dir so repos created before the hash suffix are not orphaned.
-    let Some(global_link) = plan_c_alias_db_for_root(project_root) else {
-        return PlanCLinkOutcome::Skipped("project root has no directory name");
+    let global_link = match plan_c_alias_db_for_root(project_root) {
+        Ok(path) => path,
+        Err(error) => {
+            return PlanCLinkOutcome::Failed {
+                path: projects_root,
+                error,
+            };
+        }
     };
     let Some(global_project_dir) = global_link.parent().map(Path::to_path_buf) else {
         return PlanCLinkOutcome::Skipped("project root has no directory name");
@@ -79,7 +85,25 @@ pub(crate) fn plan_c_split_brain(local_db: &Path, project_root: &Path) -> Option
     }
     // Inspect the alias that would actually be used (hashed, or a pre-existing
     // legacy un-hashed dir) so split-brain detection matches creation behavior.
-    let alias_db = plan_c_alias_db_for_root(project_root)?;
+    // An ambiguous/unresolvable identity is not "no split-brain": it is a
+    // distinct fail-closed condition already enforced at the routing gates
+    // (`resolve_named_project_binding`, `preflight_project_identity`). Do not
+    // silently swallow it here — log loudly so a status/repair caller that only
+    // consults this diagnostic surface still sees the problem.
+    let alias_db = match plan_c_alias_db_for_root(project_root) {
+        Ok(alias_db) => alias_db,
+        Err(error) => {
+            tracing::warn!(
+                target: "tachi::plan_c::split_brain",
+                root = %project_root.display(),
+                error = %error,
+                "Plan C alias identity is ambiguous or unresolvable; split-brain \
+                 inspection is skipped (identity is enforced fail-closed at the \
+                 named-project routing gates)"
+            );
+            return None;
+        }
+    };
     // Report the name of the alias dir we actually inspected so the warning's
     // project name matches the on-disk alias (legacy vs hashed).
     let project_name = alias_db

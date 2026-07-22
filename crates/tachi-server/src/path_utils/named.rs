@@ -50,7 +50,7 @@ pub(crate) fn named_project_for_db_path(db_path: &Path) -> Option<String> {
         }) {
             // Fast-path: check the alias that would actually be used for this
             // root (hashed, falling back to a pre-existing legacy un-hashed dir).
-            if let Some(named_path) = plan_c_existing_alias_db_for_root(project_root) {
+            if let Ok(Some(named_path)) = plan_c_existing_alias_db_for_root(project_root) {
                 if std::fs::canonicalize(&named_path)
                     .map(|path| path == canonical)
                     .unwrap_or(false)

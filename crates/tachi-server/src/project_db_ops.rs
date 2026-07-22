@@ -75,12 +75,6 @@ impl MemoryServer {
                 )
             })?;
 
-        // Already registered (repo-local DB on disk, or an existing Plan C /
-        // manifest alias resolves) — nothing to auto-create.
-        if Self::resolve_named_project_db_path(&project_name).is_ok() {
-            return Ok(project_name);
-        }
-
         // Route through the same canonical containment guard
         // `handle_tachi_init_project_db` uses below
         // (`path_utils::alias::resolve_project_db_path`) instead of a bare
@@ -101,11 +95,24 @@ impl MemoryServer {
                 git_root.display()
             )
         })?;
-        // `resolve_project_db_path` already created the parent dir(s) as part
-        // of establishing containment. Force the DB file (and its schema)
-        // into existence via the same per-path attach cache every
-        // named-project call goes through — see the doc comment above for
-        // why this, and not `activate_project_db`.
+        // Registration may continue only when identity lookup proves genuine
+        // absence. A successful lookup must resolve to this exact repo-local
+        // DB; ambiguity, manifest failure, or a same-name standalone store is
+        // an error, never a reason to create/open another DB.
+        if preflight_project_identity(&db_path, &git_root, &project_name)? {
+            return Ok(project_name);
+        }
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "create project db parent directory at {}: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+        // Force the DB file (and its schema) into existence via the same
+        // per-path attach cache every named-project call goes through — see
+        // the doc comment above for why this, and not `activate_project_db`.
         self.with_path_store(&db_path, |_store| Ok(()))
             .map_err(|e| format!("initialize project db at {}: {e}", db_path.display()))?;
 
@@ -118,15 +125,7 @@ impl MemoryServer {
         // finding [2], #1207: `ensure_plan_c_symlink` is a no-op `Skipped` on
         // non-Unix hosts, so a project registered only via the symlink could
         // never be reopened there).
-        if let Err(err) = register_repo_local_manifest_entry(&db_path, &project_name) {
-            tracing::warn!(
-                target: "tachi::project_db::auto_register",
-                project = %project_name,
-                error = %err,
-                "workspace-root auto-registration could not write a manifest entry; falling \
-                 back to Plan C symlink resolution only"
-            );
-        }
+        register_repo_local_manifest_entry(&db_path, &project_name)?;
 
         // Secondary/legacy addressing: the `~/.tachi/projects/<name>/`
         // symlink alias. `ensure_plan_c_symlink` is a no-op `Skipped` on
@@ -212,13 +211,77 @@ impl MemoryServer {
 /// (an unreadable/corrupt manifest is an error here, not "no entries yet" —
 /// overwriting it via `load_or_empty` would silently drop every other
 /// registered project's entry).
-fn register_repo_local_manifest_entry(
+pub(crate) fn register_repo_local_manifest_entry(
     db_path: &std::path::Path,
     project_name: &str,
 ) -> Result<(), String> {
     let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
+    let _process_guard = manifest_registration_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    with_manifest_registration_file_lock(&manifest_path, || {
+        register_repo_local_manifest_entry_locked(db_path, project_name, &manifest_path)
+    })
+}
+
+fn manifest_registration_mutex() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(unix)]
+fn with_manifest_registration_file_lock<T>(
+    manifest_path: &std::path::Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+
+    let lock_path = manifest_path.with_extension("json.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create manifest lock directory {}: {e}", parent.display()))?;
+    }
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("open manifest lock {}: {e}", lock_path.display()))?;
+    let fd = lock_file.as_raw_fd();
+    // SAFETY: `fd` belongs to the live `lock_file`; flock receives only the
+    // descriptor and integer flags and is released when this function exits.
+    if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+        return Err(format!(
+            "lock manifest registration {}: {}",
+            lock_path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let result = f();
+    // SAFETY: the descriptor remains live. Close also releases the lock if
+    // this best-effort explicit unlock fails.
+    unsafe {
+        libc::flock(fd, libc::LOCK_UN);
+    }
+    result
+}
+
+#[cfg(not(unix))]
+fn with_manifest_registration_file_lock<T>(
+    _manifest_path: &std::path::Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    f()
+}
+
+fn register_repo_local_manifest_entry_locked(
+    db_path: &std::path::Path,
+    project_name: &str,
+    manifest_path: &std::path::Path,
+) -> Result<(), String> {
     let mut manifest = if manifest_path.exists() {
-        crate::manifest::Manifest::load(&manifest_path)
+        crate::manifest::Manifest::load(manifest_path)
             .map_err(|e| format!("load manifest {}: {e}", manifest_path.display()))?
     } else {
         crate::manifest::Manifest::empty()
@@ -226,9 +289,18 @@ fn register_repo_local_manifest_entry(
 
     let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
     let canon_str = canonical.display().to_string();
-    if manifest.dbs.iter().any(|e| e.path == canon_str) {
-        // Already registered — idempotent second contact from the same root.
-        return Ok(());
+    if let Some(entry) = manifest.dbs.iter_mut().find(|e| e.path == canon_str) {
+        // A physical canonical DB path is unambiguous authority. Refresh only
+        // its derived identity label; never move or auto-claim an alias path.
+        let canonical_scope = format!("project:{project_name}");
+        if entry.scope_hint == canonical_scope {
+            return Ok(());
+        }
+        entry.scope_hint = canonical_scope;
+        manifest.generated_at = chrono::Utc::now().to_rfc3339();
+        return manifest
+            .save(manifest_path)
+            .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()));
     }
 
     manifest.dbs.push(crate::manifest::DbEntry {
@@ -246,8 +318,71 @@ fn register_repo_local_manifest_entry(
     });
     manifest.generated_at = chrono::Utc::now().to_rfc3339();
     manifest
-        .save(&manifest_path)
+        .save(manifest_path)
         .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()))
+}
+
+/// Prove that every existing identity source for `project_name` points to the
+/// intended repo-local DB before any store is opened. Returns `true` when the
+/// intended DB is already registered and usable, `false` only for genuine
+/// absence. Manifest errors, broken/divergent aliases, and standalone-store
+/// collisions are all fatal.
+fn preflight_project_identity(
+    db_path: &std::path::Path,
+    project_root: &std::path::Path,
+    project_name: &str,
+) -> Result<bool, String> {
+    let resolved = MemoryServer::resolve_existing_named_project_db_path(project_name)?;
+    let already_resolved = resolved.is_some();
+    let alias = crate::path_utils::plan_c_alias_db_for_root(project_root)?;
+    let alias_exists = std::fs::symlink_metadata(&alias).is_ok();
+    let has_existing_evidence = resolved.is_some() || alias_exists;
+    if !has_existing_evidence {
+        return Ok(false);
+    }
+    if !db_path.exists() {
+        return Err(format!(
+            "project identity '{project_name}' already has an alias or registered DB, but intended repo DB {} does not exist; refusing ownership guess",
+            db_path.display()
+        ));
+    }
+    let expected = std::fs::canonicalize(db_path).map_err(|err| {
+        format!(
+            "intended project DB cannot be canonicalized at {}: {err}",
+            db_path.display()
+        )
+    })?;
+    if let Some(existing) = resolved {
+        let existing = std::fs::canonicalize(&existing).map_err(|err| {
+            format!(
+                "registered project '{project_name}' cannot be canonicalized at {}: {err}",
+                existing.display()
+            )
+        })?;
+        if existing != expected {
+            return Err(format!(
+                "project identity '{project_name}' resolves to unrelated DB {}; expected {}",
+                existing.display(),
+                expected.display()
+            ));
+        }
+    }
+    if alias_exists {
+        let alias_identity = std::fs::canonicalize(&alias).map_err(|err| {
+            format!(
+                "project alias cannot be canonicalized at {}: {err}",
+                alias.display()
+            )
+        })?;
+        if alias_identity != expected {
+            return Err(format!(
+                "project identity '{project_name}' has divergent alias {}; expected {}",
+                alias.display(),
+                expected.display()
+            ));
+        }
+    }
+    Ok(already_resolved)
 }
 
 pub(crate) async fn handle_tachi_init_project_db(
@@ -286,9 +421,16 @@ pub(crate) async fn handle_tachi_init_project_db(
         ));
     }
 
+    // Derive and validate identity before creating a directory, opening a DB,
+    // or activating a store. An unusable root must fail without leaving any
+    // persistent state behind.
+    let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+        .ok_or_else(|| "project root has no usable directory identity".to_string())?;
+
     let rel = PathBuf::from(&params.db_relpath);
     let db_path = crate::path_utils::resolve_project_db_path(&project_root, &rel)?;
     let existed = db_path.exists();
+    preflight_project_identity(&db_path, &project_root, &project_name)?;
     if let Some(parent) = db_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -297,6 +439,8 @@ pub(crate) async fn handle_tachi_init_project_db(
 
     // Hot-activate the project DB on the running server (no restart needed)
     let was_new_activation = server.activate_project_db(db_path.clone())?;
+
+    register_repo_local_manifest_entry(&db_path, &project_name)?;
 
     let mut plan_c_note: Option<String> = None;
     if let Some(safe_name) = crate::path_utils::plan_c_dir_name_from_root(&project_root) {
@@ -349,6 +493,7 @@ pub(crate) async fn handle_tachi_init_project_db(
         "active": true,
         "hot_activated": was_new_activation,
         "project_root": project_root.display().to_string(),
+        "project": project_name,
         "db_path": db_path.display().to_string(),
         "db_relpath": rel.display().to_string(),
         "plan_c_split_brain": crate::path_utils::plan_c_split_brain(&db_path, &project_root),
@@ -411,6 +556,48 @@ mod resolve_or_register_workspace_root_tests {
                 err.contains("does not exist"),
                 "expected a does-not-exist error, got: {err}"
             );
+        });
+    }
+
+    #[test]
+    fn concurrent_manifest_registrations_preserve_both_projects() {
+        with_test_home(|root| {
+            let alpha = root.join("Alpha/data/project.db");
+            let beta = root.join("Beta/data/project.db");
+            for db in [&alpha, &beta] {
+                std::fs::create_dir_all(db.parent().unwrap()).expect("DB parent");
+                std::fs::write(db, b"db").expect("DB");
+            }
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let handles = [(alpha, "Alpha"), (beta, "Beta")]
+                .into_iter()
+                .map(|(db, project)| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        register_repo_local_manifest_entry(&db, project)
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("registration thread")
+                    .expect("register");
+            }
+
+            let manifest = crate::manifest::Manifest::load(
+                &crate::path_utils::tachi_home().join("manifest.json"),
+            )
+            .expect("manifest");
+            let mut scopes = manifest
+                .dbs
+                .iter()
+                .map(|entry| entry.scope_hint.as_str())
+                .collect::<Vec<_>>();
+            scopes.sort_unstable();
+            assert_eq!(scopes, ["project:Alpha", "project:Beta"]);
         });
     }
 
@@ -656,6 +843,90 @@ mod resolve_or_register_workspace_root_tests {
                 resolved_a, resolved_b,
                 "each name must resolve to its own DB file"
             );
+        });
+    }
+
+    #[test]
+    fn workspace_registration_refuses_same_identity_standalone_store_before_db_open() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Collision-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("repo");
+            let identity = crate::path_utils::plan_c_dir_name_from_root(&repo).expect("identity");
+            let standalone = crate::path_utils::plan_c_global_db_path(&identity);
+            std::fs::create_dir_all(standalone.parent().unwrap()).expect("alias parent");
+            std::fs::write(&standalone, b"standalone").expect("standalone DB");
+            let local_db = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("standalone store must not be claimed as this workspace");
+            assert!(error.contains("refusing ownership guess"), "{error}");
+            assert!(!local_db.exists(), "no repo DB may be opened or created");
+            assert_eq!(std::fs::read(standalone).unwrap(), b"standalone");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn previous_hash_alias_is_migrated_to_restart_stable_canonical_registration() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Legacy-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("repo");
+            let local_db = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(local_db.parent().unwrap()).expect("DB parent");
+            memcore::MemoryStore::open(local_db.to_str().unwrap()).expect("local DB");
+            let previous = crate::path_utils::plan_c_previous_dir_name_from_root(&repo)
+                .expect("previous identity");
+            let previous_alias = crate::path_utils::plan_c_global_db_path(&previous);
+            std::fs::create_dir_all(previous_alias.parent().unwrap()).expect("alias parent");
+            std::os::unix::fs::symlink(&local_db, &previous_alias).expect("previous alias");
+
+            let current = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("compatibility alias must migrate without orphaning the DB");
+            assert_ne!(current, previous);
+            let resolved = MemoryServer::resolve_named_project_db_path(&current)
+                .expect("canonical identity must resolve after migration");
+            assert_eq!(
+                std::fs::canonicalize(resolved).unwrap(),
+                std::fs::canonicalize(local_db).unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn non_ascii_projects_register_distinct_stable_identities_across_restart() {
+        with_test_home(|root| {
+            let repo_a = root.join("workspace/量化");
+            let repo_b = root.join("workspace/研究");
+            std::fs::create_dir_all(repo_a.join(".git")).expect("repo a");
+            std::fs::create_dir_all(repo_b.join(".git")).expect("repo b");
+
+            let first_server = make_server(root);
+            let name_a = first_server
+                .resolve_or_register_workspace_root(&repo_a.display().to_string())
+                .expect("register repo a");
+            let name_b = first_server
+                .resolve_or_register_workspace_root(&repo_b.display().to_string())
+                .expect("register repo b");
+            assert!(name_a.starts_with("project-"), "{name_a}");
+            assert!(name_b.starts_with("project-"), "{name_b}");
+            assert_ne!(name_a, name_b);
+            drop(first_server);
+
+            let restarted = make_server(root);
+            for (name, repo) in [(&name_a, &repo_a), (&name_b, &repo_b)] {
+                let resolved = MemoryServer::resolve_named_project_db_path(name)
+                    .expect("canonical identity resolves after restart");
+                assert_eq!(
+                    std::fs::canonicalize(resolved).unwrap(),
+                    std::fs::canonicalize(repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME))
+                        .unwrap()
+                );
+            }
+            drop(restarted);
         });
     }
 }
