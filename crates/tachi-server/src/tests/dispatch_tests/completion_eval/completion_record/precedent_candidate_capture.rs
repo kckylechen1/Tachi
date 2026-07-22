@@ -123,7 +123,8 @@ async fn fetch_metadata(server: &crate::MemoryServer, id: &str) -> Value {
 /// candidates; a one-summary output is RED.
 #[tokio::test]
 async fn two_independent_principles_produce_two_candidates() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
         case: "cfg(test) env-flippable auth bypass in the vault access check".to_string(),
@@ -224,7 +225,8 @@ async fn two_independent_principles_produce_two_candidates() {
 /// candidate.
 #[tokio::test]
 async fn shared_principle_across_distinct_cases_stays_distinct() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let mut params = base_complete();
     params.rulings = vec![
         RulingRecordParams {
@@ -309,7 +311,8 @@ async fn shared_principle_across_distinct_cases_stays_distinct() {
 /// row is left untouched.
 #[tokio::test]
 async fn same_source_replay_idempotent_edited_comment_appends_revision() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
 
     let ruling_v1 = RulingRecordParams {
         case: "#1076 dedup check for precedent candidates".to_string(),
@@ -426,7 +429,8 @@ async fn same_source_replay_idempotent_edited_comment_appends_revision() {
 /// once.
 #[tokio::test]
 async fn missing_adjudicator_alone_keeps_authority_incomplete() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
         case: "ruling with pinned source evidence but no adjudicator identity".to_string(),
@@ -463,7 +467,8 @@ async fn missing_adjudicator_alone_keeps_authority_incomplete() {
 /// authority -- isolates the "missing source authority" half.
 #[tokio::test]
 async fn missing_source_refs_alone_keeps_authority_incomplete() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
         case: "ruling with an adjudicator but no source evidence at all".to_string(),
@@ -501,7 +506,8 @@ async fn missing_source_refs_alone_keeps_authority_incomplete() {
 /// never silently vanish behind an unconditional "full"/"complete" claim.
 #[tokio::test]
 async fn malformed_source_ref_degrades_coverage_and_authority() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
         case: "ruling with one pinned ref and one unpinned (no body_hash) ref".to_string(),
@@ -569,7 +575,8 @@ async fn malformed_source_ref_degrades_coverage_and_authority() {
 /// remains pending and cannot masquerade as established.
 #[tokio::test]
 async fn missing_adjudicator_and_source_refs_stays_pending_and_incomplete() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
         case: "ruling captured with no adjudicator identity and no source evidence".to_string(),
@@ -629,7 +636,8 @@ async fn missing_adjudicator_and_source_refs_stays_pending_and_incomplete() {
 /// establishment gate, not harmonized away.
 #[tokio::test]
 async fn contradictory_self_overturn_text_is_preserved_verbatim() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
         case: "leader initially ruled the switch could stay behind a const gate".to_string(),
@@ -702,7 +710,8 @@ async fn contradictory_self_overturn_text_is_preserved_verbatim() {
 /// path.
 #[tokio::test]
 async fn full_source_coverage_no_truncation_or_drop_tail() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     // Longer than the 100-char `summary` teaser cap -- `metadata.case` (a
     // content field) must never be truncated even though `summary` is.
     let long_case = "x".repeat(300);
@@ -784,7 +793,8 @@ async fn full_source_coverage_no_truncation_or_drop_tail() {
 /// sibling `precedent_recording` stage.
 #[tokio::test]
 async fn complete_without_rulings_skips_candidate_decomposition() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let params = base_complete();
     let resp = server
         .tachi_complete(Parameters(params))
@@ -802,7 +812,8 @@ async fn complete_without_rulings_skips_candidate_decomposition() {
 /// "whole-verdict" candidate masquerading as principle-level.
 #[tokio::test]
 async fn ruling_with_no_principles_cited_is_skipped_not_fabricated() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
         case: "ruling with no principles cited at all".to_string(),
@@ -854,7 +865,8 @@ async fn ruling_with_no_principles_cited_is_skipped_not_fabricated() {
 /// under the default (non-`full`) receipt.
 #[tokio::test]
 async fn default_format_receipt_still_surfaces_skipped_candidates() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
 
     let mut params = base_complete();
     params.format = None; // exercise the compact/default receipt shaper

@@ -49,8 +49,9 @@ fn base_dual_truth_params(dispatch_id: &str, outcome: &str) -> TachiCompletePara
 
 #[tokio::test]
 async fn reported_outcome_preserves_case_and_whitespace_trim_only() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "disp-dual-truth-001";
+    seed_dispatch_run(&server, dispatch_id);
 
     let params = base_dual_truth_params(dispatch_id, "Complete ");
     server
@@ -90,8 +91,9 @@ async fn reported_outcome_preserves_case_and_whitespace_trim_only() {
 
 #[tokio::test]
 async fn reported_outcome_matches_verbatim_for_canonical_success() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "disp-dual-truth-002";
+    seed_dispatch_run(&server, dispatch_id);
 
     let params = base_dual_truth_params(dispatch_id, "success");
     server
