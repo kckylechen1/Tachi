@@ -307,7 +307,15 @@ fn apply_decision_and_research_boosts(
     /// provisional research-path boost under /wiki/**/research/**
     /// (calibrated so labeled research notes beat denser architecture wikis
     /// on the ops-audit adjacent-wiki case).
-    const RESEARCH_PATH_BOOST: f64 = 2.85;
+    ///
+    /// tachi#1344: 2.85 left `hindsight-research-wiki` at rank2 (expected
+    /// final 0.03683 vs. competitor 0.03733). Rank-attribution harness
+    /// (`/Users/kckylechen/.claude/jobs/94957fc1/tmp/attrib-data.jsonl`)
+    /// showed 3.00 flips it to rank1 (expected final 0.03877 > competitor
+    /// 0.03733) with zero golden-corpus coupling — golden has no
+    /// /wiki/research paths, and golden_corpus_meets_spec_targets /
+    /// golden_corpus_recall_order_is_deterministic stay green at 3.00.
+    const RESEARCH_PATH_BOOST: f64 = 3.00;
 
     let research_query = query_looks_research_shaped(query);
 
@@ -634,7 +642,7 @@ mod tests {
     // tachi#911 follow-up to #903: the golden/ops-audit corpora only guard
     // recall@10 / MRR floors and rank-1 promotion for specific known-broken
     // cases; nothing asserted that the DECISION_BOOST (1.55x) / RESEARCH_PATH_BOOST
-    // (2.85x) multipliers leave an *already-correct* rank order unchanged.
+    // (3.00x, tachi#1344) multipliers leave an *already-correct* rank order unchanged.
     // These tests exercise `apply_decision_and_research_boosts` directly
     // (unit-level, no DB) against seeded scores whose pre-boost order already
     // matches the intended/golden order, and assert the boost does not
@@ -862,8 +870,8 @@ mod tests {
             &mut scores,
         );
 
-        assert_eq!(scores.get("r1").unwrap().final_score, 2.0 * 2.85);
-        assert_eq!(scores.get("r2").unwrap().final_score, 1.0 * 2.85);
+        assert_eq!(scores.get("r1").unwrap().final_score, 2.0 * 3.00);
+        assert_eq!(scores.get("r2").unwrap().final_score, 1.0 * 3.00);
         assert_eq!(
             ranked_ids(&scores, &["r1", "r2"]),
             vec!["r1".to_string(), "r2".to_string()]
