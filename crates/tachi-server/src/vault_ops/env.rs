@@ -1,6 +1,6 @@
 use crate::server_state::MemoryServer;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::access::{
@@ -51,6 +51,23 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env(
     server: &MemoryServer,
     cwd: Option<&Path>,
 ) -> Result<Vec<(String, String)>, String> {
+    load_unlocked_env_secrets_for_child_env_with_consumer(server, cwd, None)
+        .map(|report| report.secrets)
+}
+
+/// The dispatch and CLI execution paths share this one child-environment
+/// resolver. `unavailable` records project binding failures by environment name
+/// so an explicit CLI requirement can fail loudly without re-parsing bindings.
+pub(crate) struct ChildEnvSecretLoad {
+    pub(crate) secrets: Vec<(String, String)>,
+    pub(crate) unavailable: HashMap<String, String>,
+}
+
+pub(crate) fn load_unlocked_env_secrets_for_child_env_with_consumer(
+    server: &MemoryServer,
+    cwd: Option<&Path>,
+    consumer: Option<&str>,
+) -> Result<ChildEnvSecretLoad, String> {
     let child_env_mode = std::env::var("TACHI_VAULT_CHILD_ENV")
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
@@ -73,16 +90,24 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env(
         load_unlocked_provider_env_secrets(server)?
     };
     let Some(cwd) = cwd else {
-        return Ok(secrets);
+        return Ok(ChildEnvSecretLoad {
+            secrets,
+            unavailable: HashMap::new(),
+        });
     };
     let Some(bindings_path) = find_project_vault_env_file(cwd) else {
-        return Ok(secrets);
+        return Ok(ChildEnvSecretLoad {
+            secrets,
+            unavailable: HashMap::new(),
+        });
     };
 
     let contents = std::fs::read_to_string(&bindings_path)
         .map_err(|e| format!("Failed to read {}: {e}", bindings_path.display()))?;
+    let consumer = consumer.filter(|value| !value.trim().is_empty());
+    let mut unavailable = HashMap::new();
     for (env_name, secret_name) in parse_project_vault_env_bindings(&contents) {
-        let value = match read_unlocked_vault_secret(server, &secret_name, None, false) {
+        let value = match read_unlocked_vault_secret(server, &secret_name, consumer, false) {
             Ok(value) => value,
             Err(err) => {
                 tracing::warn!(
@@ -92,13 +117,17 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env(
                     bindings_path.display(),
                     err
                 );
+                unavailable.insert(env_name, err);
                 continue;
             }
         };
         upsert_env_secret(&mut secrets, env_name, value);
     }
 
-    Ok(secrets)
+    Ok(ChildEnvSecretLoad {
+        secrets,
+        unavailable,
+    })
 }
 
 fn find_project_vault_env_file(cwd: &Path) -> Option<PathBuf> {

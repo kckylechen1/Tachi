@@ -241,6 +241,30 @@ pub enum VaultAction {
         #[arg(long)]
         insecure_password_file: bool,
     },
+    /// Run a command with Vault-backed environment variables injected.
+    Exec {
+        /// Read password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
+        /// Optional Vault consumer identity for project-bound secret ACL checks.
+        #[arg(long, value_name = "ID")]
+        consumer: Option<String>,
+        /// Comma-separated environment variable names that must be present before spawning.
+        #[arg(long, value_name = "NAME,NAME", value_delimiter = ',')]
+        require: Vec<String>,
+        /// Command and arguments to execute. Use `--` before the command.
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
     /// Remove a secret from the vault.
     Remove {
         /// Secret name.

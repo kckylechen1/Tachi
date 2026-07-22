@@ -212,6 +212,11 @@ pub fn run_cli() {
         error
             .downcast_ref::<repair::RepairExit>()
             .map(|exit| exit.code())
+            .or_else(|| {
+                error
+                    .downcast_ref::<bootstrap::VaultExecExit>()
+                    .map(|exit| exit.code())
+            })
     });
 }
 
