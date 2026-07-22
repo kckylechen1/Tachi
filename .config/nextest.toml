@@ -52,3 +52,18 @@ retries = 2
 # target/nextest/ci/junit.xml -- a repo-relative path here would double-nest.
 [profile.ci.junit]
 path = "junit.xml"
+
+# Known deterministic reds for the machine-readable gate (#1278 / shift #1383 T5).
+# These three fail on current main for reasons tracked separately from random
+# flakes; `scripts/nextest-known-reds-diff.sh` diffs a JUnit failure set against
+# this named group and exits nonzero on any outsider.
+[test-groups]
+known-deterministic-reds = { max-threads = "num-cpus" }
+
+[[profile.default.overrides]]
+filter = 'test(/board_first::plan_review_pending_response_projects_input_required_kanban_state|board_first::successful_dispatch_seeds_status_and_kanban_before_plan_completes|dispatch_confirmation::tachi_task_dispatch_requires_leader_confirmation_for_blocked_issue_flow/)'
+test-group = 'known-deterministic-reds'
+
+[[profile.ci.overrides]]
+filter = 'test(/board_first::plan_review_pending_response_projects_input_required_kanban_state|board_first::successful_dispatch_seeds_status_and_kanban_before_plan_completes|dispatch_confirmation::tachi_task_dispatch_requires_leader_confirmation_for_blocked_issue_flow/)'
+test-group = 'known-deterministic-reds'
