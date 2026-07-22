@@ -436,12 +436,12 @@ fn model_lanes_reports_configured_local_rerank_provider() {
 
 #[test]
 fn xai_and_zai_are_recognized_provider_env_names() {
-    // #1355: the grok/xai and zhipuai/GLM opencode lane providers use
-    // `{env:XAI_API_KEY}` / `{env:ZAI_API_KEY}` substitution in opencode.json
-    // so vault "收权" can never blank them (no literal on disk). That only
-    // works end-to-end if these names are in the provider-key filter that
-    // gates which unlocked-vault secrets get injected into the lane subprocess
-    // env (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
+    // #1355: the grok/xai opencode lane provider uses `{env:XAI_API_KEY}`
+    // substitution in opencode.json so vault "收权" can never blank it (no
+    // literal on disk). That only works end-to-end if this name is in the
+    // provider-key filter that gates which unlocked-vault secrets get
+    // injected into the lane subprocess env
+    // (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
     let names = provider_api_key_env_names();
     assert!(
         names.contains("XAI_API_KEY"),
@@ -453,7 +453,25 @@ fn xai_and_zai_are_recognized_provider_env_names() {
         names.contains("GROK_API_KEY"),
         "GROK_API_KEY alias must be admitted by the provider-key filter"
     );
-    // Zhipu family already covered before #1355.
+    // Zhipu/BigModel family already covered before #1355.
     assert!(names.contains("ZAI_API_KEY"));
     assert!(names.contains("BIGMODEL_API_KEY"));
+}
+
+#[test]
+fn zhipuai_is_a_recognized_provider_env_name() {
+    // #1355(b): the opencode `zhipuai-coding-plan` GLM lane provider uses
+    // `{env:ZHIPUAI_API_KEY}` substitution in opencode.json. `ZAI_API_KEY`
+    // (asserted above) does NOT cover this — the vault stores a distinct
+    // `ZHIPUAI_API_KEY` secret (verified by SHA match against the working
+    // opencode literal at `zhipuai-coding-plan.options.apiKey`) holding a
+    // different value than `ZAI_API_KEY`. Without `ZHIPUAI_API_KEY` in the
+    // provider-key filter, the GLM lane subprocess never receives its
+    // vault secret and `{env:ZHIPUAI_API_KEY}` resolves to nothing.
+    let names = provider_api_key_env_names();
+    assert!(
+        names.contains("ZHIPUAI_API_KEY"),
+        "ZHIPUAI_API_KEY must be a recognized provider env name so an unlocked-vault \
+         zhipuai secret materializes into the opencode GLM lane child env"
+    );
 }
