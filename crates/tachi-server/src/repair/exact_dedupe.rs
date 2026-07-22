@@ -1,7 +1,7 @@
 use crate::daemon_lock::{DualDaemonLock, DualLockError};
 use crate::db_ownership::{daemon_ownership, DbOwnership};
 use crate::manifest::{DbRole, Manifest, MANIFEST_SCHEMA_VERSION};
-use memcore::store::exact_dedupe::ExactDedupePlan;
+use memcore::store::exact_dedupe::{ExactDedupePlan, ExactDedupeReceipt};
 use memcore::MemoryStore;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -87,12 +87,27 @@ pub fn apply(
     db: &str,
     plan_path: &Path,
     yes: bool,
+    receipt_out: &Path,
     app_home: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !yes {
         return Err("exact-dedupe apply requires --yes".into());
     }
+    // Fail before any mutation if the receipt destination is unusable: an
+    // apply that mutates the DB with no durable receipt to show for it
+    // violates #1348's receipt convention just as surely as a bad plan does.
+    if receipt_out.exists() {
+        return Err(format!(
+            "exact-dedupe receipt output already exists: {}",
+            receipt_out.display()
+        )
+        .into());
+    }
     let (target, daemon_scope) = target_and_daemon_scope(db, app_home, true)?;
+    if receipt_out == target || std::fs::canonicalize(receipt_out).is_ok_and(|path| path == target)
+    {
+        return Err("exact-dedupe receipt output must not be the target DB".into());
+    }
     let plan: ExactDedupePlan = serde_json::from_slice(&std::fs::read(plan_path)?)?;
     plan.validate()?;
     if std::fs::canonicalize(&plan.target_db_identity)? != target {
@@ -127,9 +142,96 @@ pub fn apply(
         }
     }
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
+    let result = store.apply_exact_dedupe(&plan)?;
+    let receipt_json = serde_json::to_string_pretty(&result.receipt)?;
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(receipt_out)
+    {
+        Ok(mut file) => {
+            // A mid-write failure (e.g. disk full after create) is just as
+            // fatal as failing to open: the apply already committed, so a
+            // truncated receipt must be surfaced as loudly as a missing one,
+            // dumping the full JSON for a manual restore rather than dropping
+            // it behind a bare `?`.
+            if let Err(error) = file
+                .write_all(receipt_json.as_bytes())
+                .and_then(|()| file.write_all(b"\n"))
+            {
+                eprintln!(
+                    "CRITICAL: exact-dedupe apply committed {} archived loser(s) but the receipt could not be fully written to {}: {error}\nReceipt JSON (save for a manual `repair dedupe restore`):\n{receipt_json}",
+                    result.applied_losers,
+                    receipt_out.display(),
+                );
+                return Err(
+                    format!("exact-dedupe receipt write failed after commit: {error}").into(),
+                );
+            }
+        }
+        Err(error) => {
+            // The apply already committed. Losing the receipt file here
+            // would silently drop the only durable restore/audit trail, so
+            // this refusal must be loud rather than quietly swallowed.
+            eprintln!(
+                "CRITICAL: exact-dedupe apply committed {} archived loser(s) but the receipt could not be written to {}: {error}\nReceipt JSON (save for a manual `repair dedupe restore`):\n{receipt_json}",
+                result.applied_losers,
+                receipt_out.display(),
+            );
+            return Err(format!("exact-dedupe receipt write failed after commit: {error}").into());
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+pub fn restore(
+    db: &str,
+    receipt_path: &Path,
+    yes: bool,
+    app_home: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !yes {
+        return Err("exact-dedupe restore requires --yes".into());
+    }
+    let (target, daemon_scope) = target_and_daemon_scope(db, app_home, true)?;
+    let receipt: ExactDedupeReceipt = serde_json::from_slice(&std::fs::read(receipt_path)?)?;
+    receipt.validate()?;
+    if std::fs::canonicalize(&receipt.target_db_identity)? != target {
+        return Err("exact-dedupe receipt target DB mismatch".into());
+    }
+    let _lock = match DualDaemonLock::acquire(app_home, &daemon_scope) {
+        Ok(lock) => lock,
+        Err(DualLockError::ScopedRunning { pid }) => {
+            return Err(
+                format!("exact-dedupe restore refused: daemon pid {pid} holds scoped lock").into(),
+            )
+        }
+        Err(DualLockError::LegacyRunning { pid }) => {
+            return Err(
+                format!("exact-dedupe restore refused: daemon pid {pid} holds legacy lock").into(),
+            )
+        }
+        Err(DualLockError::Io(error)) => {
+            return Err(format!("exact-dedupe daemon ownership unknown: {error}").into())
+        }
+    };
+    match daemon_ownership(&target) {
+        DbOwnership::NotOwned => {}
+        DbOwnership::Owned => {
+            return Err("exact-dedupe restore refused: target DB is owned by a live daemon".into())
+        }
+        DbOwnership::Unknown(reason) => {
+            return Err(format!(
+                "exact-dedupe restore refused: target DB ownership unknown: {reason}"
+            )
+            .into())
+        }
+    }
+    let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
     println!(
         "{}",
-        serde_json::to_string_pretty(&store.apply_exact_dedupe(&plan)?)?
+        serde_json::to_string_pretty(&store.restore_exact_dedupe(&receipt)?)?
     );
     Ok(())
 }
@@ -143,7 +245,7 @@ mod tests {
     use crate::manifest::DbEntry;
     use rusqlite::params;
 
-    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let app_home = dir.path().join(".tachi");
         std::fs::create_dir_all(&app_home).unwrap();
@@ -181,12 +283,13 @@ mod tests {
             notes: String::new(),
         });
         manifest.save(&app_home.join("manifest.json")).unwrap();
-        (dir, app_home, db_path, plan_path)
+        let receipt_path = dir.path().join("receipt.json");
+        (dir, app_home, db_path, plan_path, receipt_path)
     }
 
     #[test]
     fn plan_refuses_existing_output_and_preserves_first_plan() {
-        let (_dir, app_home, db_path, _plan_path) = fixture();
+        let (_dir, app_home, db_path, _plan_path, _receipt_path) = fixture();
         let output = app_home.join("cli-plan.json");
         plan(&db_path.to_string_lossy(), &output, None, None, &app_home).unwrap();
         let first = std::fs::read(&output).unwrap();
@@ -200,7 +303,7 @@ mod tests {
 
     #[test]
     fn plan_refuses_target_database_as_output_without_changing_it() {
-        let (_dir, app_home, db_path, _plan_path) = fixture();
+        let (_dir, app_home, db_path, _plan_path, _receipt_path) = fixture();
         let before = std::fs::read(&db_path).unwrap();
         let error = plan(&db_path.to_string_lossy(), &db_path, None, None, &app_home).unwrap_err();
         assert!(
@@ -213,18 +316,31 @@ mod tests {
     #[test]
     fn apply_requires_yes_before_target_resolution() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(apply("missing", Path::new("missing"), false, dir.path())
-            .unwrap_err()
-            .to_string()
-            .contains("requires --yes"));
+        assert!(apply(
+            "missing",
+            Path::new("missing"),
+            false,
+            Path::new("missing-receipt"),
+            dir.path()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("requires --yes"));
     }
 
     #[test]
     fn apply_refuses_malformed_manifest_without_mutation() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         std::fs::write(app_home.join("manifest.json"), b"not json").unwrap();
 
-        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("manifest"));
         let archived: i64 = rusqlite::Connection::open(db_path)
             .unwrap()
@@ -235,12 +351,19 @@ mod tests {
 
     #[test]
     fn apply_refuses_unregistered_target_without_mutation() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         Manifest::empty()
             .save(&app_home.join("manifest.json"))
             .unwrap();
 
-        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("not authorized by manifest"));
         let archived: i64 = rusqlite::Connection::open(db_path)
             .unwrap()
@@ -251,7 +374,7 @@ mod tests {
 
     #[test]
     fn read_only_plan_allows_manifest_read_only_target_but_apply_refuses_it() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         let manifest_path = app_home.join("manifest.json");
         let mut manifest = Manifest::load(&manifest_path).unwrap();
         manifest.dbs[0].allow_write = false;
@@ -261,7 +384,14 @@ mod tests {
         plan(&db_path.to_string_lossy(), &output, None, None, &app_home).unwrap();
         assert!(output.exists());
 
-        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("not writable by manifest authority"));
@@ -274,13 +404,20 @@ mod tests {
 
     #[test]
     fn apply_refuses_non_tachi_manifest_target_without_mutation() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         let manifest_path = app_home.join("manifest.json");
         let mut manifest = Manifest::load(&manifest_path).unwrap();
         manifest.dbs[0].schema_kind = "openclaw_legacy".into();
         manifest.save(&manifest_path).unwrap();
 
-        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("not a Tachi-schema manifest DB"));
         let archived: i64 = rusqlite::Connection::open(db_path)
             .unwrap()
@@ -291,25 +428,39 @@ mod tests {
 
     #[test]
     fn apply_refuses_scoped_daemon_lock() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         let _holder = DaemonLock::acquire(scoped_daemon_lock_path(&app_home, &db_path))
             .expect("hold scoped daemon lock");
-        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("holds scoped lock"));
     }
 
     #[test]
     fn apply_refuses_legacy_daemon_lock() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         let _holder = DaemonLock::acquire(legacy_daemon_lock_path(&app_home))
             .expect("hold legacy daemon lock");
-        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("holds legacy lock"));
     }
 
     #[test]
     fn project_apply_refuses_manifest_global_scoped_lock_without_mutation() {
-        let (_dir, app_home, project_path, plan_path) = fixture();
+        let (_dir, app_home, project_path, plan_path, receipt_path) = fixture();
         let global_path = app_home.join("global.db");
         MemoryStore::open(&global_path.to_string_lossy()).unwrap();
         let mut manifest = Manifest::empty();
@@ -341,7 +492,7 @@ mod tests {
         let _holder = DaemonLock::acquire(scoped_daemon_lock_path(&app_home, &global_path))
             .expect("hold manifest-global scoped daemon lock");
 
-        let error = apply("project:test", &plan_path, true, &app_home).unwrap_err();
+        let error = apply("project:test", &plan_path, true, &receipt_path, &app_home).unwrap_err();
         assert!(error.to_string().contains("holds scoped lock"));
         assert_eq!(std::fs::read(&project_path).unwrap(), before_bytes);
         let after_archived: i64 = rusqlite::Connection::open(&project_path)
@@ -354,31 +505,52 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn apply_refuses_injected_owned_before_rw_open() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         set_ownership_inject_for_test(Some(DbOwnership::Owned));
-        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("owned by a live daemon"));
     }
 
     #[cfg(unix)]
     #[test]
     fn apply_refuses_injected_unknown_before_rw_open() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         set_ownership_inject_for_test(Some(DbOwnership::Unknown("injected".into())));
-        let error = apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap_err();
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("ownership unknown: injected"));
     }
 
     #[cfg(unix)]
     #[test]
     fn apply_succeeds_without_recreating_missing_memories_vec() {
-        let (_dir, app_home, db_path, plan_path) = fixture();
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute("DROP TABLE memories_vec", []).unwrap();
         drop(conn);
         set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
 
-        apply(&db_path.to_string_lossy(), &plan_path, true, &app_home).unwrap();
+        apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap();
 
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         let (archived, superseded_by): (i64, Option<String>) = conn
@@ -398,5 +570,117 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_count, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_writes_a_durable_receipt_that_restore_consumes() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+
+        apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect("apply plan");
+
+        let receipt: memcore::store::exact_dedupe::ExactDedupeReceipt =
+            serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt file exists"))
+                .expect("receipt file is valid JSON");
+        receipt.validate().expect("receipt is self-consistent");
+        assert_eq!(receipt.rows.len(), 1);
+        assert_eq!(receipt.rows[0].loser_id, "loser");
+
+        let archived_before: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT archived FROM memories WHERE id='loser'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(archived_before, 1);
+
+        restore(&db_path.to_string_lossy(), &receipt_path, true, &app_home).expect("restore");
+
+        let archived_after: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT archived FROM memories WHERE id='loser'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(archived_after, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_refuses_when_receipt_output_already_exists_without_mutation() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        std::fs::write(&receipt_path, b"pre-existing").unwrap();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("receipt output already exists"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+        assert_eq!(std::fs::read(&receipt_path).unwrap(), b"pre-existing");
+    }
+
+    #[test]
+    fn restore_requires_yes_before_target_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(restore("missing", Path::new("missing"), false, dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("requires --yes"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_refuses_receipt_for_a_different_target_database() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect("apply plan");
+
+        let (_other_dir, other_app_home, other_db_path, _other_plan_path, _other_receipt_path) =
+            fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        let error = restore(
+            &other_db_path.to_string_lossy(),
+            &receipt_path,
+            true,
+            &other_app_home,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("target DB mismatch"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = rusqlite::Connection::open(&other_db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
     }
 }

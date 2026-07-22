@@ -325,12 +325,24 @@ pub enum DedupeAction {
         #[arg(long)]
         path_prefix: Option<String>,
     },
-    /// Apply a saved exact-dedupe plan atomically.
+    /// Apply a saved exact-dedupe plan atomically. Writes a durable receipt
+    /// (audit + restore input) to `--receipt-out` before reporting success.
     Apply {
         #[arg(long, value_name = "LABEL")]
         db: String,
         #[arg(long)]
         plan: std::path::PathBuf,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, value_name = "FILE")]
+        receipt_out: std::path::PathBuf,
+    },
+    /// Restore every loser archived by one exact-dedupe apply receipt.
+    Restore {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        receipt: std::path::PathBuf,
         #[arg(long)]
         yes: bool,
     },

@@ -193,8 +193,14 @@ pub async fn run_repair(
                     limit,
                     path_prefix,
                 } => exact_dedupe::plan(&db, &output, limit, path_prefix.as_deref(), app_home),
-                DedupeAction::Apply { db, plan, yes } => {
-                    exact_dedupe::apply(&db, &plan, yes, app_home)
+                DedupeAction::Apply {
+                    db,
+                    plan,
+                    yes,
+                    receipt_out,
+                } => exact_dedupe::apply(&db, &plan, yes, &receipt_out, app_home),
+                DedupeAction::Restore { db, receipt, yes } => {
+                    exact_dedupe::restore(&db, &receipt, yes, app_home)
                 }
             },
             RepairAction::Quarantine { action } => run_quarantine(action, app_home, json_out).await,

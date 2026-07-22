@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub const EXACT_DEDUPE_POLICY: &str = "exact-text-same-normalized-path-v1";
 pub const EXACT_DEDUPE_SCHEMA_VERSION: u32 = 1;
+pub const EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +70,103 @@ pub struct ExactDedupePlan {
 pub struct ExactDedupeApplyResult {
     pub applied_groups: usize,
     pub applied_losers: usize,
+    /// Durable, hash-bound audit/rollback record for this apply. The caller
+    /// (CLI adapter) is responsible for persisting this to disk before
+    /// treating the apply as complete — see #1348 "receipt conventions".
+    pub receipt: ExactDedupeReceipt,
+}
+
+/// One archived loser as recorded at apply time — the exact CAS binding
+/// [`MemoryStore::restore_exact_dedupe`] revalidates before undoing it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExactDedupeReceiptRow {
+    pub winner_id: String,
+    pub loser_id: String,
+    pub loser_path: String,
+    /// `memories.valid_until` immediately before this apply. The archive
+    /// mutation only fills `valid_until` in when it was previously NULL
+    /// (`COALESCE(valid_until, now)`); restore must put back exactly this
+    /// value, not unconditionally clear it.
+    pub loser_valid_until_before: Option<String>,
+    pub before_revision: i64,
+    pub archived_revision: i64,
+}
+
+/// Post-apply, durable audit/rollback record for one [`ExactDedupePlan`]
+/// application. Hash-bound the same way the plan itself is: clear
+/// `receipt_digest`, serialize, SHA-256 the bytes.
+///
+/// Restoring a receipt undoes the `memories.archived`/`superseded_by`
+/// state of each loser row under revision CAS. It does **not** attempt to
+/// un-merge `memory_edges` transferred onto the winner during apply:
+/// edges that collided with an edge the winner already had were dropped
+/// (deduped) rather than recorded per-loser, so which loser "owned" a
+/// given post-merge winner edge is not always recoverable. This mirrors
+/// the existing capture-archive-sweep receipt/restore contract, which
+/// also only reverses the archived-row state it durably recorded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactDedupeReceipt {
+    pub schema_version: u32,
+    pub policy_version: String,
+    pub target_db_identity: String,
+    pub plan_digest: String,
+    pub applied_at: String,
+    pub rows: Vec<ExactDedupeReceiptRow>,
+    pub applied_groups: usize,
+    pub applied_losers: usize,
+    pub receipt_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactDedupeRestoreResult {
+    pub restored_losers: usize,
+}
+
+impl ExactDedupeReceipt {
+    pub fn compute_digest(&self) -> Result<String, MemoryError> {
+        let mut r = self.clone();
+        r.receipt_digest.clear();
+        Ok(digest(&serde_json::to_vec(&r)?))
+    }
+
+    pub fn validate(&self) -> Result<(), MemoryError> {
+        if self.schema_version != EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION
+            || self.policy_version != EXACT_DEDUPE_POLICY
+        {
+            return Err(MemoryError::InvalidArg(
+                "unsupported exact-dedupe receipt schema/policy".into(),
+            ));
+        }
+        if self.applied_losers != self.rows.len() {
+            return Err(MemoryError::InvalidArg(
+                "exact-dedupe receipt counts mismatch".into(),
+            ));
+        }
+        let mut ids = HashSet::new();
+        for row in &self.rows {
+            if !ids.insert(row.loser_id.as_str())
+                || row.loser_id.is_empty()
+                || row.winner_id.is_empty()
+                || row.loser_id == row.winner_id
+                || row.before_revision < 1
+                || row.archived_revision != row.before_revision + 1
+            {
+                return Err(MemoryError::InvalidArg(format!(
+                    "invalid exact-dedupe receipt row {}",
+                    row.loser_id
+                )));
+            }
+        }
+        if !valid_digest(&self.receipt_digest) || self.receipt_digest != self.compute_digest()? {
+            return Err(MemoryError::InvalidArg(
+                "exact-dedupe receipt digest mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -439,8 +537,14 @@ impl MemoryStore {
         // The complete text-digest revalidation above runs after BEGIN IMMEDIATE,
         // which excludes intervening writers until commit. The UPDATE therefore
         // needs only the revision/state/original-path CAS predicates.
+        let mut receipt_rows = Vec::with_capacity(plan.planned_losers);
         for g in &plan.groups {
             for f in &g.losers {
+                let valid_until_before: Option<String> = tx.query_row(
+                    "SELECT valid_until FROM memories WHERE id=?1",
+                    [&f.id],
+                    |r| r.get(0),
+                )?;
                 let changed=tx.execute("UPDATE memories SET archived=1,superseded_by=?1,valid_until=COALESCE(valid_until,?2),updated_at=?2,revision=revision+1 WHERE id=?3 AND revision=?4 AND archived=0 AND superseded_by IS NULL AND path=?5",params![g.winner.id,now,f.id,f.revision,f.path])?;
                 if changed != 1 {
                     return Err(MemoryError::InvalidArg(format!(
@@ -448,14 +552,130 @@ impl MemoryStore {
                         f.id
                     )));
                 }
+                transfer_edges_to_winner(&tx, &f.id, &g.winner.id)?;
+                receipt_rows.push(ExactDedupeReceiptRow {
+                    winner_id: g.winner.id.clone(),
+                    loser_id: f.id.clone(),
+                    loser_path: f.path.clone(),
+                    loser_valid_until_before: valid_until_before,
+                    before_revision: f.revision,
+                    archived_revision: f.revision + 1,
+                });
             }
         }
+        let mut receipt = ExactDedupeReceipt {
+            schema_version: EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION,
+            policy_version: EXACT_DEDUPE_POLICY.into(),
+            target_db_identity: plan.target_db_identity.clone(),
+            plan_digest: plan.plan_digest.clone(),
+            applied_at: now,
+            applied_groups: plan.groups.len(),
+            applied_losers: plan.planned_losers,
+            rows: receipt_rows,
+            receipt_digest: String::new(),
+        };
+        receipt.receipt_digest = receipt.compute_digest()?;
         tx.commit()?;
         Ok(ExactDedupeApplyResult {
             applied_groups: plan.groups.len(),
             applied_losers: plan.planned_losers,
+            receipt,
         })
     }
+
+    /// Restore every loser archived by one [`ExactDedupeReceipt`]. All-or-nothing,
+    /// like [`MemoryStore::apply_exact_dedupe`]: any row whose live state no
+    /// longer matches the receipt's CAS binding aborts the whole restore with
+    /// zero writes. Does not attempt to un-merge `memory_edges` — see
+    /// [`ExactDedupeReceipt`]'s doc comment for why that is not always
+    /// recoverable.
+    pub fn restore_exact_dedupe(
+        &mut self,
+        receipt: &ExactDedupeReceipt,
+    ) -> Result<ExactDedupeRestoreResult, MemoryError> {
+        receipt.validate()?;
+        let effective: String = self.conn.query_row(
+            "SELECT file FROM pragma_database_list WHERE name='main'",
+            [],
+            |r| r.get(0),
+        )?;
+        if canonical(&effective)? != canonical(&receipt.target_db_identity)? {
+            return Err(MemoryError::InvalidArg(
+                "exact-dedupe receipt target DB mismatch".into(),
+            ));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for row in &receipt.rows {
+            let changed = tx.execute(
+                "UPDATE memories SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1 WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4 AND path=?5",
+                params![
+                    row.loser_valid_until_before,
+                    row.loser_id,
+                    row.archived_revision,
+                    row.winner_id,
+                    row.loser_path
+                ],
+            )?;
+            if changed != 1 {
+                return Err(MemoryError::InvalidArg(format!(
+                    "exact-dedupe restore CAS failed: {}",
+                    row.loser_id
+                )));
+            }
+        }
+        tx.commit()?;
+        Ok(ExactDedupeRestoreResult {
+            restored_losers: receipt.rows.len(),
+        })
+    }
+}
+
+/// Move every `memory_edges` row touching `loser` onto `winner` in the same
+/// transaction as the archive CAS. `loser` is byte-identical to `winner`
+/// (that's the entire exact-dedupe eligibility bar), so its edges are
+/// semantically the winner's edges post-merge:
+///
+/// - an edge already present for `winner` with the same `(target, relation)`
+///   (or `(source, relation)` on the incoming side) is a duplicate — the
+///   loser's copy is dropped, not doubled (`INSERT OR IGNORE` on the
+///   `(source_id, target_id, relation)` primary key);
+/// - an edge between `loser` and `winner` becomes a winner→winner self-loop
+///   after the rename, which is meaningless post-merge, so it is dropped
+///   rather than inserted (the `target_id != winner`/`source_id != winner`
+///   guards on the `INSERT ... SELECT`).
+///
+/// `edge_observations` (the append-only Layer-2 evidence ledger, #774) is
+/// deliberately left untouched: it is historical record of what was
+/// observed about which ids, not a live projection, and is out of scope
+/// for #1348's frozen contract.
+fn transfer_edges_to_winner(
+    tx: &rusqlite::Transaction<'_>,
+    loser: &str,
+    winner: &str,
+) -> Result<(), MemoryError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+         SELECT ?1, target_id, relation, weight, metadata, created_at, valid_from, valid_to
+         FROM memory_edges WHERE source_id = ?2 AND target_id != ?1",
+        params![winner, loser],
+    )?;
+    tx.execute(
+        "DELETE FROM memory_edges WHERE source_id = ?1",
+        params![loser],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+         SELECT source_id, ?1, relation, weight, metadata, created_at, valid_from, valid_to
+         FROM memory_edges WHERE target_id = ?2 AND source_id != ?1",
+        params![winner, loser],
+    )?;
+    tx.execute(
+        "DELETE FROM memory_edges WHERE target_id = ?1",
+        params![loser],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -469,6 +689,29 @@ mod tests {
             params![id,path,text],
         ).unwrap();
         crate::db::sync_memories_symbolic_fts(&store.conn, id).unwrap();
+    }
+
+    fn insert_edge(store: &MemoryStore, source: &str, target: &str, relation: &str) {
+        store
+            .conn
+            .execute(
+                "INSERT INTO memory_edges(source_id,target_id,relation,weight,metadata,created_at,valid_from,valid_to) VALUES(?1,?2,?3,1.0,'{}','2026-01-01','2026-01-01',NULL)",
+                params![source, target, relation],
+            )
+            .unwrap();
+    }
+
+    fn all_edges(store: &MemoryStore) -> Vec<(String, String, String)> {
+        let mut edges: Vec<(String, String, String)> = store
+            .conn
+            .prepare("SELECT source_id, target_id, relation FROM memory_edges")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        edges.sort();
+        edges
     }
 
     #[test]
@@ -826,5 +1069,162 @@ mod tests {
         let path = dir.path().join("absent.db");
         assert!(MemoryStore::open_existing_read_write(&path.to_string_lossy()).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn apply_transfers_edges_to_winner_dedupes_and_drops_self_loops() {
+        let (_dir, identity, mut store) = disk_store();
+        insert(&store, "winner", "/a", "same-a");
+        insert(&store, "loser", "/a", "same-a");
+        insert(&store, "neighbor-in", "/n1", "unrelated");
+        insert(&store, "neighbor-out", "/n2", "unrelated");
+        store
+            .conn
+            .execute(
+                "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
+                [],
+            )
+            .unwrap();
+
+        // A -> loser: should transfer to A -> winner.
+        insert_edge(&store, "neighbor-in", "loser", "related_to");
+        // loser -> B: should transfer to winner -> B.
+        insert_edge(&store, "loser", "neighbor-out", "related_to");
+        // Edges between loser and winner become winner->winner self-loops
+        // after the rename and must be dropped, not inserted.
+        insert_edge(&store, "loser", "winner", "related_to");
+        insert_edge(&store, "winner", "loser", "supports");
+        // Winner already has an edge to neighbor-out under the same relation
+        // as loser's; the transfer must not double it.
+        insert_edge(&store, "winner", "neighbor-out", "related_to");
+
+        let plan = store
+            .plan_exact_dedupe(identity, None, None)
+            .expect("build plan");
+        assert_eq!(plan.groups.len(), 1, "{plan:#?}");
+
+        store.apply_exact_dedupe(&plan).expect("apply plan");
+
+        assert_eq!(
+            all_edges(&store),
+            vec![
+                (
+                    "neighbor-in".to_string(),
+                    "winner".to_string(),
+                    "related_to".to_string()
+                ),
+                (
+                    "winner".to_string(),
+                    "neighbor-out".to_string(),
+                    "related_to".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_edges WHERE source_id = target_id",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0,
+            "no self-loop should survive the merge"
+        );
+    }
+
+    #[test]
+    fn apply_produces_a_durable_receipt_and_restore_is_hash_bound_and_reversible() {
+        let (_dir, identity, mut store) = disk_store();
+        insert(&store, "winner", "/a", "same-a");
+        insert(&store, "loser", "/a", "same-a");
+        store
+            .conn
+            .execute(
+                "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
+                [],
+            )
+            .unwrap();
+        let plan = store
+            .plan_exact_dedupe(identity, None, None)
+            .expect("build plan");
+
+        let result = store.apply_exact_dedupe(&plan).expect("apply plan");
+        let receipt = result.receipt.clone();
+        receipt
+            .validate()
+            .expect("apply receipt is self-consistent");
+        assert_eq!(receipt.applied_losers, 1);
+        assert_eq!(receipt.rows.len(), 1);
+        assert_eq!(receipt.rows[0].loser_id, "loser");
+        assert_eq!(receipt.rows[0].winner_id, "winner");
+        assert_eq!(receipt.rows[0].archived_revision, 2);
+
+        let archived: i64 = store
+            .conn
+            .query_row("SELECT archived FROM memories WHERE id='loser'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(archived, 1);
+
+        // A tampered-but-not-rehashed receipt fails schema/digest validation
+        // before touching the database at all.
+        let mut tampered = receipt.clone();
+        tampered.rows[0].archived_revision += 1;
+        assert!(store.restore_exact_dedupe(&tampered).is_err());
+        let still_archived: i64 = store
+            .conn
+            .query_row("SELECT archived FROM memories WHERE id='loser'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(still_archived, 1, "failed validation must not mutate");
+
+        // Even a receipt re-hashed after tampering the bound revision fails
+        // the real DB CAS and performs zero writes.
+        let mut forged = tampered.clone();
+        forged.receipt_digest.clear();
+        forged.receipt_digest = forged.compute_digest().unwrap();
+        assert!(store.restore_exact_dedupe(&forged).is_err());
+        let still_archived: i64 = store
+            .conn
+            .query_row("SELECT archived FROM memories WHERE id='loser'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(still_archived, 1, "failed CAS must not mutate");
+
+        let restored = store
+            .restore_exact_dedupe(&receipt)
+            .expect("restore the untampered receipt");
+        assert_eq!(restored.restored_losers, 1);
+        let (archived, superseded_by): (i64, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT archived, superseded_by FROM memories WHERE id='loser'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(archived, 0);
+        assert_eq!(superseded_by, None);
+        assert!(store.get("loser").unwrap().is_some());
+
+        // The receipt is now stale (loser is no longer archived at the
+        // recorded revision): repeat restore is a hard refusal, not a
+        // silent no-op, and performs zero further writes.
+        assert!(store.restore_exact_dedupe(&receipt).is_err());
+        let (archived, superseded_by): (i64, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT archived, superseded_by FROM memories WHERE id='loser'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(archived, 0);
+        assert_eq!(superseded_by, None);
     }
 }
