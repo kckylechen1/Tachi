@@ -34,6 +34,16 @@ from pathlib import Path
 import sys
 
 Path(os.environ[\"FAKE_CARGO_ARGS\"]).write_text(json.dumps(sys.argv[1:]))
+target = Path(os.environ[\"CARGO_TARGET_DIR\"])
+if not target.exists():
+    target_state = \"absent\"
+elif not target.is_dir():
+    target_state = \"not_a_directory\"
+elif any(target.iterdir()):
+    target_state = \"nonempty\"
+else:
+    target_state = \"empty\"
+Path(os.environ[\"FAKE_TARGET_STATE\"]).write_text(target_state)
 junit = Path(os.environ[\"FAKE_WORKSPACE\"]) / \"target/nextest/census/junit.xml\"
 junit.parent.mkdir(parents=True, exist_ok=True)
 junit.write_text(\"\"\"<testsuites><testsuite><testcase classname=\"tachi_server::census\" name=\"records_provenance\" time=\"1.5\"><failure message=\"thread 'census' (4242) panicked at deliberate failure\" /></testcase></testsuite></testsuites>\"\"\")
@@ -44,21 +54,24 @@ sys.exit(7)
             fake_cargo.chmod(0o755)
 
             target_dir = temp / "fresh-target"
-            evidence_dir = temp / "evidence"
+            evidence_dir = target_dir / "nextest-census"
             cargo_args = temp / "cargo-args.json"
+            target_state = temp / "target-state.txt"
             env = os.environ | {
                 "CARGO_TARGET_DIR": str(target_dir),
-                "NEXTEST_CENSUS_DIR": str(evidence_dir),
                 "NEXTEST_TEST_THREADS": "8",
                 "FAKE_CARGO_ARGS": str(cargo_args),
+                "FAKE_TARGET_STATE": str(target_state),
                 "FAKE_WORKSPACE": str(workspace),
                 "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
             }
+            env.pop("NEXTEST_CENSUS_DIR", None)
 
             first = subprocess.run(
                 ["bash", str(script)], text=True, capture_output=True, env=env, check=False
             )
             self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(target_state.read_text(encoding="utf-8"), "absent")
             self.assertEqual(
                 json.loads(cargo_args.read_text(encoding="utf-8")),
                 [
@@ -81,10 +94,11 @@ sys.exit(7)
             self.assertEqual(first_row["test_threads"], "8")
             self.assertEqual(first_row["target_dir"], str(target_dir))
             self.assertEqual(first_row["target_source"], "CARGO_TARGET_DIR")
-            self.assertEqual(first_row["target_pre_run_state"], "absent")
-            self.assertTrue(first_row["target_clean_before_run"])
+            self.assertEqual(first_row["target_state_at_invocation"], "absent")
+            self.assertTrue(first_row["target_clean_at_invocation"])
             self.assertGreaterEqual(first_row["run_runtime_s"], 0)
             self.assertEqual(first_row["nextest_exit"], 7)
+            self.assertIn("summary nextest_exit=7", first.stdout)
             self.assertEqual(first_row["test_id"], "tachi_server::census::records_provenance")
             self.assertTrue(first_row["failure_line1_hash"])
             self.assertEqual(first_row["prior_matching_failures"], 0)
@@ -94,7 +108,10 @@ sys.exit(7)
                 ["bash", str(script)], text=True, capture_output=True, env=env, check=False
             )
             self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(target_state.read_text(encoding="utf-8"), "nonempty")
             second_row = json.loads(jsonl.read_text(encoding="utf-8").splitlines()[1])
+            self.assertEqual(second_row["target_state_at_invocation"], "nonempty")
+            self.assertFalse(second_row["target_clean_at_invocation"])
             self.assertEqual(second_row["prior_matching_failures"], 1)
             self.assertEqual(second_row["recurrence"], "recurrent")
 

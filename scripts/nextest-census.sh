@@ -9,7 +9,7 @@
 #      output enabled. Set NEXTEST_TEST_THREADS to pass an explicit nextest
 #      concurrency setting through to the run.
 #   2. Parses the JUnit XML into one JSONL line per failed test:
-#        {run_id, test_threads, target_dir, target_pre_run_state,
+#        {run_id, test_threads, target_dir, target_state_at_invocation,
 #         run_runtime_s, test_id, failure_line1_hash, recurrence, ...}
 #      failure_line1_hash = sha256 of the first line of the failure message.
 #   3. Appends to $CENSUS_DIR/census.jsonl (default:
@@ -41,19 +41,20 @@ else
   TARGET_SOURCE="default"
   TARGET_DIR="/Users/kckylechen/.cache/sigil-shared-target"
 fi
-if [[ ! -e "${TARGET_DIR}" ]]; then
-  TARGET_PRE_RUN_STATE="absent"
-elif [[ ! -d "${TARGET_DIR}" ]]; then
-  TARGET_PRE_RUN_STATE="not_a_directory"
-elif [[ -n "$(find "${TARGET_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-  TARGET_PRE_RUN_STATE="nonempty"
-else
-  TARGET_PRE_RUN_STATE="empty"
-fi
-case "${TARGET_PRE_RUN_STATE}" in
-  absent|empty) TARGET_CLEAN_BEFORE_RUN=true ;;
-  *) TARGET_CLEAN_BEFORE_RUN=false ;;
-esac
+
+census_target_state() {
+  local target="$1"
+  if [[ ! -e "${target}" ]]; then
+    echo "absent"
+  elif [[ ! -d "${target}" ]]; then
+    echo "not_a_directory"
+  elif [[ -n "$(find "${target}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "nonempty"
+  else
+    echo "empty"
+  fi
+}
+
 TEST_THREADS="${NEXTEST_TEST_THREADS:-default}"
 CENSUS_DIR="${NEXTEST_CENSUS_DIR:-${TARGET_DIR}/nextest-census}"
 # nextest store dir is workspace-relative (`[store] dir = "target/nextest"`),
@@ -61,25 +62,24 @@ CENSUS_DIR="${NEXTEST_CENSUS_DIR:-${TARGET_DIR}/nextest-census}"
 JUNIT_PATH="${ROOT}/target/nextest/census/junit.xml"
 JSONL="${CENSUS_DIR}/census.jsonl"
 
-mkdir -p "${CENSUS_DIR}"
-# Guarantee JSONL exists before the summary line reads it below, even on a
-# fresh machine / first-ever run where nothing has failed yet: an empty file
-# reads as zero lines rather than tripping `wc -l < missing-file` under `set
-# -e`.
-touch "${JSONL}"
-
 RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 RUN_STARTED_EPOCH="$(date +%s)"
 
 echo "nextest-census: run_id=${RUN_ID} started_at=${STARTED_AT}"
-echo "nextest-census: target_dir=${TARGET_DIR} source=${TARGET_SOURCE} pre_run_state=${TARGET_PRE_RUN_STATE} clean_before_run=${TARGET_CLEAN_BEFORE_RUN}"
 echo "nextest-census: test_threads=${TEST_THREADS}"
 echo "nextest-census: junit=${JUNIT_PATH}"
 echo "nextest-census: jsonl=${JSONL}"
 
 # Ensure no stale junit confuses this run.
 rm -f "${JUNIT_PATH}"
+
+TARGET_STATE_AT_INVOCATION="$(census_target_state "${TARGET_DIR}")"
+case "${TARGET_STATE_AT_INVOCATION}" in
+  absent|empty) TARGET_CLEAN_AT_INVOCATION=true ;;
+  *) TARGET_CLEAN_AT_INVOCATION=false ;;
+esac
+echo "nextest-census: target_dir=${TARGET_DIR} source=${TARGET_SOURCE} state_at_invocation=${TARGET_STATE_AT_INVOCATION} clean_at_invocation=${TARGET_CLEAN_AT_INVOCATION}"
 
 set +e
 (
@@ -100,6 +100,14 @@ if [[ ! -f "${JUNIT_PATH}" ]]; then
   echo "nextest-census: nextest exit=${NEXTEST_EXIT}; census profile expected to write this path." >&2
   exit 2
 fi
+
+# Defer evidence creation until cargo has observed the target. When CENSUS_DIR
+# uses its default under TARGET_DIR, creating it earlier would make a fresh
+# target nonempty and falsify the invocation-time cleanliness provenance.
+mkdir -p "${CENSUS_DIR}"
+# Guarantee JSONL exists before the summary reads it, including a first run
+# where no tests fail.
+touch "${JSONL}"
 
 # Portable file lock (no `flock(1)` dependency -- this script's default
 # paths are macOS dev-machine paths, and macOS ships no `flock` binary by
@@ -190,7 +198,7 @@ census_lock_acquire
 trap census_lock_release EXIT
 
 NEW_ROWS="$(mktemp)"
-python3 - "${JUNIT_PATH}" "${JSONL}" "${RUN_ID}" "${STARTED_AT}" "${FINISHED_AT}" "${RUN_RUNTIME_S}" "${TARGET_DIR}" "${TARGET_SOURCE}" "${TARGET_PRE_RUN_STATE}" "${TARGET_CLEAN_BEFORE_RUN}" "${TEST_THREADS}" "${NEXTEST_EXIT}" "${NEW_ROWS}" <<'PY'
+python3 - "${JUNIT_PATH}" "${JSONL}" "${RUN_ID}" "${STARTED_AT}" "${FINISHED_AT}" "${RUN_RUNTIME_S}" "${TARGET_DIR}" "${TARGET_SOURCE}" "${TARGET_STATE_AT_INVOCATION}" "${TARGET_CLEAN_AT_INVOCATION}" "${TEST_THREADS}" "${NEXTEST_EXIT}" "${NEW_ROWS}" <<'PY'
 from collections import Counter
 import hashlib
 import json
@@ -207,8 +215,8 @@ import xml.etree.ElementTree as ET
     run_runtime_s,
     target_dir,
     target_source,
-    target_pre_run_state,
-    target_clean_before_run,
+    target_state_at_invocation,
+    target_clean_at_invocation,
     test_threads,
     nextest_exit,
     out_path,
@@ -271,8 +279,8 @@ for suite in suites:
                 "test_threads": test_threads,
                 "target_dir": target_dir,
                 "target_source": target_source,
-                "target_pre_run_state": target_pre_run_state,
-                "target_clean_before_run": target_clean_before_run == "true",
+                "target_state_at_invocation": target_state_at_invocation,
+                "target_clean_at_invocation": target_clean_at_invocation == "true",
                 "nextest_exit": int(nextest_exit),
                 "test_id": test_id,
                 "failure_line1_hash": digest,
@@ -311,5 +319,7 @@ trap - EXIT
 echo "nextest-census: summary nextest_exit=${NEXTEST_EXIT} runtime_s=${RUN_RUNTIME_S} failed=${FAIL_N} previously_seen=${REPEAT_M} novel=${NOVEL_K}"
 echo "nextest-census: jsonl_lines=$(wc -l < "${JSONL}" | tr -d ' ') path=${JSONL}"
 
-# Census always records; surface nextest's exit for callers that care.
+# This is a census recorder, not a pass/fail gate: successful capture exits 0
+# even when tests fail. nextest_exit remains loud in every failure row and the
+# summary above; missing JUnit or evidence-lock failures still exit nonzero.
 exit 0
