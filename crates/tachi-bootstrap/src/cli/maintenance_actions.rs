@@ -675,6 +675,25 @@ pub enum SkillSurfaceAction {
     },
 }
 
+/// Cross-harness injection-surface doctor (#1307): report-only inventory of
+/// MCP / plugin / credential / environment / density planes. Never writes,
+/// never chmods, never uninstalls, never prints credential values.
+#[derive(Subcommand, Debug, Clone)]
+pub enum InjectionSurfaceAction {
+    /// Report-only doctor over a local fleet registry of harness injection planes
+    Doctor {
+        /// Path to the fleet registry JSON (local to this doctor; not #871)
+        #[arg(long, value_name = "PATH")]
+        registry: PathBuf,
+        /// Optional root for resolving relative plane paths in fixtures
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum CardAction {
     /// List Cards available to the current project/runtime.

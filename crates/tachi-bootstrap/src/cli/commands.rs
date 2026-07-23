@@ -1,8 +1,8 @@
 use super::{
     BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction, EnvAction,
-    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, ManifestAction, McpAction,
-    PokeAction, RepairAction, RescueAction, SkillSurfaceAction, VaultAction, WatcherAction,
-    WikiAction, WorktreeAction,
+    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction,
+    ManifestAction, McpAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction,
+    VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -162,6 +162,11 @@ pub enum Commands {
     SkillSurface {
         #[command(subcommand)]
         action: SkillSurfaceAction,
+    },
+    /// Cross-harness injection-surface doctor (MCP/plugin/credential/env planes)
+    InjectionSurface {
+        #[command(subcommand)]
+        action: InjectionSurfaceAction,
     },
     /// Inspect Tachikoma Cards projected from dispatch profiles.
     Card {
