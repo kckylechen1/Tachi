@@ -3,7 +3,7 @@ use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex as StdMutex, RwLock as StdRwLock};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 const DEFAULT_MEMORY_READ_POOL_SIZE: usize = 4;
@@ -67,6 +67,56 @@ pub fn query_limit(limit: usize) -> usize {
 pub struct ReadPoolCheckoutReceipt {
     pub pool_checkout_wait: Duration,
     pub operation_wall_time: Duration,
+}
+
+/// One opt-in timing sample from a real global [`DbRuntime`] operation.
+///
+/// The labels name the two resources involved in every global operation:
+/// `gate` is always `global_rw_gate`, while `resource` is either the write
+/// `global_store` mutex or the read `global_read_pool`. Timings deliberately
+/// contain no database path, query, memory content, or credential.
+#[derive(Debug, Clone)]
+pub struct DbContentionReceipt {
+    /// Stable instrumentation boundary, currently `db_runtime`.
+    pub phase: &'static str,
+    /// `write` for [`DbRuntime::with_global_store`], `read` for its read twins.
+    pub action: &'static str,
+    /// The primary operation resource: `global_store` or `global_read_pool`.
+    pub resource: &'static str,
+    /// The `global_rw_gate` mode: `exclusive` for writes, `shared` for reads.
+    pub mode: &'static str,
+    /// The shared gate that serialized or admitted the operation.
+    pub gate: &'static str,
+    pub gate_wait: Duration,
+    pub resource_wait: Duration,
+    pub resource_hold: Duration,
+    pub gate_hold: Duration,
+    /// `false` when the closure returned an error; panics do not emit a receipt.
+    pub completed: bool,
+}
+
+/// Shared, opt-in sink for [`DbContentionReceipt`]s.
+///
+/// A runtime allocates this only when a caller asks to observe it. Normal
+/// global reads and writes retain their existing no-timer path.
+#[derive(Default)]
+pub struct DbContentionRecorder {
+    receipts: StdMutex<Vec<DbContentionReceipt>>,
+}
+
+impl DbContentionRecorder {
+    fn record(&self, receipt: DbContentionReceipt) {
+        lock_or_recover(&self.receipts, "db_contention_receipts").push(receipt);
+    }
+
+    /// Drain every sample observed so far. Intended for isolated test/harness
+    /// collection after the operations under observation have completed.
+    pub fn drain(&self) -> Vec<DbContentionReceipt> {
+        std::mem::take(&mut *lock_or_recover(
+            &self.receipts,
+            "db_contention_receipts",
+        ))
+    }
 }
 
 /// Shared state behind every clone of a [`ReadStorePool`]: the fixed slots
@@ -547,6 +597,13 @@ pub struct DbRuntime {
     pub global_store: Arc<StdMutex<MemoryStore>>,
     pub global_read_pool: ReadStorePool,
     pub global_rw_gate: Arc<StdRwLock<()>>,
+    /// Lazily initialized only by an explicit measurement caller (#1255).
+    /// The normal path performs a single `OnceLock::get` and takes no timer.
+    pub global_contention_recorder: Arc<OnceLock<Arc<DbContentionRecorder>>>,
+    /// Test-only causal signal for a writer that has observed the real global
+    /// gate as busy immediately before its measured blocking acquisition.
+    #[cfg(test)]
+    global_write_gate_contended_observers: Arc<StdMutex<Vec<std::sync::mpsc::Sender<()>>>>,
     pub global_db_path: Arc<PathBuf>,
     pub global_vec_available: bool,
     pub project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
@@ -562,6 +619,59 @@ pub struct DbRuntime {
 }
 
 impl DbRuntime {
+    /// Enable isolated observation of future global read/write contention.
+    ///
+    /// This does not change lock order, pool size, or admission semantics. The
+    /// returned recorder is shared by every clone of this runtime, including
+    /// per-MCP-session server clones used by the in-process receipt harness.
+    pub fn enable_global_contention_receipts(&self) -> Arc<DbContentionRecorder> {
+        Arc::clone(
+            self.global_contention_recorder
+                .get_or_init(|| Arc::new(DbContentionRecorder::default())),
+        )
+    }
+
+    /// Test-only: notify once when a global writer has observed
+    /// `global_rw_gate` as contended immediately before its measured acquire.
+    /// This is a causal test probe, not a production lock path or policy.
+    #[cfg(test)]
+    fn observe_next_global_write_gate_contention_for_test(&self) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        lock_or_recover(
+            &self.global_write_gate_contended_observers,
+            "global_write_gate_contended_observers",
+        )
+        .push(tx);
+        rx
+    }
+
+    #[cfg(test)]
+    fn notify_global_write_gate_contention_for_test(&self) {
+        if lock_or_recover(
+            &self.global_write_gate_contended_observers,
+            "global_write_gate_contended_observers",
+        )
+        .is_empty()
+        {
+            return;
+        }
+        let contended = matches!(
+            self.global_rw_gate.try_write(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        if !contended {
+            return;
+        }
+        for observer in lock_or_recover(
+            &self.global_write_gate_contended_observers,
+            "global_write_gate_contended_observers",
+        )
+        .drain(..)
+        {
+            let _ = observer.send(());
+        }
+    }
+
     pub fn has_project_db(&self) -> bool {
         self.project_db
             .read()
@@ -739,17 +849,75 @@ impl DbRuntime {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
+        let Some(recorder) = self.global_contention_recorder.get().cloned() else {
+            let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
+            let mut store = lock_or_recover(&self.global_store, "global_store");
+            return f(&mut store);
+        };
+
+        let gate_wait_started = Instant::now();
+        #[cfg(test)]
+        self.notify_global_write_gate_contention_for_test();
         let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
+        let gate_wait = gate_wait_started.elapsed();
+        let gate_hold_started = Instant::now();
+        let resource_wait_started = Instant::now();
         let mut store = lock_or_recover(&self.global_store, "global_store");
-        f(&mut store)
+        let resource_wait = resource_wait_started.elapsed();
+        let resource_hold_started = Instant::now();
+        let result = f(&mut store);
+        let resource_hold = resource_hold_started.elapsed();
+        let completed = result.is_ok();
+        drop(store);
+        let gate_hold = gate_hold_started.elapsed();
+        drop(_gate);
+        recorder.record(DbContentionReceipt {
+            phase: "db_runtime",
+            action: "write",
+            resource: "global_store",
+            mode: "exclusive",
+            gate: "global_rw_gate",
+            gate_wait,
+            resource_wait,
+            resource_hold,
+            gate_hold,
+            completed,
+        });
+        result
     }
 
     pub fn with_global_store_read<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
+        let Some(recorder) = self.global_contention_recorder.get().cloned() else {
+            let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+            return self.global_read_pool.with_store("global_read_pool", f);
+        };
+
+        let gate_wait_started = Instant::now();
         let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-        self.global_read_pool.with_store("global_read_pool", f)
+        let gate_wait = gate_wait_started.elapsed();
+        let gate_hold_started = Instant::now();
+        let (result, pool_receipt) = self
+            .global_read_pool
+            .with_store_recording("global_read_pool", f);
+        let completed = result.is_ok();
+        let gate_hold = gate_hold_started.elapsed();
+        drop(_gate);
+        recorder.record(DbContentionReceipt {
+            phase: "db_runtime",
+            action: "read",
+            resource: "global_read_pool",
+            mode: "shared",
+            gate: "global_rw_gate",
+            gate_wait,
+            resource_wait: pool_receipt.pool_checkout_wait,
+            resource_hold: pool_receipt.operation_wall_time,
+            gate_hold,
+            completed,
+        });
+        result
     }
 
     /// Recording twin of [`Self::with_global_store_read`]: identical
@@ -768,10 +936,36 @@ impl DbRuntime {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<(T, ReadPoolCheckoutReceipt), String> {
+        let Some(recorder) = self.global_contention_recorder.get().cloned() else {
+            let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+            let (result, receipt) = self
+                .global_read_pool
+                .with_store_recording("global_read_pool", f);
+            return Ok((result?, receipt));
+        };
+
+        let gate_wait_started = Instant::now();
         let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+        let gate_wait = gate_wait_started.elapsed();
+        let gate_hold_started = Instant::now();
         let (result, receipt) = self
             .global_read_pool
             .with_store_recording("global_read_pool", f);
+        let completed = result.is_ok();
+        let gate_hold = gate_hold_started.elapsed();
+        drop(_gate);
+        recorder.record(DbContentionReceipt {
+            phase: "db_runtime",
+            action: "read",
+            resource: "global_read_pool",
+            mode: "shared",
+            gate: "global_rw_gate",
+            gate_wait,
+            resource_wait: receipt.pool_checkout_wait,
+            resource_hold: receipt.operation_wall_time,
+            gate_hold,
+            completed,
+        });
         Ok((result?, receipt))
     }
 
@@ -1147,6 +1341,8 @@ mod tests {
             global_read_pool: ReadStorePool::open_read_only(global_db_str, 1)
                 .expect("global read pool"),
             global_rw_gate: Arc::new(StdRwLock::new(())),
+            global_contention_recorder: Arc::new(OnceLock::new()),
+            global_write_gate_contended_observers: Arc::new(StdMutex::new(Vec::new())),
             global_db_path: Arc::new(global_db),
             global_vec_available: false,
             project_db: Arc::new(StdRwLock::new(None)),
@@ -1480,6 +1676,7 @@ mod tests {
         let global_db = temp.join("global/memory.db");
         std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
         let runtime = Arc::new(test_runtime(global_db));
+        let recorder = runtime.enable_global_contention_receipts();
 
         // Pool size is 1 (test_runtime). Thread A holds the sole slot on a
         // release gate so it deterministically stays checked out until we let
@@ -1556,7 +1753,128 @@ mod tests {
              pool_checkout_wait (B was proven parked); got {waiter_wait:?}"
         );
 
+        let contention = recorder.drain();
+        assert!(
+            contention.iter().any(|receipt| {
+                receipt.phase == "db_runtime"
+                    && receipt.action == "read"
+                    && receipt.resource == "global_read_pool"
+                    && receipt.mode == "shared"
+                    && receipt.gate == "global_rw_gate"
+                    && receipt.resource_wait > Duration::ZERO
+                    && receipt.resource_hold > Duration::ZERO
+                    && receipt.gate_hold >= receipt.resource_hold
+                    && receipt.completed
+            }),
+            "the real pooled reader that was proven parked must emit a complete \
+             global_read_pool timing receipt; receipts={contention:?}"
+        );
+
         waiter.join().expect("waiter thread should join");
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// #1255: a global write must record the actual `global_rw_gate` wait and
+    /// `global_store` hold, rather than inferring contention from an HTTP
+    /// handler delay. Writer A holds the real write gate and store mutex on a
+    /// condition-variable release; writer B first proves that the same real
+    /// gate is busy, then attempts its real DbRuntime write. The assertion is
+    /// on the measured DbRuntime receipt, not on a handler delay or scheduler
+    /// window.
+    ///
+    /// Mutation discriminator: replacing the measured `gate_wait` assignment
+    /// in `with_global_store` with `Duration::ZERO` makes the strict waiter
+    /// assertion below fail while the same writer/reader choreography still
+    /// runs. This is intentionally a real gate test, not the transport
+    /// harness's server-side `hold_ms` overlap aid.
+    #[test]
+    fn global_write_contention_receipt_reports_gate_wait_and_store_hold() {
+        let temp = unique_temp_dir("global-write-contention-receipt");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = Arc::new(test_runtime(global_db));
+        let recorder = runtime.enable_global_contention_receipts();
+
+        let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let (holder_entered_tx, holder_entered_rx) = std::sync::mpsc::channel();
+        let holder_runtime = Arc::clone(&runtime);
+        let holder_release = Arc::clone(&release);
+        let holder = std::thread::spawn(move || {
+            holder_runtime.with_global_store(|_store| {
+                holder_entered_tx
+                    .send(())
+                    .expect("holder should signal after taking global gate/store");
+                let (released, wake) = &*holder_release;
+                let mut released = released.lock().expect("lock release gate");
+                while !*released {
+                    released = wake.wait(released).expect("wait release gate");
+                }
+                Ok(())
+            })
+        });
+        holder_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("holder must own global_rw_gate before waiter starts");
+
+        let contended_rx = runtime.observe_next_global_write_gate_contention_for_test();
+        let (waiter_done_tx, waiter_done_rx) = std::sync::mpsc::channel();
+        let waiter_runtime = Arc::clone(&runtime);
+        let waiter = std::thread::spawn(move || {
+            let _ = waiter_done_tx.send(waiter_runtime.with_global_store(|_store| Ok(())));
+        });
+        contended_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter must observe the real global_rw_gate held before holder releases");
+
+        {
+            let (released, wake) = &*release;
+            *released.lock().expect("lock release gate") = true;
+            wake.notify_all();
+        }
+        holder
+            .join()
+            .expect("holder thread should join")
+            .expect("holder DbRuntime write should succeed");
+        waiter_done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("waiter should finish after holder release")
+            .expect("waiter DbRuntime write should succeed");
+        waiter.join().expect("waiter thread should join");
+
+        let contention = recorder.drain();
+        assert_eq!(
+            contention.len(),
+            2,
+            "only the holder and waiter writes should be observed; receipts={contention:?}"
+        );
+        assert!(
+            contention.iter().all(|receipt| {
+                receipt.phase == "db_runtime"
+                    && receipt.action == "write"
+                    && receipt.resource == "global_store"
+                    && receipt.mode == "exclusive"
+                    && receipt.gate == "global_rw_gate"
+                    && receipt.gate_hold >= receipt.resource_hold
+                    && receipt.completed
+            }),
+            "all real global writes must retain their complete labelled timing receipt; \
+             receipts={contention:?}"
+        );
+        assert!(
+            contention
+                .iter()
+                .any(|receipt| receipt.gate_wait > Duration::ZERO),
+            "writer B waited behind the holder's real global_rw_gate but receipt lost that wait; \
+             receipts={contention:?}"
+        );
+        assert!(
+            contention
+                .iter()
+                .any(|receipt| receipt.resource_hold > Duration::ZERO),
+            "writer A held the real global_store but receipt lost that hold; \
+             receipts={contention:?}"
+        );
+
         let _ = std::fs::remove_dir_all(temp);
     }
 

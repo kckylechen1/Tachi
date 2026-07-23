@@ -201,6 +201,7 @@ impl MemoryServer {
             global_store: Arc::new(StdMutex::new(global_store)),
             global_read_pool,
             global_rw_gate: Arc::new(StdRwLock::new(())),
+            global_contention_recorder: Arc::new(std::sync::OnceLock::new()),
             global_db_path: Arc::new(global_db_path),
             global_vec_available,
             project_db: Arc::new(StdRwLock::new(project_db_state)),
