@@ -282,17 +282,17 @@ mod tests {
             vec!["ALPHA_KEY", "BETA_KEY"]
         );
         assert!(
-            timestamps.iter().all(|(_, updated_at)| !updated_at.is_empty()),
+            timestamps
+                .iter()
+                .all(|(_, updated_at)| !updated_at.is_empty()),
             "updated_at must be populated"
         );
 
         // Discrimination: narrow listing must agree with full-list metadata
         // without forcing callers to materialize ciphertext fields.
         let full = store.vault_list_entries().expect("full list");
-        let from_full: Vec<(String, String)> = full
-            .into_iter()
-            .map(|e| (e.name, e.updated_at))
-            .collect();
+        let from_full: Vec<(String, String)> =
+            full.into_iter().map(|e| (e.name, e.updated_at)).collect();
         assert_eq!(timestamps, from_full);
     }
 
