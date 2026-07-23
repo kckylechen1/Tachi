@@ -10,12 +10,10 @@ use super::{
 };
 use crate::manifest::DbRole;
 use chrono::{DateTime, Utc};
+pub(crate) use memcore::RECALL_CACHE_SQL_WHERE as RECALL_CACHE_WHERE;
 use memcore::{
     job_status_histogram, vector_backfill::vector_backfill_eligible_where, ContinuityMetrics,
     JobStatusHistogram, MemoryStore, VectorBackfillScope,
-};
-pub(crate) use memcore::{
-    RECALL_CACHE_SQL_WHERE as RECALL_CACHE_WHERE,
 };
 use rusqlite::OptionalExtension;
 use serde_json::json;

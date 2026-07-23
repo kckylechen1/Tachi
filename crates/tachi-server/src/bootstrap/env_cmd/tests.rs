@@ -56,8 +56,7 @@ fn put_secret(store: &memcore::MemoryStore, key: &[u8; 32], name: &str, value: &
 #[test]
 fn project_env_plan_marks_secret_pool_and_missing() {
     let store = temp_store();
-    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456")
-        .expect("key");
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
     put_secret(&store, key.bytes(), "direct.secret", "direct-value");
     store
         .vault_set_rotation(&memcore::vault::VaultKeyRotation {
@@ -96,8 +95,7 @@ BAD-NAME=vault:direct.secret
 #[test]
 fn project_env_sync_preview_does_not_write() {
     let store = temp_store();
-    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456")
-        .expect("key");
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
     put_secret(&store, key.bytes(), "direct.secret", "direct-value");
     let unlocked = UnlockedVaultStore { store, key };
 
@@ -120,8 +118,7 @@ fn project_env_sync_preview_does_not_write() {
 #[test]
 fn project_env_sync_writes_generated_exports() {
     let store = temp_store();
-    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456")
-        .expect("key");
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
     put_secret(&store, key.bytes(), "direct.secret", "direct-value");
     put_secret(&store, key.bytes(), "POOL_API_KEY_1", "pool-value-1");
     store
@@ -182,8 +179,7 @@ PROJECT_POOL=vault:POOL_API_KEY
 #[test]
 fn project_env_sync_refuses_overwrite_without_force() {
     let store = temp_store();
-    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456")
-        .expect("key");
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
     put_secret(&store, key.bytes(), "direct.secret", "new-value");
     let unlocked = UnlockedVaultStore { store, key };
 

@@ -712,7 +712,10 @@ mod tests {
             status_missing, backfill_pending,
             "status and vector backfill must share the exact membership set"
         );
-        assert_eq!(status_missing, 1, "only the durable row is missing a vector");
+        assert_eq!(
+            status_missing, 1,
+            "only the durable row is missing a vector"
+        );
     }
 
     #[tokio::test]
