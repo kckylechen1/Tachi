@@ -405,11 +405,18 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 if value.trim().is_empty() {
                     continue;
                 }
-                rotation_members.insert(entry.name.clone());
+                let key_id = entry.name.clone();
+                rotation_members.insert(key_id.clone());
                 pool.push(tachi_llm::ProviderSecret {
                     key_id: entry.name,
                     value,
                 });
+                // Materialize/pool reads decrypt secrets; bump access_count like vault_get.
+                server
+                    .with_global_store(|store| {
+                        record_successful_vault_access(store, &key_id, None)
+                    })
+                    .map_err(|e| format!("Failed to update access stats: {e}"))?;
             }
             if !pool.is_empty() {
                 pools.insert(rotation.prefix, pool);
@@ -435,12 +442,19 @@ fn load_unlocked_api_key_secret_pools_filtered(
             let value = String::from_utf8(decrypted)
                 .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
             if !value.trim().is_empty() {
-                pools.entry(entry.name.clone()).or_insert_with(|| {
+                let key_id = entry.name.clone();
+                pools.entry(key_id.clone()).or_insert_with(|| {
                     vec![tachi_llm::ProviderSecret {
                         key_id: entry.name,
                         value,
                     }]
                 });
+                // Materialize/pool reads decrypt secrets; bump access_count like vault_get.
+                server
+                    .with_global_store(|store| {
+                        record_successful_vault_access(store, &key_id, None)
+                    })
+                    .map_err(|e| format!("Failed to update access stats: {e}"))?;
             }
         }
 
