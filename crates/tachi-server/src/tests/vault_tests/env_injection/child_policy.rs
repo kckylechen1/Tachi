@@ -58,6 +58,57 @@ async fn dispatch_vault_env_injection_does_not_export_all_secrets_by_default() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes process-wide env across async vault setup + subprocess spawn
+async fn default_and_fill_missing_preserve_inherited_openai_api_key() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
+    std::env::set_var("OPENAI_API_KEY", "caller-openai-value");
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "child-env-openai-fill-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "OPENAI_API_KEY".to_string(),
+            value: "vault-openai-value".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "provider-shaped child env precedence fixture".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set should succeed");
+
+    for mode in [None, Some("fill_missing")] {
+        match mode {
+            Some(mode) => std::env::set_var("TACHI_VAULT_CHILD_ENV", mode),
+            None => std::env::remove_var("TACHI_VAULT_CHILD_ENV"),
+        }
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("printf '%s' \"$OPENAI_API_KEY\"");
+        let injected = crate::dispatch_ops::apply_unlocked_vault_env(&mut cmd, &server, None);
+        assert_eq!(injected, 0, "mode {mode:?} must preserve inherited name");
+        let output = cmd.output().await.expect("env probe command should run");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("env probe output should be utf8"),
+            "caller-openai-value",
+            "mode {mode:?} must keep the caller's inherited provider value"
+        );
+    }
+
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes process-wide env across async vault setup + subprocess spawn
 async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured() {
     let _guard = crate::utils::global_test_lock()
         .lock()

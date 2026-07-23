@@ -242,7 +242,11 @@ async fn chat_lane_waits_for_temporarily_unavailable_pool_key() {
             value: "pool-secret-one".to_string(),
         }],
     );
-    client.mark_provider_key_rate_limited_for_tests("EXTRACT_API_KEY_1", Some(1));
+    client.mark_provider_key_rate_limited_for_tests(
+        "EXTRACT_API_KEY",
+        "EXTRACT_API_KEY_1",
+        Some(1),
+    );
 
     let out = client
         .call_extract_llm("system", "user", None, 0.0, 16)

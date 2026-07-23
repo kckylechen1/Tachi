@@ -94,7 +94,10 @@ impl ProviderHealthSnapshot {
 #[derive(Default)]
 pub(in crate::llm) struct ProviderState {
     pub(in crate::llm) secrets: HashMap<String, Vec<ProviderSecret>>,
-    pub(in crate::llm) cooldowns: HashMap<String, Instant>,
+    /// Ephemeral cooldowns use the same exact identity as persisted health:
+    /// logical provider name plus member key id. Member ids may legitimately
+    /// collide across independent logical pools.
+    pub(in crate::llm) cooldowns: HashMap<String, HashMap<String, Instant>>,
     pub(in crate::llm) indices: HashMap<String, usize>,
     pub(in crate::llm) health: HashMap<String, HashMap<String, VaultKeyHealth>>,
     pub(in crate::llm) health_snapshots: HashMap<String, HashMap<String, ProviderHealthSnapshot>>,
@@ -243,6 +246,45 @@ impl ProviderState {
     }
 
     pub(in crate::llm) fn prune_expired_cooldowns(&mut self, now: Instant) {
-        self.cooldowns.retain(|_, until| *until > now);
+        self.cooldowns.retain(|_, members| {
+            members.retain(|_, until| *until > now);
+            !members.is_empty()
+        });
+    }
+
+    pub(in crate::llm) fn cooldown_until(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+    ) -> Option<&Instant> {
+        self.cooldowns
+            .get(logical_name)
+            .and_then(|members| members.get(key_id))
+    }
+
+    pub(in crate::llm) fn is_cooling_down(&self, logical_name: &str, key_id: &str) -> bool {
+        self.cooldown_until(logical_name, key_id).is_some()
+    }
+
+    pub(in crate::llm) fn set_cooldown(
+        &mut self,
+        logical_name: &str,
+        key_id: &str,
+        until: Instant,
+    ) {
+        self.cooldowns
+            .entry(logical_name.to_string())
+            .or_default()
+            .insert(key_id.to_string(), until);
+    }
+
+    pub(in crate::llm) fn remove_cooldown(&mut self, logical_name: &str, key_id: &str) {
+        let remove_logical = self.cooldowns.get_mut(logical_name).is_some_and(|members| {
+            members.remove(key_id);
+            members.is_empty()
+        });
+        if remove_logical {
+            self.cooldowns.remove(logical_name);
+        }
     }
 }

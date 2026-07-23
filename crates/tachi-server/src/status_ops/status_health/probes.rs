@@ -167,17 +167,21 @@ pub(super) fn skipped_alias_probe_result(
     if report.skipped_aliases.is_empty() {
         return None;
     }
-    for (key, reason) in &report.skipped_aliases {
+    for (key, _reason) in &report.skipped_aliases {
+        let retained = report
+            .retained_from_last_known_good
+            .iter()
+            .any(|retained_key| retained_key == key);
         tracing::warn!(
-            "[provider] skipped alias for '{key}': {}",
-            crate::provider_config::format_skipped_alias_reason(reason)
+            "{}",
+            crate::provider_config::format_skipped_alias_warning(key, retained)
         );
     }
     Some(ProviderProbeResult {
         name: "provider_secret_materialization".to_string(),
         status: "degraded".to_string(),
-        message: Some(crate::provider_config::describe_skipped_aliases(
-            &report.skipped_aliases,
+        message: Some(crate::provider_config::describe_skipped_alias_report(
+            report,
         )),
     })
 }
@@ -271,7 +275,9 @@ async fn probe_rotation_member(
         Ok(client) => client,
         Err(err) => return ("failed".to_string(), Some(err)),
     };
-    client.clear_provider_secrets();
+    if let Err(err) = client.clear_provider_secrets() {
+        return ("failed".to_string(), Some(err));
+    }
     client.set_provider_secret_pool(
         logical_name,
         vec![tachi_llm::ProviderSecret {

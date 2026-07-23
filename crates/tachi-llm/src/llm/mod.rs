@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 mod chat_lanes;
 mod circuit_breaker;
@@ -53,6 +53,10 @@ pub struct LlmClient {
     rerank_config: RerankConfig,
     vault_db_path: Option<PathBuf>,
     provider_state: Arc<RwLock<ProviderState>>,
+    /// Serializes a complete provider materialization transaction across
+    /// clones. It is deliberately separate from `provider_state` so refreshes
+    /// never hold its read/write lock while consulting env or Vault inputs.
+    provider_materialization_lock: Arc<Mutex<()>>,
     provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
     provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
     claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
@@ -90,6 +94,33 @@ impl LlmClient {
     /// Configured rerank provider (resolved at construction).
     pub fn rerank_config(&self) -> &RerankConfig {
         &self.rerank_config
+    }
+
+    pub(crate) fn provider_materialization_guard(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.provider_materialization_lock
+            .lock()
+            .map_err(|_| {
+                "Provider materialization transaction lock is poisoned; refusing provider cache mutation"
+                    .to_string()
+            })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn provider_materialization_lock_is_held_for_tests(&self) -> bool {
+        self.provider_materialization_lock.try_lock().is_err()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn poison_provider_materialization_lock_for_tests(&self) {
+        let lock = Arc::clone(&self.provider_materialization_lock);
+        let result = std::thread::spawn(move || {
+            let _guard = lock.lock().expect("materialization lock starts healthy");
+            panic!("poison provider materialization lock for discrimination");
+        })
+        .join();
+        assert!(result.is_err(), "poisoning thread must panic");
     }
 }
 

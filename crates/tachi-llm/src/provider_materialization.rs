@@ -11,10 +11,13 @@ pub struct MaterializeReport {
     pub from_vault: usize,
     pub from_alias: usize,
     pub env_fallbacks_bypassed: usize,
-    /// Env/config key names whose plaintext values were ignored because vault won.
-    /// Names only — never secret values.
+    /// Env/config key names whose different plaintext values were ignored because
+    /// Vault won. Names only — never secret values.
     pub bypassed_names: Vec<String>,
     pub skipped_aliases: Vec<(String, String)>,
+    /// Logical config key names whose missing/locked alias kept an existing
+    /// provider pool. Names only; retained pools are included in `loaded`.
+    pub retained_from_last_known_good: Vec<String>,
 }
 
 fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {
@@ -57,7 +60,12 @@ pub fn group_api_key_values_by_configured_rotations(
         })
 }
 
-/// Apply Vault + config.env aliases into `LlmClient` without mutating process env.
+/// Apply caller-owned, already-resolved pools plus config.env aliases into
+/// `LlmClient` without mutating process env.
+///
+/// Durable Vault/Keychain readers must use
+/// [`materialize_provider_secrets_from_durable_source`] so source loading is
+/// covered by the same transaction as cache replacement.
 pub fn materialize_provider_secrets<I, S>(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
@@ -67,7 +75,63 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    llm.clear_provider_secrets();
+    materialize_provider_secrets_inner(llm, vault_pools, provider_keys, None)
+}
+
+/// Materialize provider secrets while holding one transaction boundary across
+/// durable source loading and provider-cache replacement.
+///
+/// `load_vault_pools` runs after the transaction lock is acquired. Callers that
+/// decrypt Vault/Keychain material or update access accounting must use this
+/// entry point so an explicit cache clear cannot be overtaken by pre-resolved
+/// secret pools.
+pub fn materialize_provider_secrets_from_durable_source<I, S, F>(
+    llm: &LlmClient,
+    provider_keys: I,
+    load_vault_pools: F,
+) -> Result<MaterializeReport, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+    F: FnOnce() -> Result<HashMap<String, Vec<ProviderSecret>>, String>,
+{
+    let _materialization_guard = llm.provider_materialization_guard()?;
+    let vault_pools = load_vault_pools()?;
+    materialize_provider_secrets_under_guard(llm, &vault_pools, provider_keys, None)
+}
+
+fn materialize_provider_secrets_inner<I, S>(
+    llm: &LlmClient,
+    vault_pools: &HashMap<String, Vec<ProviderSecret>>,
+    provider_keys: I,
+    after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<MaterializeReport, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    // Snapshot, env/alias resolution, and the final atomic map replacement are
+    // one transaction across every LlmClient clone. This mutex is independent
+    // from provider_state, so env/Vault work never nests under its lock.
+    let _materialization_guard = llm.provider_materialization_guard()?;
+    materialize_provider_secrets_under_guard(
+        llm,
+        vault_pools,
+        provider_keys,
+        after_missing_alias_snapshot,
+    )
+}
+
+fn materialize_provider_secrets_under_guard<I, S>(
+    llm: &LlmClient,
+    vault_pools: &HashMap<String, Vec<ProviderSecret>>,
+    provider_keys: I,
+    mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<MaterializeReport, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let vault_map = flatten_pools(vault_pools);
     let mut resolved_pools: HashMap<String, Vec<ProviderSecret>> = vault_pools.clone();
     let mut report = MaterializeReport {
@@ -90,13 +154,17 @@ where
         }
 
         if let Some(vault_name) = parse_vault_alias(trimmed) {
+            // An explicit alias is the configured source for this logical key.
+            // Remove any same-key canonical Vault pool before resolving it so a
+            // missing target cannot silently fall back to a different secret.
+            resolved_pools.remove(&key);
             // tachi#1287: syntactically-malformed alias names (space, stray
             // punctuation, oversized) are a config typo, not a "secret not yet
             // provisioned" condition — those must stay fatal instead of being
             // folded into the tolerable `skipped_aliases` degrade below.
-            if let Err(reason) = validate_vault_alias_name(vault_name) {
+            if validate_vault_alias_name(vault_name).is_err() {
                 return Err(format!(
-                    "Config key '{key}' references Vault alias '{vault_name}' which is not a valid Vault secret name: {reason}"
+                    "Config key '{key}' references a Vault alias that is not a valid Vault secret name; provider refresh refused and prior provider cache left unchanged"
                 ));
             }
             let Some(pool) = vault_pools.get(vault_name).cloned().or_else(|| {
@@ -110,22 +178,33 @@ where
                 report.skipped_aliases.push((
                     key.clone(),
                     format!(
-                        "Config key '{key}' references Vault alias '{vault_name}' but the secret is missing or Vault is locked."
+                        "Config key '{key}' references a Vault alias, but the secret is missing or Vault is locked."
                     ),
                 ));
+                let retained_pool = llm.provider_secret_pool_snapshot(&key);
+                if let Some(hook) = after_missing_alias_snapshot.take() {
+                    hook();
+                }
+                if let Some(pool) = retained_pool {
+                    resolved_pools.insert(key.clone(), pool);
+                    report.retained_from_last_known_good.push(key);
+                }
                 continue;
             };
             resolved_pools.insert(key.clone(), pool);
             report.from_alias += 1;
             report.env_fallbacks_bypassed += 1;
-            report.bypassed_names.push(key.clone());
             continue;
         }
 
-        if vault_map.contains_key(&key) {
+        if let Some(vault_value) = vault_map.get(&key) {
             // Vault wins over duplicate plaintext in env/config.env.
             report.env_fallbacks_bypassed += 1;
-            report.bypassed_names.push(key.clone());
+            // The report is logged by daemon callers, so retain only an
+            // actionable key name and never retain either plaintext value.
+            if vault_value != trimmed {
+                report.bypassed_names.push(key.clone());
+            }
             continue;
         }
 
@@ -138,7 +217,12 @@ where
         );
     }
 
-    report.loaded = llm.set_provider_secret_pools(resolved_pools);
+    let retained_logical_names = report
+        .retained_from_last_known_good
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    report.loaded = llm.replace_provider_secret_pools(resolved_pools, &retained_logical_names)?;
     Ok(report)
 }
 
@@ -155,6 +239,12 @@ mod tests {
         fn set(key: &'static str, value: &str) -> Self {
             let original = std::env::var_os(key);
             std::env::set_var(key, value);
+            Self { key, original }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            std::env::remove_var(key);
             Self { key, original }
         }
     }
@@ -216,7 +306,10 @@ mod tests {
 
         assert_eq!(report.from_alias, 1);
         assert_eq!(report.env_fallbacks_bypassed, 1);
-        assert_eq!(report.bypassed_names, vec!["VOYAGE_API_KEY".to_string()]);
+        assert!(
+            report.bypassed_names.is_empty(),
+            "a vault: alias is an explicit Vault reference, not a conflicting plaintext value"
+        );
         assert_eq!(
             llm.provider_secret_for_tests(&["VOYAGE_API_KEY"])
                 .as_deref(),
@@ -255,6 +348,33 @@ mod tests {
         assert_eq!(std::env::var("OPENAI_API_KEY").as_deref(), Ok("env-secret"));
     }
 
+    /// A duplicate with the same value is not a custody conflict. The daemon
+    /// still prefers the Vault copy, but must not send an operator a false
+    /// "value ignored" warning.
+    #[test]
+    fn materialize_provider_secrets_does_not_report_same_value_as_bypassed() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env = EnvGuard::set("TACHI_TEST_SAME_VALUE_API_KEY", "same-fixture-value");
+        let llm = LlmClient::new().expect("llm client");
+        let vault_pools = HashMap::from([(
+            "TACHI_TEST_SAME_VALUE_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "TACHI_TEST_SAME_VALUE_API_KEY".to_string(),
+                value: "same-fixture-value".to_string(),
+            }],
+        )]);
+
+        let report =
+            materialize_provider_secrets(&llm, &vault_pools, ["TACHI_TEST_SAME_VALUE_API_KEY"])
+                .expect("materialize");
+
+        assert_eq!(report.env_fallbacks_bypassed, 1);
+        assert!(
+            report.bypassed_names.is_empty(),
+            "same-value env and Vault copies must not produce a false conflict warning: {report:?}"
+        );
+    }
+
     // Semantics changed (tachi#1279): a single missing Vault alias used to abort the
     // entire batch with an `Err`. It now degrades to a per-alias skip recorded in
     // `report.skipped_aliases`, so the rest of the provider keys still materialize.
@@ -270,9 +390,10 @@ mod tests {
         assert_eq!(report.skipped_aliases.len(), 1);
         let (key, reason) = &report.skipped_aliases[0];
         assert_eq!(key, "TACHI_TEST_PROVIDER_ALIAS_KEY");
-        assert!(reason.contains(
-            "Config key 'TACHI_TEST_PROVIDER_ALIAS_KEY' references Vault alias 'MISSING_ALIAS'"
-        ));
+        assert!(
+            reason.contains("Config key 'TACHI_TEST_PROVIDER_ALIAS_KEY' references a Vault alias")
+        );
+        assert!(!reason.contains("MISSING_ALIAS"));
         assert!(!reason.contains("TACHI_TEST_PROVIDER_ALIAS_KEY=vault:MISSING_ALIAS"));
         assert!(!reason.contains("config.env"));
         assert!(!reason.contains("vault_unlock"));
@@ -360,6 +481,7 @@ mod tests {
 
         assert!(err.contains("TACHI_TEST_MALFORMED_ALIAS_KEY"));
         assert!(err.contains("not a valid Vault secret name"));
+        assert!(!err.contains("invalid key with spaces"));
     }
 
     #[test]
@@ -377,5 +499,661 @@ mod tests {
                 .expect_err("oversized alias name must fail loudly, not degrade to a skip");
 
         assert!(err.contains("not a valid Vault secret name"));
+        assert!(!err.contains(&oversized_name));
+    }
+
+    #[test]
+    fn malformed_alias_refresh_retains_last_known_good_cache_and_sanitizes_error() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let alias_sentinel = "MALFORMED ALIAS SENTINEL MUST NOT LEAK";
+        let _env = EnvGuard::set(
+            "TACHI_TEST_LKG_ALIAS_API_KEY",
+            &format!("vault:{alias_sentinel}"),
+        );
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret("TACHI_TEST_LKG_API_KEY", "last-known-good-secret"));
+
+        let err =
+            materialize_provider_secrets(&llm, &HashMap::new(), ["TACHI_TEST_LKG_ALIAS_API_KEY"])
+                .expect_err("malformed alias must refuse refresh");
+
+        assert!(err.contains("TACHI_TEST_LKG_ALIAS_API_KEY"), "{err}");
+        assert!(err.contains("refresh refused"), "{err}");
+        assert!(
+            !err.contains(alias_sentinel),
+            "error leaked alias target: {err}"
+        );
+        assert!(
+            !err.contains("last-known-good-secret"),
+            "error leaked cached value: {err}"
+        );
+        assert_eq!(
+            llm.provider_secret_for_tests(&["TACHI_TEST_LKG_API_KEY"])
+                .as_deref(),
+            Some("last-known-good-secret")
+        );
+        assert_eq!(llm.provider_secret_count(), 1);
+    }
+
+    #[test]
+    fn later_alias_failure_exposes_no_partial_pool_and_retains_old_cache() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _good_env = EnvGuard::set("TACHI_TEST_PENDING_GOOD_API_KEY", "pending-good-secret");
+        let alias_sentinel = "LATER MALFORMED ALIAS SENTINEL";
+        let _bad_env = EnvGuard::set(
+            "TACHI_TEST_PENDING_BAD_API_KEY",
+            &format!("vault:{alias_sentinel}"),
+        );
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret("TACHI_TEST_OLD_API_KEY", "old-cache-secret"));
+
+        let err = materialize_provider_secrets(
+            &llm,
+            &HashMap::new(),
+            [
+                "TACHI_TEST_PENDING_GOOD_API_KEY",
+                "TACHI_TEST_PENDING_BAD_API_KEY",
+            ],
+        )
+        .expect_err("later malformed alias must refuse the complete refresh");
+
+        assert!(err.contains("TACHI_TEST_PENDING_BAD_API_KEY"), "{err}");
+        assert!(
+            !err.contains(alias_sentinel),
+            "error leaked alias target: {err}"
+        );
+        assert_eq!(
+            llm.provider_secret_for_tests(&["TACHI_TEST_OLD_API_KEY"])
+                .as_deref(),
+            Some("old-cache-secret")
+        );
+        assert!(
+            llm.provider_pool_statuses()
+                .iter()
+                .all(|pool| pool.logical_name != "TACHI_TEST_PENDING_GOOD_API_KEY"),
+            "a failed refresh must not expose an earlier partially-built pool"
+        );
+        assert_eq!(llm.provider_secret_count(), 1);
+    }
+
+    #[test]
+    fn successful_refresh_atomically_replaces_complete_provider_cache() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _new_env = EnvGuard::remove("TACHI_TEST_NEW_API_KEY");
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret("TACHI_TEST_OLD_API_KEY", "old-cache-secret"));
+        let vault_pools = HashMap::from([(
+            "TACHI_TEST_NEW_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "TACHI_TEST_NEW_API_KEY".to_string(),
+                value: "new-cache-secret".to_string(),
+            }],
+        )]);
+
+        let report = materialize_provider_secrets(&llm, &vault_pools, ["TACHI_TEST_NEW_API_KEY"])
+            .expect("valid complete refresh");
+
+        assert_eq!(report.loaded, 1);
+        assert!(llm
+            .provider_secret_for_tests(&["TACHI_TEST_OLD_API_KEY"])
+            .is_none());
+        assert_eq!(
+            llm.provider_secret_for_tests(&["TACHI_TEST_NEW_API_KEY"])
+                .as_deref(),
+            Some("new-cache-secret")
+        );
+        assert_eq!(llm.provider_secret_count(), 1);
+    }
+
+    #[test]
+    fn poisoned_materialization_lock_refuses_refresh_and_clear_loudly() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let logical_name = "TACHI_TEST_POISONED_TRANSACTION_API_KEY";
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret(logical_name, "last-known-good"));
+        llm.poison_provider_materialization_lock_for_tests();
+        let replacement = HashMap::from([(
+            logical_name.to_string(),
+            vec![ProviderSecret {
+                key_id: logical_name.to_string(),
+                value: "replacement-secret".to_string(),
+            }],
+        )]);
+
+        let refresh_err = materialize_provider_secrets(&llm, &replacement, [logical_name])
+            .expect_err("poisoned transaction lock must refuse refresh");
+        assert!(refresh_err.contains("transaction lock is poisoned"));
+        let clear_err = llm
+            .clear_provider_secrets()
+            .expect_err("poisoned transaction lock must refuse clear");
+        assert!(clear_err.contains("transaction lock is poisoned"));
+        assert_eq!(
+            llm.provider_secret_for_tests(&[logical_name]).as_deref(),
+            Some("last-known-good"),
+            "refused mutations must leave prior cache unchanged"
+        );
+    }
+
+    #[test]
+    fn missing_alias_retains_existing_logical_pool_and_reports_key_only() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let alias_target = "MISSING_VOYAGE";
+        let _env = EnvGuard::set("VOYAGE_API_KEY", &format!("vault:{alias_target}"));
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret("VOYAGE_API_KEY", "last-known-good-voyage"));
+
+        let report = materialize_provider_secrets(&llm, &HashMap::new(), ["VOYAGE_API_KEY"])
+            .expect("a valid missing alias remains a tolerated degraded refresh");
+
+        assert_eq!(report.loaded, 1, "retained pools count as ready/loaded");
+        assert_eq!(report.retained_from_last_known_good, vec!["VOYAGE_API_KEY"]);
+        assert_eq!(report.skipped_aliases.len(), 1);
+        assert!(!report.skipped_aliases[0].1.contains(alias_target));
+        assert_eq!(
+            llm.provider_secret_for_tests(&["VOYAGE_API_KEY"])
+                .as_deref(),
+            Some("last-known-good-voyage")
+        );
+    }
+
+    #[test]
+    fn missing_alias_without_existing_pool_stays_absent_and_loudly_skipped() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let alias_target = "MISSING_VOYAGE_NO_CACHE";
+        let _env = EnvGuard::set("VOYAGE_API_KEY", &format!("vault:{alias_target}"));
+        let llm = LlmClient::new().expect("llm client");
+
+        let report = materialize_provider_secrets(&llm, &HashMap::new(), ["VOYAGE_API_KEY"])
+            .expect("a valid missing alias remains a tolerated degraded refresh");
+
+        assert_eq!(report.loaded, 0);
+        assert!(report.retained_from_last_known_good.is_empty());
+        assert_eq!(report.skipped_aliases.len(), 1);
+        assert_eq!(report.skipped_aliases[0].0, "VOYAGE_API_KEY");
+        assert!(report.skipped_aliases[0]
+            .1
+            .contains("missing or Vault is locked"));
+        assert!(!report.skipped_aliases[0].1.contains(alias_target));
+        assert!(llm
+            .provider_pool_statuses()
+            .iter()
+            .all(|pool| pool.logical_name != "VOYAGE_API_KEY"));
+    }
+
+    #[test]
+    fn degraded_refresh_retains_only_skipped_configured_key_and_adds_valid_new_key() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let alias_target = "MISSING_VOYAGE_MIXED";
+        let _voyage_env = EnvGuard::set("VOYAGE_API_KEY", &format!("vault:{alias_target}"));
+        let _fresh_env = EnvGuard::set("TACHI_TEST_FRESH_API_KEY", "fresh-provider-secret");
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret("VOYAGE_API_KEY", "old-voyage-secret"));
+        assert!(llm.set_provider_secret("TACHI_TEST_REMOVED_API_KEY", "stale-secret"));
+
+        let report = materialize_provider_secrets(
+            &llm,
+            &HashMap::new(),
+            ["VOYAGE_API_KEY", "TACHI_TEST_FRESH_API_KEY"],
+        )
+        .expect("missing alias must not block an otherwise valid refresh");
+        std::env::remove_var("TACHI_TEST_FRESH_API_KEY");
+
+        assert_eq!(report.loaded, 2, "retained pools count as ready/loaded");
+        assert_eq!(report.retained_from_last_known_good, vec!["VOYAGE_API_KEY"]);
+        assert_eq!(
+            llm.provider_secret_for_tests(&["VOYAGE_API_KEY"])
+                .as_deref(),
+            Some("old-voyage-secret")
+        );
+        assert_eq!(
+            llm.provider_secret_for_tests(&["TACHI_TEST_FRESH_API_KEY"])
+                .as_deref(),
+            Some("fresh-provider-secret")
+        );
+        assert!(llm
+            .provider_pool_statuses()
+            .iter()
+            .all(|pool| pool.logical_name != "TACHI_TEST_REMOVED_API_KEY"));
+        assert_eq!(llm.provider_secret_count(), 2);
+    }
+
+    #[test]
+    fn missing_alias_outranks_canonical_same_key_and_retains_old_logical_pool() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let alias_target = "MISSING_VOYAGE_ALIAS";
+        let _env = EnvGuard::set("VOYAGE_API_KEY", &format!("vault:{alias_target}"));
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret("VOYAGE_API_KEY", "old-logical-secret"));
+        let vault_pools = HashMap::from([(
+            "VOYAGE_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "VOYAGE_API_KEY".to_string(),
+                value: "fresh-canonical-secret".to_string(),
+            }],
+        )]);
+
+        let report = materialize_provider_secrets(&llm, &vault_pools, ["VOYAGE_API_KEY"])
+            .expect("missing alias remains a tolerated degraded refresh");
+
+        assert_eq!(report.retained_from_last_known_good, vec!["VOYAGE_API_KEY"]);
+        let materialized = llm.provider_secret_for_tests(&["VOYAGE_API_KEY"]);
+        assert_eq!(materialized.as_deref(), Some("old-logical-secret"));
+        assert_ne!(materialized.as_deref(), Some("fresh-canonical-secret"));
+    }
+
+    #[test]
+    fn missing_alias_outranks_canonical_same_key_without_old_pool() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let alias_target = "MISSING_VOYAGE_WITHOUT_LKG";
+        let _env = EnvGuard::set("VOYAGE_API_KEY", &format!("vault:{alias_target}"));
+        let llm = LlmClient::new().expect("llm client");
+        let vault_pools = HashMap::from([(
+            "VOYAGE_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "VOYAGE_API_KEY".to_string(),
+                value: "fresh-canonical-secret".to_string(),
+            }],
+        )]);
+
+        let report = materialize_provider_secrets(&llm, &vault_pools, ["VOYAGE_API_KEY"])
+            .expect("missing alias remains a tolerated degraded refresh");
+
+        assert!(report.retained_from_last_known_good.is_empty());
+        assert!(llm
+            .provider_pool_statuses()
+            .iter()
+            .all(|pool| pool.logical_name != "VOYAGE_API_KEY"));
+        assert!(llm.provider_secret_for_tests(&["VOYAGE_API_KEY"]).is_none());
+    }
+
+    #[test]
+    fn existing_alias_target_outranks_canonical_same_key_pool() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env = EnvGuard::set("VOYAGE_API_KEY", "vault:VOYAGE_ALIAS_TARGET");
+        let llm = LlmClient::new().expect("llm client");
+        let vault_pools = HashMap::from([
+            (
+                "VOYAGE_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "VOYAGE_API_KEY".to_string(),
+                    value: "canonical-secret".to_string(),
+                }],
+            ),
+            (
+                "VOYAGE_ALIAS_TARGET".to_string(),
+                vec![ProviderSecret {
+                    key_id: "VOYAGE_ALIAS_TARGET".to_string(),
+                    value: "target-secret".to_string(),
+                }],
+            ),
+        ]);
+
+        let report = materialize_provider_secrets(&llm, &vault_pools, ["VOYAGE_API_KEY"])
+            .expect("existing explicit alias target must materialize");
+
+        assert_eq!(report.from_alias, 1);
+        assert!(report.retained_from_last_known_good.is_empty());
+        assert_eq!(
+            llm.provider_secret_for_tests(&["VOYAGE_API_KEY"])
+                .as_deref(),
+            Some("target-secret")
+        );
+    }
+
+    #[test]
+    fn retained_pool_preserves_index_and_cooldown_while_new_pool_resets_state() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env = EnvGuard::set("VOYAGE_API_KEY", "vault:MISSING_STATEFUL_VOYAGE");
+        let llm = LlmClient::new().expect("llm client");
+        let voyage_first = "VOYAGE_API_KEY_1";
+        let replacement_first = "TACHI_TEST_REPLACED_API_KEY_1";
+        assert!(llm.set_provider_secret_pool(
+            "VOYAGE_API_KEY",
+            vec![
+                ProviderSecret {
+                    key_id: voyage_first.to_string(),
+                    value: "old-voyage-one".to_string(),
+                },
+                ProviderSecret {
+                    key_id: "VOYAGE_API_KEY_2".to_string(),
+                    value: "old-voyage-two".to_string(),
+                },
+            ],
+        ));
+        assert!(llm.set_provider_secret_pool(
+            "TACHI_TEST_REPLACED_API_KEY",
+            vec![ProviderSecret {
+                key_id: replacement_first.to_string(),
+                value: "old-replaced-secret".to_string(),
+            }],
+        ));
+        llm.seed_provider_operational_state_for_tests("VOYAGE_API_KEY", 1, voyage_first);
+        llm.seed_provider_operational_state_for_tests(
+            "TACHI_TEST_REPLACED_API_KEY",
+            1,
+            replacement_first,
+        );
+        let vault_pools = HashMap::from([(
+            "TACHI_TEST_REPLACED_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: replacement_first.to_string(),
+                value: "new-replaced-secret".to_string(),
+            }],
+        )]);
+
+        let report = materialize_provider_secrets(
+            &llm,
+            &vault_pools,
+            ["VOYAGE_API_KEY", "TACHI_TEST_REPLACED_API_KEY"],
+        )
+        .expect("degraded refresh should atomically combine retained and new pools");
+
+        assert_eq!(report.retained_from_last_known_good, vec!["VOYAGE_API_KEY"]);
+        let statuses = llm.provider_pool_statuses();
+        let retained = statuses
+            .iter()
+            .find(|pool| pool.logical_name == "VOYAGE_API_KEY")
+            .expect("retained pool status");
+        assert_eq!(retained.current_index, 1);
+        assert_eq!(retained.rate_limited_keys.len(), 1);
+        assert_eq!(retained.rate_limited_keys[0].key_id, voyage_first);
+        let replaced = statuses
+            .iter()
+            .find(|pool| pool.logical_name == "TACHI_TEST_REPLACED_API_KEY")
+            .expect("new pool status");
+        assert_eq!(replaced.current_index, 0);
+        assert!(replaced.rate_limited_keys.is_empty());
+    }
+
+    #[test]
+    fn retained_cooldown_does_not_block_fresh_pool_with_same_member_id() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let retained_logical = "VOYAGE_API_KEY";
+        let fresh_logical = "TACHI_TEST_FRESH_SHARED_API_KEY";
+        let shared_member = "TACHI_TEST_SHARED_COOLDOWN_MEMBER";
+        let _env = EnvGuard::set(retained_logical, "vault:MISSING_SHARED_COOLDOWN");
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret_pool(
+            retained_logical,
+            vec![ProviderSecret {
+                key_id: shared_member.to_string(),
+                value: "retained-old-secret".to_string(),
+            }],
+        ));
+        assert!(llm.set_provider_secret_pool(
+            fresh_logical,
+            vec![ProviderSecret {
+                key_id: shared_member.to_string(),
+                value: "stale-fresh-secret".to_string(),
+            }],
+        ));
+        llm.seed_provider_operational_state_for_tests(retained_logical, 0, shared_member);
+        let vault_pools = HashMap::from([(
+            fresh_logical.to_string(),
+            vec![ProviderSecret {
+                key_id: shared_member.to_string(),
+                value: "fresh-replacement-secret".to_string(),
+            }],
+        )]);
+
+        let report =
+            materialize_provider_secrets(&llm, &vault_pools, [retained_logical, fresh_logical])
+                .expect("retained and fresh pools should replace atomically");
+
+        assert_eq!(report.retained_from_last_known_good, vec![retained_logical]);
+        let statuses = llm.provider_pool_statuses();
+        let retained = statuses
+            .iter()
+            .find(|pool| pool.logical_name == retained_logical)
+            .expect("retained pool status");
+        assert_eq!(retained.rate_limited_keys.len(), 1);
+        let fresh = statuses
+            .iter()
+            .find(|pool| pool.logical_name == fresh_logical)
+            .expect("fresh pool status");
+        assert!(
+            fresh.rate_limited_keys.is_empty(),
+            "cooldown identity must include the logical pool"
+        );
+        assert_eq!(
+            llm.provider_secret_for_tests(&[fresh_logical]).as_deref(),
+            Some("fresh-replacement-secret"),
+            "fresh pool sharing a member id must remain selectable"
+        );
+        assert!(
+            llm.provider_secret_for_tests(&[retained_logical]).is_none(),
+            "retained pool must keep its own cooldown"
+        );
+    }
+
+    #[test]
+    fn concurrent_refresh_cannot_overwrite_newer_cache_from_stale_alias_snapshot() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let logical_name = "TACHI_TEST_CONCURRENT_ALIAS_API_KEY";
+        let _env = EnvGuard::set(logical_name, "vault:MISSING_CONCURRENT_ALIAS");
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret(logical_name, "old-last-known-good"));
+
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let stale_llm = llm.clone();
+        let stale = std::thread::spawn(move || {
+            materialize_provider_secrets_inner(
+                &stale_llm,
+                &HashMap::new(),
+                [logical_name],
+                Some(Box::new(move || {
+                    snapshot_tx.send(()).expect("announce stale snapshot");
+                    release_rx.recv().expect("release stale refresh");
+                })),
+            )
+        });
+        snapshot_rx.recv().expect("stale refresh reached snapshot");
+
+        let transaction_is_serialized = llm.provider_materialization_lock_is_held_for_tests();
+        let (fresh_done_tx, fresh_done_rx) = std::sync::mpsc::channel();
+        let fresh_llm = llm.clone();
+        let fresh = std::thread::spawn(move || {
+            let vault_pools = HashMap::from([(
+                logical_name.to_string(),
+                vec![ProviderSecret {
+                    key_id: logical_name.to_string(),
+                    value: "newer-provider-secret".to_string(),
+                }],
+            )]);
+            let result =
+                materialize_provider_secrets(&fresh_llm, &vault_pools, std::iter::empty::<&str>());
+            fresh_done_tx.send(()).expect("announce fresh refresh");
+            result
+        });
+
+        if transaction_is_serialized {
+            release_tx
+                .send(())
+                .expect("release serialized stale refresh");
+            stale
+                .join()
+                .expect("stale refresh thread")
+                .expect("stale degraded refresh");
+            fresh_done_rx.recv().expect("fresh refresh completed");
+        } else {
+            fresh_done_rx
+                .recv()
+                .expect("unserialized fresh refresh completed first");
+            release_tx.send(()).expect("release stale overwrite");
+            stale
+                .join()
+                .expect("stale refresh thread")
+                .expect("stale degraded refresh");
+        }
+        fresh
+            .join()
+            .expect("fresh refresh thread")
+            .expect("fresh refresh succeeds");
+
+        assert_eq!(
+            llm.provider_secret_for_tests(&[logical_name]).as_deref(),
+            Some("newer-provider-secret"),
+            "a stale missing-alias snapshot must never roll back a newer refresh"
+        );
+    }
+
+    #[test]
+    fn explicit_clear_finishes_after_inflight_stale_materialization() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum ClearEvent {
+            Started,
+            WaitingForMaterializationGuard,
+            Done,
+        }
+
+        let _guard = crate::test_support::global_test_lock().lock();
+        let logical_name = "TACHI_TEST_LOCK_RACE_API_KEY";
+        let _env = EnvGuard::set(logical_name, "vault:MISSING_LOCK_RACE_ALIAS");
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret(logical_name, "last-known-good-before-lock"));
+
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let stale_llm = llm.clone();
+        let stale = std::thread::spawn(move || {
+            materialize_provider_secrets_inner(
+                &stale_llm,
+                &HashMap::new(),
+                [logical_name],
+                Some(Box::new(move || {
+                    snapshot_tx.send(()).expect("announce stale snapshot");
+                    release_rx.recv().expect("release stale materialization");
+                })),
+            )
+        });
+        snapshot_rx.recv().expect("stale refresh reached snapshot");
+
+        let (clear_event_tx, clear_event_rx) = std::sync::mpsc::channel();
+        let clear_llm = llm.clone();
+        let clear = std::thread::spawn(move || {
+            clear_event_tx
+                .send(ClearEvent::Started)
+                .expect("announce clear call");
+            let waiting_tx = clear_event_tx.clone();
+            clear_llm
+                .clear_provider_secrets_with_hook_for_tests(move || {
+                    waiting_tx
+                        .send(ClearEvent::WaitingForMaterializationGuard)
+                        .expect("announce materialization guard wait");
+                })
+                .expect("clear provider secrets");
+            clear_event_tx
+                .send(ClearEvent::Done)
+                .expect("announce clear completion");
+        });
+        assert_eq!(
+            clear_event_rx.recv().expect("clear call started"),
+            ClearEvent::Started
+        );
+        let next_event = clear_event_rx.recv().expect("clear ordering event");
+        match next_event {
+            ClearEvent::WaitingForMaterializationGuard => {
+                release_tx
+                    .send(())
+                    .expect("release stale materialization before serialized clear");
+                stale
+                    .join()
+                    .expect("stale materialization thread")
+                    .expect("stale degraded materialization");
+                assert_eq!(
+                    clear_event_rx.recv().expect("serialized clear completed"),
+                    ClearEvent::Done
+                );
+            }
+            ClearEvent::Done => {
+                release_tx
+                    .send(())
+                    .expect("release stale writer after early clear");
+                stale
+                    .join()
+                    .expect("stale materialization thread")
+                    .expect("stale degraded materialization");
+            }
+            ClearEvent::Started => panic!("duplicate clear-start event"),
+        }
+        clear.join().expect("clear thread");
+
+        assert_eq!(
+            llm.provider_secret_count(),
+            0,
+            "explicit clear must finish last and leave no stale provider secret"
+        );
+        assert!(llm.provider_secret_for_tests(&[logical_name]).is_none());
+    }
+
+    #[test]
+    fn replacement_clears_stale_health_but_retained_pool_keeps_composite_health_state() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env = EnvGuard::set("VOYAGE_API_KEY", "vault:MISSING_HEALTHY_VOYAGE");
+        let llm = LlmClient::new().expect("llm client");
+        let retained_logical = "VOYAGE_API_KEY";
+        let replaced_logical = "TACHI_TEST_REPLACED_HEALTH_API_KEY";
+        // Deliberately collide the member id across two logical pools. Health
+        // identity is (logical_name, key_id), never key_id alone.
+        let retained_member = "TACHI_TEST_SHARED_HEALTH_MEMBER";
+        let replaced_member = retained_member;
+        assert!(llm.set_provider_secret_pool(
+            retained_logical,
+            vec![ProviderSecret {
+                key_id: retained_member.to_string(),
+                value: "retained-old-secret".to_string(),
+            }],
+        ));
+        assert!(llm.set_provider_secret_pool(
+            replaced_logical,
+            vec![ProviderSecret {
+                key_id: replaced_member.to_string(),
+                value: "replaced-old-secret".to_string(),
+            }],
+        ));
+        llm.mark_provider_key_auth_failed_for_tests(retained_logical, retained_member);
+        llm.mark_provider_key_auth_failed_for_tests(replaced_logical, replaced_member);
+        assert_eq!(
+            llm.provider_health_state_presence_for_tests(retained_logical, retained_member),
+            (true, true)
+        );
+        assert_eq!(
+            llm.provider_health_state_presence_for_tests(replaced_logical, replaced_member),
+            (true, true)
+        );
+        let vault_pools = HashMap::from([(
+            replaced_logical.to_string(),
+            vec![ProviderSecret {
+                key_id: replaced_member.to_string(),
+                value: "replacement-new-secret".to_string(),
+            }],
+        )]);
+
+        let report =
+            materialize_provider_secrets(&llm, &vault_pools, [retained_logical, replaced_logical])
+                .expect("health-state replacement remains atomic");
+
+        assert_eq!(report.retained_from_last_known_good, vec![retained_logical]);
+        assert_eq!(
+            llm.provider_health_state_presence_for_tests(retained_logical, retained_member),
+            (true, true),
+            "retained logical/member identity must preserve health and snapshot"
+        );
+        assert!(
+            llm.provider_secret_for_tests(&[retained_logical]).is_none(),
+            "retained auth-failed member must remain blocked"
+        );
+        assert_eq!(
+            llm.provider_health_state_presence_for_tests(replaced_logical, replaced_member),
+            (false, false),
+            "new credential with reused logical/key id must not inherit old health"
+        );
+        assert_eq!(
+            llm.provider_secret_for_tests(&[replaced_logical])
+                .as_deref(),
+            Some("replacement-new-secret"),
+            "replacement credential must be selectable after stale health is removed"
+        );
     }
 }

@@ -6,6 +6,12 @@ use std::time::{Duration, Instant};
 const VAULT_UNLOCK_MAX_FAILED_ATTEMPTS: u32 = 5;
 const VAULT_UNLOCK_LOCKOUT_SECS: u64 = 300;
 
+#[derive(Clone, Copy)]
+enum ProviderRefreshOwner {
+    AutoUnlock,
+    Caller,
+}
+
 fn remaining_lockout_seconds(until: Instant) -> u64 {
     let remaining = until.saturating_duration_since(Instant::now());
     let secs = remaining.as_secs();
@@ -36,9 +42,11 @@ pub(super) fn clear_vault_key_only(server: &MemoryServer) {
 /// Full clear: vault key + unlock time + provider secrets.
 /// Used ONLY by user-initiated `vault lock`, where the user explicitly wants
 /// everything purged.
-pub(super) fn clear_cached_vault_state(server: &MemoryServer) {
-    clear_vault_key_only(server);
-    server.llm.clear_provider_secrets();
+pub(super) fn clear_cached_vault_state(server: &MemoryServer) -> Result<(), String> {
+    server.llm.clear_provider_secrets_with_custody(|| {
+        clear_vault_key_only(server);
+        Ok(())
+    })
 }
 
 pub(super) fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
@@ -64,8 +72,17 @@ pub(super) fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
 fn try_keychain_auto_unlock_after_locked_access(
     server: &MemoryServer,
     reason: &str,
+    refresh_owner: ProviderRefreshOwner,
 ) -> Result<bool, String> {
-    match crate::provider_config::auto_unlock_vault_from_keychain(server) {
+    let result = match refresh_owner {
+        ProviderRefreshOwner::Caller => {
+            crate::provider_config::auto_unlock_vault_key_from_keychain(server)
+        }
+        ProviderRefreshOwner::AutoUnlock => {
+            crate::provider_config::auto_unlock_vault_from_keychain(server)
+        }
+    };
+    match result {
         Ok(true) => Ok(true),
         Ok(false) => Ok(false),
         Err(err) => {
@@ -82,6 +99,24 @@ fn try_keychain_auto_unlock_after_locked_access(
 /// Check if vault is unlocked and run work with a borrowed cached key.
 pub(super) fn with_vault_key<T>(
     server: &MemoryServer,
+    f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
+) -> Result<T, String> {
+    with_vault_key_inner(server, ProviderRefreshOwner::AutoUnlock, f)
+}
+
+/// Borrow the Vault key while an outer provider materialization transaction
+/// owns provider refresh. A locked Vault may install its Keychain key, but the
+/// outer transaction performs the sole cache refresh after this loader returns.
+pub(super) fn with_vault_key_for_provider_refresh<T>(
+    server: &MemoryServer,
+    f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
+) -> Result<T, String> {
+    with_vault_key_inner(server, ProviderRefreshOwner::Caller, f)
+}
+
+fn with_vault_key_inner<T>(
+    server: &MemoryServer,
+    refresh_owner: ProviderRefreshOwner,
     f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
 ) -> Result<T, String> {
     let mut attempted_auto_unlock = false;
@@ -107,7 +142,7 @@ pub(super) fn with_vault_key<T>(
             Ok(key) => break Ok(key),
             Err(reason) if !attempted_auto_unlock => {
                 attempted_auto_unlock = true;
-                match try_keychain_auto_unlock_after_locked_access(server, &reason) {
+                match try_keychain_auto_unlock_after_locked_access(server, &reason, refresh_owner) {
                     Ok(true) => continue,
                     Ok(false) => break Err(reason),
                     // A real auto-unlock failure (e.g. stored kdf_params

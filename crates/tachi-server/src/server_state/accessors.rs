@@ -20,6 +20,13 @@ pub(crate) fn format_bypassed_env_warning(name: &str) -> String {
     )
 }
 
+/// Loud refusal for automatic refresh paths. Materialization errors contain
+/// key names only; the cache state named here is the complete prior state
+/// (which may be empty), never a partially-built refresh.
+pub(crate) fn format_provider_refresh_refusal(err: &str) -> String {
+    format!("[provider] refresh refused; prior provider cache left unchanged: {err}")
+}
+
 impl MemoryServer {
     pub(crate) fn set_work_claim_connection(
         &self,
@@ -85,10 +92,14 @@ impl MemoryServer {
         // auto-unlock, ensure_materialized, vault_set/unlock). A per-alias skip
         // must never be swallowed by the discarded report — log each skipped alias
         // loudly with its vault_unlock/vault_set remediation before returning.
-        for (key, reason) in &report.skipped_aliases {
+        for (key, _reason) in &report.skipped_aliases {
+            let retained = report
+                .retained_from_last_known_good
+                .iter()
+                .any(|retained_key| retained_key == key);
             tracing::warn!(
-                "[provider] skipped alias for '{key}': {}",
-                crate::provider_config::format_skipped_alias_reason(reason)
+                "{}",
+                crate::provider_config::format_skipped_alias_warning(key, retained)
             );
         }
         Ok(report)
@@ -101,7 +112,9 @@ impl MemoryServer {
         {
             return;
         }
-        let _ = self.refresh_llm_provider_secrets_from_vault();
+        if let Err(err) = self.refresh_llm_provider_secrets_from_vault() {
+            tracing::error!("{}", format_provider_refresh_refusal(&err));
+        }
     }
 
     pub(crate) fn unlocked_env_secrets_for_child_env(
@@ -221,7 +234,29 @@ impl MemoryServer {
 
 #[cfg(test)]
 mod tests {
-    use super::format_bypassed_env_warning;
+    use super::{format_bypassed_env_warning, format_provider_refresh_refusal};
+
+    #[derive(Clone, Default)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     /// #1403 R2 / #1393: bypassed-env warn text must name the key and must not
     /// leak env or vault secret values into the operator-facing string.
@@ -255,85 +290,39 @@ mod tests {
         );
     }
 
-    /// A capturing [`tracing_subscriber::fmt::MakeWriter`] so the production
-    /// `tracing::warn!` in `refresh_llm_provider_secrets_from_vault` can be
-    /// asserted on directly. Same idiom as
-    /// `bootstrap::clean_cli::tests::sweep_leaves_lease_whose_stat_is_inconclusive_and_logs_why`.
-    #[derive(Clone, Default)]
-    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    #[test]
+    fn provider_refresh_refusal_is_loud_and_does_not_echo_alias_text() {
+        let key = "OPENAI_API_KEY";
+        let alias_sentinel = "MALFORMED ALIAS SENTINEL";
+        let safe_error = format!(
+            "Config key '{key}' references a Vault alias that is not a valid Vault secret name; provider refresh refused and prior provider cache left unchanged"
+        );
 
-    impl std::io::Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+        let warning = format_provider_refresh_refusal(&safe_error);
+
+        assert!(
+            warning.contains(key),
+            "warning must name the key: {warning}"
+        );
+        assert!(warning.contains("refresh refused"), "{warning}");
+        assert!(
+            warning.contains("prior provider cache left unchanged"),
+            "{warning}"
+        );
+        assert!(
+            !warning.contains(alias_sentinel),
+            "warning leaked alias text: {warning}"
+        );
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// #1403 R2 / #1393 cold review (codex-2d6e7): the formatter-only test
-    /// above calls `format_bypassed_env_warning` directly, so deleting the
-    /// production warn loop below —
-    /// ```ignore
-    /// if report.env_fallbacks_bypassed > 0 {
-    ///     for name in &report.bypassed_names {
-    ///         tracing::warn!("{}", format_bypassed_env_warning(name));
-    ///     }
-    /// }
-    /// ```
-    /// (the body of `refresh_llm_provider_secrets_from_vault`, this file,
-    /// currently a few lines above the `tests` module) — would leave the
-    /// formatter test green, because it never calls
-    /// `refresh_llm_provider_secrets_from_vault` at all.
-    ///
-    /// This test drives the real emission path instead: `vault_set` on a
-    /// live `MemoryServer` with a plaintext env fallback already present
-    /// under the same key. Inside `handle_vault_set`,
-    /// `attach_provider_refresh_warning` calls the production
-    /// `refresh_llm_provider_secrets_from_vault()`, which finds
-    /// `env_fallbacks_bypassed > 0` (vault wins over the env plaintext) and
-    /// — if the loop above still exists — emits `tracing::warn!` naming the
-    /// bypassed key. We capture the real tracing output with a `MakeWriter`
-    /// held across the async work via `tracing::subscriber::set_default`
-    /// inside `block_on` (same thread, so the guard's thread-local stays
-    /// valid for the whole emission path).
-    ///
-    /// Plain `#[test]` + `new_current_thread().block_on` (not `#[tokio::test]`),
-    /// matching the `global_test_lock` convention in `vault_ops/tests.rs`: the
-    /// guard serializes process-wide `SILICONFLOW_API_KEY` env against other
-    /// tests, so it must stay held for the whole init/set sequence including
-    /// its internal awaits — a current_thread runtime keeps TLS and
-    /// `tracing::subscriber::set_default` on one thread for the whole
-    /// emission path, and `block_on` runs that future to completion without
-    /// a top-level `.await` for clippy's `await_holding_lock` lint while the
-    /// guard's coverage is unchanged.
-    ///
-    /// DISCRIMINATION (RED/GREEN proof executed by the build seat, not run
-    /// here — this lane is edit-only, no cargo): comment out or delete the
-    /// `if report.env_fallbacks_bypassed > 0 { ... }` block in
-    /// `refresh_llm_provider_secrets_from_vault` above and this test must go
-    /// RED (the captured buffer no longer contains the bypassed key name);
-    /// restoring the block must bring it back GREEN.
+    /// Drive the production refresh emission path, not only the formatter.
+    /// The current-thread runtime keeps the tracing subscriber and the global
+    /// environment lock on one thread throughout the async init/set sequence.
     #[test]
     fn refresh_from_vault_emits_bypassed_env_warning_via_real_emission_path() {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        // `crate::tests::make_server()` runs `ensure_test_env()` (a
-        // process-wide `Once`) which sets a baseline `SILICONFLOW_API_KEY`.
-        // Construct the server FIRST so that `Once` fires before we install
-        // our own sentinel value below — otherwise, if this were the first
-        // test in the binary to touch `ensure_test_env()`, the baseline
-        // value could be set AFTER ours and clobber it.
         let server = crate::tests::make_server();
 
         let key_name = "SILICONFLOW_API_KEY";
@@ -362,10 +351,6 @@ mod tests {
                     .finish();
                 let _tracing_guard = tracing::subscriber::set_default(subscriber);
 
-                // vault_set stores `vault_sentinel` under the same name the env
-                // fallback already occupies, then internally calls
-                // `refresh_llm_provider_secrets_from_vault()` — the real production
-                // trigger for the warn loop under test.
                 server
                     .vault_set(rmcp::handler::server::wrapper::Parameters(
                         crate::vault_ops::VaultSetParams {

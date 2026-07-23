@@ -29,7 +29,10 @@ fn rotation_index(name: &str, prefix: &str) -> Option<u32> {
     suffix.parse::<u32>().ok()
 }
 
-pub(super) fn collect_rotation_entries(
+/// Canonical daemon grouping for configured Vault rotation members.
+/// Report-only consumers reuse this so suffix parsing cannot drift from
+/// provider materialization.
+pub(crate) fn collect_rotation_entries(
     entries: Vec<VaultEntry>,
     prefix: &str,
 ) -> Vec<(u32, VaultEntry)> {

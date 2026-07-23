@@ -245,12 +245,9 @@ pub fn derive_verified_key_from_stored_config(
 /// (unsupported platform, `security` invocation failure, missing entry, or
 /// non-UTF8 value) — never a bare io/process error.
 ///
-/// Distinct from `derive_verified_key_from_stored_config`'s callers
-/// (`provider_config::auto_unlock_vault_from_keychain` and the status-health
-/// Keychain loader): those are best-effort background auto-unlock paths that
-/// silently no-op when Keychain has no entry. This function backs an
-/// *explicit* keychain-unlock request, so it surfaces every failure loudly
-/// instead of degrading to a silent `false`.
+/// Background auto-unlock wraps this primitive and explicitly downgrades only
+/// missing/empty entries to a benign miss; explicit unlock callers surface
+/// every failure loudly.
 pub fn read_password_from_macos_keychain() -> Result<String, String> {
     // Test builds only: never shell out to the real `security` binary from a
     // unit test (that would read/depend on whatever `tachi-vault`/`default`

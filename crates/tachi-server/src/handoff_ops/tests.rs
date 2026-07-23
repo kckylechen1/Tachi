@@ -1,21 +1,10 @@
 use super::*;
 
-fn ensure_test_env() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        std::env::set_var("VOYAGE_API_KEY", "test-voyage-key");
-        std::env::set_var("SILICONFLOW_API_KEY", "test-siliconflow-key");
-        std::env::set_var("SILICONFLOW_MODEL", "test-model");
-        std::env::set_var("SUMMARY_MODEL", "test-summary-model");
-    });
-}
-
 fn env_lock() -> &'static std::sync::Mutex<()> {
     crate::shell_ops::tachi_run_root_env_lock()
 }
 
 fn test_server(db_path: std::path::PathBuf) -> MemoryServer {
-    ensure_test_env();
     MemoryServer::new(db_path, None).expect("test memory server")
 }
 

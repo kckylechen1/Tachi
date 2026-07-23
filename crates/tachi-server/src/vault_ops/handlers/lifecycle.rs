@@ -211,13 +211,12 @@ pub(crate) async fn handle_vault_unlock(
 }
 
 pub(crate) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
-    let result = {
-        clear_cached_vault_state(server);
+    let result = clear_cached_vault_state(server).and_then(|()| {
         serde_json::to_string(&json!({
             "locked": true
         }))
         .map_err(|e| format!("serialize: {e}"))
-    };
+    });
 
     let audit_result = record_vault_audit(
         server,

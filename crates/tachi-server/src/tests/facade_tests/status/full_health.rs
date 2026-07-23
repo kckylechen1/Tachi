@@ -68,9 +68,11 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
             },
         ],
     );
-    server
-        .llm
-        .mark_provider_key_rate_limited_for_tests("VOYAGE_API_KEY_1", Some(60));
+    server.llm.mark_provider_key_rate_limited_for_tests(
+        "VOYAGE_API_KEY",
+        "VOYAGE_API_KEY_1",
+        Some(60),
+    );
 
     let body = crate::status_ops::handle_tachi_status_full(&server, Some("json"))
         .await

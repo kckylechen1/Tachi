@@ -15,7 +15,8 @@ pub use llm::{
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
 pub use provider_materialization::{
-    group_api_key_values_by_configured_rotations, materialize_provider_secrets, MaterializeReport,
+    group_api_key_values_by_configured_rotations, materialize_provider_secrets,
+    materialize_provider_secrets_from_durable_source, MaterializeReport,
 };
 pub use provider_names::{
     is_vault_alias, parse_rotation_member_name, parse_vault_alias, vault_alias_line,

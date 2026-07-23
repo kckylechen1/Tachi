@@ -22,9 +22,11 @@ async fn vault_api_key_lease_skips_unusable_health_members() {
         .await
         .expect("vault_set_api_key_pool should succeed");
 
-    server
-        .llm
-        .mark_provider_key_rate_limited_for_tests("TRANSIT_API_KEY_1", Some(60));
+    server.llm.mark_provider_key_rate_limited_for_tests(
+        "TRANSIT_API_KEY",
+        "TRANSIT_API_KEY_1",
+        Some(60),
+    );
 
     let leased = server
         .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
