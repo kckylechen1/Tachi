@@ -1,17 +1,20 @@
 //! Integration test — NOT a `#[cfg(test)]` unit test inside `src/`.
 //!
 //! Cargo compiles this file as a separate crate that links `vault-kit`'s
-//! library target as an ordinary external dependency: the library is built
-//! *without* `--cfg test` applied to itself, and this workspace's own
-//! `cargo test` run does not enable vault-kit's `test-support` feature for
-//! this crate (only tachi-server's `[dev-dependencies]` entry does, for
-//! itself). So `DerivedVaultKey::derive()` / `active_kdf_params_json()`
-//! here run through the REAL production Argon2 profile (m=65536 KiB, t=3,
-//! p=4), exactly as a release build would — the one code path vault-kit's
-//! own unit tests structurally can never exercise (every unit test always
-//! compiles the crate with `cfg(test)` on, which forces the weak profile).
-//! This is where a drift in the production constants themselves gets
-//! caught, at the cost of one real ~100-300ms Argon2id run.
+//! library target as an ordinary external dependency. Run standalone
+//! (`cargo test -p vault-kit`), vault-kit's `test-support` feature is off
+//! for this crate. Run under a `--workspace` build, Cargo's feature
+//! unification can pull `test-support` in here too, since tachi-server's
+//! `[dev-dependencies]` entry requests it elsewhere in the same graph —
+//! but that no longer changes what this test proves: `test-support` is
+//! purely additive now, gating only the separate, opt-in
+//! `test_support::derive_cheap` helper. It never swaps what
+//! `DerivedVaultKey::derive()` / `active_kdf_params_json()` return, in
+//! either build. Both run through the REAL production Argon2 profile
+//! (m=65536 KiB, t=3, p=4), exactly as a release build would, whether the
+//! feature is unified in or not. This is where a drift in the production
+//! constants themselves gets caught, at the cost of one real ~100-300ms
+//! Argon2id run.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use vault_kit::{active_kdf_params_json, create_verifier, DerivedVaultKey};

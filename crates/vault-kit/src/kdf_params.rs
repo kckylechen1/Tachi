@@ -1,22 +1,27 @@
 //! Versioned, storage-driven Argon2id KDF parameters.
 //!
 //! Both Sigil/tachi-server and the HyperTachi fork write a `kdf_params` JSON
-//! column (`{"m":65536,"t":3,"p":4}`) into `vault_config` at vault-init time
-//! — and both deliberately ignore it at unlock, deriving with a
-//! compile-time constant instead (tachi#1080 v1 comment). `KdfParams` gives
-//! that column a first-class, versioned type: parse it, and refuse
-//! (fail-closed) anything outside the known-supported set rather than
-//! silently deriving with mismatched parameters — or, worse, letting a
+//! column (`{"m":65536,"t":3,"p":4}`) into `vault_config` at vault-init time.
+//! `KdfParams` gives that column a first-class, versioned type: parse it,
+//! and refuse (fail-closed) anything outside the known-supported set rather
+//! than silently deriving with mismatched parameters — or, worse, letting a
 //! decrypt failure caused by parameter drift get misread as "wrong
 //! password" by a caller.
 //!
-//! This module is new, additive API. Nothing in either product calls it
-//! yet — wiring a product's actual unlock path to read the stored value and
-//! call [`crate::DerivedVaultKey::derive_with_params`] is deferred (see the
-//! issue's "separately specced before adoption" list: legacy-vault
-//! interpretation, the pinning contract, and the trading startup/health
-//! policy all need an owner decision first). Existing `derive()` callers
-//! are completely unaffected.
+//! `from_stored_json`/`supported` are wired into tachi-server's
+//! `parse_stored_kdf_params` (`vault_crypto.rs`), which every stored-config
+//! unlock/verify site calls (tachi#1080): the MCP `handle_vault_unlock`
+//! handler, the CLI central verifier, the in-process Keychain auto-unlock,
+//! the status-health Keychain loader, the setup-wizard unlock-existing-vault
+//! verifier, both `env_cmd` unlock entry points (materialize + legacy), and
+//! the stateless `vault_cli` session verifier — 8 call sites total. Each
+//! parses the stored value through this module, then derives with
+//! [`crate::DerivedVaultKey::derive_with_params`] keyed off the parsed
+//! result, not a compile-time constant — so a stored-parameter mismatch is
+//! refused before `verify_password` ever runs, never misdiagnosed as a
+//! wrong password. Init paths are unchanged: they still write
+//! `KdfParams::PRODUCTION` and derive with the plain, compile-time `derive()`
+//! path, since they create the config rather than read one.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,40 +55,10 @@ impl KdfParams {
         parallelism: 4,
     };
 
-    /// The lightweight parameter set `active_kdf_params_json()` writes under
-    /// `cfg(test)` / `test-support`+`debug_assertions` (mirrors the cfg gate
-    /// on the compile-time constants in `kdf.rs`). It must be in the
-    /// supported set in those same builds: a test that inits a vault and
-    /// unlocks it writes the active profile, then re-reads it through
-    /// `from_stored_json` — if the just-written value were rejected as
-    /// unsupported, the init→unlock round-trip (and every downstream test
-    /// suite that exercises it) would break against the product's own stored
-    /// format.
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-    const TEST: KdfParams = KdfParams {
-        memory_cost_kib: 64,
-        time_cost: 1,
-        parallelism: 1,
-    };
-
-    /// The parameter sets `derive_with_params`/`from_stored_json` accept.
-    ///
-    /// In a production build this is exactly `[PRODUCTION]` — the only value
-    /// either product has ever written. Under `cfg(test)` / `test-support`
-    /// the matching lightweight profile is accepted too, so "what `derive()`
-    /// uses" and "what `supported()` accepts" stay in lockstep in every build
-    /// mode (a test-profile vault must unlock against its own stored params).
-    /// This is the seam a future format revision extends, not a place to
-    /// widen speculatively.
+    /// The parameter sets production stored-config parsing and derivation
+    /// accept. This is deliberately production-only in every build mode.
     pub fn supported() -> &'static [KdfParams] {
-        #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-        {
-            &[KdfParams::PRODUCTION, KdfParams::TEST]
-        }
-        #[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
-        {
-            &[KdfParams::PRODUCTION]
-        }
+        &[KdfParams::PRODUCTION]
     }
 
     /// Whether `self` is one of the [`KdfParams::supported`] profiles.

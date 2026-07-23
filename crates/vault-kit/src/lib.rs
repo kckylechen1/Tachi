@@ -39,6 +39,8 @@ mod verifier;
 
 pub use cipher::{decrypt, encrypt, generate_nonce, AES_GCM_NONCE_LEN};
 pub use kdf::{active_kdf_params_json, generate_salt, zero_key, zero_string, DerivedVaultKey};
+#[cfg(feature = "test-support")]
+pub use kdf::test_support::{cheap_kdf_params_json, derive_cheap};
 pub use kdf_params::{KdfParams, KdfParamsError, KdfParamsProbe};
 pub use verifier::{create_verifier, verify_password};
 
