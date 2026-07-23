@@ -18,6 +18,8 @@ pub use vault_kit::{
     active_kdf_params_json, create_verifier, decrypt, encrypt, generate_salt, verify_password,
     zero_key, zero_string, DerivedVaultKey, KdfParams, AES_GCM_NONCE_LEN,
 };
+#[cfg(test)]
+pub use vault_kit::{cheap_kdf_params_json, derive_cheap};
 
 use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
@@ -425,16 +427,12 @@ mod tests {
         assert!(validate_secret_name("a".repeat(129).as_str()).is_err());
     }
 
-    /// De-risks the dev-dependency feature-unification trick in
-    /// `Cargo.toml` (`vault-kit` plain in `[dependencies]`, `test-support`
-    /// only in `[dev-dependencies]`): tachi-server's own test binary must
-    /// see vault-kit's lightweight Argon2 profile (m=64 KiB), not the
-    /// production default (m=65536 KiB, ~100-300ms/derive) — otherwise
-    /// every `DerivedVaultKey::derive` call across this crate's test suite
-    /// silently starts paying real Argon2 cost.
+    /// Feature unification must not weaken ordinary APIs; fixture speed needs
+    /// an explicit test-support helper.
     #[test]
-    fn active_kdf_params_json_uses_test_support_profile_in_tachi_server_tests() {
-        assert_eq!(active_kdf_params_json(), r#"{"m":64,"t":1,"p":1}"#);
+    fn test_support_is_explicit_under_feature_unification() {
+        assert_eq!(active_kdf_params_json(), r#"{"m":65536,"t":3,"p":4}"#);
+        assert_eq!(cheap_kdf_params_json(), r#"{"m":64,"t":1,"p":1}"#);
     }
 
     // --- tachi#1080 in-process seam discrimination tests ---
