@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_MEMORY_READ_POOL_SIZE: usize = 4;
 const MAX_MEMORY_READ_POOL_SIZE: usize = 32;
+const DEFAULT_DB_CONTENTION_RECEIPT_CAPACITY: usize = 4096;
 
 /// Logical memory database scope used by server handlers and background jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,31 +92,83 @@ pub struct DbContentionReceipt {
     pub resource_wait: Duration,
     pub resource_hold: Duration,
     pub gate_hold: Duration,
-    /// `false` when the closure returned an error; panics do not emit a receipt.
+    /// `false` when the closure returned an error or panicked.
     pub completed: bool,
+}
+
+/// One atomic drain of a [`DbContentionRecorder`].
+///
+/// `dropped_samples` covers only the same interval as `receipts`; draining
+/// resets both together so a harness cannot silently report a complete phase
+/// after collector overflow.
+#[derive(Debug)]
+pub struct DbContentionBatch {
+    pub receipts: Vec<DbContentionReceipt>,
+    pub dropped_samples: u64,
+}
+
+#[derive(Default)]
+struct DbContentionRecorderState {
+    receipts: VecDeque<DbContentionReceipt>,
+    dropped_samples: u64,
 }
 
 /// Shared, opt-in sink for [`DbContentionReceipt`]s.
 ///
 /// A runtime allocates this only when a caller asks to observe it. Normal
 /// global reads and writes retain their existing no-timer path.
-#[derive(Default)]
 pub struct DbContentionRecorder {
-    receipts: StdMutex<Vec<DbContentionReceipt>>,
+    state: StdMutex<DbContentionRecorderState>,
+    capacity: usize,
+}
+
+impl Default for DbContentionRecorder {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_DB_CONTENTION_RECEIPT_CAPACITY)
+    }
 }
 
 impl DbContentionRecorder {
-    fn record(&self, receipt: DbContentionReceipt) {
-        lock_or_recover(&self.receipts, "db_contention_receipts").push(receipt);
+    /// Construct a recorder with a fixed maximum number of retained samples.
+    /// Once full, new samples are counted as dropped until the next drain.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            state: StdMutex::new(DbContentionRecorderState {
+                receipts: VecDeque::with_capacity(capacity),
+                dropped_samples: 0,
+            }),
+            capacity,
+        }
     }
 
-    /// Drain every sample observed so far. Intended for isolated test/harness
-    /// collection after the operations under observation have completed.
-    pub fn drain(&self) -> Vec<DbContentionReceipt> {
-        std::mem::take(&mut *lock_or_recover(
-            &self.receipts,
-            "db_contention_receipts",
-        ))
+    fn record(&self, receipt: DbContentionReceipt) {
+        let mut state = lock_or_recover(&self.state, "db_contention_receipts");
+        if state.receipts.len() < self.capacity {
+            state.receipts.push_back(receipt);
+        } else {
+            state.dropped_samples = state.dropped_samples.saturating_add(1);
+        }
+    }
+
+    /// Drain every retained sample and the overflow count observed so far.
+    /// The queue and counter reset atomically for phase-isolated collection.
+    pub fn drain(&self) -> DbContentionBatch {
+        let mut state = lock_or_recover(&self.state, "db_contention_receipts");
+        DbContentionBatch {
+            receipts: state.receipts.drain(..).collect(),
+            dropped_samples: std::mem::take(&mut state.dropped_samples),
+        }
+    }
+}
+
+struct ElapsedOnDrop<'a> {
+    started: Instant,
+    elapsed: &'a mut Option<Duration>,
+}
+
+impl Drop for ElapsedOnDrop<'_> {
+    fn drop(&mut self) {
+        *self.elapsed = Some(self.started.elapsed());
     }
 }
 
@@ -856,21 +909,38 @@ impl DbRuntime {
         };
 
         let gate_wait_started = Instant::now();
-        #[cfg(test)]
-        self.notify_global_write_gate_contention_for_test();
-        let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
-        let gate_wait = gate_wait_started.elapsed();
-        let gate_hold_started = Instant::now();
-        let resource_wait_started = Instant::now();
-        let mut store = lock_or_recover(&self.global_store, "global_store");
-        let resource_wait = resource_wait_started.elapsed();
-        let resource_hold_started = Instant::now();
-        let result = f(&mut store);
-        let resource_hold = resource_hold_started.elapsed();
-        let completed = result.is_ok();
-        drop(store);
-        let gate_hold = gate_hold_started.elapsed();
-        drop(_gate);
+        let mut gate_wait = Duration::ZERO;
+        let mut gate_hold_started = None;
+        let mut gate_hold = Duration::ZERO;
+        let mut resource_wait = Duration::ZERO;
+        let mut resource_hold_started = None;
+        let mut resource_hold = Duration::ZERO;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            self.notify_global_write_gate_contention_for_test();
+            let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
+            gate_wait = gate_wait_started.elapsed();
+            gate_hold_started = Some(Instant::now());
+            let resource_wait_started = Instant::now();
+            let mut store = lock_or_recover(&self.global_store, "global_store");
+            resource_wait = resource_wait_started.elapsed();
+            resource_hold_started = Some(Instant::now());
+            let result = f(&mut store);
+            resource_hold = resource_hold_started
+                .expect("resource hold timer set before measured write")
+                .elapsed();
+            drop(store);
+            gate_hold = gate_hold_started
+                .expect("gate hold timer set after measured write admission")
+                .elapsed();
+            drop(_gate);
+            result
+        }));
+        if outcome.is_err() {
+            resource_hold = resource_hold_started.map_or(Duration::ZERO, |start| start.elapsed());
+            gate_hold = gate_hold_started.map_or(Duration::ZERO, |start| start.elapsed());
+        }
+        let completed = matches!(&outcome, Ok(Ok(_)));
         recorder.record(DbContentionReceipt {
             phase: "db_runtime",
             action: "write",
@@ -883,7 +953,75 @@ impl DbRuntime {
             gate_hold,
             completed,
         });
-        result
+        match outcome {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn with_global_store_read_instrumented<T>(
+        &self,
+        recorder: Arc<DbContentionRecorder>,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> (Result<T, String>, ReadPoolCheckoutReceipt) {
+        let gate_wait_started = Instant::now();
+        let mut gate_wait = Duration::ZERO;
+        let mut gate_hold_started = None;
+        let mut gate_hold = Duration::ZERO;
+        let mut pool_wait_on_panic = None;
+        let mut resource_hold_on_panic = None;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+            gate_wait = gate_wait_started.elapsed();
+            gate_hold_started = Some(Instant::now());
+            let pool_wait_started = Instant::now();
+            let result = self
+                .global_read_pool
+                .with_store_recording("global_read_pool", |store| {
+                    pool_wait_on_panic = Some(pool_wait_started.elapsed());
+                    let _hold_timer = ElapsedOnDrop {
+                        started: Instant::now(),
+                        elapsed: &mut resource_hold_on_panic,
+                    };
+                    f(store)
+                });
+            gate_hold = gate_hold_started
+                .expect("gate hold timer set after measured read admission")
+                .elapsed();
+            drop(_gate);
+            result
+        }));
+        if outcome.is_err() {
+            gate_hold = gate_hold_started.map_or(Duration::ZERO, |start| start.elapsed());
+        }
+        let (resource_wait, resource_hold, completed) = match &outcome {
+            Ok((result, receipt)) => (
+                receipt.pool_checkout_wait,
+                receipt.operation_wall_time,
+                result.is_ok(),
+            ),
+            Err(_) => (
+                pool_wait_on_panic.unwrap_or(Duration::ZERO),
+                resource_hold_on_panic.unwrap_or(Duration::ZERO),
+                false,
+            ),
+        };
+        recorder.record(DbContentionReceipt {
+            phase: "db_runtime",
+            action: "read",
+            resource: "global_read_pool",
+            mode: "shared",
+            gate: "global_rw_gate",
+            gate_wait,
+            resource_wait,
+            resource_hold,
+            gate_hold,
+            completed,
+        });
+        match outcome {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     pub fn with_global_store_read<T>(
@@ -895,29 +1033,7 @@ impl DbRuntime {
             return self.global_read_pool.with_store("global_read_pool", f);
         };
 
-        let gate_wait_started = Instant::now();
-        let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-        let gate_wait = gate_wait_started.elapsed();
-        let gate_hold_started = Instant::now();
-        let (result, pool_receipt) = self
-            .global_read_pool
-            .with_store_recording("global_read_pool", f);
-        let completed = result.is_ok();
-        let gate_hold = gate_hold_started.elapsed();
-        drop(_gate);
-        recorder.record(DbContentionReceipt {
-            phase: "db_runtime",
-            action: "read",
-            resource: "global_read_pool",
-            mode: "shared",
-            gate: "global_rw_gate",
-            gate_wait,
-            resource_wait: pool_receipt.pool_checkout_wait,
-            resource_hold: pool_receipt.operation_wall_time,
-            gate_hold,
-            completed,
-        });
-        result
+        self.with_global_store_read_instrumented(recorder, f).0
     }
 
     /// Recording twin of [`Self::with_global_store_read`]: identical
@@ -944,28 +1060,7 @@ impl DbRuntime {
             return Ok((result?, receipt));
         };
 
-        let gate_wait_started = Instant::now();
-        let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-        let gate_wait = gate_wait_started.elapsed();
-        let gate_hold_started = Instant::now();
-        let (result, receipt) = self
-            .global_read_pool
-            .with_store_recording("global_read_pool", f);
-        let completed = result.is_ok();
-        let gate_hold = gate_hold_started.elapsed();
-        drop(_gate);
-        recorder.record(DbContentionReceipt {
-            phase: "db_runtime",
-            action: "read",
-            resource: "global_read_pool",
-            mode: "shared",
-            gate: "global_rw_gate",
-            gate_wait,
-            resource_wait: receipt.pool_checkout_wait,
-            resource_hold: receipt.operation_wall_time,
-            gate_hold,
-            completed,
-        });
+        let (result, receipt) = self.with_global_store_read_instrumented(recorder, f);
         Ok((result?, receipt))
     }
 
@@ -1754,8 +1849,9 @@ mod tests {
         );
 
         let contention = recorder.drain();
+        assert_eq!(contention.dropped_samples, 0);
         assert!(
-            contention.iter().any(|receipt| {
+            contention.receipts.iter().any(|receipt| {
                 receipt.phase == "db_runtime"
                     && receipt.action == "read"
                     && receipt.resource == "global_read_pool"
@@ -1842,13 +1938,14 @@ mod tests {
         waiter.join().expect("waiter thread should join");
 
         let contention = recorder.drain();
+        assert_eq!(contention.dropped_samples, 0);
         assert_eq!(
-            contention.len(),
+            contention.receipts.len(),
             2,
             "only the holder and waiter writes should be observed; receipts={contention:?}"
         );
         assert!(
-            contention.iter().all(|receipt| {
+            contention.receipts.iter().all(|receipt| {
                 receipt.phase == "db_runtime"
                     && receipt.action == "write"
                     && receipt.resource == "global_store"
@@ -1862,6 +1959,7 @@ mod tests {
         );
         assert!(
             contention
+                .receipts
                 .iter()
                 .any(|receipt| receipt.gate_wait > Duration::ZERO),
             "writer B waited behind the holder's real global_rw_gate but receipt lost that wait; \
@@ -1869,11 +1967,114 @@ mod tests {
         );
         assert!(
             contention
+                .receipts
                 .iter()
                 .any(|receipt| receipt.resource_hold > Duration::ZERO),
             "writer A held the real global_store but receipt lost that hold; \
              receipts={contention:?}"
         );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn measured_global_panics_emit_incomplete_receipts_and_resume_unwind() {
+        let temp = unique_temp_dir("global-contention-panic-receipts");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = test_runtime(global_db);
+        let recorder = runtime.enable_global_contention_receipts();
+
+        let write_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.with_global_store::<()>(|_store| panic!("measured write panic"))
+        }))
+        .expect_err("measured write panic must resume to its caller");
+        assert_eq!(
+            write_panic.downcast_ref::<&str>(),
+            Some(&"measured write panic")
+        );
+        assert!(
+            runtime.global_store.is_poisoned(),
+            "instrumented write panic must retain the original mutex-poisoning behavior"
+        );
+
+        let read_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.with_global_store_read::<()>(|_store| panic!("measured read panic"))
+        }))
+        .expect_err("measured read panic must resume to its caller");
+        assert_eq!(
+            read_panic.downcast_ref::<&str>(),
+            Some(&"measured read panic")
+        );
+        assert!(
+            runtime.global_read_pool.inner.stores[0].is_poisoned(),
+            "instrumented read panic must retain the original pool-slot poisoning behavior"
+        );
+
+        let recording_read_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.with_global_store_read_recording::<()>(|_store| {
+                panic!("measured recording read panic")
+            })
+        }))
+        .expect_err("measured recording read panic must resume to its caller");
+        assert_eq!(
+            recording_read_panic.downcast_ref::<&str>(),
+            Some(&"measured recording read panic")
+        );
+
+        let contention = recorder.drain();
+        assert_eq!(contention.dropped_samples, 0);
+        assert_eq!(contention.receipts.len(), 3);
+        assert!(contention.receipts.iter().all(|receipt| !receipt.completed));
+        assert_eq!(
+            contention
+                .receipts
+                .iter()
+                .filter(|receipt| receipt.resource == "global_store")
+                .count(),
+            1
+        );
+        assert_eq!(
+            contention
+                .receipts
+                .iter()
+                .filter(|receipt| receipt.resource == "global_read_pool")
+                .count(),
+            2
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn contention_recorder_bounds_samples_and_reports_overflow_per_drain() {
+        let temp = unique_temp_dir("global-contention-recorder-capacity");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = test_runtime(global_db);
+        let recorder = Arc::new(DbContentionRecorder::with_capacity(2));
+        assert!(
+            runtime
+                .global_contention_recorder
+                .set(Arc::clone(&recorder))
+                .is_ok(),
+            "test runtime recorder must be unset"
+        );
+
+        for _ in 0..3 {
+            runtime
+                .with_global_store(|_store| Ok(()))
+                .expect("measured write");
+        }
+
+        let overflowed = recorder.drain();
+        assert_eq!(overflowed.receipts.len(), 2);
+        assert_eq!(overflowed.dropped_samples, 1);
+        assert!(overflowed.receipts.iter().all(|receipt| receipt.completed));
+
+        let reset = recorder.drain();
+        assert!(reset.receipts.is_empty());
+        assert_eq!(reset.dropped_samples, 0);
 
         let _ = std::fs::remove_dir_all(temp);
     }

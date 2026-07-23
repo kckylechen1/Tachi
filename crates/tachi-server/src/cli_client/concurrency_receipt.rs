@@ -438,6 +438,23 @@ fn response_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
         })
 }
 
+fn search_result_rows_contain(value: &serde_json::Value, expected_text: &str) -> bool {
+    value
+        .get("sections")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|section| section.get("rows").and_then(serde_json::Value::as_array))
+        .flatten()
+        .any(|row| {
+            ["summary", "excerpt", "text"].into_iter().any(|field| {
+                row.get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value.contains(expected_text))
+            })
+        })
+}
+
 fn assert_tachi_memory_response(
     result: &Result<rmcp::model::CallToolResult, DaemonCallError>,
     action: &str,
@@ -468,9 +485,9 @@ fn assert_tachi_memory_response(
     );
     if let Some(expected_text) = expected_text {
         assert!(
-            text.contains(expected_text),
-            "tachi_memory(action={action}) response must contain the saved unique text; \
-             expected={expected_text:?} body={text:?}"
+            search_result_rows_contain(&value, expected_text),
+            "tachi_memory(action={action}) must return the saved unique text in an actual \
+             result row's summary/excerpt/text field; expected={expected_text:?} body={text:?}"
         );
     }
 }
@@ -534,9 +551,19 @@ fn duration_us(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
-fn emit_db_contention_receipt_jsonl(receipts: &[memory_server_runtime::DbContentionReceipt]) {
-    for receipt in receipts {
+fn emit_db_contention_receipt_jsonl(
+    load_phase: &str,
+    batch: &memory_server_runtime::DbContentionBatch,
+) {
+    let status = serde_json::json!({
+        "load_phase": load_phase,
+        "sample_count": batch.receipts.len(),
+        "dropped_samples": batch.dropped_samples,
+    });
+    println!("1255_db_contention_collection {status}");
+    for receipt in &batch.receipts {
         let line = serde_json::json!({
+            "load_phase": load_phase,
             "phase": receipt.phase,
             "action": receipt.action,
             "resource": receipt.resource,
@@ -550,6 +577,63 @@ fn emit_db_contention_receipt_jsonl(receipts: &[memory_server_runtime::DbContent
         });
         println!("1255_db_contention_receipt {line}");
     }
+}
+
+fn assert_db_contention_phase(
+    load_phase: &str,
+    batch: &memory_server_runtime::DbContentionBatch,
+    minimum_writes: usize,
+    minimum_reads: usize,
+) {
+    assert_eq!(
+        batch.dropped_samples,
+        0,
+        "{load_phase} DB contention collection overflowed; retained={} dropped={}",
+        batch.receipts.len(),
+        batch.dropped_samples
+    );
+    let valid_write_count = batch
+        .receipts
+        .iter()
+        .filter(|sample| {
+            sample.phase == "db_runtime"
+                && sample.action == "write"
+                && sample.resource == "global_store"
+                && sample.mode == "exclusive"
+                && sample.gate == "global_rw_gate"
+                && sample.resource_hold > Duration::ZERO
+                && sample.gate_hold >= sample.resource_hold
+                && sample.completed
+        })
+        .count();
+    let valid_read_count = batch
+        .receipts
+        .iter()
+        .filter(|sample| {
+            sample.phase == "db_runtime"
+                && sample.action == "read"
+                && sample.resource == "global_read_pool"
+                && sample.mode == "shared"
+                && sample.gate == "global_rw_gate"
+                && sample.resource_hold > Duration::ZERO
+                && sample.gate_hold >= sample.resource_hold
+                && sample.completed
+        })
+        .count();
+    assert!(
+        valid_write_count >= minimum_writes,
+        "{load_phase} real tachi_memory saves must independently produce at least \
+         {minimum_writes} complete global_store write samples; valid={valid_write_count} \
+         samples={:?}",
+        batch.receipts
+    );
+    assert!(
+        valid_read_count >= minimum_reads,
+        "{load_phase} real tachi_memory searches must independently produce at least \
+         {minimum_reads} complete global_read_pool read samples; valid={valid_read_count} \
+         samples={:?}",
+        batch.receipts
+    );
 }
 
 async fn spawn_receipt_http_daemon(
@@ -954,6 +1038,31 @@ mod tests {
         assert!(!concurrent_receipts_overlap(&[a, b]));
     }
 
+    #[test]
+    fn search_result_discrimination_rejects_echoes_without_result_rows() {
+        let expected = "1255 saved memory needle";
+        let echoed_only = json!({
+            "status": "completed",
+            "query": expected,
+            "arguments": { "query": expected },
+            "sections": [{ "name": "Memory", "rows": [] }],
+        });
+        assert!(
+            !search_result_rows_contain(&echoed_only, expected),
+            "an echoed query or argument must not satisfy search-result discrimination"
+        );
+
+        let returned_row = json!({
+            "status": "completed",
+            "query": expected,
+            "sections": [{
+                "name": "Memory",
+                "rows": [{ "excerpt": expected }],
+            }],
+        });
+        assert!(search_result_rows_contain(&returned_row, expected));
+    }
+
     /// Live transport-path harness: serial baseline + concurrent burst via
     /// `call_daemon_tool_raw_with_phases` against an in-process test daemon
     /// with server-side call observation.
@@ -1054,6 +1163,9 @@ mod tests {
             serial_expected as u64,
             "serial tachi_memory save/search must be observed by the same transport daemon"
         );
+        let serial_db_samples = db_contention.drain();
+        assert_db_contention_phase("serial", &serial_db_samples, 1, 1);
+        emit_db_contention_receipt_jsonl("serial", &serial_db_samples);
 
         let max_after_serial = observer.max_in_flight();
         let mut concurrent = run_concurrent_burst(
@@ -1079,6 +1191,9 @@ mod tests {
 
         let expected = runtime_expected + CALLERS * MEMORY_CALLS_PER_CALLER;
         wait_until_server_saw(&observer, expected as u64, "total").await;
+        let concurrent_db_samples = db_contention.drain();
+        assert_db_contention_phase("concurrent", &concurrent_db_samples, CALLERS, CALLERS);
+        emit_db_contention_receipt_jsonl("concurrent", &concurrent_db_samples);
 
         assert_eq!(
             serial.len() + serial_memory.len() + concurrent.len() + concurrent_memory.len(),
@@ -1210,37 +1325,6 @@ mod tests {
         all.append(&mut concurrent);
         all.append(&mut concurrent_memory);
         emit_receipt_jsonl(&all);
-
-        let db_samples = db_contention.drain();
-        assert!(
-            db_samples.iter().any(|sample| {
-                sample.phase == "db_runtime"
-                    && sample.action == "write"
-                    && sample.resource == "global_store"
-                    && sample.mode == "exclusive"
-                    && sample.gate == "global_rw_gate"
-                    && sample.resource_hold > Duration::ZERO
-                    && sample.gate_hold >= sample.resource_hold
-                    && sample.completed
-            }),
-            "real tachi_memory save must exercise labelled global_store write timing; \
-             samples={db_samples:?}"
-        );
-        assert!(
-            db_samples.iter().any(|sample| {
-                sample.phase == "db_runtime"
-                    && sample.action == "read"
-                    && sample.resource == "global_read_pool"
-                    && sample.mode == "shared"
-                    && sample.gate == "global_rw_gate"
-                    && sample.resource_hold > Duration::ZERO
-                    && sample.gate_hold >= sample.resource_hold
-                    && sample.completed
-            }),
-            "real tachi_memory search must exercise labelled global_read_pool read timing; \
-             samples={db_samples:?}"
-        );
-        emit_db_contention_receipt_jsonl(&db_samples);
 
         let timeout_count = all
             .iter()
