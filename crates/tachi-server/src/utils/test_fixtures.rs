@@ -1,30 +1,43 @@
 //! Suite-scoped temp fixture root for tachi-server tests.
 //!
-//! All fixtures live under `$TMPDIR/tachi-tests/` so a single Once GC at first
-//! use can reclaim kill -9 / panic leftovers (mtime > 1h). See tachi#1405 /
-//! HyperTachi#68.
+//! Layout: `$TMPDIR/tachi-tests/run-<pid>-<uuid>/…`
+//!
+//! A single Once GC at first use reclaims kill -9 / panic leftovers by deleting
+//! **sibling** `run-*` dirs and loose files under the suite root whose mtime is
+//! older than 1h. The current process's run dir is never GC'd (cross-process
+//! safety for long-lived nextest workers). See tachi#1405 / HyperTachi#68.
 
 use std::path::{Path, PathBuf};
 
 /// Suite-scoped temp fixture root name under `$TMPDIR`.
 pub(crate) const TEST_FIXTURE_ROOT_NAME: &str = "tachi-tests";
 
-/// Max age before a fixture under [`test_fixture_root`] is eligible for GC.
+/// Max age before a sibling under the suite root is eligible for GC.
 pub(crate) const TEST_FIXTURE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
-/// Remove direct children of `root` whose mtime is older than `max_age`
-/// relative to `now`. Returns the number of entries successfully removed.
+/// `$TMPDIR/tachi-tests/` (suite root; not the per-run dir).
+pub(crate) fn suite_fixture_root() -> PathBuf {
+    std::env::temp_dir().join(TEST_FIXTURE_ROOT_NAME)
+}
+
+/// Remove direct children of `suite_root` whose mtime is older than `max_age`
+/// relative to `now`, skipping `keep` (the current run dir). Returns the number
+/// of entries successfully removed.
 pub(crate) fn gc_stale_test_fixtures(
-    root: &Path,
+    suite_root: &Path,
     max_age: std::time::Duration,
     now: std::time::SystemTime,
+    keep: Option<&Path>,
 ) -> usize {
-    let Ok(entries) = std::fs::read_dir(root) else {
+    let Ok(entries) = std::fs::read_dir(suite_root) else {
         return 0;
     };
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
+        if keep.is_some_and(|k| k == path.as_path()) {
+            continue;
+        }
         let stale = entry
             .metadata()
             .ok()
@@ -46,16 +59,30 @@ pub(crate) fn gc_stale_test_fixtures(
     removed
 }
 
-/// `$TMPDIR/tachi-tests/`, created on first use. Runs stale-fixture GC once
-/// per test binary (Once).
+/// Per-process run dir: `$TMPDIR/tachi-tests/run-<pid>-<uuid>/`.
+///
+/// Created on first use. Runs stale-sibling GC once against the suite root,
+/// never deleting this run dir.
 pub(crate) fn test_fixture_root() -> PathBuf {
-    static GC: std::sync::Once = std::sync::Once::new();
-    let root = std::env::temp_dir().join(TEST_FIXTURE_ROOT_NAME);
-    let _ = std::fs::create_dir_all(&root);
-    GC.call_once(|| {
-        let _ = gc_stale_test_fixtures(&root, TEST_FIXTURE_MAX_AGE, std::time::SystemTime::now());
-    });
-    root
+    static RUN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RUN.get_or_init(|| {
+        let suite = suite_fixture_root();
+        let _ = std::fs::create_dir_all(&suite);
+        let run = suite.join(format!(
+            "run-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = gc_stale_test_fixtures(
+            &suite,
+            TEST_FIXTURE_MAX_AGE,
+            std::time::SystemTime::now(),
+            Some(run.as_path()),
+        );
+        let _ = std::fs::create_dir_all(&run);
+        run
+    })
+    .clone()
 }
 
 /// Join `name` under [`test_fixture_root`] (triggers Once GC on first use).
@@ -68,45 +95,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gc_stale_test_fixtures_removes_old_keeps_young() {
+    fn gc_stale_test_fixtures_removes_old_siblings_keeps_young_and_keep() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        let stale = root.join("stale.txt");
-        let nested = root.join("stale-dir");
-        std::fs::create_dir_all(&nested).expect("stale dir");
-        std::fs::write(nested.join("inner.txt"), b"x").expect("inner");
-        std::fs::write(&stale, b"s").expect("stale");
+        let suite = dir.path();
+        let keep = suite.join("run-keep-alive");
+        std::fs::create_dir_all(&keep).expect("keep dir");
+        std::fs::write(keep.join("live.txt"), b"live").expect("live");
 
-        let mtime = std::fs::metadata(&stale)
+        let stale_run = suite.join("run-stale-sibling");
+        std::fs::create_dir_all(&stale_run).expect("stale run");
+        std::fs::write(stale_run.join("inner.txt"), b"x").expect("inner");
+        let stale_loose = suite.join("loose-orphan.txt");
+        std::fs::write(&stale_loose, b"s").expect("loose");
+
+        let mtime = std::fs::metadata(&stale_loose)
             .and_then(|m| m.modified())
             .expect("mtime");
+        // Synthetic "now" makes keep + stale look older than max_age. `keep` is
+        // still preserved by path, proving the cross-process safety latch.
         let now = mtime + TEST_FIXTURE_MAX_AGE + std::time::Duration::from_secs(5);
-        let removed = gc_stale_test_fixtures(root, TEST_FIXTURE_MAX_AGE, now);
-        assert_eq!(removed, 2, "file + dir older than max_age must go");
-        assert!(!stale.exists());
-        assert!(!nested.exists());
+        let removed = gc_stale_test_fixtures(suite, TEST_FIXTURE_MAX_AGE, now, Some(&keep));
+        assert_eq!(removed, 2, "stale run dir + loose file must go");
+        assert!(keep.exists(), "current run dir must never be GC'd");
+        assert!(keep.join("live.txt").exists());
+        assert!(!stale_run.exists());
+        assert!(!stale_loose.exists());
 
-        let young = root.join("young.txt");
-        std::fs::write(&young, b"y").expect("young");
-        let young_mtime = std::fs::metadata(&young)
+        let young_run = suite.join("run-young-sibling");
+        std::fs::create_dir_all(&young_run).expect("young run");
+        std::fs::write(young_run.join("y.txt"), b"y").expect("young");
+        let young_mtime = std::fs::metadata(&young_run)
             .and_then(|m| m.modified())
             .expect("young mtime");
         let kept = gc_stale_test_fixtures(
-            root,
+            suite,
             TEST_FIXTURE_MAX_AGE,
             young_mtime + std::time::Duration::from_secs(60),
+            Some(&keep),
         );
         assert_eq!(kept, 0);
-        assert!(young.exists());
+        assert!(young_run.exists(), "young sibling run must survive");
     }
 
     #[test]
-    fn test_fixture_path_lives_under_suite_root() {
+    fn test_fixture_path_lives_under_per_run_suite_root() {
         let path = test_fixture_path("probe-fixture.txt");
+        let run_dir = path.parent().expect("parent");
+        let suite_dir = run_dir.parent().expect("suite");
         assert_eq!(
-            path.parent().and_then(|p| p.file_name()),
+            suite_dir.file_name(),
             Some(std::ffi::OsStr::new(TEST_FIXTURE_ROOT_NAME))
         );
-        assert!(test_fixture_root().is_dir());
+        let run_name = run_dir.file_name().and_then(|s| s.to_str()).expect("run");
+        assert!(
+            run_name.starts_with("run-"),
+            "expected run-* namespace, got {run_name}"
+        );
+        assert_eq!(test_fixture_root(), run_dir);
+        assert!(run_dir.is_dir());
     }
 }

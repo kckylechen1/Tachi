@@ -125,7 +125,7 @@ mod tests {
         let env = SkillsRootGuard::acquire();
         let unique = uuid::Uuid::new_v4();
         let rel_path = format!("skill/__resolver_fixture_{unique}/SKILL.md");
-        let root = std::env::temp_dir().join(format!("tachi-skill-resolver-{unique}"));
+        let root = crate::utils::test_fixture_path(format!("tachi-skill-resolver-{unique}"));
         let expected = root.join(&rel_path);
         std::fs::create_dir_all(&root).unwrap();
         env.set_skills_root(&root);
@@ -144,7 +144,7 @@ mod tests {
         let env = SkillsRootGuard::acquire();
         let unique = uuid::Uuid::new_v4();
         let rel_path = format!("skill/__resolver_precedence_{unique}/SKILL.md");
-        let base = std::env::temp_dir().join(format!("tachi-skill-roots-{unique}"));
+        let base = crate::utils::test_fixture_path(format!("tachi-skill-roots-{unique}"));
         let explicit_root = base.join("explicit");
         let home = base.join("home");
         let explicit_path = explicit_root.join(&rel_path);
@@ -166,7 +166,7 @@ mod tests {
         let env = SkillsRootGuard::acquire();
         let unique = uuid::Uuid::new_v4();
         let rel_path = format!("skill/__resolver_home_{unique}/SKILL.md");
-        let home = std::env::temp_dir().join(format!("tachi-skill-home-{unique}"));
+        let home = crate::utils::test_fixture_path(format!("tachi-skill-home-{unique}"));
         let expected = home.join(".agents").join("vendored-skills").join(&rel_path);
         std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
         std::fs::write(&expected, "# fixture\n").unwrap();
@@ -183,7 +183,7 @@ mod tests {
         let env = SkillsRootGuard::acquire();
         let unique = uuid::Uuid::new_v4();
         let rel_path = format!("skill/__resolver_manifest_{unique}/SKILL.md");
-        let base = std::env::temp_dir().join(format!("tachi-skill-manifest-{unique}"));
+        let base = crate::utils::test_fixture_path(format!("tachi-skill-manifest-{unique}"));
         let workspace = base.join("workspace");
         let manifest_dir = workspace.join("crates").join("tachi-server");
         let central = base.join("central");

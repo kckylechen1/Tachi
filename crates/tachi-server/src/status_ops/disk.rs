@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn top_consumers_rank_live_resources_and_exclude_reclaimed_bytes() {
         let dir =
-            std::env::temp_dir().join(format!("tachi-disk-consumers-{}", uuid::Uuid::new_v4()));
+            crate::utils::test_fixture_path(format!("tachi-disk-consumers-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("memory.db");
         let mut store = memcore::MemoryStore::open(db.to_str().unwrap()).unwrap();
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn top_consumers_are_empty_when_the_ledger_is_unreadable() {
         // Informational surface: a missing DB is an empty list, never an error.
-        let missing = std::env::temp_dir().join("tachi-disk-consumers-missing/memory.db");
+        let missing = crate::utils::test_fixture_path("tachi-disk-consumers-missing/memory.db");
         assert!(collect_top_consumers(&missing, 3).is_empty());
     }
 
@@ -383,7 +383,7 @@ mod tests {
     fn real_disk_usage_walks_up_to_nearest_existing_ancestor() {
         // A not-yet-created leaf under an existing dir must still resolve
         // (statvfs probes the nearest existing ancestor).
-        let missing = std::env::temp_dir().join("tachi-disk-status-does-not-exist-484");
+        let missing = crate::utils::test_fixture_path("tachi-disk-status-does-not-exist-484");
         let _ = std::fs::remove_dir_all(&missing);
         let (_, total) = real_disk_usage(&missing).expect("should walk up to an existing ancestor");
         assert!(total > 0);
