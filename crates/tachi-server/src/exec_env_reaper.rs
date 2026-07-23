@@ -4318,11 +4318,10 @@ mod tests {
         );
         // …and the prune is a SAFETY REFUSAL on the books, not a `continue`.
         assert_eq!(scan.accounting.protected_pruned, 1, "{:?}", scan.accounting);
-        assert!(
-            scan.skips
-                .iter()
-                .any(|skip| skip.path == shared && skip.outcome == UnitOutcome::ProtectedPruned)
-        );
+        assert!(scan
+            .skips
+            .iter()
+            .any(|skip| skip.path == shared && skip.outcome == UnitOutcome::ProtectedPruned));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4515,11 +4514,9 @@ mod tests {
         // The bytes are still on disk...
         assert!(dead.join("debug/artifact.rlib").exists());
         // ...and nothing was written to the ledger.
-        assert!(
-            memcore::list_resources(store.connection(), None, None)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(memcore::list_resources(store.connection(), None, None)
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4709,11 +4706,9 @@ mod tests {
         let observed = observed.borrow();
         assert_eq!(observed.len(), 2, "eligibility and final holder probes");
         let expected_prefix = PathBuf::from(format!("/proc/{}/fd", std::process::id()));
-        assert!(
-            observed
-                .iter()
-                .all(|path| path.starts_with(&expected_prefix) && path != &target)
-        );
+        assert!(observed
+            .iter()
+            .all(|path| path.starts_with(&expected_prefix) && path != &target));
         assert!(target.is_dir());
         assert!(std::fs::read_dir(&target).unwrap().next().is_none());
 
@@ -5121,11 +5116,9 @@ mod tests {
 
         assert!(report.reclaimed.is_empty());
         assert!(held.join("debug/artifact.rlib").exists(), "bytes survive");
-        assert!(
-            memcore::list_resources(store.connection(), None, None)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(memcore::list_resources(store.connection(), None, None)
+            .unwrap()
+            .is_empty());
         assert_eq!(report.candidates[0].decision, "skip");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -5522,8 +5515,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_directory_replaced_during_final_probe_preserves_replacement() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
 
         let root = unique_temp_dir("tachi-reaper-post-probe-swap");
         let target = make_target_dir(&root, "swapped-target");
@@ -6280,8 +6273,8 @@ mod tests {
     /// fails the assertions instead of hanging the suite.
     #[test]
     fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_each_other() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use std::time::Instant;
 
         let gapped_root = unique_temp_dir("tachi-reaper-parallel-gapped");
@@ -6586,9 +6579,7 @@ mod tests {
                 let failing_scan: fn() -> (Vec<PathBuf>, Vec<String>) = || {
                     (
                         Vec::new(),
-                        vec![
-                            "process scan unavailable (ps: No such file or directory)".to_string(),
-                        ],
+                        vec!["process scan unavailable (ps: No such file or directory)".to_string()],
                     )
                 };
                 let report = run_orphan_reap_uncertified(
