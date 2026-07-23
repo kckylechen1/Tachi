@@ -68,13 +68,6 @@ impl MemoryServer {
                 report.env_fallbacks_bypassed
             );
         }
-        if report.env_fallbacks_bypassed > 0 {
-            for name in &report.bypassed_names {
-                tracing::warn!(
-                    "[provider] env/config.env value ignored for {name} — vault wins; if your env value is fresher: tachi vault set {name}"
-                );
-            }
-        }
         // #1279: this is the single refresh seam (daemon auto-refresh, keychain
         // auto-unlock, ensure_materialized, vault_set/unlock). A per-alias skip
         // must never be swallowed by the discarded report — log each skipped alias
