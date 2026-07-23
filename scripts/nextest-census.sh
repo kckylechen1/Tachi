@@ -15,11 +15,11 @@
 #      — machine-local evidence, outside the repo.
 #   4. Prints a per-run summary: N failed, M previously-seen signatures, K novel.
 #
-# JUnit note (observation for #1278): the default nextest profile has no
-# `[profile.default.junit]` section. JUnit is already configured on the `ci`
-# profile (`.config/nextest.toml` → target/nextest/ci/junit.xml). This script
-# therefore uses `--profile ci` to enable JUnit without restructuring nextest
-# config (T4 must not edit nextest.toml; that is T5 / step ② territory).
+# JUnit note (#1278 step ②): a dedicated `[profile.census]` in
+# `.config/nextest.toml` enables JUnit for this script. It deliberately does
+# NOT set `retries` (unlike the `ci` profile's retries = 2) -- a retried-away
+# failure never reaches the JUnit report, so retrying would make the census
+# undercount exactly the flaky failures it exists to observe.
 #
 # No production code. Re-running accumulates in the JSONL file.
 
@@ -29,11 +29,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-/Users/kckylechen/.cache/sigil-shared-target}"
 CENSUS_DIR="${NEXTEST_CENSUS_DIR:-${TARGET_DIR}/nextest-census}"
 # nextest store dir is workspace-relative (`[store] dir = "target/nextest"`),
-# not under --target-dir. The ci profile writes junit.xml there.
-JUNIT_PATH="${ROOT}/target/nextest/ci/junit.xml"
+# not under --target-dir. The census profile writes junit.xml there.
+JUNIT_PATH="${ROOT}/target/nextest/census/junit.xml"
 JSONL="${CENSUS_DIR}/census.jsonl"
 
 mkdir -p "${CENSUS_DIR}"
+# Guarantee JSONL exists before the summary line reads it below, even on a
+# fresh machine / first-ever run where nothing has failed yet: an empty file
+# reads as zero lines rather than tripping `wc -l < missing-file` under `set
+# -e`.
+touch "${JSONL}"
 
 RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -49,7 +54,7 @@ rm -f "${JUNIT_PATH}"
 set +e
 (
   cd "${ROOT}"
-  cargo nextest run -p tachi-server --no-fail-fast --profile ci \
+  cargo nextest run -p tachi-server --no-fail-fast --profile census \
     --target-dir "${TARGET_DIR}"
 )
 NEXTEST_EXIT=$?
@@ -57,15 +62,38 @@ set -e
 
 if [[ ! -f "${JUNIT_PATH}" ]]; then
   echo "nextest-census: STOP — JUnit XML not produced at ${JUNIT_PATH}" >&2
-  echo "nextest-census: nextest exit=${NEXTEST_EXIT}; default profile has no junit; ci profile expected to write this path." >&2
+  echo "nextest-census: nextest exit=${NEXTEST_EXIT}; census profile expected to write this path." >&2
   exit 2
 fi
 
+# Portable file lock (no `flock(1)` dependency -- this script's default
+# paths are macOS dev-machine paths, and macOS ships no `flock` binary by
+# default). `mkdir` is atomic on any POSIX filesystem, so a lock *directory*
+# under CENSUS_DIR serializes the read-classify-append critical section
+# below across concurrent invocations of this script without a third-party
+# tool.
+LOCK_DIR="${CENSUS_DIR}/census.lock.d"
+census_lock_acquire() {
+  local waited=0
+  while ! mkdir "${LOCK_DIR}" 2>/dev/null; do
+    waited=$((waited + 1))
+    if [[ "${waited}" -ge 150 ]]; then
+      echo "nextest-census: STOP — could not acquire ${LOCK_DIR} after 30s (stale lock from a crashed run?)" >&2
+      exit 3
+    fi
+    sleep 0.2
+  done
+}
+census_lock_release() {
+  rmdir "${LOCK_DIR}" 2>/dev/null || true
+}
+census_lock_acquire
+trap census_lock_release EXIT
+
 # Collect previously-seen failure_line1_hash values (field 4 in compact JSON).
 PREV_HASHES="$(mktemp)"
-if [[ -f "${JSONL}" ]]; then
-  # shellcheck disable=SC2016
-  python3 - "${JSONL}" "${PREV_HASHES}" <<'PY'
+# shellcheck disable=SC2016
+python3 - "${JSONL}" "${PREV_HASHES}" <<'PY'
 import json, sys
 src, dst = sys.argv[1], sys.argv[2]
 seen = set()
@@ -85,7 +113,6 @@ with open(dst, "w", encoding="utf-8") as out:
     for h in sorted(seen):
         out.write(h + "\n")
 PY
-fi
 
 NEW_ROWS="$(mktemp)"
 python3 - "${JUNIT_PATH}" "${RUN_ID}" "${STARTED_AT}" "${NEW_ROWS}" <<'PY'
@@ -166,6 +193,8 @@ if [[ "${FAIL_N}" -gt 0 ]]; then
 fi
 
 rm -f "${PREV_HASHES}" "${NEW_ROWS}"
+census_lock_release
+trap - EXIT
 
 echo "nextest-census: summary failed=${FAIL_N} previously_seen=${REPEAT_M} novel=${NOVEL_K}"
 echo "nextest-census: jsonl_lines=$(wc -l < "${JSONL}" | tr -d ' ') path=${JSONL}"

@@ -52,3 +52,27 @@ retries = 2
 # target/nextest/ci/junit.xml -- a repo-relative path here would double-nest.
 [profile.ci.junit]
 path = "junit.xml"
+
+# Used by scripts/nextest-census.sh (#1278 step ①) to capture one JUnit
+# report per run for repeat-failure-signature accumulation.
+#
+# retries = 0 is load-bearing, not an oversight: the `ci` profile's
+# retries = 2 exists specifically to absorb flakes so they don't cancel the
+# rest of the run -- but that absorption makes a retried-away failure never
+# reach the JUnit report at all, so the census (which exists to *count*
+# failures, including flaky ones, by signature) would silently undercount
+# exactly the class of test it is built to observe. Do not copy `retries`
+# from `[profile.ci]` here.
+[profile.census]
+slow-timeout = { period = "20s", terminate-after = 6 }
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "fail"
+final-status-level = "flaky"
+retries = 0
+
+# NOTE: `path` resolves relative to the profile's store dir
+# (target/nextest/census/), so a bare filename lands the report at
+# target/nextest/census/junit.xml.
+[profile.census.junit]
+path = "junit.xml"
