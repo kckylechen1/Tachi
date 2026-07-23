@@ -475,3 +475,25 @@ fn zhipuai_is_a_recognized_provider_env_name() {
          zhipuai secret materializes into the opencode GLM lane child env"
     );
 }
+
+#[test]
+fn kimi_is_a_recognized_provider_env_name() {
+    // #1355 follow-up: the `kimi-for-coding`/K3 opencode lane provider uses
+    // `{env:KIMI_API_KEY}` substitution (or direct env read) so vault
+    // "收权" can never blank it (no literal on disk). That only works
+    // end-to-end if this name is in the provider-key filter that gates
+    // which unlocked-vault secrets get injected into the lane subprocess
+    // env (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
+    let names = provider_api_key_env_names();
+    assert!(
+        names.contains("KIMI_API_KEY"),
+        "KIMI_API_KEY must be a recognized provider env name so an unlocked-vault \
+         Kimi secret materializes into the kimi-for-coding lane child env"
+    );
+    // Alternate ecosystem name is admitted too (whichever the owner stored;
+    // Moonshot AI is Kimi's vendor).
+    assert!(
+        names.contains("MOONSHOT_API_KEY"),
+        "MOONSHOT_API_KEY alias must be admitted by the provider-key filter"
+    );
+}
