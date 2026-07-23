@@ -81,24 +81,41 @@ pub(crate) async fn detect_daemon_for_global_db_result(
     global_db_path: &Path,
 ) -> Result<DaemonInfo, DaemonProbeFailure> {
     let scoped_pid = crate::daemon_lock::scoped_daemon_pid_path(app_home, global_db_path);
-    match detect_daemon_from_pid_path(&scoped_pid).await {
+    let scoped_failure = match detect_daemon_from_pid_path(&scoped_pid).await {
         Ok(info) if daemon_global_db_matches(&info, global_db_path) => return Ok(info),
         Ok(_) => {
             // Scoped pid pointed at a live daemon for a different global DB —
             // fall through to legacy. Treat as absent for this scope.
+            None
         }
-        Err(DaemonProbeFailure::TcpProbeRefused { .. }) => {
-            // Scoped file exists but port is dead; still try legacy before
-            // surfacing failure (legacy may own a matching live daemon).
-        }
-        Err(DaemonProbeFailure::PidFileAbsent { .. }) => {}
-    }
+        // Scoped file exists but port is dead; still try legacy before
+        // surfacing failure (legacy may own a matching live daemon). Keep the
+        // refusal so composition can prefer it over a bare PidFileAbsent.
+        Err(failure) => Some(failure),
+    };
 
     let legacy_pid = crate::daemon_lock::legacy_daemon_pid_path(app_home);
-    match detect_daemon_from_pid_path(&legacy_pid).await {
-        Ok(info) if daemon_global_db_matches(&info, global_db_path) => Ok(info),
-        Ok(_) => Err(DaemonProbeFailure::PidFileAbsent { path: legacy_pid }),
-        Err(failure) => Err(failure),
+    let legacy_failure = match detect_daemon_from_pid_path(&legacy_pid).await {
+        Ok(info) if daemon_global_db_matches(&info, global_db_path) => return Ok(info),
+        Ok(_) => DaemonProbeFailure::PidFileAbsent { path: legacy_pid },
+        Err(failure) => failure,
+    };
+    Err(prefer_probe_failure(scoped_failure, legacy_failure))
+}
+
+/// Prefer the most informative probe failure when composing scoped + legacy.
+/// Any [`DaemonProbeFailure::TcpProbeRefused`] outranks [`DaemonProbeFailure::PidFileAbsent`].
+fn prefer_probe_failure(
+    scoped: Option<DaemonProbeFailure>,
+    legacy: DaemonProbeFailure,
+) -> DaemonProbeFailure {
+    match scoped {
+        // Scoped TCP-refused must survive legacy fallback when legacy has no
+        // better match (including legacy PidFileAbsent).
+        Some(scoped @ DaemonProbeFailure::TcpProbeRefused { .. }) => scoped,
+        // Scoped absent / mismatched / PidFileAbsent: take legacy as-is
+        // (legacy TcpProbeRefused already outranks a bare absent).
+        _ => legacy,
     }
 }
 
@@ -490,6 +507,45 @@ mod tests {
             err,
             DaemonProbeFailure::TcpProbeRefused {
                 path: pid_path,
+                port,
+            }
+        );
+    }
+
+    /// Composition: scoped pid TCP-refused + legacy absent must report
+    /// `TcpProbeRefused` (scoped path/port), not degrade to legacy `PidFileAbsent`.
+    #[tokio::test]
+    async fn detect_for_global_db_preserves_scoped_tcp_refused_over_legacy_absent() {
+        let dir = TempDir::new().expect("tempdir");
+        let app_home = dir.path();
+        let global_db = app_home.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("mkdir");
+        std::fs::write(&global_db, b"").expect("touch global db");
+
+        let scoped_pid = crate::daemon_lock::scoped_daemon_pid_path(app_home, &global_db);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+
+        std::fs::write(
+            &scoped_pid,
+            serde_json::to_string(&json!({
+                "pid": 1,
+                "port": port,
+                "global_db": global_db.display().to_string(),
+            }))
+            .expect("json"),
+        )
+        .expect("write scoped pid");
+        // Legacy pid intentionally absent.
+
+        let err = detect_daemon_for_global_db_result(app_home, &global_db)
+            .await
+            .expect_err("composed probe should fail");
+        assert_eq!(
+            err,
+            DaemonProbeFailure::TcpProbeRefused {
+                path: scoped_pid,
                 port,
             }
         );
