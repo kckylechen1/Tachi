@@ -1,59 +1,11 @@
 use super::*;
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
-
-/// Pins process-level git config so production `ship.rs` git commits (which
-/// inherit the test process env) cannot pick up ambient global hooks/templates.
-/// Held for the fixture lifetime. nextest runs each test in its own process, so
-/// no cross-test lock is required (and taking `global_test_lock` here deadlocks
-/// tests that also hold other env locks across `.await`).
-///
-/// Invariant: exact commit-message assertions must not depend on the host's
-/// `prepare-commit-msg` / trailer tooling (#1377).
-struct GitIsolationGuard {
-    original_global: Option<OsString>,
-    original_system: Option<OsString>,
-    original_nosystem: Option<OsString>,
-}
-
-impl GitIsolationGuard {
-    fn new() -> Self {
-        let original_global = std::env::var_os("GIT_CONFIG_GLOBAL");
-        let original_system = std::env::var_os("GIT_CONFIG_SYSTEM");
-        let original_nosystem = std::env::var_os("GIT_CONFIG_NOSYSTEM");
-        std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
-        std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
-        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-        Self {
-            original_global,
-            original_system,
-            original_nosystem,
-        }
-    }
-}
-
-impl Drop for GitIsolationGuard {
-    fn drop(&mut self) {
-        match &self.original_global {
-            Some(v) => std::env::set_var("GIT_CONFIG_GLOBAL", v),
-            None => std::env::remove_var("GIT_CONFIG_GLOBAL"),
-        }
-        match &self.original_system {
-            Some(v) => std::env::set_var("GIT_CONFIG_SYSTEM", v),
-            None => std::env::remove_var("GIT_CONFIG_SYSTEM"),
-        }
-        match &self.original_nosystem {
-            Some(v) => std::env::set_var("GIT_CONFIG_NOSYSTEM", v),
-            None => std::env::remove_var("GIT_CONFIG_NOSYSTEM"),
-        }
-    }
-}
+use std::sync::OnceLock;
 
 struct IsolatedRepo {
     dir: tempfile::TempDir,
-    _iso: GitIsolationGuard,
 }
 
 impl IsolatedRepo {
@@ -62,10 +14,30 @@ impl IsolatedRepo {
     }
 }
 
+/// A genuinely empty directory, created once per test binary and never
+/// written into. Used as `GIT_TEMPLATE_DIR` so `git init` cannot pick up
+/// ambient hook/config templates from the host's real template dir.
+fn empty_template_dir() -> &'static Path {
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().expect("empty git template dir"))
+        .path()
+}
+
+/// Applies per-subprocess git isolation env to a single `Command` invocation.
+/// Every fixture git call (from `git init` onward) goes through `run_git` /
+/// `git_ok`, both of which call this — so isolation is per-process-spawn, not
+/// a mutation of the shared test-process env (which would race under `cargo
+/// test`'s default same-process multithreading; nextest's per-test process
+/// model made the old process-level guard *usually* safe but not correctly
+/// so).
+///
+/// Invariant: exact commit-message assertions must not depend on the host's
+/// `prepare-commit-msg` / trailer tooling or ambient hook templates (#1377).
 fn apply_git_isolation(cmd: &mut Command) {
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1");
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TEMPLATE_DIR", empty_template_dir());
 }
 
 fn pin_empty_hooks_path(repo: &Path) {
@@ -85,7 +57,6 @@ fn pin_empty_hooks_path(repo: &Path) {
 }
 
 fn init_repo(files: &[(&str, &str)], branch: &str) -> IsolatedRepo {
-    let iso = GitIsolationGuard::new();
     let tmp = tempfile::tempdir().expect("temp repo");
     run_git(tmp.path(), &["init"]);
     run_git(tmp.path(), &["config", "user.email", "ship@example.test"]);
@@ -100,10 +71,7 @@ fn init_repo(files: &[(&str, &str)], branch: &str) -> IsolatedRepo {
     if branch != "main" {
         run_git(tmp.path(), &["checkout", "-b", branch]);
     }
-    IsolatedRepo {
-        dir: tmp,
-        _iso: iso,
-    }
+    IsolatedRepo { dir: tmp }
 }
 
 fn ship_params(repo: &std::path::Path, files: Vec<&str>, message: Option<&str>) -> TachiGhParams {
@@ -505,7 +473,6 @@ async fn ship_gb10_push_failure_after_commit_returns_partial_and_records_flow_ev
 }
 
 fn init_contract_repo(subjects: &[&str], branch: &str) -> IsolatedRepo {
-    let iso = GitIsolationGuard::new();
     let tmp = tempfile::tempdir().expect("temp repo");
     run_git(tmp.path(), &["init"]);
     run_git(tmp.path(), &["config", "user.email", "ship@example.test"]);
@@ -523,10 +490,7 @@ fn init_contract_repo(subjects: &[&str], branch: &str) -> IsolatedRepo {
         run_git(tmp.path(), &["add", "--all"]);
         run_git(tmp.path(), &["commit", "-m", subject]);
     }
-    IsolatedRepo {
-        dir: tmp,
-        _iso: iso,
-    }
+    IsolatedRepo { dir: tmp }
 }
 
 fn contract_params(repo: &Path, issue_ref: Option<&str>) -> TachiGhParams {
