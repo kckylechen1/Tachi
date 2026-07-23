@@ -189,17 +189,16 @@ pub(crate) fn build_report(
                     findings.extend(scan.corpse_findings.clone());
                     plugin_scans.push(scan);
                 }
-                "credential" => findings.extend(scan_credential(&harness.harness_id, &path)?),
+                "credential" => findings.extend(scan_credential(&harness.harness_id, &path)),
                 "environment" => findings.extend(scan_environment(
                     harness,
                     &path,
                     &harness.retired_path_prefixes,
                 )?),
                 "density" => {
-                    // First slice: density is accounted when scanned; budget
-                    // overage is reserved for a later slice.
+                    // First slice: presence check only; budget overage is later.
                     let _ = spec.and_then(|s| s.budget_bytes);
-                    let _ = path;
+                    findings.extend(scan_density(&harness.harness_id, &path));
                 }
                 _ => {}
             }
@@ -302,9 +301,27 @@ fn resolve_path(root: &Path, raw: &str) -> PathBuf {
     }
 }
 
+fn plane_path_io_finding(harness_id: &str, plane: &str, path: &Path) -> Finding {
+    let missing = !path.exists();
+    Finding {
+        harness_id: harness_id.to_string(),
+        plane: plane.to_string(),
+        check_kind: if missing {
+            "plane_path_missing".to_string()
+        } else {
+            "plane_path_unreadable".to_string()
+        },
+        evidence_path: path.display().to_string(),
+        severity: "CONCERN".to_string(),
+        remediation_owner: "fleet-registry".to_string(),
+    }
+}
+
 fn scan_mcp(harness_id: &str, path: &Path) -> Result<Vec<Finding>, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("read mcp plane {}: {e}", path.display()))?;
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => return Ok(vec![plane_path_io_finding(harness_id, "mcp", path)]),
+    };
     let file: McpPlaneFile =
         serde_json::from_str(&text).map_err(|e| format!("parse mcp plane {}: {e}", path.display()))?;
 
@@ -341,8 +358,18 @@ fn scan_plugin(
     path: &Path,
     resolve_root: &Path,
 ) -> Result<PluginScan, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("read plugin plane {}: {e}", path.display()))?;
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => {
+            return Ok(PluginScan {
+                harness_id: harness_id.to_string(),
+                plane_path: path.to_path_buf(),
+                cache_dirs: Vec::new(),
+                skill_roster: Vec::new(),
+                corpse_findings: vec![plane_path_io_finding(harness_id, "plugin", path)],
+            });
+        }
+    };
     let file: PluginPlaneFile = serde_json::from_str(&text)
         .map_err(|e| format!("parse plugin plane {}: {e}", path.display()))?;
 
@@ -433,20 +460,16 @@ fn path_under(path: &Path, ancestor: &Path) -> bool {
 }
 
 /// Credential plane: metadata only — never open file contents.
-fn scan_credential(harness_id: &str, path: &Path) -> Result<Vec<Finding>, String> {
-    let meta = fs::metadata(path)
-        .map_err(|e| format!("stat credential plane {}: {e}", path.display()))?;
+///
+/// A registry-declared credential path is always in scope for the mode check;
+/// basename heuristics must not veto declared files.
+fn scan_credential(harness_id: &str, path: &Path) -> Vec<Finding> {
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => return vec![plane_path_io_finding(harness_id, "credential", path)],
+    };
     if !meta.is_file() {
-        return Ok(Vec::new());
-    }
-
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !looks_credential_like(&file_name) {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     #[cfg(unix)]
@@ -455,14 +478,14 @@ fn scan_credential(harness_id: &str, path: &Path) -> Result<Vec<Finding>, String
         let mode = meta.permissions().mode() & 0o777;
         // Group- or world-readable.
         if mode & 0o044 != 0 {
-            return Ok(vec![Finding {
+            return vec![Finding {
                 harness_id: harness_id.to_string(),
                 plane: "credential".to_string(),
                 check_kind: "credential_world_readable".to_string(),
                 evidence_path: format!("{} mode={mode:#o}", path.display()),
                 severity: "BUG".to_string(),
                 remediation_owner: "harness-credential".to_string(),
-            }]);
+            }];
         }
     }
 
@@ -471,24 +494,22 @@ fn scan_credential(harness_id: &str, path: &Path) -> Result<Vec<Finding>, String
         let _ = harness_id;
     }
 
-    Ok(Vec::new())
+    Vec::new()
 }
 
-fn looks_credential_like(file_name: &str) -> bool {
-    const NEEDLES: &[&str] = &[
-        "credential",
-        "credentials",
-        "secret",
-        "token",
-        "apikey",
-        "api_key",
-        "api-key",
-        "password",
-        ".env",
-        "auth",
-        "jwt",
-    ];
-    NEEDLES.iter().any(|n| file_name.contains(n))
+/// Density first-slice: declared path must exist and be readable as a file.
+fn scan_density(harness_id: &str, path: &Path) -> Vec<Finding> {
+    match fs::metadata(path) {
+        Err(_) => return vec![plane_path_io_finding(harness_id, "density", path)],
+        Ok(meta) if !meta.is_file() => {
+            return vec![plane_path_io_finding(harness_id, "density", path)];
+        }
+        Ok(_) => {}
+    }
+    match fs::File::open(path) {
+        Ok(_) => Vec::new(),
+        Err(_) => vec![plane_path_io_finding(harness_id, "density", path)],
+    }
 }
 
 fn scan_environment(
@@ -496,8 +517,16 @@ fn scan_environment(
     path: &Path,
     retired_prefixes: &[String],
 ) -> Result<Vec<Finding>, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("read environment plane {}: {e}", path.display()))?;
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => {
+            return Ok(vec![plane_path_io_finding(
+                &harness.harness_id,
+                "environment",
+                path,
+            )]);
+        }
+    };
     let file: EnvironmentPlaneFile = serde_json::from_str(&text)
         .map_err(|e| format!("parse environment plane {}: {e}", path.display()))?;
 

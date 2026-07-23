@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -78,6 +78,20 @@ fn assert_has_kind(report: &super::InjectionSurfaceReport, kind: &str) {
     );
 }
 
+fn assert_single_finding(report: &super::InjectionSurfaceReport, kind: &str) {
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "expected exactly one finding of kind={kind}, got {:?}",
+        report
+            .findings
+            .iter()
+            .map(|f| f.check_kind.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(report.findings[0].check_kind, kind);
+}
+
 fn plane(
     path: &str,
     scanned: bool,
@@ -129,16 +143,8 @@ fn injection_surface_red_plugin_corpse() {
     );
 
     let report = build_report(&registry, Some(&home)).unwrap();
-    assert_has_kind(&report, "plugin_corpse");
-    assert_eq!(
-        report
-            .findings
-            .iter()
-            .find(|f| f.check_kind == "plugin_corpse")
-            .unwrap()
-            .severity,
-        "CONCERN"
-    );
+    assert_single_finding(&report, "plugin_corpse");
+    assert_eq!(report.findings[0].severity, "CONCERN");
     let _ = fs::remove_dir_all(home);
 }
 
@@ -179,16 +185,8 @@ fn injection_surface_red_mcp_identity_split() {
     );
 
     let report = build_report(&registry, Some(&home)).unwrap();
-    assert_has_kind(&report, "mcp_identity_split");
-    assert_eq!(
-        report
-            .findings
-            .iter()
-            .find(|f| f.check_kind == "mcp_identity_split")
-            .unwrap()
-            .severity,
-        "BUG"
-    );
+    assert_single_finding(&report, "mcp_identity_split");
+    assert_eq!(report.findings[0].severity, "BUG");
     let _ = fs::remove_dir_all(home);
 }
 
@@ -219,16 +217,8 @@ fn injection_surface_red_tachi_profile_mismatch() {
     );
 
     let report = build_report(&registry, Some(&home)).unwrap();
-    assert_has_kind(&report, "tachi_profile_mismatch");
-    assert_eq!(
-        report
-            .findings
-            .iter()
-            .find(|f| f.check_kind == "tachi_profile_mismatch")
-            .unwrap()
-            .severity,
-        "BUG"
-    );
+    assert_single_finding(&report, "tachi_profile_mismatch");
+    assert_eq!(report.findings[0].severity, "BUG");
     let _ = fs::remove_dir_all(home);
 }
 
@@ -258,12 +248,8 @@ fn injection_surface_red_credential_world_readable() {
     );
 
     let report = build_report(&registry, Some(&home)).unwrap();
-    assert_has_kind(&report, "credential_world_readable");
-    let finding = report
-        .findings
-        .iter()
-        .find(|f| f.check_kind == "credential_world_readable")
-        .unwrap();
+    assert_single_finding(&report, "credential_world_readable");
+    let finding = &report.findings[0];
     assert_eq!(finding.severity, "BUG");
     assert!(finding.evidence_path.contains("mode=0o644") || finding.evidence_path.contains("mode=644"));
     let serialized = serde_json::to_string(&report).unwrap();
@@ -303,16 +289,8 @@ fn injection_surface_red_env_ghost() {
     );
 
     let report = build_report(&registry, Some(&home)).unwrap();
-    assert_has_kind(&report, "env_ghost");
-    assert_eq!(
-        report
-            .findings
-            .iter()
-            .find(|f| f.check_kind == "env_ghost")
-            .unwrap()
-            .severity,
-        "CONCERN"
-    );
+    assert_single_finding(&report, "env_ghost");
+    assert_eq!(report.findings[0].severity, "CONCERN");
     let _ = fs::remove_dir_all(home);
 }
 
@@ -373,12 +351,8 @@ fn injection_surface_red_skill_sweep_in() {
     );
 
     let report = build_report(&registry, Some(&home)).unwrap();
-    assert_has_kind(&report, "skill_sweep_in");
-    let finding = report
-        .findings
-        .iter()
-        .find(|f| f.check_kind == "skill_sweep_in")
-        .unwrap();
+    assert_single_finding(&report, "skill_sweep_in");
+    let finding = &report.findings[0];
     assert_eq!(finding.harness_id, "fixture-a");
     assert_eq!(finding.severity, "BUG");
     let _ = fs::remove_dir_all(home);
@@ -549,5 +523,183 @@ fn injection_surface_unscanned_is_not_clean() {
         .all(|a| a.status == "unscanned"));
     // Zero findings + all unscanned must not be mistaken for a clean fleet.
     assert_ne!(report.summary.planes_unscanned, 0);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn injection_surface_red_density_scanned_missing_path_not_clean() {
+    let home = temp_root("density-missing");
+    let registry = write_registry(
+        &home,
+        serde_json::json!([{
+            "harness_id": "fixture-a",
+            "expected_tachi_profile": "fixture-a",
+            "planes": {
+                "density": {
+                    "path": "fixture-a/density.json",
+                    "scanned": true
+                },
+                "mcp": { "scanned": false },
+                "plugin": { "scanned": false },
+                "credential": { "scanned": false },
+                "environment": { "scanned": false }
+            }
+        }]),
+    );
+
+    let report = build_report(&registry, Some(&home)).unwrap();
+    assert_eq!(report.summary.planes_scanned, 1);
+    let density = report
+        .plane_accounts
+        .iter()
+        .find(|a| a.plane == "density")
+        .unwrap();
+    assert_eq!(density.status, "scanned");
+    assert_single_finding(&report, "plane_path_missing");
+    assert_eq!(report.findings[0].plane, "density");
+    assert_eq!(report.findings[0].severity, "CONCERN");
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn injection_surface_red_credential_declared_id_rsa_world_readable() {
+    credential_declared_basename_world_readable("id_rsa", "ID_RSA_SECRET_VALUE_do_not_leak_aa01");
+}
+
+#[test]
+fn injection_surface_red_credential_declared_id_ed25519_world_readable() {
+    credential_declared_basename_world_readable(
+        "id_ed25519",
+        "ID_ED25519_SECRET_VALUE_do_not_leak_bb02",
+    );
+}
+
+#[test]
+fn injection_surface_red_credential_declared_private_key_pem_world_readable() {
+    credential_declared_basename_world_readable(
+        "private_key.pem",
+        "PRIVATE_KEY_PEM_SECRET_VALUE_do_not_leak_cc03",
+    );
+}
+
+fn credential_declared_basename_world_readable(basename: &str, secret_value: &str) {
+    let home = temp_root(&format!("cred-basename-{basename}"));
+    let rel = format!("fixture-a/{basename}");
+    write_mode(
+        &home.join(&rel),
+        &format!("BEGIN SECRET\n{secret_value}\nEND SECRET\n"),
+        0o644,
+    );
+    let registry = write_registry(
+        &home,
+        serde_json::json!([{
+            "harness_id": "fixture-a",
+            "expected_tachi_profile": "fixture-a",
+            "planes": {
+                "credential": plane(&rel, true),
+                "mcp": { "scanned": false },
+                "plugin": { "scanned": false },
+                "environment": { "scanned": false },
+                "density": { "scanned": false }
+            }
+        }]),
+    );
+
+    let report = build_report(&registry, Some(&home)).unwrap();
+    assert_single_finding(&report, "credential_world_readable");
+    assert_eq!(report.findings[0].severity, "BUG");
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(
+        !serialized.contains(secret_value),
+        "credential VALUE must not appear in report for {basename}"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn injection_surface_red_plane_io_missing_continues_other_planes() {
+    let home = temp_root("plane-io-missing");
+    write_mode(
+        &home.join("fixture-a/api_key.credentials.json"),
+        r#"{"apiKey":"PLANE_IO_SECRET_do_not_leak_dd04"}"#,
+        0o600,
+    );
+    write(
+        &home.join("fixture-a/env.json"),
+        r#"{"tachi_profile":"fixture-a","injected_paths":[]}"#,
+    );
+    let registry = write_registry(
+        &home,
+        serde_json::json!([{
+            "harness_id": "fixture-a",
+            "expected_tachi_profile": "fixture-a",
+            "planes": {
+                "mcp": plane("fixture-a/mcp-missing.json", true),
+                "credential": plane("fixture-a/api_key.credentials.json", true),
+                "environment": plane("fixture-a/env.json", true),
+                "plugin": { "scanned": false },
+                "density": { "scanned": false }
+            }
+        }]),
+    );
+
+    let report = build_report(&registry, Some(&home))
+        .expect("plane I/O must yield Ok(report) with findings, not Err");
+    assert_single_finding(&report, "plane_path_missing");
+    assert_eq!(report.findings[0].plane, "mcp");
+    assert_eq!(report.findings[0].severity, "CONCERN");
+    assert_eq!(report.summary.planes_scanned, 3);
+    assert_eq!(report.summary.planes_unscanned, 2);
+    let scanned_planes: Vec<_> = report
+        .plane_accounts
+        .iter()
+        .filter(|a| a.status == "scanned")
+        .map(|a| a.plane.as_str())
+        .collect();
+    assert!(scanned_planes.contains(&"mcp"));
+    assert!(scanned_planes.contains(&"credential"));
+    assert!(scanned_planes.contains(&"environment"));
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(!serialized.contains("PLANE_IO_SECRET_do_not_leak_dd04"));
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn injection_surface_red_plane_io_unreadable_continues() {
+    let home = temp_root("plane-io-unreadable");
+    let mcp_path = home.join("fixture-a/mcp.json");
+    write(
+        &mcp_path,
+        r#"{"registrations":[{"name":"tachi","scope":"user","endpoint":"stdio://tachi"}]}"#,
+    );
+    // Exists but unreadable: chmod after write so mode sticks on Darwin.
+    fs::set_permissions(&mcp_path, fs::Permissions::from_mode(0o000)).unwrap();
+    write(
+        &home.join("fixture-a/env.json"),
+        r#"{"tachi_profile":"fixture-a","injected_paths":[]}"#,
+    );
+    let registry = write_registry(
+        &home,
+        serde_json::json!([{
+            "harness_id": "fixture-a",
+            "expected_tachi_profile": "fixture-a",
+            "planes": {
+                "mcp": plane("fixture-a/mcp.json", true),
+                "environment": plane("fixture-a/env.json", true),
+                "plugin": { "scanned": false },
+                "credential": { "scanned": false },
+                "density": { "scanned": false }
+            }
+        }]),
+    );
+
+    let report = build_report(&registry, Some(&home))
+        .expect("unreadable plane must yield Ok(report) with findings, not Err");
+    // Restore mode so cleanup can remove the file.
+    let _ = fs::set_permissions(&mcp_path, fs::Permissions::from_mode(0o644));
+    assert_single_finding(&report, "plane_path_unreadable");
+    assert_eq!(report.findings[0].plane, "mcp");
+    assert_eq!(report.findings[0].severity, "CONCERN");
+    assert_eq!(report.summary.planes_scanned, 2);
     let _ = fs::remove_dir_all(home);
 }
