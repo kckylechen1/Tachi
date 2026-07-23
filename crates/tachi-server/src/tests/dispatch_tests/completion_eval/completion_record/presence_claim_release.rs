@@ -47,8 +47,9 @@ fn base_complete_for_dispatch(dispatch_id: &str) -> TachiCompleteParams {
 
 #[tokio::test]
 async fn tachi_complete_releases_the_presence_claim_registered_for_its_dispatch_id() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "disp-presence-release-001";
+    seed_dispatch_run(&server, dispatch_id);
 
     // Register a claim the way dispatch.rs's zero-ceremony hook does —
     // keyed on dispatch_id.
@@ -91,7 +92,8 @@ async fn tachi_complete_with_no_live_claim_for_dispatch_id_is_a_harmless_noop() 
     // registered (e.g. the auto-register hook itself degraded to no-op)
     // must not make `tachi_complete` error or panic when the release path
     // finds nothing to release.
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-presence-release-002-no-claim");
     let params = base_complete_for_dispatch("disp-presence-release-002-no-claim");
     let result = server.tachi_complete(Parameters(params)).await;
     assert!(
