@@ -149,9 +149,7 @@ pub(super) async fn run_cli_command(
             unreachable!("SkillSurface is handled in async context before generic CLI dispatch")
         }
         Commands::InjectionSurface { .. } => {
-            unreachable!(
-                "InjectionSurface is handled in async context before generic CLI dispatch"
-            )
+            unreachable!("InjectionSurface is handled in async context before generic CLI dispatch")
         }
         Commands::Poke { .. } => {
             unreachable!("Poke is handled in async context before generic CLI dispatch")

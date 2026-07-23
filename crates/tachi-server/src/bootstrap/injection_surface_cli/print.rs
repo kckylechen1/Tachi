@@ -17,10 +17,7 @@ pub(super) fn print_report(report: &InjectionSurfaceReport) {
     println!("Plane accounting:");
     for account in &report.plane_accounts {
         match account.status.as_str() {
-            "unscanned" => println!(
-                "  UNSCANNED  {} / {}",
-                account.harness_id, account.plane
-            ),
+            "unscanned" => println!("  UNSCANNED  {} / {}", account.harness_id, account.plane),
             _ => {
                 let path = account.path.as_deref().unwrap_or("-");
                 println!(

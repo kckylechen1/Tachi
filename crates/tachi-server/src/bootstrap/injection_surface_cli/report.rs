@@ -400,11 +400,7 @@ fn scan_mcp(harness_id: &str, path: &Path) -> Result<Vec<Finding>, String> {
     Ok(findings)
 }
 
-fn scan_plugin(
-    harness_id: &str,
-    path: &Path,
-    resolve_root: &Path,
-) -> Result<PluginScan, String> {
+fn scan_plugin(harness_id: &str, path: &Path, resolve_root: &Path) -> Result<PluginScan, String> {
     if let Some(finding) = reject_non_regular_file(harness_id, "plugin", path) {
         return Ok(empty_plugin_scan(harness_id, path, finding));
     }
@@ -444,11 +440,7 @@ fn scan_plugin(
                     harness_id: harness_id.to_string(),
                     plane: "plugin".to_string(),
                     check_kind: "plugin_corpse".to_string(),
-                    evidence_path: format!(
-                        "{}#plugin={}",
-                        cache_path.display(),
-                        entry.name
-                    ),
+                    evidence_path: format!("{}#plugin={}", cache_path.display(), entry.name),
                     severity: "CONCERN".to_string(),
                     remediation_owner: "harness-plugin".to_string(),
                 });
@@ -608,10 +600,7 @@ fn scan_environment(
                 harness_id: harness.harness_id.clone(),
                 plane: "environment".to_string(),
                 check_kind: "tachi_profile_mismatch".to_string(),
-                evidence_path: format!(
-                    "{} expected={expected} actual={actual}",
-                    path.display()
-                ),
+                evidence_path: format!("{} expected={expected} actual={actual}", path.display()),
                 severity: "BUG".to_string(),
                 remediation_owner: "harness-tachi-client".to_string(),
             });

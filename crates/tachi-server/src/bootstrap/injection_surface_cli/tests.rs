@@ -80,10 +80,7 @@ fn assert_single_finding(report: &super::InjectionSurfaceReport, kind: &str) {
     assert_eq!(report.findings[0].check_kind, kind);
 }
 
-fn plane(
-    path: &str,
-    scanned: bool,
-) -> serde_json::Value {
+fn plane(path: &str, scanned: bool) -> serde_json::Value {
     serde_json::json!({ "path": path, "scanned": scanned })
 }
 
@@ -239,7 +236,9 @@ fn injection_surface_red_credential_world_readable() {
     assert_single_finding(&report, "credential_world_readable");
     let finding = &report.findings[0];
     assert_eq!(finding.severity, "BUG");
-    assert!(finding.evidence_path.contains("mode=0o644") || finding.evidence_path.contains("mode=644"));
+    assert!(
+        finding.evidence_path.contains("mode=0o644") || finding.evidence_path.contains("mode=644")
+    );
     let serialized = serde_json::to_string(&report).unwrap();
     assert!(
         !serialized.contains(secret_value),
@@ -735,7 +734,10 @@ fn injection_surface_red_credential_path_is_directory_not_silent_clean() {
 #[test]
 fn injection_surface_red_mcp_config_malformed_continues() {
     let home = temp_root("mcp-malformed");
-    write(&home.join("fixture-a/mcp.json"), r#"{"registrations":[not-json"#);
+    write(
+        &home.join("fixture-a/mcp.json"),
+        r#"{"registrations":[not-json"#,
+    );
     write(
         &home.join("fixture-a/env.json"),
         r#"{"tachi_profile":"fixture-a","injected_paths":[]}"#,
@@ -775,7 +777,10 @@ fn injection_surface_red_mcp_config_malformed_continues() {
 #[test]
 fn injection_surface_red_plugin_config_malformed_continues() {
     let home = temp_root("plugin-malformed");
-    write(&home.join("fixture-a/plugin.json"), r#"{"entries":[not-json"#);
+    write(
+        &home.join("fixture-a/plugin.json"),
+        r#"{"entries":[not-json"#,
+    );
     write(
         &home.join("fixture-a/env.json"),
         r#"{"tachi_profile":"fixture-a","injected_paths":[]}"#,
@@ -815,7 +820,10 @@ fn injection_surface_red_plugin_config_malformed_continues() {
 #[test]
 fn injection_surface_red_environment_config_malformed_continues() {
     let home = temp_root("env-malformed");
-    write(&home.join("fixture-a/env.json"), r#"{"tachi_profile":[not-json"#);
+    write(
+        &home.join("fixture-a/env.json"),
+        r#"{"tachi_profile":[not-json"#,
+    );
     write_mode(
         &home.join("fixture-a/api_key.credentials.json"),
         r#"{"apiKey":"ENV_MALFORMED_SECRET_do_not_leak_ee05"}"#,

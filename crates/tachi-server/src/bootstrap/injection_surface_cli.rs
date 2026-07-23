@@ -16,13 +16,7 @@ use serde::Serialize;
 
 const SCHEMA_VERSION: &str = "tachi.injection_surface.doctor.v1";
 
-const PLANE_NAMES: &[&str] = &[
-    "mcp",
-    "plugin",
-    "credential",
-    "environment",
-    "density",
-];
+const PLANE_NAMES: &[&str] = &["mcp", "plugin", "credential", "environment", "density"];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct Finding {
