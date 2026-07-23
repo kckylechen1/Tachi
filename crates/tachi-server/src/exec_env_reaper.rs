@@ -3811,6 +3811,7 @@ mod tests {
 
         /// Stand in for the process table — the source a build that starts *after* the
         /// scan actually arrives through.
+        #[cfg(target_os = "linux")]
         fn with_live_builds<'b>(self, scan: &'b LiveBuildScan) -> ProtectionSources<'b> {
             ProtectionSources {
                 cargo_target_dir: self.cargo_target_dir,
@@ -6406,8 +6407,94 @@ mod tests {
     // and a fresh receipt is checked in by hand. No code in this module reads the
     // printed output back to flip it, on purpose: a receipt this crate wrote to itself
     // would recreate exactly the self-grading S2d exists to rule out.
+    #[cfg(target_os = "linux")]
     mod kill_tests {
         use super::*;
+
+        /// #1379 needs ext4's directory inode recycling, not a synthetic identity
+        /// substitute. This provisional per-kill-test bound is explicit: an ext4
+        /// runner that cannot reproduce the premise is a loud failed certification
+        /// event, never a quiet skip.
+        #[cfg(target_os = "linux")]
+        const MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS: usize = 16_384;
+        #[cfg(target_os = "linux")]
+        const EXT4_SUPER_MAGIC: libc::c_long = 0xEF53;
+
+        /// Clean the unique destructive fixture even if a kill-test assertion panics.
+        #[cfg(target_os = "linux")]
+        struct RemoveTempRootOnDrop(PathBuf);
+
+        #[cfg(target_os = "linux")]
+        impl Drop for RemoveTempRootOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        fn require_ext4_fixture_root(root: &Path) {
+            let root = c_path(root).expect("unique kill-test root must be a valid C path");
+            let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: `root` is NUL-terminated and `stat` is valid writable storage.
+            let result = unsafe { libc::statfs(root.as_ptr(), stat.as_mut_ptr()) };
+            assert_eq!(
+                result,
+                0,
+                "#1379 ext4 inode-reuse kill test could not stat its fixture filesystem: {}",
+                std::io::Error::last_os_error()
+            );
+            // SAFETY: a successful `statfs` initialized `stat` above.
+            let stat = unsafe { stat.assume_init() };
+            assert_eq!(
+                stat.f_type, EXT4_SUPER_MAGIC,
+                "#1379 ext4 inode-reuse premise unavailable: kill-test fixture is on filesystem \
+                 type {:#x}, not ext4 ({EXT4_SUPER_MAGIC:#x}); rerun on ext4 rather than \
+                 treating a different allocator as certification evidence",
+                stat.f_type
+            );
+        }
+
+        /// Recreate one name until ext4 returns exactly the inode that was just freed.
+        /// The caller owns the final recreated directory on success.
+        #[cfg(target_os = "linux")]
+        fn churn_same_name_until_reused_identity(
+            path: &Path,
+            freed_identity: FileIdentity,
+        ) -> FileIdentity {
+            for attempt in 1..=MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS {
+                std::fs::create_dir(path).unwrap_or_else(|err| {
+                    panic!(
+                        "#1379 ext4 inode-reuse kill test could not create {} on attempt \
+                         {attempt}/{MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS}: {err}",
+                        path.display()
+                    )
+                });
+                let observed = FileIdentity::of(path).unwrap_or_else(|| {
+                    panic!(
+                        "#1379 ext4 inode-reuse kill test could not read (dev, ino) for {} \
+                         on attempt {attempt}/{MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS}",
+                        path.display()
+                    )
+                });
+                if observed == freed_identity {
+                    return observed;
+                }
+                std::fs::remove_dir(path).unwrap_or_else(|err| {
+                    panic!(
+                        "#1379 ext4 inode-reuse kill test could not remove {} on attempt \
+                         {attempt}/{MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS}: {err}",
+                        path.display()
+                    )
+                });
+            }
+            panic!(
+                "#1379 ext4 inode-reuse premise unavailable: {} did not reuse freed \
+                 identity {freed_identity:?} after {MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS} \
+                 same-name create/remove attempts; this filesystem cannot certify the required \
+                 ext4 reproduction",
+                path.display()
+            );
+        }
 
         /// One line of the matrix: what was exercised, and whether it survived / was
         /// refused as required. Printed, not asserted into a struct anyone parses —
@@ -6417,18 +6504,19 @@ mod tests {
             outcome: &'static str,
         }
 
-        /// The four scenarios #1062 names as the minimum kill-test bar, run back to
-        /// back against real directories under real `--force`. Each panics (failing
-        /// the test, and printing nothing) if the reaper does not behave exactly as
-        /// required; only a run where all four survive prints the receipt.
+        /// The four #1062 scenarios plus #1379's ext4 inode-reuse reproduction, run
+        /// back to back against real directories under real `--force`. Each panics
+        /// (failing the test, and printing nothing) if the reaper does not behave
+        /// exactly as required; only a run where all scenarios survive prints the
+        /// receipt.
         ///
         /// `#[ignore]`: this is the out-of-band event S2d's own module doc describes
         /// — it deletes real directories on the machine that runs it (inside its own
         /// temp roots only) and is not something an ordinary `cargo test` should run
         /// unattended. Run explicitly: `cargo test --offline -p tachi-server --lib \
         /// exec_env_reaper::tests::kill_tests:: -- --ignored --nocapture`.
-        #[cfg(unix)]
-        #[ignore = "#1062 kill-test: real deletes under real --force; run explicitly, not on every cargo test"]
+        #[cfg(target_os = "linux")]
+        #[ignore = "#1062/#1379 kill-test: real ext4 deletes and inode churn under real --force; run explicitly, not on every cargo test"]
         #[test]
         fn orphan_reaper_kill_test_matrix() {
             let started = std::time::Instant::now();
@@ -6538,7 +6626,99 @@ mod tests {
                 });
             }
 
-            // 3. A protected source that cannot be resolved (HOME unset — the
+            // 3. #1379's missing regression: the historical tuple-only check accepts
+            //    an ext4 same-(dev, ino) impostor, but an openat2 pinned FD keeps its
+            //    unlinked inode allocated so no same-name replacement can become it.
+            {
+                let root = unique_temp_dir("tachi-reaper-kt-ext4-inode-reuse");
+                let _cleanup = RemoveTempRootOnDrop(root.clone());
+                require_ext4_fixture_root(&root);
+
+                let tuple_only_path = root.join("tuple-only-candidate");
+                std::fs::create_dir(&tuple_only_path).unwrap();
+                let judged_identity = FileIdentity::of(&tuple_only_path)
+                    .expect("#1379 tuple-only candidate must expose a Linux (dev, ino)");
+                std::fs::remove_dir(&tuple_only_path).unwrap();
+                let impostor_identity =
+                    churn_same_name_until_reused_identity(&tuple_only_path, judged_identity);
+
+                // Invariant: a same-(dev, ino) re-stat is not authority. This is the
+                // historical tuple-only predicate BUG 2 used before descriptor pinning.
+                let historical_tuple_only_predicate =
+                    FileIdentity::of(&tuple_only_path) == Some(judged_identity);
+                assert!(
+                    historical_tuple_only_predicate,
+                    "#1379 reproduction failed to show the tuple-only false positive: judged \
+                     {judged_identity:?}, impostor {impostor_identity:?}"
+                );
+                assert_eq!(impostor_identity, judged_identity);
+                std::fs::remove_dir(&tuple_only_path).unwrap();
+
+                let pinned_path = root.join("fd-pinned-candidate");
+                std::fs::create_dir(&pinned_path).unwrap();
+                let candidate = linux_candidate(&pinned_path);
+                let pinned_identity = candidate
+                    .file_identity
+                    .expect("#1379 pinned candidate must expose a Linux (dev, ino)");
+                let pinned = pin_content_root(&candidate)
+                    .expect("#1379 must acquire the production openat2 root capability");
+                assert_eq!(
+                    fd_identity(pinned.root.as_raw_fd()).unwrap(),
+                    pinned_identity,
+                    "the production capability must hold the judged object"
+                );
+
+                // The directory name is gone, but the live capability still pins this
+                // object. ext4 must not recycle the pinned inode to any replacement.
+                std::fs::remove_dir(&pinned_path).unwrap();
+                assert!(
+                    !pinned_path.exists(),
+                    "#1379 must remove the original directory entry while its fd remains held"
+                );
+                assert_eq!(
+                    fd_stat(pinned.root.as_raw_fd()).unwrap().st_nlink,
+                    0,
+                    "the pinned root fd must observe that its directory entry disappeared"
+                );
+
+                for attempt in 1..=MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS {
+                    std::fs::create_dir(&pinned_path).unwrap_or_else(|err| {
+                        panic!(
+                            "#1379 pinned-fd non-reuse check could not create {} on attempt \
+                             {attempt}/{MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS}: {err}",
+                            pinned_path.display()
+                        )
+                    });
+                    let replacement_identity =
+                        FileIdentity::of(&pinned_path).unwrap_or_else(|| {
+                            panic!(
+                                "#1379 pinned-fd non-reuse check could not read (dev, ino) for {} \
+                             on attempt {attempt}/{MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS}",
+                                pinned_path.display()
+                            )
+                        });
+                    assert_ne!(
+                        replacement_identity, pinned_identity,
+                        "#1379: ext4 reused pinned identity on same-name replacement attempt \
+                         {attempt}/{MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS}; the openat2 \
+                         capability must keep the judged inode unrecyclable while alive"
+                    );
+                    std::fs::remove_dir(&pinned_path).unwrap_or_else(|err| {
+                        panic!(
+                            "#1379 pinned-fd non-reuse check could not remove {} on attempt \
+                             {attempt}/{MAX_EXT4_INODE_REUSE_CHURN_ATTEMPTS}: {err}",
+                            pinned_path.display()
+                        )
+                    });
+                }
+
+                results.push(MatrixResult {
+                    label: "ext4_same_dev_ino_reuse_rejected_by_pinned_fd",
+                    outcome: "PASS: tuple-only re-stat accepted an impostor; held openat2 fd prevented identity reuse",
+                });
+            }
+
+            // 4. A protected source that cannot be resolved (HOME unset — the
             //    default shared cache cannot be named) MUST abort the whole run under
             //    --force, deleting nothing (BUG 3, re-proven under this matrix's
             //    real --force + real fixtures).
@@ -6555,13 +6735,13 @@ mod tests {
                 );
                 assert!(
                     dead.join("debug/artifact.rlib").exists(),
-                    "3. an unresolvable protected source must abort before any delete: {report:?}"
+                    "4. an unresolvable protected source must abort before any delete: {report:?}"
                 );
-                assert!(report.reclaimed.is_empty(), "3. {report:?}");
-                assert!(!report.protection_complete, "3. {report:?}");
+                assert!(report.reclaimed.is_empty(), "4. {report:?}");
+                assert!(!report.protection_complete, "4. {report:?}");
                 assert!(
                     reap_exit_status(&report).is_err(),
-                    "3. must not exit clean: {report:?}"
+                    "4. must not exit clean: {report:?}"
                 );
                 let _ = std::fs::remove_dir_all(&root);
                 results.push(MatrixResult {
@@ -6570,7 +6750,7 @@ mod tests {
                 });
             }
 
-            // 4. A process-table scan that cannot spawn MUST abort the whole run
+            // 5. A process-table scan that cannot spawn MUST abort the whole run
             //    under --force, deleting nothing.
             {
                 let root = unique_temp_dir("tachi-reaper-kt-noproc");
@@ -6591,12 +6771,12 @@ mod tests {
                 );
                 assert!(
                     dead.join("debug/artifact.rlib").exists(),
-                    "4. a ps that cannot spawn must abort before any delete: {report:?}"
+                    "5. a ps that cannot spawn must abort before any delete: {report:?}"
                 );
-                assert!(report.reclaimed.is_empty(), "4. {report:?}");
+                assert!(report.reclaimed.is_empty(), "5. {report:?}");
                 assert!(
                     reap_exit_status(&report).is_err(),
-                    "4. must not exit clean: {report:?}"
+                    "5. must not exit clean: {report:?}"
                 );
                 let _ = std::fs::remove_dir_all(&root);
                 results.push(MatrixResult {
@@ -6609,7 +6789,7 @@ mod tests {
 
             // Printed, never written — see the section doc above for why checking in
             // the receipt is a human act, not something this test does to itself.
-            println!("\n─── #1062 orphan reaper kill-test receipt (S2d shape) ───");
+            println!("\n─── #1062/#1379 orphan reaper kill-test receipt (S2d shape) ───");
             println!("kill_test = \"crates/tachi-server/src/exec_env_reaper.rs\"");
             println!(
                 "kill_test_fn = \"exec_env_reaper::tests::kill_tests::orphan_reaper_kill_test_matrix\""
