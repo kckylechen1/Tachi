@@ -1,6 +1,7 @@
 use super::*;
 
 #[tokio::test]
+#[ignore = "requires vendored corpora (docs/superpowers/, gitignored) — provisioned boxes: --run-ignored all"]
 async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let server = make_server();
 
