@@ -774,7 +774,7 @@ async fn run_serial_memory_calls(
     info: &DaemonInfo,
     harness_epoch: Instant,
     next_id: &mut usize,
-) -> (Vec<ConcurrencyCallReceipt>, String) {
+) -> Vec<ConcurrencyCallReceipt> {
     let save_id = *next_id;
     *next_id += 1;
     let saved_text = format!("1255 serial transport memory {save_id}");
@@ -800,7 +800,23 @@ async fn run_serial_memory_calls(
         saved_text.clone(),
     )
     .await;
-    (vec![save, search], saved_text)
+    vec![save, search]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ConcurrentMemoryPairPlan {
+    save_text: String,
+    search_query: String,
+    expected_text: String,
+}
+
+fn concurrent_memory_pair_plan(save_id: usize) -> ConcurrentMemoryPairPlan {
+    let save_text = format!("1255 concurrent transport memory {save_id}");
+    ConcurrentMemoryPairPlan {
+        search_query: save_text.clone(),
+        expected_text: save_text.clone(),
+        save_text,
+    }
 }
 
 async fn run_concurrent_memory_calls(
@@ -808,47 +824,41 @@ async fn run_concurrent_memory_calls(
     callers: usize,
     harness_epoch: Instant,
     next_id: &mut usize,
-    serial_saved_text: String,
 ) -> Vec<ConcurrencyCallReceipt> {
-    let mut handles = Vec::with_capacity(callers * 2);
+    let mut handles = Vec::with_capacity(callers);
     for caller_idx in 0..callers {
         let save_id = *next_id;
         *next_id += 1;
-        let save_info = info.clone();
-        let save_text = format!("1255 concurrent transport memory {save_id}");
+        let search_id = *next_id;
+        *next_id += 1;
+        let pair_info = info.clone();
+        let plan = concurrent_memory_pair_plan(save_id);
         handles.push(tokio::spawn(async move {
-            record_tachi_memory_save(
-                save_info,
+            let save = record_tachi_memory_save(
+                pair_info.clone(),
                 save_id,
                 "concurrent",
                 caller_idx,
                 harness_epoch,
-                save_text,
+                plan.save_text,
             )
-            .await
-        }));
-
-        let search_id = *next_id;
-        *next_id += 1;
-        let search_info = info.clone();
-        let search_query = serial_saved_text.clone();
-        let expected_text = serial_saved_text.clone();
-        handles.push(tokio::spawn(async move {
-            record_tachi_memory_search(
-                search_info,
+            .await;
+            let search = record_tachi_memory_search(
+                pair_info,
                 search_id,
                 "concurrent",
                 caller_idx,
                 harness_epoch,
-                search_query,
-                expected_text,
+                plan.search_query,
+                plan.expected_text,
             )
-            .await
+            .await;
+            [save, search]
         }));
     }
-    let mut out = Vec::with_capacity(handles.len());
+    let mut out = Vec::with_capacity(callers * 2);
     for handle in handles {
-        out.push(
+        out.extend(
             handle
                 .await
                 .expect("join concurrent tachi_memory receipt task"),
@@ -1063,6 +1073,19 @@ mod tests {
         assert!(search_result_rows_contain(&returned_row, expected));
     }
 
+    #[test]
+    fn concurrent_memory_pair_searches_for_its_own_saved_text() {
+        let plan = concurrent_memory_pair_plan(12);
+        assert_eq!(
+            plan.search_query, plan.save_text,
+            "a concurrent search query must target its corresponding concurrent save"
+        );
+        assert_eq!(
+            plan.expected_text, plan.save_text,
+            "structured-row discrimination must expect the corresponding concurrent save"
+        );
+    }
+
     /// Live transport-path harness: serial baseline + concurrent burst via
     /// `call_daemon_tool_raw_with_phases` against an in-process test daemon
     /// with server-side call observation.
@@ -1149,8 +1172,7 @@ mod tests {
             "server-observed serial tool calls must equal client-emitted receipts"
         );
 
-        let (mut serial_memory, serial_saved_text) =
-            run_serial_memory_calls(&daemon, harness_epoch, &mut next_id).await;
+        let mut serial_memory = run_serial_memory_calls(&daemon, harness_epoch, &mut next_id).await;
         let serial_expected = SERIAL_N + MEMORY_SERIAL_CALLS;
         wait_until_server_saw(
             &observer,
@@ -1180,14 +1202,8 @@ mod tests {
         let runtime_expected = serial_expected + CALLERS * CALLS_PER_CALLER;
         wait_until_server_saw(&observer, runtime_expected as u64, "runtime burst").await;
 
-        let mut concurrent_memory = run_concurrent_memory_calls(
-            &daemon,
-            CALLERS,
-            harness_epoch,
-            &mut next_id,
-            serial_saved_text,
-        )
-        .await;
+        let mut concurrent_memory =
+            run_concurrent_memory_calls(&daemon, CALLERS, harness_epoch, &mut next_id).await;
 
         let expected = runtime_expected + CALLERS * MEMORY_CALLS_PER_CALLER;
         wait_until_server_saw(&observer, expected as u64, "total").await;
