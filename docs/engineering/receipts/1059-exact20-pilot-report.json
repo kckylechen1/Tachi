@@ -1,0 +1,628 @@
+{
+  "schema_version": "github_corpus_exact20_report_v1",
+  "manifest_sha256": "224858da1443006fe9bdc84ce10aea84a2ccf2cec3da8aa2d8d041dc4df3fbe8",
+  "captured_at": "2026-07-23T17:42:43Z",
+  "disposition": "partial_preview_only",
+  "engine_receipt": {
+    "requested_role": "github_corpus_adapter",
+    "fallback_chain": [
+      "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+    ],
+    "degraded": true
+  },
+  "provider_resolution": {
+    "vault_status_checked": true,
+    "provider_cache_loaded": true,
+    "identity_proof": "Vault status can attest cache readiness only; this read-only adapter made no model invocation, so effective provider/model/version remain unproven"
+  },
+  "candidates_emitted": 20,
+  "total_latency_ms": 36980,
+  "cases": [
+    {
+      "case_id": "gh-1379-1397",
+      "issue_ref": "kckylechen1/tachi#1379",
+      "pr_ref": "kckylechen1/tachi#1397",
+      "expected_merge_sha": "5251c6710cfb0f2b0a4be96606f11f2fb23b8605",
+      "observed_merge_sha": "5251c6710cfb0f2b0a4be96606f11f2fb23b8605",
+      "issue_snapshot_hash": "a91dd3d1b74b7d7166cf879cdd5a5a75f45daafd2e54ad887c967c9b7b64362b",
+      "pr_snapshot_hash": "cc71b425b9db9454326a2d110b5d483062650343715edc08edfe53bea55ed522",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 4498,
+        "covered_bytes": 2483
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "12d163be3c5150a4",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 5,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1875,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Add a Linux/ext4 inode-reuse regression proving the root is pinned before judgment and its name is never unlinked.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1354-1396",
+      "issue_ref": "kckylechen1/tachi#1354",
+      "pr_ref": "kckylechen1/tachi#1396",
+      "expected_merge_sha": "cd05ffc290edd9a3bb615edb373925322a868a13",
+      "observed_merge_sha": "cd05ffc290edd9a3bb615edb373925322a868a13",
+      "issue_snapshot_hash": "35e316be2b4a25b4b8c613e5add8c1ff12c66aba31babf1d4b4be3c2de73d070",
+      "pr_snapshot_hash": "86c961562e75d9cdeec2d905fd1e374d4adbd954fafe263e7d1db384045c2ef3",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 4942,
+        "covered_bytes": 2236
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "c019071aea9f513c",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 2148,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Exercise the composed compatibility path and assert the scoped refusal survives legacy fallback.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1355-1384",
+      "issue_ref": "kckylechen1/tachi#1355",
+      "pr_ref": "kckylechen1/tachi#1384",
+      "expected_merge_sha": "0bfa5eecf8f218e6dec79747763fd1c897949394",
+      "observed_merge_sha": "0bfa5eecf8f218e6dec79747763fd1c897949394",
+      "issue_snapshot_hash": "a6a7a1f687b8da0a2dd67b59c884da69765b52e22fdde4677d1808bb45fb283e",
+      "pr_snapshot_hash": "6663160fb724391c91a2741a2a1f83283b63fd6573fd6aebe4a0725533695d98",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 2730,
+        "covered_bytes": 1268
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "6eb3680daa3a5ddf",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 2235,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Run caller-wins, fill-missing, and require-before-spawn regressions without claiming the full custody track is complete.",
+      "follow_up_context": [
+        "#1391 merged KIMI allowlist context; #1413 remains OPEN with a vault exec fail-open concern."
+      ]
+    },
+    {
+      "case_id": "gh-1393-l1-1398",
+      "issue_ref": "kckylechen1/tachi#1393",
+      "pr_ref": "kckylechen1/tachi#1398",
+      "expected_merge_sha": "ef0742196177dc11f93bd9c674d0100044edfdab",
+      "observed_merge_sha": "ef0742196177dc11f93bd9c674d0100044edfdab",
+      "issue_snapshot_hash": "385ef82c7d2f0f15c2ffa0493119c200701ac57bdbfc51216c03ab1a71c9de77",
+      "pr_snapshot_hash": "166f3aac69dcd6e98d149f2851d8effe4910a3f25ffed40b978cec0945f9b40c",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 6922,
+        "covered_bytes": 4580
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "04eac28d844c540e",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 5,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1598,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Assert L1 name-only warning output and explicitly keep the full credential-custody behavior out of this case.",
+      "follow_up_context": [
+        "L1 only; #1411 remains OPEN for the full credential-custody track."
+      ]
+    },
+    {
+      "case_id": "gh-1405-1407",
+      "issue_ref": "kckylechen1/tachi#1405",
+      "pr_ref": "kckylechen1/tachi#1407",
+      "expected_merge_sha": "cd4bb04ae8f7646e275dc293526d87926d8be568",
+      "observed_merge_sha": "cd4bb04ae8f7646e275dc293526d87926d8be568",
+      "issue_snapshot_hash": "d46031d0ecde28aeb2a8ff9df4e1bb5ab7b390784dad4280fba4b65d99e56f93",
+      "pr_snapshot_hash": "c3d9d7c5ac26e78dbf23237ff75ede3a13cc720adf9952d6d9309530e6f67ba5",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 2285,
+        "covered_bytes": 981
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "1f9044ec5b075d7c",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 2080,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Create a regression that leaves no fixture database artifact outside the dedicated temporary root.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1364-1380",
+      "issue_ref": "kckylechen1/tachi#1364",
+      "pr_ref": "kckylechen1/tachi#1380",
+      "expected_merge_sha": "2f6bde61a75e4626240b3146fcb77dd8c15d406e",
+      "observed_merge_sha": "2f6bde61a75e4626240b3146fcb77dd8c15d406e",
+      "issue_snapshot_hash": "d6b27d0bd9f7f44b89d2c05400dc6755700f6031387bc3be2ad167f4c718e315",
+      "pr_snapshot_hash": "164cec93dd10a64aa75ca5049ec8063f69d018064d21197ffd10a16328e12dc6",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 2662,
+        "covered_bytes": 1913
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "194e4e6c3e3d51c0",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1760,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Exercise the lint attribution path and distinguish candidate-introduced debt from inherited CI failures.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1358-1362",
+      "issue_ref": "kckylechen1/tachi#1358",
+      "pr_ref": "kckylechen1/tachi#1362",
+      "expected_merge_sha": "ac8730dce733f7a66c12389ea9412c6861656d92",
+      "observed_merge_sha": "ac8730dce733f7a66c12389ea9412c6861656d92",
+      "issue_snapshot_hash": "7614745d490fffa2e7c85556f4a50a24158d2686eaa32c725f3af2ecb291d175",
+      "pr_snapshot_hash": "7807c8386dac0271fd18cfd87deebe111c0fff564da453c41597c6c0c786711f",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 3170,
+        "covered_bytes": 1234
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "b043910d20075c32",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1618,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Assert the real lock acquisition graph before accepting or replacing synchronization behavior.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1356-1360",
+      "issue_ref": "kckylechen1/tachi#1356",
+      "pr_ref": "kckylechen1/tachi#1360",
+      "expected_merge_sha": "00c4d4deb5b2ae1876459e4eebd011d79b325b1e",
+      "observed_merge_sha": "00c4d4deb5b2ae1876459e4eebd011d79b325b1e",
+      "issue_snapshot_hash": "bffe2513e1367d976ab83ca1a1c539652e6f5ef19607f3206582af9720cf6773",
+      "pr_snapshot_hash": "09297150891c0fd343909f008575ccdca35c7a7bd344c7d60e438bf78266c731",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 4046,
+        "covered_bytes": 3264
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "c195441835c65502",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 2300,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Exercise ambiguous and stale identity recovery and require a fail-closed resolver/manifest result.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1344-1373",
+      "issue_ref": "kckylechen1/tachi#1344",
+      "pr_ref": "kckylechen1/tachi#1373",
+      "expected_merge_sha": "c0f55d6a9a06acce42259093220be0f3bb0b975a",
+      "observed_merge_sha": "c0f55d6a9a06acce42259093220be0f3bb0b975a",
+      "issue_snapshot_hash": "aa3747deaa2fb535edaf916d6f16ee85ad7075be6ad2b02703270458090cd240",
+      "pr_snapshot_hash": "0d7166992d1e8c9c5d99926c873d167430b4e4fb641bd6d3dc96db99f1d1089b",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 3485,
+        "covered_bytes": 2141
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "b46207890d7c59a2",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1759,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Test that a category prior cannot open the ranking gate without topical evidence.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1273-1281",
+      "issue_ref": "kckylechen1/tachi#1273",
+      "pr_ref": "kckylechen1/tachi#1281",
+      "expected_merge_sha": "ca46eefe157604af1f44d8697288f63385ec9fdb",
+      "observed_merge_sha": "ca46eefe157604af1f44d8697288f63385ec9fdb",
+      "issue_snapshot_hash": "6952798ba43b94f902043611a9906047516cd74359bf723dc2b57d6c9efeb3b4",
+      "pr_snapshot_hash": "7e34a6ed9555623fffeb02c876c4bd142cc7a0599a20dd0167f1b983bdef429d",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 3711,
+        "covered_bytes": 2347
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "9103bba3baf4563c",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 2880,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Add sequence coverage for SIGTERM, per-parent age ordering, and uncertain identity refusal.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1229-1256",
+      "issue_ref": "kckylechen1/tachi#1229",
+      "pr_ref": "kckylechen1/tachi#1256",
+      "expected_merge_sha": "a83ad694502bedf557d347138bdfbd9240264b25",
+      "observed_merge_sha": "a83ad694502bedf557d347138bdfbd9240264b25",
+      "issue_snapshot_hash": "6a552aee3fbe7aae662c2c4cc33a3ad8285686cda68d6e19e6035f84643dfe69",
+      "pr_snapshot_hash": "b9feaeeeedefbd3eb9cfb742218fd12c4fba2717f90bbcabfed28612247f7479",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 3483,
+        "covered_bytes": 1719
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "86fe7779382355f9",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1535,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Assert an indirect run_dir_hint outside the canonical root is rejected before filesystem use.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1377-1386",
+      "issue_ref": "kckylechen1/tachi#1377",
+      "pr_ref": "kckylechen1/tachi#1386",
+      "expected_merge_sha": "5c2cee2683e053494ea0ee7d2e444dc872b7a01c",
+      "observed_merge_sha": "5c2cee2683e053494ea0ee7d2e444dc872b7a01c",
+      "issue_snapshot_hash": "bfaa88144d53cb2850a0a8b3cffec1517ecb10c3fc63b0dcb54f931cddd95b55",
+      "pr_snapshot_hash": "1e78165a395ce170e224469379aee87f64d8a5a4aff3c0d5996e8ef0fb1f24d4",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 3281,
+        "covered_bytes": 1744
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "1ab52339bea05010",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1501,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Run an exact commit-message test with hostile ambient Git configuration and prove repository-local isolation.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1378-1387",
+      "issue_ref": "kckylechen1/tachi#1378",
+      "pr_ref": "kckylechen1/tachi#1387",
+      "expected_merge_sha": "1b256c1dfd37a96a30dfc2f6ff45f8dab0c67fc8",
+      "observed_merge_sha": "1b256c1dfd37a96a30dfc2f6ff45f8dab0c67fc8",
+      "issue_snapshot_hash": "f35b53a321f2264488611f998f102637c86cffd3b3629a75ba4f2e9b61492468",
+      "pr_snapshot_hash": "bf500298bfb23751ffc3cedf1d275ab7e76ff6f7fbb14129d0a6fa86840f00a5",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 2780,
+        "covered_bytes": 1766
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "a681b34583395cff",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1628,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Assert a clean clone reports an explicit provisioning prerequisite rather than a misleading code failure.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1375-1385",
+      "issue_ref": "kckylechen1/tachi#1375",
+      "pr_ref": "kckylechen1/tachi#1385",
+      "expected_merge_sha": "704756e25c905f4320ef5df2f298c9f0808dfe90",
+      "observed_merge_sha": "704756e25c905f4320ef5df2f298c9f0808dfe90",
+      "issue_snapshot_hash": "beee2ecc57e99b0fb8cf931e747962f9416e92ca9a3a26dd95618f1412903079",
+      "pr_snapshot_hash": "f9cb077822b780014beec545f46a4415f18720aabd9ce1cd18f66bc37a4cd864",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 5006,
+        "covered_bytes": 2609
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "e4802d3642255773",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1610,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Run the completion/dispatch fixture with an empty isolated TACHI_HOME and assert deterministic behavior.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1278-1390",
+      "issue_ref": "kckylechen1/tachi#1278",
+      "pr_ref": "kckylechen1/tachi#1390",
+      "expected_merge_sha": "471751ee155f5eb8ed355551799e6d7b1e024eca",
+      "observed_merge_sha": "471751ee155f5eb8ed355551799e6d7b1e024eca",
+      "issue_snapshot_hash": "77999247bbb1f2871a360bb930365b8e0f8895b1269d7884ef22445c44c046e6",
+      "pr_snapshot_hash": "3c934490ae8193036eef1a1bc40db0d8fa31368634560ab07e75c039cf358192",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 3569,
+        "covered_bytes": 1654
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "1c142e9f70545ff7",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 5,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1640,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Inject a novel failing test and assert the known-red allowlist cannot absorb it.",
+      "follow_up_context": [
+        "#1278 step 2 only; #1413 later records an OPEN known-reds regex follow-up."
+      ]
+    },
+    {
+      "case_id": "gh-1279-1287",
+      "issue_ref": "kckylechen1/tachi#1279",
+      "pr_ref": "kckylechen1/tachi#1287",
+      "expected_merge_sha": "4456d4f8cea8a7358cccbf4e77a2e1ff9dcf54ff",
+      "observed_merge_sha": "4456d4f8cea8a7358cccbf4e77a2e1ff9dcf54ff",
+      "issue_snapshot_hash": "52ecaf24fa0de80887420dbc4da657947fb34e2728657799e2714fdf0c09baaa",
+      "pr_snapshot_hash": "c3e85e98d6e41ed2f72cd5f7031da4f4f927afd2e6317dddde3344a7a03f3940",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 5987,
+        "covered_bytes": 3463
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "d95af18e8ea759f1",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1768,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Assert one missing alias emits a loud skip while independent provider keys still materialize.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1289-1292",
+      "issue_ref": "kckylechen1/tachi#1289",
+      "pr_ref": "kckylechen1/tachi#1292",
+      "expected_merge_sha": "b69693aebfb347ee0a850553bba9ca568afed650",
+      "observed_merge_sha": "b69693aebfb347ee0a850553bba9ca568afed650",
+      "issue_snapshot_hash": "f4483b6c31cb76110bd173b5d026e416a1a17c582265d8af1e899849ee11f858",
+      "pr_snapshot_hash": "8a98dfda628ebf2b96c809aa4de1edae9b8d397f59428898e5b10c6c51bd8b8b",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 6709,
+        "covered_bytes": 3503
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "4692885aa5445041",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1676,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Build a pre-migration state and invoke the public sentinel-gated entrypoint rather than a helper.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1271-1280",
+      "issue_ref": "kckylechen1/tachi#1271",
+      "pr_ref": "kckylechen1/tachi#1280",
+      "expected_merge_sha": "cb25bf8934966ebd35b9b07aa30a409fdaf7e2da",
+      "observed_merge_sha": "cb25bf8934966ebd35b9b07aa30a409fdaf7e2da",
+      "issue_snapshot_hash": "283768308d1f3e0125ecff4989f4496857edfd92496fe7100d1b5264439937f0",
+      "pr_snapshot_hash": "2082458e3b897e973ca10338c5dc25410ff4eedaef15ff28b14c91ac73b7f788",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 1862,
+        "covered_bytes": 991
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "e14bd68b47e053c2",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 2108,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Fault the event write and assert retry may duplicate but cannot silently lose the lifecycle event.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1200-1238",
+      "issue_ref": "kckylechen1/tachi#1200",
+      "pr_ref": "kckylechen1/tachi#1238",
+      "expected_merge_sha": "3ac875f91566c10ea80b6e3e197de27b4c65995f",
+      "observed_merge_sha": "3ac875f91566c10ea80b6e3e197de27b4c65995f",
+      "issue_snapshot_hash": "57a7c2b1c3778f8001964fc34219603fd64c8d23543f56fee29fade296ab91c2",
+      "pr_snapshot_hash": "980b9165939fb3732ef67c0398032b3b479c15b31133a15803c500fb27635f4f",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 2654,
+        "covered_bytes": 1691
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "cd6b9d63f0915305",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1648,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Assert omitted caller linkage resolves only from the dispatch record and never from a fabricated profile.",
+      "follow_up_context": []
+    },
+    {
+      "case_id": "gh-1242-1243",
+      "issue_ref": "kckylechen1/tachi#1242",
+      "pr_ref": "kckylechen1/tachi#1243",
+      "expected_merge_sha": "f9d02334cc5436e5b61cf1db06013b250f0947eb",
+      "observed_merge_sha": "f9d02334cc5436e5b61cf1db06013b250f0947eb",
+      "issue_snapshot_hash": "7a21015910564725ce47e886cdf902d3a12b3eaee4af8f41b923210be50bbdb5",
+      "pr_snapshot_hash": "5822847b3603e30657f103326377573941064a517a5061e5b1bb1f434b2ce0e1",
+      "selected_comment_revisions": [],
+      "source_coverage": {
+        "source_bytes": 7619,
+        "covered_bytes": 3945
+      },
+      "candidate_yield": {
+        "emitted": true,
+        "candidate_id": "f213bdb63bfb542a",
+        "candidate_status": "pending",
+        "identity_status": "preview_only",
+        "evidence_ref_count": 6,
+        "outcome_evidence": true,
+        "overturn_appended": false
+      },
+      "cost_latency": {
+        "latency_ms": 1602,
+        "cost_usd": null,
+        "cost_status": "not_applicable_no_model_invocation"
+      },
+      "behavior_test_handoff": "Assert sweep membership and count stay equivalent while promotion gates remain limited to named paths.",
+      "follow_up_context": []
+    }
+  ]
+}
