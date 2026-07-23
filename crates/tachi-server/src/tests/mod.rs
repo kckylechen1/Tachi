@@ -60,7 +60,7 @@ impl TempHomeGuard {
         let original_tachi_run_root = std::env::var_os("TACHI_RUN_ROOT");
         let original_sigil_home = std::env::var_os("SIGIL_HOME");
         let temp_home =
-            std::env::temp_dir().join(format!("tachi-test-home-{}", uuid::Uuid::new_v4()));
+            crate::utils::test_fixture_path(format!("tachi-test-home-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_home).expect("create temp home");
         std::env::set_var("HOME", &temp_home);
         std::env::set_var("TACHI_HOME", temp_home.join(".tachi"));
@@ -172,7 +172,7 @@ fn template_db_path() -> &'static std::path::PathBuf {
                 .hash(&mut hasher);
             hasher.finish()
         };
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_fixture_path(format!(
             "memory-server-test-template-{fingerprint:016x}.sqlite"
         ));
         if path.exists() {
@@ -183,7 +183,7 @@ fn template_db_path() -> &'static std::path::PathBuf {
         // template. If several processes race, each builds an equivalent
         // file and the renames just overwrite one another; `fs::copy`
         // readers hold their own fd so an overwrite mid-copy is still safe.
-        let build = std::env::temp_dir().join(format!(
+        let build = crate::utils::test_fixture_path(format!(
             "memory-server-test-template-build-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
@@ -221,7 +221,7 @@ fn copy_template_db(dest: &std::path::Path) {
 
 pub(crate) fn make_server() -> TestServer {
     ensure_test_env();
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

@@ -469,7 +469,7 @@ mod dispatch_run_dir_gate_tests {
         let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let original = std::env::var_os("TACHI_HOME");
         let root =
-            std::env::temp_dir().join(format!("tachi-runhint-test-{}", uuid::Uuid::new_v4()));
+            crate::utils::test_fixture_path(format!("tachi-runhint-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("runs")).unwrap();
         // SAFETY: serialized by env_lock(); restored/removed in Drop.
         unsafe {

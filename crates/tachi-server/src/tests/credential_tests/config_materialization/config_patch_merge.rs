@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn credential_config_patch_merges_json_without_retaining_old_secret_backup() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-config-patch-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

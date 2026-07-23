@@ -34,9 +34,9 @@ async fn promote_handoff_issue_updates_memory_and_flow_artifacts() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
     let db_path =
-        std::env::temp_dir().join(format!("handoff-promote-{}.sqlite", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("handoff-promote-{}.sqlite", uuid::Uuid::new_v4()));
     let run_root =
-        std::env::temp_dir().join(format!("handoff-promote-runs-{}", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("handoff-promote-runs-{}", uuid::Uuid::new_v4()));
     let flow_id = "flow_handoff-promote";
     std::fs::create_dir_all(run_root.join(flow_id)).expect("create run dir");
     std::env::set_var("TACHI_RUN_ROOT", &run_root);
@@ -105,7 +105,7 @@ async fn promote_handoff_issue_updates_memory_and_flow_artifacts() {
 
 #[tokio::test]
 async fn promote_rejects_invalid_flow_id_before_issue_creation() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "handoff-invalid-flow-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -141,9 +141,9 @@ async fn promote_dedup_returns_already_promoted_without_force() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
     let db_path =
-        std::env::temp_dir().join(format!("handoff-dedup-{}.sqlite", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("handoff-dedup-{}.sqlite", uuid::Uuid::new_v4()));
     let run_root =
-        std::env::temp_dir().join(format!("handoff-dedup-runs-{}", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("handoff-dedup-runs-{}", uuid::Uuid::new_v4()));
     std::env::set_var("TACHI_RUN_ROOT", &run_root);
 
     let server = test_server(db_path.clone());
@@ -206,9 +206,9 @@ async fn promote_force_creates_new_issue_even_if_already_promoted() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
     let db_path =
-        std::env::temp_dir().join(format!("handoff-force-{}.sqlite", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("handoff-force-{}.sqlite", uuid::Uuid::new_v4()));
     let run_root =
-        std::env::temp_dir().join(format!("handoff-force-runs-{}", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("handoff-force-runs-{}", uuid::Uuid::new_v4()));
     std::env::set_var("TACHI_RUN_ROOT", &run_root);
 
     let server = test_server(db_path.clone());

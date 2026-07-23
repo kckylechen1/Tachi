@@ -1,6 +1,8 @@
 mod env;
 mod file;
 mod locks;
+#[cfg(test)]
+mod test_fixtures;
 mod text;
 mod validation;
 mod workspace;
@@ -16,6 +18,8 @@ pub(super) use self::file::{
 };
 #[cfg(test)]
 pub(crate) use self::locks::global_test_lock;
+#[cfg(test)]
+pub(crate) use self::test_fixtures::test_fixture_path;
 pub(super) use self::locks::{lock_or_recover, read_or_recover, write_or_recover};
 pub(crate) use self::text::{compact_text_line, sanitize_safe_path_name};
 pub(super) use self::text::{

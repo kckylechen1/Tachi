@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn search_retries_a_real_sqlite_lock_and_preserves_exhaustion_errors() {
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::test_fixtures::test_fixture_path(format!(
             "memcore-search-lock-retry-{}.db",
             uuid::Uuid::new_v4()
         ));

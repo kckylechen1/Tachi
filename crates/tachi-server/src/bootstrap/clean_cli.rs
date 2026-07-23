@@ -672,7 +672,7 @@ mod tests {
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        let path = crate::utils::test_fixture_path(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path

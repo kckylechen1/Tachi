@@ -113,7 +113,7 @@ async fn find_similar_memory_does_not_record_access_in_global_or_project_db() {
         return;
     }
 
-    let root = std::env::temp_dir().join(format!("tachi-similar-access-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-similar-access-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
     server
         .tachi_init_project_db(Parameters(InitProjectDbParams {

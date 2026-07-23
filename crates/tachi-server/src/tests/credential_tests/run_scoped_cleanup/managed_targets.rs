@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_materialize_cleanup_removes_run_scoped_credentials() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-cleanup-run-scoped-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

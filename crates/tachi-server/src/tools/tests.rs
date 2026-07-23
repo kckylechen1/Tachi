@@ -333,7 +333,7 @@ fn local_skill_discovery_scans_host_skill_dirs() {
         .unwrap_or_else(|e| e.into_inner());
     let original_home = std::env::var_os("HOME");
     let temp_home =
-        std::env::temp_dir().join(format!("tachi-local-skill-test-{}", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("tachi-local-skill-test-{}", uuid::Uuid::new_v4()));
     let skill_dir = temp_home.join(".agents/skills/agent-only-probe");
     let duplicate_skill_dir = temp_home.join(".codex/skills/agent-only-probe");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
@@ -376,7 +376,7 @@ fn local_skill_discovery_expands_common_chinese_queries() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let original_home = std::env::var_os("HOME");
-    let temp_home = std::env::temp_dir().join(format!(
+    let temp_home = crate::utils::test_fixture_path(format!(
         "tachi-local-skill-zh-test-{}",
         uuid::Uuid::new_v4()
     ));

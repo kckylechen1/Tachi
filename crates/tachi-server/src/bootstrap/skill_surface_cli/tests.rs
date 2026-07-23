@@ -15,7 +15,7 @@ fn temp_home(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("tachi-{name}-{}-{nanos}", std::process::id()))
+    crate::utils::test_fixture_path(format!("tachi-{name}-{}-{nanos}", std::process::id()))
 }
 
 fn write_skill(root: &Path, name: &str, content: &str) {

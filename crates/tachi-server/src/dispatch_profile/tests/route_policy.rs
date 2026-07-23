@@ -38,7 +38,7 @@ fn route_policy_simulation_sinks_non_finite_scores() {
 
 #[test]
 fn load_route_policy_rule_loadout_classifies_persisted_rules() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "dispatch-route-policy-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

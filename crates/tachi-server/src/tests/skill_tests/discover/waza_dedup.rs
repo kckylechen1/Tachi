@@ -7,7 +7,7 @@ fn tachi_skill_discover_prefers_hub_waza_skill_over_host_duplicate() {
         .unwrap_or_else(|e| e.into_inner());
     let original_home = std::env::var_os("HOME");
     let temp_home =
-        std::env::temp_dir().join(format!("tachi-waza-dedup-test-{}", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("tachi-waza-dedup-test-{}", uuid::Uuid::new_v4()));
     let skill_dir = temp_home.join(".agents/skills/check");
     std::fs::create_dir_all(&skill_dir).expect("create host check skill dir");
     std::fs::write(

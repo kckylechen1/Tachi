@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn migration_plan_targets_only_legacy_dbs_and_skips_keep_actions() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-plan-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-tidy-plan-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let target_db = home.join(".tachi").join("global").join("memory.db");
     let archive_root = home.join(".tachi").join("archive").join("ts-fake");
@@ -42,7 +42,7 @@ fn migration_plan_targets_only_legacy_dbs_and_skips_keep_actions() {
 
 #[test]
 fn manifest_update_drops_migrated_sources_and_inserts_target() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-manifest-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-tidy-manifest-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".tachi")).expect("create .tachi");
     let manifest_path = root.join(".tachi").join("manifest.json");
 

@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn tachi_init_project_db_creates_expected_path() {
     let server = make_server();
-    let root = std::env::temp_dir().join(format!("tachi-project-db-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-project-db-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
 
     let response = server
@@ -70,7 +70,7 @@ async fn custom_db_relpath_reopens_from_manifest_without_alias() {
 #[tokio::test]
 async fn tachi_init_project_db_activates_project_store_and_read_pool() {
     let server = make_server();
-    let root = std::env::temp_dir().join(format!("tachi-project-runtime-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-project-runtime-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
 
     assert_eq!(server.project_db_path_buf(), None);
@@ -186,7 +186,7 @@ async fn tachi_init_project_db_requires_project_root_explicitly() {
 #[tokio::test]
 async fn tachi_init_project_db_rejects_path_traversal() {
     let server = make_server();
-    let root = std::env::temp_dir().join(format!("tachi-project-escape-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-project-escape-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
 
     let err = server

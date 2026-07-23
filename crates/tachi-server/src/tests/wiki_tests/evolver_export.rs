@@ -35,7 +35,7 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
     let original_reasoning_base = std::env::var_os("REASONING_BASE_URL");
     let original_siliconflow_key = std::env::var_os("SILICONFLOW_API_KEY");
     let original_voyage_key = std::env::var_os("VOYAGE_API_KEY");
-    let temp_home = std::env::temp_dir().join(format!("tachi-rem-test-{}", uuid::Uuid::new_v4()));
+    let temp_home = crate::utils::test_fixture_path(format!("tachi-rem-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(temp_home.join(".tachi/projects/wiki")).expect("create wiki project");
     std::env::set_var("HOME", &temp_home);
     std::env::set_var("TACHI_HOME", temp_home.join(".tachi"));
@@ -180,7 +180,7 @@ async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     entry.entities = vec!["MCP".to_string()];
 
     let (server, _home) = seed_wiki_project_entries(vec![entry]);
-    let out_dir = std::env::temp_dir().join(format!("wiki-export-{}", uuid::Uuid::new_v4()));
+    let out_dir = crate::utils::test_fixture_path(format!("wiki-export-{}", uuid::Uuid::new_v4()));
 
     let result = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
         .expect("wiki export should succeed");
@@ -213,7 +213,7 @@ async fn wiki_export_obsidian_prefers_typed_refs_when_both_channels_exist() {
 
     let (server, _home) = seed_wiki_project_entries(vec![entry]);
     let out_dir =
-        std::env::temp_dir().join(format!("wiki-export-dual-refs-{}", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("wiki-export-dual-refs-{}", uuid::Uuid::new_v4()));
 
     let result = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
         .expect("wiki export should succeed");
@@ -243,7 +243,7 @@ async fn wiki_export_obsidian_exports_legacy_only_refs() {
     entry.topic = "legacy-refs".to_string();
     entry.metadata = json!({"source_refs": ["kckylechen1/tachi#1072"]});
     let (server, _home) = seed_wiki_project_entries(vec![entry]);
-    let out_dir = std::env::temp_dir().join(format!("wiki-export-legacy-{}", uuid::Uuid::new_v4()));
+    let out_dir = crate::utils::test_fixture_path(format!("wiki-export-legacy-{}", uuid::Uuid::new_v4()));
     crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir).unwrap();
     let markdown = std::fs::read_to_string(out_dir.join("export/legacy/legacy-refs.md")).unwrap();
     assert!(markdown.contains("## References\n"));
@@ -259,7 +259,7 @@ async fn wiki_export_obsidian_exports_typed_only_refs() {
     entry.topic = "typed-refs".to_string();
     entry.metadata = json!({"evidence_refs_v1": [{"ref": "#1296", "target_kind": "issue", "captured_at": "2026-07-19T00:00:00Z"}]});
     let (server, _home) = seed_wiki_project_entries(vec![entry]);
-    let out_dir = std::env::temp_dir().join(format!("wiki-export-typed-{}", uuid::Uuid::new_v4()));
+    let out_dir = crate::utils::test_fixture_path(format!("wiki-export-typed-{}", uuid::Uuid::new_v4()));
     crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir).unwrap();
     let markdown = std::fs::read_to_string(out_dir.join("export/typed/typed-refs.md")).unwrap();
     assert!(markdown.contains("## Evidence Refs (typed)"));
@@ -278,7 +278,7 @@ async fn wiki_export_obsidian_ignores_invalid_typed_refs_and_falls_back_to_legac
         "source_refs": [null, "", "#legacy-valid"]
     });
     let (server, _home) = seed_wiki_project_entries(vec![entry]);
-    let out_dir = std::env::temp_dir().join(format!(
+    let out_dir = crate::utils::test_fixture_path(format!(
         "wiki-export-invalid-typed-{}",
         uuid::Uuid::new_v4()
     ));
