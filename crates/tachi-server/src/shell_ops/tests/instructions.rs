@@ -16,6 +16,7 @@ fn meta_skill_mapping_is_complete() {
 }
 
 #[test]
+#[ignore = "requires vendored corpora (docs/superpowers/, gitignored) — provisioned boxes: --run-ignored all"]
 fn superpowers_meta_skills_resolve_for_all_shell_stages() {
     // The resolver reads `TACHI_SKILLS_ROOT`; share the same env lock as its
     // neutral-module tests so their mutations can never pollute this read.

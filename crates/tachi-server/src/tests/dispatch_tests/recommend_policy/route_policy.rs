@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
 
     for (task_id, profile, agent, outcome, duration_ms, cost_usd, quality_score) in [
         (
@@ -134,8 +134,9 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
 /// for "fix_request" here.
 #[tokio::test]
 async fn tachi_task_route_simulate_matches_dispatch_completed_without_explicit_profile() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "20260717T000003Z-custom-route-sim-linkage";
+    seed_dispatch_run(&server, dispatch_id);
     let profile = "opencode_builder";
 
     // Seed the kanban card the way a real dispatch launch would
@@ -262,7 +263,7 @@ async fn tachi_task_route_simulate_matches_dispatch_completed_without_explicit_p
 
 #[tokio::test]
 async fn tachi_task_route_policy_proposals_require_review_before_apply() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
 
     for (task_id, profile, outcome, cost_usd, quality_score) in [
         (

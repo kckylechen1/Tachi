@@ -1,18 +1,5 @@
 use super::*;
 
-/// Completion now refuses to invent a durable receipt for an arbitrary
-/// dispatch id. Fixtures that exercise a legitimate completion must therefore
-/// seed the run authority the dispatch launcher would have created.
-fn seed_dispatch_run(server: &crate::MemoryServer, dispatch_id: &str) {
-    let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
-    std::fs::create_dir_all(&run_dir).expect("create trusted dispatch run directory");
-    std::fs::write(
-        run_dir.join("status.json"),
-        json!({ "dispatch_id": dispatch_id }).to_string(),
-    )
-    .expect("seed trusted dispatch status");
-}
-
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {

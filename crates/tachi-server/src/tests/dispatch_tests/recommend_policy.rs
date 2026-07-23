@@ -1,4 +1,5 @@
-use super::super::make_server;
+use super::super::{make_server, make_server_with_temp_home};
+use super::completion_eval::seed_dispatch_run;
 use super::task_params;
 use crate::tool_params::{
     TachiAgentsParams, TachiCompleteParams, TachiSkillParams, TachiSubagentEvalParams,

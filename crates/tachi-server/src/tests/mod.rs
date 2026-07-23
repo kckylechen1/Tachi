@@ -233,7 +233,7 @@ pub(crate) fn make_server() -> TestServer {
     }
 }
 
-fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
+pub(crate) fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
     ensure_test_env();
     let temp_home = TempHomeGuard::new();
     let global_db = temp_home.temp_home.join(".tachi/global/memory.db");

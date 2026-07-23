@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 mod credential_actions;
 mod daemon;
+mod exec_actions;
 mod intake;
 mod keys;
 mod output;
@@ -50,6 +51,27 @@ pub(super) async fn run_vault_command(
         | VaultAction::Get { .. }
         | VaultAction::Remove { .. }) => {
             secret_actions::run_secret_action(global_db_path, app_home, action).await
+        }
+        VaultAction::Exec {
+            stdin_password,
+            keychain,
+            password_file,
+            insecure_password_file,
+            consumer,
+            require,
+            command,
+        } => {
+            exec_actions::run_exec_action(
+                global_db_path,
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+                insecure_password_file,
+                consumer.as_deref(),
+                &require,
+                &command,
+            )
+            .await
         }
         action @ VaultAction::Intake { .. } => {
             intake::run_intake_action(global_db_path, app_home, action)

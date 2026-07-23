@@ -68,7 +68,8 @@ fn base_complete() -> TachiCompleteParams {
 
 #[tokio::test]
 async fn complete_with_rulings_persists_retrievable_precedent_rows() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-950");
 
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
@@ -176,7 +177,8 @@ async fn complete_with_rulings_persists_retrievable_precedent_rows() {
 /// existing row's id, not a fresh one.
 #[tokio::test]
 async fn retrying_same_ruling_dedupes_to_one_precedent_row() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-950");
 
     let mut params = base_complete();
     params.rulings = vec![RulingRecordParams {
@@ -291,7 +293,8 @@ async fn retrying_same_ruling_dedupes_to_one_precedent_row() {
 /// own content, not a shared constant).
 #[tokio::test]
 async fn different_ruling_content_gets_a_different_precedent_path() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-950");
 
     let mut params = base_complete();
     params.rulings = vec![
@@ -364,7 +367,9 @@ async fn different_ruling_content_gets_a_different_precedent_path() {
 /// same row exactly like a same-dispatch retry does.
 #[tokio::test]
 async fn same_ruling_different_dispatch_still_dedupes_to_one_row() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-A");
+    seed_dispatch_run(&server, "disp-B");
 
     let ruling = RulingRecordParams {
         case: "same ruling, recaptured from an entirely different dispatch/flow".to_string(),
@@ -490,7 +495,8 @@ async fn same_ruling_different_dispatch_still_dedupes_to_one_row() {
 /// bytes — these two rulings must land on distinct paths.
 #[tokio::test]
 async fn nul_ambiguous_ruling_pair_gets_distinct_precedent_paths() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-950");
 
     let mut params = base_complete();
     params.rulings = vec![
@@ -554,7 +560,8 @@ async fn nul_ambiguous_ruling_pair_gets_distinct_precedent_paths() {
 
 #[tokio::test]
 async fn complete_without_rulings_writes_no_precedent() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-950");
 
     let resp = server
         .tachi_complete(Parameters(base_complete()))
@@ -571,7 +578,8 @@ async fn complete_without_rulings_writes_no_precedent() {
 
 #[tokio::test]
 async fn malformed_ruling_skipped_but_complete_succeeds() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-950");
 
     let mut params = base_complete();
     params.rulings = vec![
@@ -656,7 +664,8 @@ async fn malformed_ruling_skipped_but_complete_succeeds() {
 /// in `evidence_format.rs` now carries `precedent_recording` through whole.
 #[tokio::test]
 async fn default_format_receipt_still_surfaces_skipped_rulings() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-950");
 
     let mut params = base_complete();
     params.format = None; // exercise the compact/default receipt shaper
@@ -696,25 +705,18 @@ async fn default_format_receipt_still_surfaces_skipped_rulings() {
     );
 }
 
-/// Serializes access to the process-global `TACHI_CAPTURE_GATE` env var so
-/// this test doesn't race other tests in the (parallel, same-process) suite.
-/// Mirrors `TempHomeGuard`'s save/restore-on-drop pattern in `tests/mod.rs`.
+/// Save/restore the process-global `TACHI_CAPTURE_GATE` env var.
+/// Callers must already hold `global_test_lock` (e.g. via `TempHomeGuard`)
+/// so parallel tests do not race on the variable.
 struct CaptureGateEnforceGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
     original: Option<std::ffi::OsString>,
 }
 
 impl CaptureGateEnforceGuard {
     fn new() -> Self {
-        let lock = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let original = std::env::var_os("TACHI_CAPTURE_GATE");
         std::env::set_var("TACHI_CAPTURE_GATE", "enforce");
-        Self {
-            _lock: lock,
-            original,
-        }
+        Self { original }
     }
 }
 
@@ -735,8 +737,9 @@ impl Drop for CaptureGateEnforceGuard {
 /// counted as `recorded` with a null id.
 #[tokio::test]
 async fn enforce_mode_persists_valid_ruling_and_skips_gate_rejected_one() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-950");
     let _guard = CaptureGateEnforceGuard::new();
-    let server = make_server();
 
     let mut params = base_complete();
     params.rulings = vec![

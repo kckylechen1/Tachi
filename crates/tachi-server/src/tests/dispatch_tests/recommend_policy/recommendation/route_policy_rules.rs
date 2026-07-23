@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn tachi_task_recommend_consumes_approved_route_policy_rules() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
 
     for (task_id, profile, outcome, cost_usd, quality_score) in [
         (
@@ -143,7 +143,7 @@ async fn tachi_task_recommend_consumes_approved_route_policy_rules() {
 
 #[tokio::test]
 async fn tachi_task_recommend_skips_route_policy_rules_blocked_by_risk() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
     server
         .with_global_store(|store| {
             store

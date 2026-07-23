@@ -3,9 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use memcore::{
-    MemoryStore, FOUNDRY_RECALL_CACHE_SOURCE, RECALL_CACHE_SQL_WHERE, RECALL_CACHE_SQL_WHERE_M,
-};
+use memcore::{MemoryStore, VectorBackfillScope};
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 
@@ -105,14 +103,18 @@ pub(crate) fn list_missing_vector_entries(
     limit: Option<usize>,
 ) -> Result<Vec<(String, String, String, i64)>, String> {
     store
-        .entries_missing_vectors_filtered(
-            if skip_recall_cache {
-                Some(FOUNDRY_RECALL_CACHE_SOURCE)
-            } else {
-                None
+        .vector_backfill_entries(
+            VectorBackfillScope {
+                include_cache: !skip_recall_cache,
             },
             limit,
         )
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| (entry.id, entry.text, entry.summary, entry.revision))
+                .collect()
+        })
         .map_err(|e| format!("list missing vectors: {e}"))
 }
 
@@ -309,35 +311,12 @@ fn vector_counts_filtered(
     store: &MemoryStore,
     skip_recall_cache: bool,
 ) -> Result<(usize, usize), String> {
-    if !skip_recall_cache {
-        let (total, with_vec) = store
-            .vector_stats()
-            .map_err(|e| format!("vector stats: {e}"))?;
-        return Ok((total.max(0) as usize, with_vec.max(0) as usize));
-    }
-
-    let total: i64 = store
-        .connection()
-        .query_row(
-            &format!("SELECT COUNT(*) FROM memories WHERE NOT ({RECALL_CACHE_SQL_WHERE})"),
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("vector total stats: {e}"))?;
-    let with_vec: i64 = store
-        .connection()
-        .query_row(
-            &format!(
-                "SELECT COUNT(DISTINCT v.id)
-                 FROM memories_vec v
-                 JOIN memories m ON m.id = v.id
-                 WHERE NOT ({RECALL_CACHE_SQL_WHERE_M})"
-            ),
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("vector populated stats: {e}"))?;
-    Ok((total.max(0) as usize, with_vec.max(0) as usize))
+    let counts = store
+        .vector_backfill_counts(VectorBackfillScope {
+            include_cache: !skip_recall_cache,
+        })
+        .map_err(|e| format!("vector backfill counts: {e}"))?;
+    Ok((counts.total, counts.with_vector))
 }
 
 /// Embed and persist up to `batch_size` rows; partitions written, skipped, and failed rows.

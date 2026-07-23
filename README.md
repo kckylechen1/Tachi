@@ -449,6 +449,8 @@ cargo build --release
 
 # Run all tests (nextest is what CI runs: per-test timeouts, see .config/nextest.toml)
 cargo nextest run --workspace   # cargo install cargo-nextest; plain `cargo test --all` also works
+# Two tests need the gitignored docs/superpowers/ corpus (see #1378). Default runs
+# skip them via #[ignore]; on a provisioned box: cargo nextest run --run-ignored all …
 
 # Run the MCP server from source with the standard profile
 cargo run -p tachi-server -- --profile standard

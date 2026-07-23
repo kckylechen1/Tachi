@@ -2,6 +2,41 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn vault_exec_cli_parses_require_and_trailing_command() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "exec",
+        "--keychain",
+        "--consumer",
+        "clanker",
+        "--require",
+        "ZHIPUAI_API_KEY,XAI_API_KEY",
+        "--",
+        "opencode",
+        "run",
+        "--auto",
+    ])
+    .expect("vault exec invocation should parse");
+
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Vault {
+            action: VaultAction::Exec {
+                keychain: true,
+                consumer: Some(consumer),
+                require,
+                command,
+                ..
+            }
+        }) if consumer == "clanker"
+            && require == ["ZHIPUAI_API_KEY", "XAI_API_KEY"]
+            && command == ["opencode", "run", "--auto"]
+    ));
+    assert!(Cli::try_parse_from(["tachi", "vault", "exec", "--keychain"]).is_err());
+}
+
+#[test]
 fn exact_dedupe_cli_is_nested_under_repair_dedupe() {
     let parsed = Cli::try_parse_from([
         "tachi",
@@ -416,16 +451,36 @@ fn backfill_vectors_accepts_named_project() {
 }
 
 #[test]
-fn backfill_vectors_rejects_db_and_project_together() {
-    let parsed = Cli::try_parse_from([
-        "tachi",
-        "backfill-vectors",
-        "--db",
-        "/tmp/memory.db",
-        "--project",
-        "sigil",
-    ]);
-    assert!(parsed.is_err());
+fn backfill_vectors_all_projects_is_exclusive_and_cache_is_opt_in() {
+    let parsed = Cli::try_parse_from(["tachi", "backfill-vectors", "--all-projects", "--dry-run"])
+        .expect("all-projects dry run should parse");
+    match parsed.command.expect("command") {
+        Commands::BackfillVectors {
+            db,
+            project,
+            all_projects,
+            dry_run,
+            include_cache,
+            ..
+        } => {
+            assert!(db.is_none());
+            assert!(project.is_none());
+            assert!(all_projects);
+            assert!(dry_run);
+            assert!(!include_cache, "recall-cache rows must be explicit opt-in");
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    for conflicting_args in [
+        vec!["--db", "/tmp/memory.db", "--all-projects"],
+        vec!["--project", "sigil", "--all-projects"],
+        vec!["--db", "/tmp/memory.db", "--project", "sigil"],
+    ] {
+        let mut args = vec!["tachi", "backfill-vectors"];
+        args.extend(conflicting_args);
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]
