@@ -11,6 +11,9 @@ pub struct MaterializeReport {
     pub from_vault: usize,
     pub from_alias: usize,
     pub env_fallbacks_bypassed: usize,
+    /// Env/config key names whose plaintext values were ignored because vault won.
+    /// Names only — never secret values.
+    pub bypassed_names: Vec<String>,
     pub skipped_aliases: Vec<(String, String)>,
 }
 
@@ -115,12 +118,14 @@ where
             resolved_pools.insert(key.clone(), pool);
             report.from_alias += 1;
             report.env_fallbacks_bypassed += 1;
+            report.bypassed_names.push(key.clone());
             continue;
         }
 
         if vault_map.contains_key(&key) {
             // Vault wins over duplicate plaintext in env/config.env.
             report.env_fallbacks_bypassed += 1;
+            report.bypassed_names.push(key.clone());
             continue;
         }
 
@@ -211,6 +216,7 @@ mod tests {
 
         assert_eq!(report.from_alias, 1);
         assert_eq!(report.env_fallbacks_bypassed, 1);
+        assert_eq!(report.bypassed_names, vec!["VOYAGE_API_KEY".to_string()]);
         assert_eq!(
             llm.provider_secret_for_tests(&["VOYAGE_API_KEY"])
                 .as_deref(),
@@ -240,6 +246,7 @@ mod tests {
 
         assert_eq!(report.from_alias, 0);
         assert_eq!(report.env_fallbacks_bypassed, 1);
+        assert_eq!(report.bypassed_names, vec!["OPENAI_API_KEY".to_string()]);
         assert_eq!(
             llm.provider_secret_for_tests(&["OPENAI_API_KEY"])
                 .as_deref(),
