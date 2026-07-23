@@ -66,18 +66,6 @@ fn snapshot_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-fn assert_has_kind(report: &super::InjectionSurfaceReport, kind: &str) {
-    let kinds: Vec<_> = report
-        .findings
-        .iter()
-        .map(|f| f.check_kind.as_str())
-        .collect();
-    assert!(
-        report.findings.iter().any(|f| f.check_kind == kind),
-        "expected check_kind={kind}, got {kinds:?}"
-    );
-}
-
 fn assert_single_finding(report: &super::InjectionSurfaceReport, kind: &str) {
     assert_eq!(
         report.findings.len(),
@@ -489,7 +477,7 @@ fn injection_surface_doctor_boundary_leaves_fixture_byte_identical() {
         "doctor must leave fixture files byte-identical"
     );
     // Credential finding is expected (world-readable), but VALUE must stay out.
-    assert_has_kind(&report, "credential_world_readable");
+    assert_single_finding(&report, "credential_world_readable");
     let serialized = serde_json::to_string(&report).unwrap();
     assert!(!serialized.contains(secret_value));
     let _ = fs::remove_dir_all(home);
@@ -701,5 +689,168 @@ fn injection_surface_red_plane_io_unreadable_continues() {
     assert_eq!(report.findings[0].plane, "mcp");
     assert_eq!(report.findings[0].severity, "CONCERN");
     assert_eq!(report.summary.planes_scanned, 2);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn injection_surface_red_credential_path_is_directory_not_silent_clean() {
+    let home = temp_root("cred-is-dir");
+    let cred_dir = home.join("fixture-a/cred-dir");
+    fs::create_dir_all(&cred_dir).unwrap();
+    write(
+        &home.join("fixture-a/env.json"),
+        r#"{"tachi_profile":"fixture-a","injected_paths":[]}"#,
+    );
+    let registry = write_registry(
+        &home,
+        serde_json::json!([{
+            "harness_id": "fixture-a",
+            "expected_tachi_profile": "fixture-a",
+            "planes": {
+                "credential": plane("fixture-a/cred-dir", true),
+                "environment": plane("fixture-a/env.json", true),
+                "mcp": { "scanned": false },
+                "plugin": { "scanned": false },
+                "density": { "scanned": false }
+            }
+        }]),
+    );
+
+    let report = build_report(&registry, Some(&home)).unwrap();
+    assert_single_finding(&report, "plane_path_unreadable");
+    assert_eq!(report.findings[0].plane, "credential");
+    assert_eq!(report.findings[0].severity, "CONCERN");
+    assert_eq!(report.summary.planes_scanned, 2);
+    let scanned_planes: Vec<_> = report
+        .plane_accounts
+        .iter()
+        .filter(|a| a.status == "scanned")
+        .map(|a| a.plane.as_str())
+        .collect();
+    assert!(scanned_planes.contains(&"credential"));
+    assert!(scanned_planes.contains(&"environment"));
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn injection_surface_red_mcp_config_malformed_continues() {
+    let home = temp_root("mcp-malformed");
+    write(&home.join("fixture-a/mcp.json"), r#"{"registrations":[not-json"#);
+    write(
+        &home.join("fixture-a/env.json"),
+        r#"{"tachi_profile":"fixture-a","injected_paths":[]}"#,
+    );
+    let registry = write_registry(
+        &home,
+        serde_json::json!([{
+            "harness_id": "fixture-a",
+            "expected_tachi_profile": "fixture-a",
+            "planes": {
+                "mcp": plane("fixture-a/mcp.json", true),
+                "environment": plane("fixture-a/env.json", true),
+                "plugin": { "scanned": false },
+                "credential": { "scanned": false },
+                "density": { "scanned": false }
+            }
+        }]),
+    );
+
+    let report = build_report(&registry, Some(&home))
+        .expect("malformed mcp must yield Ok(report) with findings, not Err");
+    assert_single_finding(&report, "plane_config_malformed");
+    assert_eq!(report.findings[0].plane, "mcp");
+    assert_eq!(report.findings[0].severity, "CONCERN");
+    assert_eq!(report.summary.planes_scanned, 2);
+    let scanned_planes: Vec<_> = report
+        .plane_accounts
+        .iter()
+        .filter(|a| a.status == "scanned")
+        .map(|a| a.plane.as_str())
+        .collect();
+    assert!(scanned_planes.contains(&"mcp"));
+    assert!(scanned_planes.contains(&"environment"));
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn injection_surface_red_plugin_config_malformed_continues() {
+    let home = temp_root("plugin-malformed");
+    write(&home.join("fixture-a/plugin.json"), r#"{"entries":[not-json"#);
+    write(
+        &home.join("fixture-a/env.json"),
+        r#"{"tachi_profile":"fixture-a","injected_paths":[]}"#,
+    );
+    let registry = write_registry(
+        &home,
+        serde_json::json!([{
+            "harness_id": "fixture-a",
+            "expected_tachi_profile": "fixture-a",
+            "planes": {
+                "plugin": plane("fixture-a/plugin.json", true),
+                "environment": plane("fixture-a/env.json", true),
+                "mcp": { "scanned": false },
+                "credential": { "scanned": false },
+                "density": { "scanned": false }
+            }
+        }]),
+    );
+
+    let report = build_report(&registry, Some(&home))
+        .expect("malformed plugin must yield Ok(report) with findings, not Err");
+    assert_single_finding(&report, "plane_config_malformed");
+    assert_eq!(report.findings[0].plane, "plugin");
+    assert_eq!(report.findings[0].severity, "CONCERN");
+    assert_eq!(report.summary.planes_scanned, 2);
+    let scanned_planes: Vec<_> = report
+        .plane_accounts
+        .iter()
+        .filter(|a| a.status == "scanned")
+        .map(|a| a.plane.as_str())
+        .collect();
+    assert!(scanned_planes.contains(&"plugin"));
+    assert!(scanned_planes.contains(&"environment"));
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn injection_surface_red_environment_config_malformed_continues() {
+    let home = temp_root("env-malformed");
+    write(&home.join("fixture-a/env.json"), r#"{"tachi_profile":[not-json"#);
+    write_mode(
+        &home.join("fixture-a/api_key.credentials.json"),
+        r#"{"apiKey":"ENV_MALFORMED_SECRET_do_not_leak_ee05"}"#,
+        0o600,
+    );
+    let registry = write_registry(
+        &home,
+        serde_json::json!([{
+            "harness_id": "fixture-a",
+            "expected_tachi_profile": "fixture-a",
+            "planes": {
+                "environment": plane("fixture-a/env.json", true),
+                "credential": plane("fixture-a/api_key.credentials.json", true),
+                "mcp": { "scanned": false },
+                "plugin": { "scanned": false },
+                "density": { "scanned": false }
+            }
+        }]),
+    );
+
+    let report = build_report(&registry, Some(&home))
+        .expect("malformed environment must yield Ok(report) with findings, not Err");
+    assert_single_finding(&report, "plane_config_malformed");
+    assert_eq!(report.findings[0].plane, "environment");
+    assert_eq!(report.findings[0].severity, "CONCERN");
+    assert_eq!(report.summary.planes_scanned, 2);
+    let scanned_planes: Vec<_> = report
+        .plane_accounts
+        .iter()
+        .filter(|a| a.status == "scanned")
+        .map(|a| a.plane.as_str())
+        .collect();
+    assert!(scanned_planes.contains(&"environment"));
+    assert!(scanned_planes.contains(&"credential"));
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(!serialized.contains("ENV_MALFORMED_SECRET_do_not_leak_ee05"));
     let _ = fs::remove_dir_all(home);
 }

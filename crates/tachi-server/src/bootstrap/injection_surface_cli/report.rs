@@ -317,13 +317,60 @@ fn plane_path_io_finding(harness_id: &str, plane: &str, path: &Path) -> Finding 
     }
 }
 
+/// Shared gate: path exists but is not a regular file → finding, skip content scan.
+/// Missing / metadata-error paths return None so plane scanners keep their IO findings.
+fn reject_non_regular_file(harness_id: &str, plane: &str, path: &Path) -> Option<Finding> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() => None,
+        Ok(_) => Some(Finding {
+            harness_id: harness_id.to_string(),
+            plane: plane.to_string(),
+            check_kind: "plane_path_unreadable".to_string(),
+            evidence_path: path.display().to_string(),
+            severity: "CONCERN".to_string(),
+            remediation_owner: "fleet-registry".to_string(),
+        }),
+        Err(_) => None,
+    }
+}
+
+fn plane_config_malformed_finding(harness_id: &str, plane: &str, path: &Path) -> Finding {
+    Finding {
+        harness_id: harness_id.to_string(),
+        plane: plane.to_string(),
+        check_kind: "plane_config_malformed".to_string(),
+        evidence_path: path.display().to_string(),
+        severity: "CONCERN".to_string(),
+        remediation_owner: "fleet-registry".to_string(),
+    }
+}
+
+fn empty_plugin_scan(harness_id: &str, path: &Path, finding: Finding) -> PluginScan {
+    PluginScan {
+        harness_id: harness_id.to_string(),
+        plane_path: path.to_path_buf(),
+        cache_dirs: Vec::new(),
+        skill_roster: Vec::new(),
+        corpse_findings: vec![finding],
+    }
+}
+
 fn scan_mcp(harness_id: &str, path: &Path) -> Result<Vec<Finding>, String> {
+    if let Some(finding) = reject_non_regular_file(harness_id, "mcp", path) {
+        return Ok(vec![finding]);
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(_) => return Ok(vec![plane_path_io_finding(harness_id, "mcp", path)]),
     };
-    let file: McpPlaneFile =
-        serde_json::from_str(&text).map_err(|e| format!("parse mcp plane {}: {e}", path.display()))?;
+    let file: McpPlaneFile = match serde_json::from_str(&text) {
+        Ok(file) => file,
+        Err(_) => {
+            return Ok(vec![plane_config_malformed_finding(
+                harness_id, "mcp", path,
+            )]);
+        }
+    };
 
     let mut by_name: BTreeMap<String, Vec<&McpRegistration>> = BTreeMap::new();
     for reg in &file.registrations {
@@ -358,20 +405,29 @@ fn scan_plugin(
     path: &Path,
     resolve_root: &Path,
 ) -> Result<PluginScan, String> {
+    if let Some(finding) = reject_non_regular_file(harness_id, "plugin", path) {
+        return Ok(empty_plugin_scan(harness_id, path, finding));
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(_) => {
-            return Ok(PluginScan {
-                harness_id: harness_id.to_string(),
-                plane_path: path.to_path_buf(),
-                cache_dirs: Vec::new(),
-                skill_roster: Vec::new(),
-                corpse_findings: vec![plane_path_io_finding(harness_id, "plugin", path)],
-            });
+            return Ok(empty_plugin_scan(
+                harness_id,
+                path,
+                plane_path_io_finding(harness_id, "plugin", path),
+            ));
         }
     };
-    let file: PluginPlaneFile = serde_json::from_str(&text)
-        .map_err(|e| format!("parse plugin plane {}: {e}", path.display()))?;
+    let file: PluginPlaneFile = match serde_json::from_str(&text) {
+        Ok(file) => file,
+        Err(_) => {
+            return Ok(empty_plugin_scan(
+                harness_id,
+                path,
+                plane_config_malformed_finding(harness_id, "plugin", path),
+            ));
+        }
+    };
 
     let mut cache_dirs = Vec::new();
     let mut corpse_findings = Vec::new();
@@ -464,13 +520,13 @@ fn path_under(path: &Path, ancestor: &Path) -> bool {
 /// A registry-declared credential path is always in scope for the mode check;
 /// basename heuristics must not veto declared files.
 fn scan_credential(harness_id: &str, path: &Path) -> Vec<Finding> {
+    if let Some(finding) = reject_non_regular_file(harness_id, "credential", path) {
+        return vec![finding];
+    }
     let meta = match fs::metadata(path) {
         Ok(meta) => meta,
         Err(_) => return vec![plane_path_io_finding(harness_id, "credential", path)],
     };
-    if !meta.is_file() {
-        return Vec::new();
-    }
 
     #[cfg(unix)]
     {
@@ -499,11 +555,11 @@ fn scan_credential(harness_id: &str, path: &Path) -> Vec<Finding> {
 
 /// Density first-slice: declared path must exist and be readable as a file.
 fn scan_density(harness_id: &str, path: &Path) -> Vec<Finding> {
+    if let Some(finding) = reject_non_regular_file(harness_id, "density", path) {
+        return vec![finding];
+    }
     match fs::metadata(path) {
         Err(_) => return vec![plane_path_io_finding(harness_id, "density", path)],
-        Ok(meta) if !meta.is_file() => {
-            return vec![plane_path_io_finding(harness_id, "density", path)];
-        }
         Ok(_) => {}
     }
     match fs::File::open(path) {
@@ -517,6 +573,9 @@ fn scan_environment(
     path: &Path,
     retired_prefixes: &[String],
 ) -> Result<Vec<Finding>, String> {
+    if let Some(finding) = reject_non_regular_file(&harness.harness_id, "environment", path) {
+        return Ok(vec![finding]);
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(_) => {
@@ -527,8 +586,16 @@ fn scan_environment(
             )]);
         }
     };
-    let file: EnvironmentPlaneFile = serde_json::from_str(&text)
-        .map_err(|e| format!("parse environment plane {}: {e}", path.display()))?;
+    let file: EnvironmentPlaneFile = match serde_json::from_str(&text) {
+        Ok(file) => file,
+        Err(_) => {
+            return Ok(vec![plane_config_malformed_finding(
+                &harness.harness_id,
+                "environment",
+                path,
+            )]);
+        }
+    };
 
     let mut findings = Vec::new();
 
