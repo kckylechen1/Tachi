@@ -6,9 +6,11 @@
 #
 # Behavior:
 #   1. Runs `cargo nextest run -p tachi-server --no-fail-fast` once with JUnit
-#      output enabled.
+#      output enabled. Set NEXTEST_TEST_THREADS to pass an explicit nextest
+#      concurrency setting through to the run.
 #   2. Parses the JUnit XML into one JSONL line per failed test:
-#        {run_id, started_at, test_id, failure_line1_hash, duration_s}
+#        {run_id, test_threads, target_dir, target_pre_run_state,
+#         run_runtime_s, test_id, failure_line1_hash, recurrence, ...}
 #      failure_line1_hash = sha256 of the first line of the failure message.
 #   3. Appends to $CENSUS_DIR/census.jsonl (default:
 #      /Users/kckylechen/.cache/sigil-shared-target/nextest-census/census.jsonl)
@@ -32,7 +34,27 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TARGET_DIR="${CARGO_TARGET_DIR:-/Users/kckylechen/.cache/sigil-shared-target}"
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  TARGET_SOURCE="CARGO_TARGET_DIR"
+  TARGET_DIR="${CARGO_TARGET_DIR}"
+else
+  TARGET_SOURCE="default"
+  TARGET_DIR="/Users/kckylechen/.cache/sigil-shared-target"
+fi
+if [[ ! -e "${TARGET_DIR}" ]]; then
+  TARGET_PRE_RUN_STATE="absent"
+elif [[ ! -d "${TARGET_DIR}" ]]; then
+  TARGET_PRE_RUN_STATE="not_a_directory"
+elif [[ -n "$(find "${TARGET_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  TARGET_PRE_RUN_STATE="nonempty"
+else
+  TARGET_PRE_RUN_STATE="empty"
+fi
+case "${TARGET_PRE_RUN_STATE}" in
+  absent|empty) TARGET_CLEAN_BEFORE_RUN=true ;;
+  *) TARGET_CLEAN_BEFORE_RUN=false ;;
+esac
+TEST_THREADS="${NEXTEST_TEST_THREADS:-default}"
 CENSUS_DIR="${NEXTEST_CENSUS_DIR:-${TARGET_DIR}/nextest-census}"
 # nextest store dir is workspace-relative (`[store] dir = "target/nextest"`),
 # not under --target-dir. The census profile writes junit.xml there.
@@ -48,9 +70,11 @@ touch "${JSONL}"
 
 RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+RUN_STARTED_EPOCH="$(date +%s)"
 
 echo "nextest-census: run_id=${RUN_ID} started_at=${STARTED_AT}"
-echo "nextest-census: target_dir=${TARGET_DIR}"
+echo "nextest-census: target_dir=${TARGET_DIR} source=${TARGET_SOURCE} pre_run_state=${TARGET_PRE_RUN_STATE} clean_before_run=${TARGET_CLEAN_BEFORE_RUN}"
+echo "nextest-census: test_threads=${TEST_THREADS}"
 echo "nextest-census: junit=${JUNIT_PATH}"
 echo "nextest-census: jsonl=${JSONL}"
 
@@ -60,11 +84,16 @@ rm -f "${JUNIT_PATH}"
 set +e
 (
   cd "${ROOT}"
-  cargo nextest run -p tachi-server --no-fail-fast --profile census \
-    --target-dir "${TARGET_DIR}"
+  nextest_args=(nextest run -p tachi-server --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
+  if [[ "${TEST_THREADS}" != "default" ]]; then
+    nextest_args+=(--test-threads "${TEST_THREADS}")
+  fi
+  cargo "${nextest_args[@]}"
 )
 NEXTEST_EXIT=$?
 set -e
+FINISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+RUN_RUNTIME_S=$(( $(date +%s) - RUN_STARTED_EPOCH ))
 
 if [[ ! -f "${JUNIT_PATH}" ]]; then
   echo "nextest-census: STOP — JUnit XML not produced at ${JUNIT_PATH}" >&2
@@ -160,39 +189,40 @@ census_lock_release() {
 census_lock_acquire
 trap census_lock_release EXIT
 
-# Collect previously-seen failure_line1_hash values (field 4 in compact JSON).
-PREV_HASHES="$(mktemp)"
-# shellcheck disable=SC2016
-python3 - "${JSONL}" "${PREV_HASHES}" <<'PY'
-import json, sys
-src, dst = sys.argv[1], sys.argv[2]
-seen = set()
-with open(src, encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        h = obj.get("failure_line1_hash")
-        if h:
-            seen.add(h)
-with open(dst, "w", encoding="utf-8") as out:
-    for h in sorted(seen):
-        out.write(h + "\n")
-PY
-
 NEW_ROWS="$(mktemp)"
-python3 - "${JUNIT_PATH}" "${RUN_ID}" "${STARTED_AT}" "${NEW_ROWS}" <<'PY'
+python3 - "${JUNIT_PATH}" "${JSONL}" "${RUN_ID}" "${STARTED_AT}" "${FINISHED_AT}" "${RUN_RUNTIME_S}" "${TARGET_DIR}" "${TARGET_SOURCE}" "${TARGET_PRE_RUN_STATE}" "${TARGET_CLEAN_BEFORE_RUN}" "${TEST_THREADS}" "${NEXTEST_EXIT}" "${NEW_ROWS}" <<'PY'
+from collections import Counter
 import hashlib
 import json
 import re
 import sys
 import xml.etree.ElementTree as ET
 
-junit_path, run_id, started_at, out_path = sys.argv[1:5]
+(
+    junit_path,
+    jsonl_path,
+    run_id,
+    started_at,
+    finished_at,
+    run_runtime_s,
+    target_dir,
+    target_source,
+    target_pre_run_state,
+    target_clean_before_run,
+    test_threads,
+    nextest_exit,
+    out_path,
+) = sys.argv[1:14]
+previous = Counter()
+with open(jsonl_path, encoding="utf-8") as prior_rows:
+    for line in prior_rows:
+        try:
+            prior = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        key = (prior.get("test_id"), prior.get("failure_line1_hash"))
+        if all(key):
+            previous[key] += 1
 tree = ET.parse(junit_path)
 root = tree.getroot()
 
@@ -227,6 +257,7 @@ for suite in suites:
         # (otherwise every run looks "novel" and the census cannot accumulate).
         first_line = re.sub(r" \(\d+\) panicked", " panicked", first_line)
         digest = hashlib.sha256(first_line.encode("utf-8")).hexdigest()
+        prior_matching_failures = previous[(test_id, digest)]
         try:
             duration_s = float(case.get("time") or "0")
         except ValueError:
@@ -235,9 +266,19 @@ for suite in suites:
             {
                 "run_id": run_id,
                 "started_at": started_at,
+                "finished_at": finished_at,
+                "run_runtime_s": int(run_runtime_s),
+                "test_threads": test_threads,
+                "target_dir": target_dir,
+                "target_source": target_source,
+                "target_pre_run_state": target_pre_run_state,
+                "target_clean_before_run": target_clean_before_run == "true",
+                "nextest_exit": int(nextest_exit),
                 "test_id": test_id,
                 "failure_line1_hash": digest,
                 "duration_s": duration_s,
+                "prior_matching_failures": prior_matching_failures,
+                "recurrence": "recurrent" if prior_matching_failures else "novel",
             }
         )
 
@@ -251,22 +292,23 @@ FAIL_N=$(wc -l < "${NEW_ROWS}" | tr -d ' ')
 REPEAT_M=0
 NOVEL_K=0
 if [[ "${FAIL_N}" -gt 0 ]]; then
-  while IFS= read -r line; do
-    hash="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["failure_line1_hash"])' <<<"${line}")"
-    if grep -Fxq "${hash}" "${PREV_HASHES}" 2>/dev/null; then
-      REPEAT_M=$((REPEAT_M + 1))
-    else
-      NOVEL_K=$((NOVEL_K + 1))
-    fi
-  done < "${NEW_ROWS}"
+  REPEAT_M="$(python3 - "${NEW_ROWS}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as rows:
+    print(sum(json.loads(line).get("recurrence") == "recurrent" for line in rows if line.strip()))
+PY
+)"
+  NOVEL_K=$((FAIL_N - REPEAT_M))
   cat "${NEW_ROWS}" >> "${JSONL}"
 fi
 
-rm -f "${PREV_HASHES}" "${NEW_ROWS}"
+rm -f "${NEW_ROWS}"
 census_lock_release
 trap - EXIT
 
-echo "nextest-census: summary failed=${FAIL_N} previously_seen=${REPEAT_M} novel=${NOVEL_K}"
+echo "nextest-census: summary nextest_exit=${NEXTEST_EXIT} runtime_s=${RUN_RUNTIME_S} failed=${FAIL_N} previously_seen=${REPEAT_M} novel=${NOVEL_K}"
 echo "nextest-census: jsonl_lines=$(wc -l < "${JSONL}" | tr -d ' ') path=${JSONL}"
 
 # Census always records; surface nextest's exit for callers that care.
