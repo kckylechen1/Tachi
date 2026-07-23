@@ -100,10 +100,7 @@ async fn vault_lease_api_key_bumps_selected_access_count_exactly_once() {
         .await
         .expect("vault_set_api_key_pool should succeed");
 
-    reset_access_counts(
-        &server,
-        &["ROT_PROBE_API_KEY_1", "ROT_PROBE_API_KEY_2"],
-    );
+    reset_access_counts(&server, &["ROT_PROBE_API_KEY_1", "ROT_PROBE_API_KEY_2"]);
     assert_eq!(access_count(&server, "ROT_PROBE_API_KEY_1"), 0);
     assert_eq!(access_count(&server, "ROT_PROBE_API_KEY_2"), 0);
 
