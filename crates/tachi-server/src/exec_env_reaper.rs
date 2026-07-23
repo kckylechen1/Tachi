@@ -52,10 +52,10 @@
 //! * **BUG 2 — the pinned identity was a pathname, not a file identity.** [`OrphanCandidate::identity`]
 //!   is a `PathBuf` — a spelling — and re-resolving a spelling only proves the NAME still resolves,
 //!   not that it resolves to the same OBJECT. [`OrphanCandidate::file_identity`] pins a real
-//!   `(dev, ino)` ([`FileIdentity`]) at judgement, and [`delete_resource_bytes`] re-`stat`s it
-//!   immediately before `remove_dir_all`, refusing on any mismatch — including "could not be
-//!   re-stat'd at all".
-//! * **BUG 4 — a partial delete used to still exit 0.** A `remove_dir_all` that failed halfway
+//!   `(dev, ino)` ([`FileIdentity`]) at judgement, then pins the candidate's parent/root
+//!   descriptors before the final destructive judgement. [`delete_resource_bytes`] drains only
+//!   contained descendants below that root; it never removes the candidate root name.
+//! * **BUG 4 — a partial delete used to still exit 0.** A descendant drain that failed halfway
 //!   left the resource half-deleted with no trace in the exit status: [`reclaim_candidate`]'s
 //!   `Err` conflated a designed safety refusal (a fence firing) with a delete that was ATTEMPTED
 //!   and did not finish. [`ReclaimFailure`] now types the two apart; only
@@ -158,9 +158,8 @@
 //! * **The judged object is the deleted object** ([`OrphanCandidate::identity`]).
 //!   `--root` is caller-supplied and may be or contain a symlink; every fence used
 //!   to resolve the *name* independently, so retargeting the link between the
-//!   verdict and `remove_dir_all` redirected the delete. The scan now pins the
-//!   resolved identity and the deleter refuses anything that does not still resolve
-//!   to it.
+//!   verdict and a pathname delete redirected the delete. The final force judgement
+//!   now pins parent/root descriptors and refuses a changed root before any unlink.
 //! * **The scan keeps books** ([`UnitClass`], [`ScanAccounting`]). Missing roots,
 //!   failed `read_dir`s, depth truncation and protection prunes were all bare
 //!   `continue`s: invisible in the report, `errors` empty, exit 0. That is not a
@@ -235,6 +234,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+#[cfg(target_os = "linux")]
+use std::ffi::{CStr, CString};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+
 use memcore::{
     ExecEnvResource, MemoryError, NewExecEnvResource, RegisterOutcome, ResourceKind,
     ResourceReclaimOutcome, ResourceState,
@@ -253,6 +259,11 @@ use tachi_clean::wt_open::SHARED_CARGO_TARGET_DIR_ENV;
 const DEFAULT_MAX_DEPTH: usize = 3;
 
 const SECS_PER_DAY: u64 = 24 * 60 * 60;
+
+/// A concurrent creator may repopulate a pinned root while it is being drained. We
+/// observe emptiness after each finite pass, rather than claiming it stays empty.
+#[cfg(target_os = "linux")]
+const MAX_CONTENT_RECLAIM_PASSES: usize = 4;
 
 // ── Certification (the sheath) ──────────────────────────────────────────────
 
@@ -1777,10 +1788,10 @@ pub(crate) fn cheap_verdict(
             return Err(SkipReason::TooYoung {
                 age_days: *age_days,
                 max_age_days,
-            })
+            });
         }
         Staleness::Unprovable(reason) => {
-            return Err(SkipReason::StalenessUnprovable(reason.clone()))
+            return Err(SkipReason::StalenessUnprovable(reason.clone()));
         }
         Staleness::Stale { .. } => {}
     }
@@ -1867,6 +1878,9 @@ pub(crate) struct CandidateReport {
     ///   no longer resolves to the same object, a holder appeared, or the ledger
     ///   bounced the reclaim. **A late refusal relabels**; leaving `reclaim` on a
     ///   candidate whose bytes are still on disk is a report that lies.
+    /// * `partial` — a descendant unlink succeeded, then a later contained operation
+    ///   failed or concurrent creation exhausted the bounded retry budget. The ledger
+    ///   is `reclaim_failed` and the run exits non-zero.
     /// * `error`   — the run could not decide (a ledger lookup failed): an
     ///   `incomplete-or-error` unit, and it costs the run its clean exit.
     pub(crate) decision: &'static str,
@@ -1889,6 +1903,12 @@ pub(crate) struct ReclaimedReport {
     pub(crate) resource_id: String,
     pub(crate) kind: &'static str,
     pub(crate) reason: &'static str,
+    /// The only successful destructive outcome: descendants were reclaimed while
+    /// the judged root object was retained.
+    pub(crate) outcome: &'static str,
+    /// True only after the pinned root's children were observed empty. This is an
+    /// observation at completion, not a claim that concurrent writers cannot refill it.
+    pub(crate) root_retained: bool,
     /// Bytes the filesystem actually gave back (S2a stamps this only after the
     /// delete happened).
     pub(crate) reclaimed_bytes: i64,
@@ -2152,6 +2172,32 @@ fn run_orphan_reap_uncertified(
         };
 
         if let (ReapDecision::Reclaim(claim), true) = (&decision, opts.force) {
+            // The root capability is acquired before the final destructive judgement
+            // (including the fresh protection read) and before the ledger moves a row
+            // into `reclaiming`. A replacement/lost root therefore refuses before any
+            // descendant unlink or ledger reclaim transition.
+            let pinned = match pin_content_root(&candidate) {
+                Ok(pinned) => pinned,
+                Err(failure) => {
+                    decision_label = "refused";
+                    reason = failure.message().to_string();
+                    report.warnings.push(reason.clone());
+                    report.candidates.push(CandidateReport {
+                        path: path.clone(),
+                        kind: candidate.kind.as_str(),
+                        bytes: candidate.bytes,
+                        age_days: candidate.staleness.age_days(),
+                        holders: candidate
+                            .holders
+                            .as_ref()
+                            .map(HolderCheck::describe)
+                            .unwrap_or_else(|| "not probed".to_string()),
+                        decision: decision_label,
+                        reason,
+                    });
+                    continue;
+                }
+            };
             // **sol audit fix (BUG 1).** The protected set is recomputed HERE, at the
             // delete — it is NOT the snapshot the scan took. The snapshot is stale by
             // construction: a build that claimed `--target-dir` after the scan is
@@ -2201,8 +2247,15 @@ fn run_orphan_reap_uncertified(
                      after the scan); the run's opening protected set did not cover it"
                 ))
             } else {
-                match reclaim_candidate(conn, &candidate, *claim, existing.as_ref(), probe, &fresh)
-                {
+                match reclaim_candidate(
+                    conn,
+                    &candidate,
+                    *claim,
+                    existing.as_ref(),
+                    probe,
+                    &fresh,
+                    &pinned,
+                ) {
                     Ok(reclaimed) => {
                         report.reclaimed_bytes += reclaimed.reclaimed_bytes;
                         report.revived_bytes += reclaimed.revived_previous_bytes.unwrap_or(0);
@@ -2223,12 +2276,15 @@ fn run_orphan_reap_uncertified(
                     }
                     Err(failure @ ReclaimFailure::DeleteFailed(_)) => {
                         report.errors.push(failure.message().to_string());
+                        decision_label = "partial";
                         Some(failure.message().to_string())
                     }
                 }
             };
             if let Some(err) = refusal {
-                decision_label = "refused";
+                if decision_label != "partial" {
+                    decision_label = "refused";
+                }
                 reason = err.clone();
                 report.warnings.push(err);
             }
@@ -2372,6 +2428,7 @@ fn reclaim_candidate(
     existing: Option<&ExecEnvResource>,
     probe: &HolderProbe,
     protection: &Protection,
+    pinned: &PinnedContentRoot,
 ) -> Result<ReclaimedReport, ReclaimFailure> {
     let path = candidate.path.display().to_string();
 
@@ -2428,17 +2485,11 @@ fn reclaim_candidate(
 
     let outcome =
         memcore::reclaim_resource(conn, &resource_id, Some(reason.as_str()), |resource| {
-            // `protection` here is the set recomputed at delete time by the caller,
-            // and `identity` / `file_identity` are the object the verdict was
-            // rendered against — the deleter re-resolves both and refuses anything
-            // else (BUG 1 / BUG 2).
-            delete_resource_bytes(
-                resource,
-                probe,
-                protection,
-                &candidate.identity,
-                candidate.file_identity,
-            )
+            // `protection` here is the set recomputed at delete time by the caller.
+            // The final force judgement pinned the candidate's parent/root fds before
+            // the ledger transition. Every destructive descendant operation below uses
+            // that root capability, never the candidate name.
+            delete_resource_bytes(resource, probe, protection, pinned)
         })
         .map_err(|err| {
             // **BUG 4.** `memcore::reclaim_resource` returns `Err` in exactly two
@@ -2462,6 +2513,9 @@ fn reclaim_candidate(
             // anymore, and that is exactly the class BUG 4 exists for, not a clean
             // refusal.
             match &err {
+                MemoryError::InvalidArg(msg) if msg.starts_with(PARTIAL_CONTENT_RECLAIM_PREFIX) => {
+                    ReclaimFailure::DeleteFailed(format!("reclaim of {path} failed: {msg}"))
+                }
                 MemoryError::InvalidArg(msg) if msg.starts_with(IDENTITY_UNRESOLVED_PREFIX) => {
                     ReclaimFailure::DeleteFailed(format!("reclaim of {path} failed: {msg}"))
                 }
@@ -2481,6 +2535,8 @@ fn reclaim_candidate(
             resource_id,
             kind: candidate.kind.as_str(),
             reason: reason.as_str(),
+            outcome: "reclaimed_content",
+            root_retained: true,
             reclaimed_bytes,
             revived_previous_bytes,
         }),
@@ -2538,142 +2594,502 @@ fn reclaim_candidate(
     }
 }
 
-/// The deleter S2a hands the filesystem work to. Runs AFTER `reclaiming` is
-/// committed and OUTSIDE any transaction; must be idempotent (a re-entered
-/// reclaim of an already-deleted path frees 0 bytes, and S2a assigns rather
-/// than accumulates, so 0 cannot corrupt a prior count).
-///
-/// `protection` must be the set computed **at delete time** (BUG 1), `pinned` the
-/// spelling the verdict was rendered against, and `pinned_identity` the `(dev, ino)`
-/// captured at the same moment (BUG 2). All three are re-asserted here, on the last
-/// lines before `remove_dir_all`.
+const CONTENT_RECLAIM_REFUSED_PREFIX: &str = "content reclaim refused: ";
+const PARTIAL_CONTENT_RECLAIM_PREFIX: &str = "partial content reclaim: ";
+
+/// A pinned capability for one judged candidate root. The parent is deliberately
+/// retained too: opening the root through that parent proves the root object before
+/// judgement, while every destructive operation below uses the root fd only.
+#[cfg(target_os = "linux")]
+struct PinnedContentRoot {
+    _parent: OwnedFd,
+    root: OwnedFd,
+    identity: FileIdentity,
+}
+
+#[cfg(not(target_os = "linux"))]
+struct PinnedContentRoot;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+#[cfg(target_os = "linux")]
+const RESOLVE_NO_XDEV: u64 = 0x01;
+#[cfg(target_os = "linux")]
+const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+#[cfg(target_os = "linux")]
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+#[cfg(target_os = "linux")]
+const RESOLVE_BENEATH: u64 = 0x08;
+
+#[derive(Debug)]
+enum ContentReclaimFailure {
+    Refused(String),
+    #[cfg(target_os = "linux")]
+    Partial(String),
+}
+
+impl ContentReclaimFailure {
+    fn message(&self) -> &str {
+        match self {
+            Self::Refused(reason) => reason,
+            #[cfg(target_os = "linux")]
+            Self::Partial(reason) => reason,
+        }
+    }
+
+    fn into_memory_error(self) -> MemoryError {
+        match self {
+            Self::Refused(reason) => {
+                MemoryError::InvalidArg(format!("{CONTENT_RECLAIM_REFUSED_PREFIX}{reason}"))
+            }
+            #[cfg(target_os = "linux")]
+            Self::Partial(reason) => {
+                MemoryError::InvalidArg(format!("{PARTIAL_CONTENT_RECLAIM_PREFIX}{reason}"))
+            }
+        }
+    }
+}
+
+/// Pin the candidate's canonical parent and root before the final destructive
+/// judgement. Linux `openat2` is mandatory: without its `BENEATH`, no-symlink and
+/// no-mount semantics, a descriptor-relative traversal cannot prove containment.
+#[cfg(target_os = "linux")]
+fn pin_content_root(
+    candidate: &OrphanCandidate,
+) -> Result<PinnedContentRoot, ContentReclaimFailure> {
+    let expected = candidate.file_identity.ok_or_else(|| {
+        ContentReclaimFailure::Refused(
+            "candidate identity was not captured before content reclaim".to_string(),
+        )
+    })?;
+    let parent_path = candidate.identity.parent().ok_or_else(|| {
+        ContentReclaimFailure::Refused(format!(
+            "candidate root {} has no parent to pin",
+            candidate.identity.display()
+        ))
+    })?;
+    let root_name = candidate.identity.file_name().ok_or_else(|| {
+        ContentReclaimFailure::Refused(format!(
+            "candidate root {} has no basename to pin",
+            candidate.identity.display()
+        ))
+    })?;
+    let parent = open_directory_from_cwd(parent_path).map_err(|err| {
+        ContentReclaimFailure::Refused(format!(
+            "cannot pin parent of {} with openat2 containment: {err}",
+            candidate.identity.display()
+        ))
+    })?;
+    let root = open_directory_beneath(parent.as_raw_fd(), root_name).map_err(|err| {
+        ContentReclaimFailure::Refused(format!(
+            "cannot pin candidate root {} with openat2 containment: {err}",
+            candidate.identity.display()
+        ))
+    })?;
+    let actual = fd_identity(root.as_raw_fd()).map_err(|err| {
+        ContentReclaimFailure::Refused(format!(
+            "cannot verify pinned candidate root {}: {err}",
+            candidate.identity.display()
+        ))
+    })?;
+    if actual != expected {
+        return Err(ContentReclaimFailure::Refused(format!(
+            "pinned candidate root {} changed before its first descendant unlink (captured \
+             {expected:?}, pinned {actual:?})",
+            candidate.identity.display()
+        )));
+    }
+    Ok(PinnedContentRoot {
+        _parent: parent,
+        root,
+        identity: expected,
+    })
+}
+
+/// macOS has no `openat2`, so this sheathed destructive body refuses before
+/// booking or mutation instead of silently falling back to pathname recursion.
+#[cfg(not(target_os = "linux"))]
+fn pin_content_root(
+    _candidate: &OrphanCandidate,
+) -> Result<PinnedContentRoot, ContentReclaimFailure> {
+    Err(ContentReclaimFailure::Refused(
+        "Linux openat2 containment is unavailable on this platform; refusing before mutation"
+            .to_string(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn c_path(path: &Path) -> Result<CString, std::io::Error> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path contains an interior NUL: {}", path.display()),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn c_name(name: &std::ffi::OsStr) -> Result<CString, std::io::Error> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.contains(&b'/') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "contained descendant name is empty or contains a slash",
+        ));
+    }
+    CString::new(bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "contained descendant name contains an interior NUL",
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn openat2_fd(
+    dirfd: RawFd,
+    path: &CStr,
+    flags: libc::c_int,
+    resolve: u64,
+) -> std::io::Result<OwnedFd> {
+    let how = OpenHow {
+        flags: flags as u64,
+        mode: 0,
+        resolve,
+    };
+    // SAFETY: `path` and `how` remain valid for the syscall; the returned fd is owned
+    // exactly once by `OwnedFd` on success.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2 as libc::c_long,
+            dirfd,
+            path.as_ptr(),
+            &how,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `openat2` returned a fresh owned descriptor above.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+#[cfg(target_os = "linux")]
+fn openat2_directory(dirfd: RawFd, path: &CStr, resolve: u64) -> std::io::Result<OwnedFd> {
+    openat2_fd(
+        dirfd,
+        path,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        resolve,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn open_directory_from_cwd(path: &Path) -> std::io::Result<OwnedFd> {
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "candidate identity must be absolute before content reclaim",
+        ));
+    }
+    let path = c_path(path)?;
+    openat2_directory(
+        libc::AT_FDCWD,
+        &path,
+        RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn open_directory_beneath(dirfd: RawFd, name: &std::ffi::OsStr) -> std::io::Result<OwnedFd> {
+    let name = c_name(name)?;
+    openat2_directory(
+        dirfd,
+        &name,
+        RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn open_entry_beneath(dirfd: RawFd, name: &std::ffi::OsStr) -> std::io::Result<OwnedFd> {
+    let name = c_name(name)?;
+    openat2_fd(
+        dirfd,
+        &name,
+        libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn fd_identity(fd: RawFd) -> std::io::Result<FileIdentity> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `stat` points to valid writable storage and `fd` is borrowed.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: successful `fstat` initialized `stat`.
+    let stat = unsafe { stat.assume_init() };
+    Ok(FileIdentity {
+        dev: stat.st_dev as u64,
+        ino: stat.st_ino as u64,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn child_stat(dirfd: RawFd, name: &CStr) -> std::io::Result<libc::stat> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `name` is NUL-terminated, `stat` is writable, and `dirfd` remains open.
+    if unsafe {
+        libc::fstatat(
+            dirfd,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: successful `fstatat` initialized `stat`.
+    Ok(unsafe { stat.assume_init() })
+}
+
+#[cfg(target_os = "linux")]
+impl PinnedContentRoot {
+    fn holder_probe_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.root.as_raw_fd()))
+    }
+
+    fn child_names(&self, dirfd: RawFd) -> Result<Vec<CString>, String> {
+        // `fdopendir` owns and closes its argument, so duplicate the borrowed fd.
+        let duplicate = unsafe { libc::dup(dirfd) };
+        if duplicate < 0 {
+            return Err(format!(
+                "cannot duplicate pinned directory fd: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: `duplicate` is a fresh descriptor; `fdopendir` owns it on success.
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            // SAFETY: `fdopendir` did not take ownership on failure.
+            unsafe { libc::close(duplicate) };
+            return Err(format!(
+                "cannot enumerate pinned directory: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let mut names = Vec::new();
+        loop {
+            // POSIX distinguishes EOF from error through errno.
+            unsafe { *libc::__errno_location() = 0 };
+            // SAFETY: `stream` is valid until `closedir` below.
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                let errno = unsafe { *libc::__errno_location() };
+                if errno != 0 {
+                    // SAFETY: `stream` is still owned here.
+                    unsafe { libc::closedir(stream) };
+                    return Err(format!(
+                        "cannot finish enumerating pinned directory: {}",
+                        std::io::Error::from_raw_os_error(errno)
+                    ));
+                }
+                break;
+            }
+            // SAFETY: `entry` is non-null and its d_name is NUL-terminated by readdir.
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                names.push(
+                    CString::new(name.to_bytes()).expect("readdir names have no interior NUL"),
+                );
+            }
+        }
+        // SAFETY: `stream` has not yet been closed and owns `duplicate`.
+        if unsafe { libc::closedir(stream) } != 0 {
+            return Err(format!(
+                "cannot close pinned directory stream: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(names)
+    }
+
+    fn contained_child(&self, dirfd: RawFd, name: &CStr) -> Result<libc::stat, String> {
+        let stat = child_stat(dirfd, name).map_err(|err| err.to_string())?;
+        if stat.st_dev as u64 != self.identity.dev {
+            return Err(format!(
+                "refusing mount-crossing descendant {} beneath pinned root",
+                name.to_string_lossy()
+            ));
+        }
+        if stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            return Err(format!(
+                "refusing symlink descendant {} beneath pinned root",
+                name.to_string_lossy()
+            ));
+        }
+        // `fstatat(AT_SYMLINK_NOFOLLOW)` classifies the child, but the contained
+        // `openat2` is the load-bearing mount/symlink fence immediately before an
+        // eventual `unlinkat`: a mount or symlink that arrives after the stat is still
+        // refused instead of being acted on through a pathname fallback.
+        let opened = open_entry_beneath(dirfd, std::ffi::OsStr::from_bytes(name.to_bytes()))
+            .map_err(|err| {
+                format!(
+                    "cannot open contained descendant {} with openat2: {err}",
+                    name.to_string_lossy()
+                )
+            })?;
+        let opened_identity = fd_identity(opened.as_raw_fd()).map_err(|err| err.to_string())?;
+        if opened_identity.dev != stat.st_dev as u64 || opened_identity.ino != stat.st_ino as u64 {
+            return Err(format!(
+                "contained descendant {} changed while it was being opened",
+                name.to_string_lossy()
+            ));
+        }
+        Ok(stat)
+    }
+
+    fn unlink_child(&self, dirfd: RawFd, name: &CStr, flags: libc::c_int) -> Result<(), String> {
+        // SAFETY: `name` is one `readdir` component, never an absolute or slash path;
+        // `dirfd` is either the pinned root or a directory opened beneath it.
+        if unsafe { libc::unlinkat(dirfd, name.as_ptr(), flags) } != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+
+    fn drain_directory(
+        &self,
+        dirfd: RawFd,
+        unlinked: &mut usize,
+        after_unlink: &mut dyn FnMut(usize) -> Result<(), String>,
+    ) -> Result<(), String> {
+        for name in self.child_names(dirfd)? {
+            let stat = self.contained_child(dirfd, &name)?;
+            if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+                let child =
+                    open_directory_beneath(dirfd, std::ffi::OsStr::from_bytes(name.as_bytes()))
+                        .map_err(|err| {
+                            format!(
+                                "cannot open contained directory {}: {err}",
+                                name.to_string_lossy()
+                            )
+                        })?;
+                self.drain_directory(child.as_raw_fd(), unlinked, after_unlink)?;
+                self.unlink_child(dirfd, &name, libc::AT_REMOVEDIR)?;
+            } else {
+                self.unlink_child(dirfd, &name, 0)?;
+            }
+            *unlinked += 1;
+            after_unlink(*unlinked)?;
+        }
+        Ok(())
+    }
+
+    fn drain_contents(
+        &self,
+        after_unlink: &mut dyn FnMut(usize) -> Result<(), String>,
+    ) -> Result<(), ContentReclaimFailure> {
+        let mut unlinked = 0usize;
+        for pass in 1..=MAX_CONTENT_RECLAIM_PASSES {
+            if let Err(reason) =
+                self.drain_directory(self.root.as_raw_fd(), &mut unlinked, after_unlink)
+            {
+                return Err(if unlinked == 0 {
+                    ContentReclaimFailure::Refused(reason)
+                } else {
+                    ContentReclaimFailure::Partial(format!(
+                        "{reason} after {unlinked} descendant unlink(s)"
+                    ))
+                });
+            }
+            match self.child_names(self.root.as_raw_fd()) {
+                Ok(children) if children.is_empty() => return Ok(()),
+                Ok(_) if pass == MAX_CONTENT_RECLAIM_PASSES => {
+                    return Err(if unlinked == 0 {
+                        ContentReclaimFailure::Refused(format!(
+                            "pinned root still had descendants after {MAX_CONTENT_RECLAIM_PASSES} bounded passes"
+                        ))
+                    } else {
+                        ContentReclaimFailure::Partial(format!(
+                            "pinned root kept gaining descendants; stopped after {MAX_CONTENT_RECLAIM_PASSES} bounded passes and {unlinked} descendant unlink(s)"
+                        ))
+                    });
+                }
+                Ok(_) => {}
+                Err(reason) => {
+                    return Err(if unlinked == 0 {
+                        ContentReclaimFailure::Refused(reason)
+                    } else {
+                        ContentReclaimFailure::Partial(format!(
+                            "{reason} after {unlinked} descendant unlink(s)"
+                        ))
+                    });
+                }
+            }
+        }
+        unreachable!("bounded pass loop returns on every terminal branch")
+    }
+}
+
+/// The deleter S2a hands the filesystem work to. It never removes the candidate
+/// root: on Linux it drains only descendant names relative to the pinned root fd.
 fn delete_resource_bytes(
     resource: &ExecEnvResource,
     probe: &HolderProbe,
     protection: &Protection,
-    pinned: &Path,
-    pinned_identity: Option<FileIdentity>,
+    pinned: &PinnedContentRoot,
 ) -> Result<i64, MemoryError> {
     let path = Path::new(&resource.path);
-
-    // The last fence before `remove_dir_all`, and the reason it is here and not
-    // only in the scan: the row handed to this deleter came out of the DB, and a
-    // row can be booked by writers that never went through our scan. The protected
-    // set is re-asserted at the exact line that deletes.
     if protection.covers(path) {
         return Err(MemoryError::InvalidArg(format!(
-            "refusing to reclaim protected path {} (a live build cache: CARGO_TARGET_DIR, the \
-             shared target dir, or the target of a running build)",
+            "{CONTENT_RECLAIM_REFUSED_PREFIX}protected path {} (a live build cache: \
+             CARGO_TARGET_DIR, the shared target dir, or the target of a running build)",
             resource.path
         )));
     }
 
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        // Already gone: the idempotent re-entry path (crash after delete,
-        // before the finishing commit).
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(err) => return Err(MemoryError::Io(err)),
-    };
-    if meta.file_type().is_symlink() {
-        return Err(MemoryError::InvalidArg(format!(
-            "refusing to reclaim symlink {} (would delete through it)",
-            resource.path
-        )));
-    }
-    if !meta.is_dir() {
-        return Err(MemoryError::InvalidArg(format!(
-            "refusing to reclaim non-directory {}",
-            resource.path
-        )));
-    }
-    // **sol audit fix (BUG 2): the object judged is the object deleted.**
-    //
-    // The name survives the check above; the *identity* is what `remove_dir_all`
-    // acts on. `--root` is caller-supplied and may be or contain a symlink, and
-    // every earlier fence resolved this name at its own moment. Retarget the link
-    // between the verdict and this line and the run deletes a directory nothing ever
-    // judged. So: resolve it again, and refuse unless it is still the same object.
-    // (A name that no longer resolves at all is also a refusal — an identity we
-    // cannot confirm is not an identity we may delete.)
-    match std::fs::canonicalize(path) {
-        Ok(actual) if actual == pinned => {}
-        Ok(actual) => {
-            return Err(MemoryError::InvalidArg(format!(
-                "identity unresolved: refusing to reclaim {}: it now resolves to {} but the \
-                 verdict was rendered against {} — a symlink or mount was retargeted between the \
-                 two",
-                resource.path,
-                actual.display(),
-                pinned.display()
-            )))
+    #[cfg(target_os = "linux")]
+    {
+        // This is the production holder check that matters: lsof walks the object held
+        // by our fd through /proc, never a mutable candidate spelling.
+        match probe(&pinned.holder_probe_path()) {
+            HolderCheck::None => {}
+            other => {
+                return Err(ContentReclaimFailure::Refused(format!(
+                    "holder appeared before content reclaim of {}: {}",
+                    resource.path,
+                    other.describe()
+                ))
+                .into_memory_error());
+            }
         }
-        Err(err) => {
-            return Err(MemoryError::InvalidArg(format!(
-                "identity unresolved: refusing to reclaim {}: its path no longer resolves \
-                 ({err}), so the identity the verdict was rendered against cannot be confirmed",
-                resource.path
-            )))
-        }
+        let mut no_fault = |_count: usize| Ok(());
+        pinned
+            .drain_contents(&mut no_fault)
+            .map_err(ContentReclaimFailure::into_memory_error)?;
+        return Ok(resource.bytes.unwrap_or(0));
     }
-    // **sol audit fix (BUG 2, the rest of it): the pathname check above proves the
-    // NAME still resolves to the same spelling — not that it is the same OBJECT.** A
-    // rename-and-replace at the same path (`rm -rf` + `mkdir`, or a rename swap)
-    // leaves the canonical spelling identical while the directory underneath it is a
-    // different one entirely; the check above cannot see that. `(dev, ino)`, captured
-    // at judgement and re-`stat`ed on this line, can. This is the FIRST of two
-    // identity checks — the second, right before `remove_dir_all` itself, is what
-    // closes the window the holder probe and the byte walk still open below
-    // (checkpoint 2, codex-9178d).
-    //
-    // `pinned_identity` being `None` is also a refusal — `decide_reap` never reaches a
-    // `Reclaim` decision without one (BUG 2's fail-closed half), so `None` here means
-    // this deleter was invoked outside that gate, and an identity we were never given
-    // is not one we may act on.
-    let current_identity = FileIdentity::of(path);
-    if pinned_identity.is_none() || current_identity != pinned_identity {
-        return Err(MemoryError::InvalidArg(format!(
-            "identity unresolved: refusing to reclaim {}: its (dev, ino) identity does not match \
-             the one the verdict was rendered against (captured {pinned_identity:?}, now \
-             {current_identity:?}) — the object at this path was replaced between judgement and \
-             delete",
-            resource.path
-        )));
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (probe, pinned);
+        Err(ContentReclaimFailure::Refused(
+            "Linux openat2 containment is unavailable on this platform; refusing before mutation"
+                .to_string(),
+        )
+        .into_memory_error())
     }
-    // Defense in depth against the scan→delete window: the row is already
-    // `reclaiming`, but the bytes are still there. A process that grabbed the
-    // directory since the scan aborts the delete (row → `reclaim_failed`,
-    // retryable) rather than losing a live build's cache.
-    match probe(path) {
-        HolderCheck::None => {}
-        other => {
-            return Err(MemoryError::InvalidArg(format!(
-                "holder appeared before delete of {}: {}",
-                resource.path,
-                other.describe()
-            )))
-        }
-    }
-    let bytes = dir_size(path);
-    // **checkpoint 2 fix (codex-9178d): re-checked IMMEDIATELY before unlink, not just
-    // before the probe.** The dev/ino check above proves the object was still the
-    // pinned one before the holder probe ran — it says nothing about what is at `path`
-    // after that probe (a real recursive `lsof +D`) and the recursive `dir_size` walk
-    // just above, both of which take real wall-clock time and are exactly the window a
-    // rename-swap needs. #1062's own text is "re-checked immediately before unlink";
-    // one check before two more filesystem round-trips does not satisfy that. Re-stat
-    // one more time, on the last line before the call that actually deletes.
-    let identity_at_unlink = FileIdentity::of(path);
-    if identity_at_unlink != pinned_identity {
-        return Err(MemoryError::InvalidArg(format!(
-            "identity unresolved: refusing to reclaim {}: its (dev, ino) identity changed again \
-             between the holder probe and the delete (captured {pinned_identity:?}, now \
-             {identity_at_unlink:?}) — the object at this path was replaced a second time",
-            resource.path
-        )));
-    }
-    std::fs::remove_dir_all(path).map_err(MemoryError::Io)?;
-    Ok(clamp_bytes(bytes))
 }
 
 /// Ledger-wide bytes freed, grouped by `reclaim_reason` — the disk story
@@ -2809,7 +3225,7 @@ fn newest_mtime(path: &Path, cutoff: SystemTime) -> MtimeWalk {
                 return MtimeWalk::Partial(format!(
                     "cannot read an entry of {}: {err}",
                     path.display()
-                ))
+                ));
             }
         };
         match newest_mtime(&entry.path(), cutoff) {
@@ -2871,7 +3287,7 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
         OutputFormat::Text => {
             let mode = if report.dry_run { "dry-run" } else { "force" };
             println!("tachi clean orphans ({mode})");
-            if !report.destructive_certified {
+            if !report.destructive_certified && report.dry_run {
                 println!(
                     "  REPORT ONLY — the destructive path is not certified and is refused (audit \
                      {BLOCKING_AUDIT}). What follows is what a certified reaper WOULD reclaim; \
@@ -2880,6 +3296,14 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
                 for defect in &report.blocking_defects {
                     println!("  blocking defect: {defect}");
                 }
+            } else if !report.destructive_certified {
+                // The public CLI never reaches this branch while the sheath is closed,
+                // but direct test-only calls can. Do not falsely claim the force body
+                // deleted nothing: its typed outcomes are authoritative.
+                println!(
+                    "  SHEATHED TEST-ONLY FORCE REPORT — inspect reclaimed_content and partial \
+                     outcomes below; this text makes no claim that nothing was deleted."
+                );
             }
             println!("  max_age_days: {}", report.max_age_days);
             for root in &report.roots {
@@ -2945,8 +3369,12 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
             );
             for reclaimed in &report.reclaimed {
                 println!(
-                    "  reclaimed: {} ({} bytes, reason={})",
-                    reclaimed.path, reclaimed.reclaimed_bytes, reclaimed.reason
+                    "  {}: {} ({} bytes, reason={}, root_retained={})",
+                    reclaimed.outcome,
+                    reclaimed.path,
+                    reclaimed.reclaimed_bytes,
+                    reclaimed.reason,
+                    reclaimed.root_retained,
                 );
             }
             println!("  reclaimed_bytes (this run): {}", report.reclaimed_bytes);
@@ -3037,6 +3465,19 @@ mod tests {
             staleness: Staleness::Stale { age_days: 30 },
             bytes: Some(2048),
             holders,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_candidate(path: &Path) -> OrphanCandidate {
+        OrphanCandidate {
+            path: path.to_path_buf(),
+            identity: std::fs::canonicalize(path).unwrap(),
+            file_identity: FileIdentity::of(path),
+            kind: ResourceKind::BuildTarget,
+            staleness: Staleness::Stale { age_days: 30 },
+            bytes: Some(dir_size(path)),
+            holders: Some(HolderCheck::None),
         }
     }
 
@@ -3220,6 +3661,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn cargo_target_dir_is_never_a_reap_candidate() {
         let root = unique_temp_dir("tachi-reaper-cargo-target-dir");
@@ -3623,10 +4065,11 @@ mod tests {
         );
         // …and the prune is a SAFETY REFUSAL on the books, not a `continue`.
         assert_eq!(scan.accounting.protected_pruned, 1, "{:?}", scan.accounting);
-        assert!(scan
-            .skips
-            .iter()
-            .any(|skip| skip.path == shared && skip.outcome == UnitOutcome::ProtectedPruned));
+        assert!(
+            scan.skips
+                .iter()
+                .any(|skip| skip.path == shared && skip.outcome == UnitOutcome::ProtectedPruned)
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3819,15 +4262,57 @@ mod tests {
         // The bytes are still on disk...
         assert!(dead.join("debug/artifact.rlib").exists());
         // ...and nothing was written to the ledger.
-        assert!(memcore::list_resources(store.connection(), None, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            memcore::list_resources(store.connection(), None, None)
+                .unwrap()
+                .is_empty()
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A seat without Linux `openat2` must not substitute pathname recursion. This
+    /// executes on the current macOS seat and proves refusal occurs before the ledger
+    /// is booked or a child is unlinked.
+    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn unmanaged_orphan_is_booked_then_reclaimed_with_real_bytes() {
+    fn unsupported_content_reclaim_refuses_before_booking_or_mutation() {
+        let root = unique_temp_dir("tachi-reaper-unsupported-content-reclaim");
+        let target = make_target_dir(&root, "unsupported-target");
+        let mut store = open_store(&root);
+
+        let report = reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("openat2")),
+            "the unsupported containment primitive must be a loud refusal: {report:?}"
+        );
+        assert!(target.join("debug/artifact.rlib").exists());
+        assert!(
+            memcore::list_resources(store.connection(), None, None)
+                .unwrap()
+                .is_empty(),
+            "root pin failure happens before booking/reclaiming"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// This is deliberately Linux-only: a non-Linux host must refuse the sheathed
+    /// force body rather than fall back to a pathname-based delete.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unmanaged_orphan_reclaims_content_and_retains_root() {
         let root = unique_temp_dir("tachi-reaper-unmanaged");
         let dead = make_target_dir(&root, "codex-bootstrap-target");
         let mut store = open_store(&root);
@@ -3842,9 +4327,16 @@ mod tests {
         assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
         assert_eq!(report.reclaimed.len(), 1, "report: {report:?}");
         assert_eq!(report.reclaimed[0].reason, "unmanaged");
+        assert_eq!(report.reclaimed[0].outcome, "reclaimed_content");
+        assert!(report.reclaimed[0].root_retained, "{report:?}");
         assert!(report.reclaimed_bytes >= 2048);
-        // The bytes are actually gone — `reclaimed` means freed, not flipped.
-        assert!(!dead.exists(), "the orphan directory must be deleted");
+        // Discriminating residual-root assertion: pre-#1379 `remove_dir_all(dead)`
+        // makes this RED because the candidate root itself disappears.
+        assert!(dead.is_dir(), "the candidate root object must be retained");
+        assert!(
+            std::fs::read_dir(&dead).unwrap().next().is_none(),
+            "success means children were observed empty at completion: {report:?}"
+        );
 
         // And the stranger is on the books, with what it actually gave back.
         let rows = memcore::list_resources(store.connection(), None, None).unwrap();
@@ -3871,6 +4363,7 @@ mod tests {
     /// End-to-end proof of the revive: the same path is reaped, reborn, and
     /// reaped again — through S2a's `UNIQUE(path, kind)`, which the first cut
     /// could only ever hit once.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_reborn_target_at_a_reaped_path_is_reaped_again() {
         let root = unique_temp_dir("tachi-reaper-reborn");
@@ -3884,7 +4377,8 @@ mod tests {
             &*unheld_probe(),
         );
         assert_eq!(first.reclaimed.len(), 1, "{first:?}");
-        assert!(!dead.exists());
+        assert!(dead.is_dir(), "the first root remains");
+        assert!(std::fs::read_dir(&dead).unwrap().next().is_none());
 
         // The lane runs again, rebuilds the same target, and dies again.
         let reborn = make_target_dir(&root, "lane-target");
@@ -3900,9 +4394,10 @@ mod tests {
             1,
             "a reborn target must be reapable again: {second:?}"
         );
+        assert!(reborn.is_dir(), "the second root remains too");
         assert!(
-            !reborn.exists(),
-            "the second incarnation's bytes must be freed too"
+            std::fs::read_dir(&reborn).unwrap().next().is_none(),
+            "the second incarnation's children must be reclaimed too"
         );
 
         // Still exactly one row for the path: the reclaimed row was revived, not
@@ -3911,6 +4406,110 @@ mod tests {
         let rows = memcore::list_resources(store.connection(), None, None).unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].state, ResourceState::Reclaimed);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A rename/replacement between scan and the final force judgement must preserve
+    /// both objects: the root fd pin recognizes that the current name is not the
+    /// scanned root and refuses before any descendant unlink.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_replacement_before_pin_preserves_replacement_and_original() {
+        let root = unique_temp_dir("tachi-reaper-root-replacement");
+        let judged = make_target_dir(&root, "replaceable-target");
+        let candidate = linux_candidate(&judged);
+        let moved = root.join("original-moved-aside");
+        std::fs::rename(&judged, &moved).unwrap();
+        let replacement = make_target_dir(&root, "replaceable-target");
+
+        let failure = match pin_content_root(&candidate) {
+            Ok(_) => panic!("a replacement at the candidate spelling must not be pinned"),
+            Err(failure) => failure,
+        };
+
+        assert!(
+            failure.message().contains("changed") || failure.message().contains("cannot pin"),
+            "the root identity loss is a loud pre-mutation refusal: {failure:?}"
+        );
+        assert!(replacement.join("debug/artifact.rlib").exists());
+        assert!(moved.join("debug/artifact.rlib").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A symlink below the pinned root is a containment failure, not a link to walk
+    /// or unlink around. The outside target and candidate root both survive.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symlink_descendant_refuses_without_traversal() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("tachi-reaper-symlink-contained");
+        let outside = root.join("outside-kept");
+        std::fs::write(&outside, "outside").unwrap();
+        let target = root.join("symlink-target");
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&outside, target.join("escape")).unwrap();
+        let mut store = open_store(&root);
+
+        let report = reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("symlink descendant")),
+            "the containment refusal must name the symlink: {report:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside");
+        assert!(target.join("escape").is_symlink());
+        assert!(target.is_dir());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The loop does not claim persistent emptiness. A writer that recreates one child
+    /// after every unlink gets exactly the bounded number of passes and then a typed
+    /// partial result, while the root descriptor/object remains valid.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_creator_is_bounded_and_never_claims_persistent_emptiness() {
+        let root = unique_temp_dir("tachi-reaper-bounded-churn");
+        let target = root.join("churn-target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("churn"), "one").unwrap();
+        let pinned = pin_content_root(&linux_candidate(&target)).unwrap();
+        let writer_target = target.clone();
+        let recreated = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let recreate_count = std::rc::Rc::clone(&recreated);
+        let mut recreate = move |_unlinked: usize| {
+            recreate_count.set(recreate_count.get() + 1);
+            std::fs::write(writer_target.join("churn"), "again").map_err(|err| err.to_string())
+        };
+
+        let failure = match pinned.drain_contents(&mut recreate) {
+            Ok(()) => panic!("a writer that recreates every child must not report success"),
+            Err(failure) => failure,
+        };
+
+        assert!(
+            matches!(failure, ContentReclaimFailure::Partial(_)),
+            "{failure:?}"
+        );
+        assert_eq!(recreated.get(), MAX_CONTENT_RECLAIM_PASSES);
+        assert!(target.is_dir(), "the candidate root is never removed");
+        assert!(
+            target.join("churn").exists(),
+            "the final observed root was not empty"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4016,14 +4615,17 @@ mod tests {
 
         assert!(report.reclaimed.is_empty());
         assert!(held.join("debug/artifact.rlib").exists(), "bytes survive");
-        assert!(memcore::list_resources(store.connection(), None, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            memcore::list_resources(store.connection(), None, None)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(report.candidates[0].decision, "skip");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn holder_appearing_after_the_scan_aborts_the_delete() {
         // The scan says unheld; by the time the deleter runs, a process holds
@@ -4069,6 +4671,7 @@ mod tests {
     /// Defense in depth: even a row booked by some other writer — one that never
     /// went through our scan — cannot be deleted if it names a protected path.
     /// The fence is re-asserted at the line that actually calls `remove_dir_all`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_deleter_refuses_a_protected_path() {
         let root = unique_temp_dir("tachi-reaper-delete-fence");
@@ -4087,14 +4690,21 @@ mod tests {
             updated_at: String::new(),
         };
 
+        let candidate = OrphanCandidate {
+            path: shared.clone(),
+            identity: std::fs::canonicalize(&shared).unwrap(),
+            file_identity: FileIdentity::of(&shared),
+            kind: ResourceKind::BuildTarget,
+            staleness: Staleness::Stale { age_days: 30 },
+            bytes: Some(2048),
+            holders: Some(HolderCheck::None),
+        };
+        let pinned = pin_content_root(&candidate).unwrap();
         let err = delete_resource_bytes(
             &resource,
             &*unheld_probe(),
             &Protection::new([shared.clone()], Vec::new()),
-            // Both identity checks would pass — the fence under test is the protected
-            // set, re-asserted at the line that deletes.
-            &std::fs::canonicalize(&shared).unwrap(),
-            FileIdentity::of(&shared),
+            &pinned,
         )
         .expect_err("a protected path must never be deleted");
         assert!(
@@ -4125,6 +4735,7 @@ mod tests {
     /// version of this test (which staged the claim by calling `set_var` on our own
     /// environment, from inside the probe) was simulating something that cannot happen —
     /// and poisoning every test running beside it while it did.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_target_claimed_after_the_scan_is_refused_at_delete_time() {
         let root = unique_temp_dir("tachi-reaper-late-claim");
@@ -4294,7 +4905,7 @@ mod tests {
     ///
     /// Discriminating: the decoy holds real bytes and is not protected by anything —
     /// only the pinned identity stands between it and `remove_dir_all`.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_root_symlink_retargeted_after_the_verdict_cannot_redirect_the_delete() {
         let base = unique_temp_dir("tachi-reaper-symlink-root");
@@ -4388,7 +4999,7 @@ mod tests {
     /// == pinned` is TRUE here (same string, before and after), so that fence
     /// alone would wave this delete through. Only the `(dev, ino)` re-check
     /// added by this fix refuses it.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[ignore = "issue #1261: assumes remove_dir_all+create_dir_all yields a fresh inode; on CI overlayfs/tmpfs inode reuse makes the (dev,ino) guard not fire. Sibling kill-test at line ~5339 is #[ignore]d for the same #1062 matrix. Run with --ignored"]
     #[test]
     fn a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_refused() {
@@ -4476,12 +5087,12 @@ mod tests {
     /// window the FIRST recheck cannot see: between the deleter's `probe(path)` call and
     /// its `remove_dir_all`. Only the SECOND recheck — checkpoint 2's own addition — can
     /// catch this.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[ignore = "issue #1261: same inode-reuse flake as the verdict-and-delete sibling above; CI overlayfs can hand back the same inode after remove_dir_all+create_dir_all. Run with --ignored"]
     #[test]
     fn a_directory_replaced_between_the_deleters_own_probe_and_unlink_is_refused() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let root = unique_temp_dir("tachi-reaper-post-probe-swap");
         let target = make_target_dir(&root, "swapped-target");
@@ -4628,7 +5239,7 @@ mod tests {
     /// candidate is genuinely eligible (stale, unheld, unbound — the OS itself is
     /// what refuses one entry), so the failure comes from the delete path, not
     /// from any earlier gate.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_partial_delete_failure_forces_a_nonclean_exit() {
         use std::os::unix::fs::PermissionsExt;
@@ -4658,8 +5269,8 @@ mod tests {
 
         assert_eq!(report.candidates.len(), 1, "{report:?}");
         assert_eq!(
-            report.candidates[0].decision, "refused",
-            "a delete that did not finish is not `reclaim`: {report:?}"
+            report.candidates[0].decision, "partial",
+            "a post-unlink failure is typed partial, never reclaimed_content: {report:?}"
         );
         assert!(
             locked.join("stuck.o").exists(),
@@ -4673,10 +5284,24 @@ mod tests {
              {report:?}"
         );
         assert!(report.incomplete, "{report:?}");
+        assert!(
+            report.reclaimed.is_empty(),
+            "partial must not produce ReclaimedReport"
+        );
         let status = reap_exit_status(&report);
         assert!(
             status.is_err(),
             "a partial delete failure must never exit clean, even under --force: {status:?}"
+        );
+        let row = memcore::list_resources(store.connection(), None, None)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.path == target.display().to_string())
+            .expect("booked resource is retained as reclaim_failed for partial recovery");
+        assert_eq!(row.state, ResourceState::ReclaimFailed, "{row:?}");
+        assert!(
+            target.is_dir(),
+            "the candidate root remains after partial failure"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -4686,6 +5311,7 @@ mod tests {
     /// to report success — even when it *did* reclaim something, and even under
     /// `--force`. Discriminating both ways: the same fixture without the missing root
     /// exits clean.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_incomplete_forced_scan_does_not_exit_clean() {
         let root = unique_temp_dir("tachi-reaper-incomplete-exit");
@@ -4742,6 +5368,7 @@ mod tests {
     /// approved and the deleter then refused (here: a holder appears in the
     /// scan→delete window) keeps its bytes — so a report that still calls it
     /// `reclaim` is a report that lies about what happened to them.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_late_refusal_relabels_the_candidate_refused_not_reclaimed() {
         let root = unique_temp_dir("tachi-reaper-late-refusal-label");
@@ -4811,6 +5438,7 @@ mod tests {
     ///   present. The day #1379's handle-pinning fix and an inode-reuse kill-test
     ///   re-certify the path, this half is the existing regression test that the
     ///   fence still works in the re-opened world.
+    #[cfg(target_os = "linux")]
     #[test]
     fn force_is_refused_at_the_entry_point_and_a_broken_fence_still_refuses_behind_it() {
         // Half 1: a healthy fixture, the real entry point, `--force` — refused
@@ -5223,8 +5851,8 @@ mod tests {
     /// fails the assertions instead of hanging the suite.
     #[test]
     fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_each_other() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Instant;
 
         let gapped_root = unique_temp_dir("tachi-reaper-parallel-gapped");
@@ -5520,7 +6148,9 @@ mod tests {
                 let failing_scan: fn() -> (Vec<PathBuf>, Vec<String>) = || {
                     (
                         Vec::new(),
-                        vec!["process scan unavailable (ps: No such file or directory)".to_string()],
+                        vec![
+                            "process scan unavailable (ps: No such file or directory)".to_string(),
+                        ],
                     )
                 };
                 let report = run_orphan_reap_uncertified(
@@ -5552,7 +6182,9 @@ mod tests {
             // the receipt is a human act, not something this test does to itself.
             println!("\n─── #1062 orphan reaper kill-test receipt (S2d shape) ───");
             println!("kill_test = \"crates/tachi-server/src/exec_env_reaper.rs\"");
-            println!("kill_test_fn = \"exec_env_reaper::tests::kill_tests::orphan_reaper_kill_test_matrix\"");
+            println!(
+                "kill_test_fn = \"exec_env_reaper::tests::kill_tests::orphan_reaper_kill_test_matrix\""
+            );
             println!("binary = \"tachi-server\"");
             println!("binary_version = \"{}\"", env!("CARGO_PKG_VERSION"));
             println!("host_os = \"{}\"", std::env::consts::OS);

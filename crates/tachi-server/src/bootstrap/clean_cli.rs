@@ -628,8 +628,8 @@ mod tests {
     // real scan root, and while `with_tachi_home` above isolates the LEDGER, it does
     // not sandbox the FILESYSTEM the CLI would then walk and delete from — a unit
     // test still has no business creating and deleting real directories through this
-    // entry point when `exec_env_reaper`'s own tests can drive the identical
-    // certified entry point (`run_orphan_reap`, via `reap_sealed`) against a fully
+    // entry point when `exec_env_reaper`'s own tests can drive the same sheathed
+    // body (`run_orphan_reap_uncertified`, via `reap_uncertified`) against a fully
     // temp-dir'd store AND a temp-dir'd scan root. See
     // `force_is_refused_at_the_entry_point_and_a_broken_fence_still_refuses_behind_it`
     // in that module for the current shape: the entry point refuses `--force`, and
