@@ -39,7 +39,12 @@ const ANCHOR_SQL_WHERE: &str = "id GLOB 'anchor:*' OR path = '/anchors' OR path 
 const ANCHOR_SQL_WHERE_M: &str =
     "m.id GLOB 'anchor:*' OR m.path = '/anchors' OR m.path GLOB '/anchors/*'";
 
-fn eligible_where(scope: VectorBackfillScope, qualified: bool) -> String {
+/// Return the canonical SQL membership predicate for vector backfill.
+///
+/// `qualified` selects the `m.`-qualified form required by queries that alias
+/// `memories` as `m`. Status and selection callers must use this instead of
+/// reconstructing the cache/anchor exclusions.
+pub fn vector_backfill_eligible_where(scope: VectorBackfillScope, qualified: bool) -> String {
     let anchor_where = if qualified {
         ANCHOR_SQL_WHERE_M
     } else {
@@ -68,7 +73,7 @@ impl MemoryStore {
         &self,
         scope: VectorBackfillScope,
     ) -> Result<VectorBackfillCounts, MemoryError> {
-        let where_clause = eligible_where(scope, true);
+        let where_clause = vector_backfill_eligible_where(scope, true);
         let (total, with_vector): (i64, i64) = self.conn.query_row(
             &format!(
                 "SELECT COUNT(*),
@@ -96,7 +101,7 @@ impl MemoryStore {
         scope: VectorBackfillScope,
         limit: Option<usize>,
     ) -> Result<Vec<VectorBackfillEntry>, MemoryError> {
-        let where_clause = eligible_where(scope, true);
+        let where_clause = vector_backfill_eligible_where(scope, true);
         let order_by = crate::embed_config::embed_selection_order_by("m.");
         let limit = limit.map(|value| value as i64).unwrap_or(-1);
         let mut stmt = self.conn.prepare(&format!(

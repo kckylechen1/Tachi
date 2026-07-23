@@ -580,10 +580,10 @@ pub(super) async fn run_backfill_fts(
 #[cfg(test)]
 mod tests {
     use super::{
-        durable_vector_counts, record_cli_vector_sweep_state, run_backfill_fts,
-        run_backfill_metadata, run_backfill_summaries, run_backfill_vectors,
+        record_cli_vector_sweep_state, run_backfill_fts, run_backfill_metadata,
+        run_backfill_summaries, run_backfill_vectors,
     };
-    use memcore::{MemoryStore, MigrationAuthority};
+    use memcore::{MemoryStore, MigrationAuthority, VectorBackfillScope};
     use rusqlite::params;
     use std::path::Path;
 
@@ -687,45 +687,32 @@ mod tests {
             .expect("collect snapshot")
     }
 
-    /// G3 (counting basis): a row shaped like recall-cache content by `topic`
-    /// (not by the literal `source` marker string) must be excluded from the
-    /// durable-row basis by BOTH `tachi status`'s vector-coverage warning
-    /// and `tachi backfill-vectors`'s Total/Missing counters — the two
-    /// surfaces must agree on what "durable" means. Before #736's fix,
-    /// `durable_vector_counts` only excluded rows whose `source` column was
-    /// exactly `'foundry_recall_rerank_cache'`; a row shaped like recall
-    /// cache in every OTHER way (topic here) slipped through as a "missing"
-    /// durable row, while `tachi status`'s broader predicate already
-    /// excluded it — the two surfaces counted different bases for the
-    /// identical DB.
+    /// G3 (cross-face counting): status and vector backfill must exclude the
+    /// same anchor plumbing rows from their missing-vector population.
     #[test]
-    fn g3_counting_basis_matches_status_recall_cache_predicate() {
+    fn g3_vector_health_matches_backfill_anchor_membership() {
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("g3.db");
         let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
 
-        // Durable row: source unrelated to recall cache, no vector -> must
-        // always count as 1 missing.
+        // Durable content without a vector is the sole pending row.
         insert_memory(&store, "durable-1", "manual", "note");
+        // Anchors are graph plumbing, not vector-backfill work.
+        insert_memory(&store, "anchor:x", "manual", "note");
 
-        // Recall-cache-shaped row identified by `topic`, not by `source` ->
-        // must be excluded from the durable basis (matches
-        // `status_ops::db_probe::RECALL_CACHE_WHERE`'s `topic = 'recall_rerank_cache'`
-        // arm), even though its `source` is NOT the literal marker string
-        // the pre-fix narrow filter checked.
-        insert_memory(&store, "cache-1", "auto", "recall_rerank_cache");
-
-        let (total, with_vec) = durable_vector_counts(&store, true).expect("durable_vector_counts");
-        let missing = total - with_vec;
+        let status_missing = crate::status_ops::vector_health(store.connection())
+            .expect("vector health")
+            .missing;
+        let backfill_pending = store
+            .vector_backfill_counts(VectorBackfillScope::default())
+            .expect("vector backfill counts")
+            .pending;
 
         assert_eq!(
-            total, 1,
-            "the recall-cache-shaped row must not count toward the durable total"
+            status_missing, backfill_pending,
+            "status and vector backfill must share the exact membership set"
         );
-        assert_eq!(
-            missing, 1,
-            "only the genuinely durable row is missing a vector"
-        );
+        assert_eq!(status_missing, 1, "only the durable row is missing a vector");
     }
 
     #[tokio::test]

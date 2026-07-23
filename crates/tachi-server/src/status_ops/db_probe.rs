@@ -10,9 +10,12 @@ use super::{
 };
 use crate::manifest::DbRole;
 use chrono::{DateTime, Utc};
-use memcore::{job_status_histogram, ContinuityMetrics, JobStatusHistogram, MemoryStore};
+use memcore::{
+    job_status_histogram, vector_backfill::vector_backfill_eligible_where, ContinuityMetrics,
+    JobStatusHistogram, MemoryStore, VectorBackfillScope,
+};
 pub(crate) use memcore::{
-    RECALL_CACHE_SQL_WHERE as RECALL_CACHE_WHERE, RECALL_CACHE_SQL_WHERE_M as RECALL_CACHE_WHERE_M,
+    RECALL_CACHE_SQL_WHERE as RECALL_CACHE_WHERE,
 };
 use rusqlite::OptionalExtension;
 use serde_json::json;
@@ -259,10 +262,11 @@ pub(crate) fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth,
 fn memory_vector_status_counts(
     conn: &rusqlite::Connection,
 ) -> Result<(usize, usize), rusqlite::Error> {
+    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), false);
     conn.query_row(
         &format!(
             "SELECT
-                SUM(CASE WHEN NOT ({RECALL_CACHE_WHERE}) THEN 1 ELSE 0 END),
+                SUM(CASE WHEN ({where_clause}) THEN 1 ELSE 0 END),
                 SUM(CASE WHEN json_extract(metadata, '$.enrichment.status') = 'failed' THEN 1 ELSE 0 END)
              FROM memories"
         ),
@@ -274,6 +278,7 @@ fn memory_vector_status_counts(
 fn memory_vector_join_counts(
     conn: &rusqlite::Connection,
 ) -> Result<(usize, usize), rusqlite::Error> {
+    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), true);
     conn.query_row(
         &format!(
             "SELECT
@@ -284,7 +289,7 @@ fn memory_vector_join_counts(
                     THEN 1 ELSE 0 END)
              FROM memories m
              LEFT JOIN memories_vec v ON v.id = m.id
-             WHERE NOT ({RECALL_CACHE_WHERE_M})"
+             WHERE {where_clause}"
         ),
         [],
         |row| Ok((optional_count(row, 0)?, optional_count(row, 1)?)),
