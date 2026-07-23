@@ -4825,12 +4825,14 @@ mod tests {
             aged_now(30),
             &*unheld_probe(),
         )
-        .expect_err(
-            "--force must be refused now: tachi#1379 revoked the 2026-07-17 certification",
-        );
+        .expect_err("--force must be refused now: tachi#1379 revoked the 2026-07-17 certification");
 
         assert!(refusal.refused);
-        assert!(refusal.reason.contains("tachi#1379"), "reason: {}", refusal.reason);
+        assert!(
+            refusal.reason.contains("tachi#1379"),
+            "reason: {}",
+            refusal.reason
+        );
         // Nothing was scanned, measured, booked or deleted.
         assert!(
             dead.join("debug/artifact.rlib").exists(),
