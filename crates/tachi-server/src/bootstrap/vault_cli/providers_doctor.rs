@@ -233,11 +233,11 @@ pub(super) fn vault_entry_updated_at_by_name(
     store: &MemoryStore,
 ) -> Result<HashMap<String, String>, String> {
     let entries = store
-        .vault_list_entries()
-        .map_err(|e| format!("vault_list_entries: {e}"))?;
+        .vault_list_entry_timestamps()
+        .map_err(|e| format!("vault_list_entry_timestamps: {e}"))?;
     let mut map = HashMap::with_capacity(entries.len());
-    for entry in entries {
-        map.insert(entry.name, entry.updated_at);
+    for (name, updated_at) in entries {
+        map.insert(name, updated_at);
     }
     Ok(map)
 }
@@ -417,6 +417,79 @@ mod tests {
         assert_eq!(
             resolve_opencode_config_path(Some(PathBuf::from("/tmp/cli-wins.json"))),
             PathBuf::from("/tmp/cli-wins.json")
+        );
+    }
+
+    fn sha256_file(path: &Path) -> String {
+        tachi_params::sha256_hex(&fs::read(path).expect("read for hash"))
+    }
+
+    /// Doctor --providers must leave durable fixture bytes untouched and open
+    /// the vault store through the read-only CLI path.
+    #[test]
+    fn providers_doctor_leaves_opencode_and_vault_db_byte_identical_read_only() {
+        use super::super::open_cli_store_read_only;
+        use memcore::vault::VaultEntry;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("memory.db");
+        let config_path = dir.path().join("opencode.json");
+
+        fs::write(
+            &config_path,
+            r#"{
+              "provider": {
+                "openai": { "options": { "apiKey": "{env:OPENAI_API_KEY}" } },
+                "literal": { "options": { "apiKey": "sk-fixture-literal" } }
+              }
+            }"#,
+        )
+        .expect("write opencode fixture");
+
+        {
+            let store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+                .expect("create vault db");
+            store
+                .vault_upsert_entry(&VaultEntry {
+                    name: "OPENAI_API_KEY".to_string(),
+                    encrypted_value: "ciphertext-fixture".to_string(),
+                    nonce: "nonce-fixture".to_string(),
+                    secret_type: "api_key".to_string(),
+                    description: "providers doctor fixture".to_string(),
+                    allowed_agents: None,
+                    created_at: "2026-07-01T00:00:00Z".to_string(),
+                    updated_at: "2026-07-11T00:00:00Z".to_string(),
+                    accessed_at: String::new(),
+                    access_count: 0,
+                })
+                .expect("seed vault entry");
+        }
+
+        let before_db = sha256_file(&db_path);
+        let before_cfg = sha256_file(&config_path);
+
+        // Same open path as VaultAction::Doctor { providers: true, ... }.
+        let store = open_cli_store_read_only(&db_path).expect("open_cli_store_read_only");
+        let touch_err = store
+            .vault_touch_entry("OPENAI_API_KEY")
+            .expect_err("read-only store must reject writes");
+        let touch_msg = touch_err.to_string().to_lowercase();
+        assert!(
+            touch_msg.contains("readonly") || touch_msg.contains("read-only"),
+            "expected readonly write failure, got: {touch_err}"
+        );
+
+        run_providers_doctor(&store, Some(config_path.clone())).expect("providers doctor");
+
+        assert_eq!(
+            sha256_file(&db_path),
+            before_db,
+            "vault DB must stay byte-identical after providers doctor"
+        );
+        assert_eq!(
+            sha256_file(&config_path),
+            before_cfg,
+            "opencode.json must stay byte-identical after providers doctor"
         );
     }
 }
