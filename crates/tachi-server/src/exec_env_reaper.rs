@@ -158,8 +158,9 @@
 //! * **The judged object is the deleted object** ([`OrphanCandidate::identity`]).
 //!   `--root` is caller-supplied and may be or contain a symlink; every fence used
 //!   to resolve the *name* independently, so retargeting the link between the
-//!   verdict and a pathname delete redirected the delete. The final force judgement
-//!   now pins parent/root descriptors and refuses a changed root before any unlink.
+//!   verdict and a pathname delete redirected the delete. Force processing now pins
+//!   parent/root descriptors before sizing, holder probing, or final judgement, then
+//!   drains only descendants beneath that capability and retains the root object.
 //! * **The scan keeps books** ([`UnitClass`], [`ScanAccounting`]). Missing roots,
 //!   failed `read_dir`s, depth truncation and protection prunes were all bare
 //!   `continue`s: invisible in the report, `errors` empty, exit 0. That is not a
@@ -292,7 +293,7 @@ const MAX_CONTENT_RECLAIM_PASSES: usize = 4;
 ///
 /// A `const` rather than a config flag, on purpose. A flag is something an operator can
 /// flip at 2 a.m. under disk pressure; the gate between a scan of `~/.cache` and
-/// `remove_dir_all` should cost a code change, a review, and a test suite.
+/// descendant unlinking should cost a code change, a review, and a test suite.
 pub(crate) const DESTRUCTIVE_CERTIFIED: bool = false;
 
 /// The finding that sheathed it THIS time. `codex-g6f99` (#1062) is the audit that
@@ -1067,32 +1068,24 @@ pub(crate) struct OrphanCandidate {
     /// The path as the scan walked it — the caller's spelling, symlinked scan
     /// root and all.
     pub(crate) path: PathBuf,
-    /// **The resolved SPELLING the verdict is rendered against.**
+    /// **The resolved spelling used to acquire the root capability.**
     ///
     /// `path` is the caller's spelling — `--root` is caller-supplied and may be
-    /// (or contain) a symlink — and the protection verdict and the
-    /// `remove_dir_all` that follows it each resolve that name independently.
-    /// Retarget the link in between and a re-resolution by NAME ALONE would
-    /// decide about one directory and delete another.
-    ///
-    /// So the scan resolves the name **once**, here, and the deleter re-resolves
-    /// it and refuses unless it still lands on the same canonical spelling
-    /// ([`delete_resource_bytes`]).
+    /// (or contain) a symlink. The scan resolves that spelling once; Linux then
+    /// opens its parent/root with `openat2` and compares the fd identity to
+    /// [`Self::file_identity`]. After pinning, this spelling is never destructive
+    /// authority: a later rename or symlink retarget cannot redirect descendant
+    /// operations away from the fd.
     ///
     /// # This is a spelling, not a file identity — see [`Self::file_identity`]
     ///
-    /// A `PathBuf` proves only that a name still resolves, never that it
-    /// resolves to the same OBJECT. Move the judged directory aside, drop a
-    /// fresh one at the same path (`rm -rf` + `mkdir`, or a rename swap), and
-    /// the canonical spelling matches — same string — while the inode
-    /// underneath has changed completely. This field alone caught only the
-    /// *symlink*-retarget half of that; [`Self::file_identity`] (sol audit, BUG
-    /// 2 — closed) is what catches the rest.
+    /// A `PathBuf` proves only a name, never an object. [`Self::file_identity`]
+    /// proves the descriptor acquired here is the scanned object; the descriptor
+    /// itself is what carries authority after that point.
     pub(crate) identity: PathBuf,
     /// **The real identity the verdict is rendered against (sol audit, BUG 2 —
-    /// closed).** `(dev, ino)`, captured here at judgement and re-`stat`ed
-    /// immediately before the delete ([`delete_resource_bytes`]); a mismatch —
-    /// including "could not be re-stat'd at all" — refuses the delete. `None`
+    /// closed).** `(dev, ino)`, captured by the scan and compared with the opened
+    /// root fd before force judgement; a mismatch refuses before mutation. `None`
     /// means the identity could not be captured at scan time (an unreadable
     /// entry, or a non-Unix host — see [`FileIdentity::of`]), and
     /// [`decide_reap`] treats that exactly like an unprobed holder check:
@@ -2099,7 +2092,7 @@ fn run_orphan_reap_uncertified(
         errors: Vec::new(),
     };
 
-    for mut candidate in scan.candidates {
+    'candidates: for mut candidate in scan.candidates {
         let path = candidate.path.display().to_string();
         // An undecidable candidate is an `incomplete-or-error` unit: it gets a
         // terminal line of its own (`error`) instead of a `continue` that would
@@ -2142,7 +2135,11 @@ fn run_orphan_reap_uncertified(
             None => 0,
         };
 
-        // Cheap gates first (staleness / ledger / bindings) …
+        // Cheap gates read only scan facts and ledger state; they do not observe the
+        // candidate path and deliberately avoid every expensive operation for a known
+        // skip. A force survivor must acquire the root capability before byte sizing,
+        // holder probing, `decide_reap`, fresh protection judgement, or mutation.
+        let mut pinned = None;
         let decision = match cheap_verdict(
             &candidate,
             opts.max_age_days,
@@ -2150,11 +2147,54 @@ fn run_orphan_reap_uncertified(
             active_bindings,
         ) {
             Err(skip) => ReapDecision::Skip(skip),
-            // … and only now the expensive ones, on a survivor: a full recursive
-            // byte walk and an `lsof +D` (which walks the tree again).
+            // … and only now the expensive ones, on a survivor.
             Ok(_) => {
-                candidate.bytes = Some(dir_size(&candidate.path));
-                candidate.holders = Some(probe(&candidate.path));
+                if opts.force {
+                    let root = match pin_content_root(&candidate) {
+                        Ok(root) => root,
+                        Err(failure) => {
+                            let reason = failure.message().to_string();
+                            report.warnings.push(reason.clone());
+                            report.candidates.push(CandidateReport {
+                                path: path.clone(),
+                                kind: candidate.kind.as_str(),
+                                bytes: None,
+                                age_days: candidate.staleness.age_days(),
+                                holders: "not probed".to_string(),
+                                decision: "refused",
+                                reason,
+                            });
+                            continue 'candidates;
+                        }
+                    };
+                    #[cfg(target_os = "linux")]
+                    {
+                        candidate.bytes = match root.measure_content_bytes() {
+                            Ok(bytes) => Some(bytes),
+                            Err(failure) => {
+                                let reason = failure.message().to_string();
+                                report.warnings.push(reason.clone());
+                                report.candidates.push(CandidateReport {
+                                    path: path.clone(),
+                                    kind: candidate.kind.as_str(),
+                                    bytes: None,
+                                    age_days: candidate.staleness.age_days(),
+                                    holders: "not probed".to_string(),
+                                    decision: "refused",
+                                    reason,
+                                });
+                                continue 'candidates;
+                            }
+                        };
+                        candidate.holders = Some(probe(&root.holder_probe_path()));
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = &root;
+                    pinned = Some(root);
+                } else {
+                    candidate.bytes = Some(dir_size(&candidate.path));
+                    candidate.holders = Some(probe(&candidate.path));
+                }
                 decide_reap(
                     &candidate,
                     opts.max_age_days,
@@ -2172,32 +2212,11 @@ fn run_orphan_reap_uncertified(
         };
 
         if let (ReapDecision::Reclaim(claim), true) = (&decision, opts.force) {
-            // The root capability is acquired before the final destructive judgement
-            // (including the fresh protection read) and before the ledger moves a row
-            // into `reclaiming`. A replacement/lost root therefore refuses before any
-            // descendant unlink or ledger reclaim transition.
-            let pinned = match pin_content_root(&candidate) {
-                Ok(pinned) => pinned,
-                Err(failure) => {
-                    decision_label = "refused";
-                    reason = failure.message().to_string();
-                    report.warnings.push(reason.clone());
-                    report.candidates.push(CandidateReport {
-                        path: path.clone(),
-                        kind: candidate.kind.as_str(),
-                        bytes: candidate.bytes,
-                        age_days: candidate.staleness.age_days(),
-                        holders: candidate
-                            .holders
-                            .as_ref()
-                            .map(HolderCheck::describe)
-                            .unwrap_or_else(|| "not probed".to_string()),
-                        decision: decision_label,
-                        reason,
-                    });
-                    continue;
-                }
-            };
+            // The force-only expensive checks above cannot produce `Reclaim`
+            // without first pinning this exact root object.
+            let pinned = pinned
+                .as_ref()
+                .expect("force reclaim decisions always carry a pinned root");
             // **sol audit fix (BUG 1).** The protected set is recomputed HERE, at the
             // delete — it is NOT the snapshot the scan took. The snapshot is stale by
             // construction: a build that claimed `--target-dir` after the scan is
@@ -2225,6 +2244,29 @@ fn run_orphan_reap_uncertified(
                     report.warnings.push(gap.clone());
                 }
             }
+            let pinned_path = match pinned.protection_path() {
+                Ok(path) => path,
+                Err(failure) => {
+                    let err = failure.message().to_string();
+                    decision_label = "refused";
+                    reason = err.clone();
+                    report.warnings.push(err);
+                    report.candidates.push(CandidateReport {
+                        path: path.clone(),
+                        kind: candidate.kind.as_str(),
+                        bytes: candidate.bytes,
+                        age_days: candidate.staleness.age_days(),
+                        holders: candidate
+                            .holders
+                            .as_ref()
+                            .map(HolderCheck::describe)
+                            .unwrap_or_else(|| "not probed".to_string()),
+                        decision: decision_label,
+                        reason,
+                    });
+                    continue 'candidates;
+                }
+            };
             // **checkpoint 1 fix (codex-9178d).** An incomplete protected set is not
             // merely a report-level footnote — it means THIS delete cannot know
             // whether `candidate.path` is actually clear. #1062 is explicit: "an
@@ -2241,10 +2283,12 @@ fn run_orphan_reap_uncertified(
                      unresolved",
                     fresh.gaps().join("; ")
                 ))
-            } else if fresh.covers(&candidate.path) || fresh.covers(&candidate.identity) {
+            } else if fresh.covers(&pinned_path) {
                 Some(format!(
-                    "refused {path}: it is protected as of the delete (a live build claimed it \
-                     after the scan); the run's opening protected set did not cover it"
+                    "refused {path}: pinned object {} is protected as of the delete (a live \
+                     build claimed it after the scan); the run's opening protected set did not \
+                     cover it",
+                    pinned_path.display()
                 ))
             } else {
                 match reclaim_candidate(
@@ -2254,7 +2298,7 @@ fn run_orphan_reap_uncertified(
                     existing.as_ref(),
                     probe,
                     &fresh,
-                    &pinned,
+                    pinned,
                 ) {
                     Ok(reclaimed) => {
                         report.reclaimed_bytes += reclaimed.reclaimed_bytes;
@@ -2370,7 +2414,7 @@ pub(crate) fn reap_exit_status(report: &ReapReport) -> Result<(), String> {
 /// found to be bound, quarantined, or already claimed by a concurrent reclaim is the
 /// destructive path **working as designed** — the whole point of re-checking at
 /// delete time is to catch exactly that, and a run that caught it has nothing to
-/// apologize for. A `remove_dir_all` that fails PARTWAY — a permission error three
+/// apologize for. A descendant drain that fails PARTWAY — a permission error three
 /// levels down, a device that goes away mid-delete — is the opposite: an operator
 /// who asked to free disk got a half-deleted directory and a process that told them
 /// it succeeded. That is not a refusal; the delete was ATTEMPTED and it did not
@@ -2383,15 +2427,12 @@ enum ReclaimFailure {
     /// a binding, quarantined, or protected at delete time). Worth a warning line;
     /// does not cost the run its clean exit — a fence that fired is not an error.
     ///
-    /// **NOT this bucket (checkpoint 3/4, codex-9178d):** an identity mismatch
-    /// (`IDENTITY_UNRESOLVED_PREFIX`) or a lost reclaim race discovered AFTER the
-    /// deleter already ran. Neither is a fence firing cleanly — the first means the
-    /// run no longer knows what is at the path it judged, the second means real
-    /// bytes were deleted with no ledger row to show for it. Both are
-    /// [`Self::DeleteFailed`].
+    /// **NOT this bucket (checkpoint 4, codex-9178d):** a lost reclaim race
+    /// discovered AFTER the deleter already ran. Real bytes were deleted with no
+    /// ledger row to show for it, so it is [`Self::DeleteFailed`].
     Refused(String),
     /// The delete path was ATTEMPTED and did not cleanly finish — an I/O failure
-    /// out of `remove_dir_all`, a ledger write that could not be made, ledger state
+    /// out of descriptor-relative unlinking, a ledger write that could not be made, ledger state
     /// so far from what this call just did that it cannot be trusted, an identity
     /// the deleter could no longer confirm, or a reclaim whose bytes hit disk but
     /// never made it into the ledger. This is the class BUG 4 exists for: it must
@@ -2407,15 +2448,6 @@ impl ReclaimFailure {
         }
     }
 }
-
-/// Sentinel prefix `delete_resource_bytes` puts on messages meaning "the object's
-/// identity could not be reconfirmed" — as opposed to a designed fence (protected
-/// path, symlink, non-directory, holder appeared) declining on purpose. Matched by
-/// `reclaim_candidate` to route identity-unresolved refusals to
-/// [`ReclaimFailure::DeleteFailed`] instead of [`ReclaimFailure::Refused`]
-/// (checkpoint 3, codex-9178d — #1062: "if the identity moved, the unit is
-/// incomplete, not progressed").
-const IDENTITY_UNRESOLVED_PREFIX: &str = "identity unresolved: ";
 
 /// Book (or revive) the resource and reclaim it through S2a's single reclaim
 /// path. An `Err` is worth a human's eye and always lands as a warning line;
@@ -2495,28 +2527,15 @@ fn reclaim_candidate(
             // **BUG 4.** `memcore::reclaim_resource` returns `Err` in exactly two
             // shapes: the deleter's own error (everything `delete_resource_bytes`
             // returns is a designed, typed `MemoryError::InvalidArg` refusal — a
-            // protected path, a retargeted identity, a holder that appeared — EXCEPT
-            // `MemoryError::Io`, which is `remove_dir_all` itself failing), or a
+            // protected pinned object, a holder that appeared, or a pre-unlink
+            // containment refusal), or a
             // ledger-side failure reading/writing the `reclaiming` state (anything
             // that is not `InvalidArg`). Only the former is a refusal that worked as
             // designed; the rest are the delete path failing to finish what it
             // started, and must not be waved through as a mere warning.
             //
-            // **checkpoint 3 fix (codex-9178d).** Not every `InvalidArg` out of
-            // `delete_resource_bytes` is the same kind of event. #1062's text: "if
-            // the identity moved, the unit is incomplete, not progressed." A
-            // protected path, a symlink, a non-directory, or a holder that appeared
-            // are the destructive path's fences WORKING — a designed refusal. An
-            // identity the deleter can no longer confirm (`IDENTITY_UNRESOLVED_PREFIX`
-            // — a retargeted symlink, a path that stopped resolving, a `(dev, ino)`
-            // that changed) is different: the run does not know what is at this path
-            // anymore, and that is exactly the class BUG 4 exists for, not a clean
-            // refusal.
             match &err {
                 MemoryError::InvalidArg(msg) if msg.starts_with(PARTIAL_CONTENT_RECLAIM_PREFIX) => {
-                    ReclaimFailure::DeleteFailed(format!("reclaim of {path} failed: {msg}"))
-                }
-                MemoryError::InvalidArg(msg) if msg.starts_with(IDENTITY_UNRESOLVED_PREFIX) => {
                     ReclaimFailure::DeleteFailed(format!("reclaim of {path} failed: {msg}"))
                 }
                 MemoryError::InvalidArg(msg) => {
@@ -2567,7 +2586,7 @@ fn reclaim_candidate(
         // claim bytes no ledger row backs (#1029's whole point).
         //
         // **checkpoint 4 fix (codex-9178d).** This is NOT a fence that fired —
-        // `remove_dir_all` already ran and real bytes are already gone; the ledger
+        // descendant draining already ran and real bytes are already gone; the ledger
         // simply failed to record it. #1062's conservation invariant and #1029's
         // whole point are that destructive work with an accounting failure must not
         // read as a clean, working refusal (a warning-only "skipped"). It must cost
@@ -2618,14 +2637,38 @@ struct OpenHow {
     resolve: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const RESOLVE_NO_XDEV: u64 = 0x01;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const RESOLVE_BENEATH: u64 = 0x08;
+
+/// Absolute ancestry is only a route to the parent capability. Applying
+/// `NO_XDEV` from `AT_FDCWD` would anchor the policy at `/` and reject an
+/// otherwise ordinary candidate merely because `/tmp`, `/home`, or another
+/// ancestor is a mount. Mount containment begins below the pinned candidate.
+#[cfg(any(target_os = "linux", test))]
+fn parent_resolve_flags() -> u64 {
+    RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS
+}
+
+/// The candidate itself establishes the containment root, so it may live on a
+/// filesystem different from its parent. Identity is checked after this open.
+#[cfg(any(target_os = "linux", test))]
+fn root_resolve_flags() -> u64 {
+    RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS
+}
+
+/// Every object reached after the root capability is established must remain
+/// beneath it and on its filesystem. These are the load-bearing destructive
+/// traversal flags.
+#[cfg(any(target_os = "linux", test))]
+fn descendant_resolve_flags() -> u64 {
+    RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS
+}
 
 #[derive(Debug)]
 enum ContentReclaimFailure {
@@ -2716,12 +2759,12 @@ fn pin_content_root(
 /// booking or mutation instead of silently falling back to pathname recursion.
 #[cfg(not(target_os = "linux"))]
 fn pin_content_root(
-    _candidate: &OrphanCandidate,
+    candidate: &OrphanCandidate,
 ) -> Result<PinnedContentRoot, ContentReclaimFailure> {
-    Err(ContentReclaimFailure::Refused(
-        "Linux openat2 containment is unavailable on this platform; refusing before mutation"
-            .to_string(),
-    ))
+    Err(ContentReclaimFailure::Refused(format!(
+        "Linux openat2 containment is unavailable on this platform; refusing {} before mutation",
+        candidate.identity.display()
+    )))
 }
 
 #[cfg(target_os = "linux")]
@@ -2800,21 +2843,19 @@ fn open_directory_from_cwd(path: &Path) -> std::io::Result<OwnedFd> {
         ));
     }
     let path = c_path(path)?;
-    openat2_directory(
-        libc::AT_FDCWD,
-        &path,
-        RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
-    )
+    openat2_directory(libc::AT_FDCWD, &path, parent_resolve_flags())
 }
 
 #[cfg(target_os = "linux")]
 fn open_directory_beneath(dirfd: RawFd, name: &std::ffi::OsStr) -> std::io::Result<OwnedFd> {
     let name = c_name(name)?;
-    openat2_directory(
-        dirfd,
-        &name,
-        RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
-    )
+    openat2_directory(dirfd, &name, root_resolve_flags())
+}
+
+#[cfg(target_os = "linux")]
+fn open_descendant_directory(dirfd: RawFd, name: &std::ffi::OsStr) -> std::io::Result<OwnedFd> {
+    let name = c_name(name)?;
+    openat2_directory(dirfd, &name, descendant_resolve_flags())
 }
 
 #[cfg(target_os = "linux")]
@@ -2824,19 +2865,24 @@ fn open_entry_beneath(dirfd: RawFd, name: &std::ffi::OsStr) -> std::io::Result<O
         dirfd,
         &name,
         libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
+        descendant_resolve_flags(),
     )
 }
 
 #[cfg(target_os = "linux")]
-fn fd_identity(fd: RawFd) -> std::io::Result<FileIdentity> {
+fn fd_stat(fd: RawFd) -> std::io::Result<libc::stat> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `stat` points to valid writable storage and `fd` is borrowed.
     if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: successful `fstat` initialized `stat`.
-    let stat = unsafe { stat.assume_init() };
+    Ok(unsafe { stat.assume_init() })
+}
+
+#[cfg(target_os = "linux")]
+fn fd_identity(fd: RawFd) -> std::io::Result<FileIdentity> {
+    let stat = fd_stat(fd)?;
     Ok(FileIdentity {
         dev: stat.st_dev as u64,
         ino: stat.st_ino as u64,
@@ -2865,7 +2911,35 @@ fn child_stat(dirfd: RawFd, name: &CStr) -> std::io::Result<libc::stat> {
 #[cfg(target_os = "linux")]
 impl PinnedContentRoot {
     fn holder_probe_path(&self) -> PathBuf {
-        PathBuf::from(format!("/proc/self/fd/{}", self.root.as_raw_fd()))
+        // `lsof` runs in a child process, where `/proc/self` would name `lsof`
+        // itself and this CLOEXEC fd would not exist. Name the reaper process
+        // explicitly so the probe resolves this pinned object.
+        PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            self.root.as_raw_fd()
+        ))
+    }
+
+    fn verify_root_linked(&self) -> Result<(), String> {
+        let stat = fd_stat(self.root.as_raw_fd()).map_err(|err| err.to_string())?;
+        if stat.st_dev as u64 != self.identity.dev || stat.st_ino as u64 != self.identity.ino {
+            return Err("pinned root fd no longer identifies the judged object".to_string());
+        }
+        if stat.st_nlink == 0 {
+            return Err("pinned root object lost its directory entry".to_string());
+        }
+        Ok(())
+    }
+
+    fn protection_path(&self) -> Result<PathBuf, ContentReclaimFailure> {
+        self.verify_root_linked()
+            .map_err(ContentReclaimFailure::Refused)?;
+        std::fs::read_link(self.holder_probe_path()).map_err(|err| {
+            ContentReclaimFailure::Refused(format!(
+                "cannot resolve the pinned root object for final protection judgement: {err}"
+            ))
+        })
     }
 
     fn child_names(&self, dirfd: RawFd) -> Result<Vec<CString>, String> {
@@ -2876,6 +2950,17 @@ impl PinnedContentRoot {
                 "cannot duplicate pinned directory fd: {}",
                 std::io::Error::last_os_error()
             ));
+        }
+        // `dup` shares the directory's open-file-description offset. Every sizing,
+        // draining, and completion pass must begin at entry zero; otherwise the
+        // measurement immediately before deletion can leave the next drain at EOF
+        // and fabricate an empty root. Seeking the duplicate resets that shared
+        // description before `fdopendir` takes ownership.
+        if unsafe { libc::lseek(duplicate, 0, libc::SEEK_SET) } < 0 {
+            let err = std::io::Error::last_os_error();
+            // SAFETY: `fdopendir` has not taken ownership yet.
+            unsafe { libc::close(duplicate) };
+            return Err(format!("cannot rewind pinned directory fd: {err}"));
         }
         // SAFETY: `duplicate` is a fresh descriptor; `fdopendir` owns it on success.
         let stream = unsafe { libc::fdopendir(duplicate) };
@@ -2959,6 +3044,50 @@ impl PinnedContentRoot {
         Ok(stat)
     }
 
+    fn measure_directory(&self, dirfd: RawFd) -> Result<u64, String> {
+        let mut bytes = 0u64;
+        for name in self.child_names(dirfd)? {
+            let stat = self.contained_child(dirfd, &name)?;
+            match stat.st_mode & libc::S_IFMT {
+                libc::S_IFDIR => {
+                    let child = open_descendant_directory(
+                        dirfd,
+                        std::ffi::OsStr::from_bytes(name.as_bytes()),
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "cannot open contained directory {} while measuring pinned root: {err}",
+                            name.to_string_lossy()
+                        )
+                    })?;
+                    bytes = bytes
+                        .checked_add(self.measure_directory(child.as_raw_fd())?)
+                        .ok_or_else(|| "pinned content byte count overflowed u64".to_string())?;
+                }
+                libc::S_IFREG => {
+                    let file_bytes = u64::try_from(stat.st_size).map_err(|_| {
+                        format!(
+                            "contained file {} reported a negative size",
+                            name.to_string_lossy()
+                        )
+                    })?;
+                    bytes = bytes
+                        .checked_add(file_bytes)
+                        .ok_or_else(|| "pinned content byte count overflowed u64".to_string())?;
+                }
+                _ => {}
+            }
+        }
+        Ok(bytes)
+    }
+
+    fn measure_content_bytes(&self) -> Result<u64, ContentReclaimFailure> {
+        self.verify_root_linked()
+            .map_err(ContentReclaimFailure::Refused)?;
+        self.measure_directory(self.root.as_raw_fd())
+            .map_err(ContentReclaimFailure::Refused)
+    }
+
     fn unlink_child(&self, dirfd: RawFd, name: &CStr, flags: libc::c_int) -> Result<(), String> {
         // SAFETY: `name` is one `readdir` component, never an absolute or slash path;
         // `dirfd` is either the pinned root or a directory opened beneath it.
@@ -2978,7 +3107,7 @@ impl PinnedContentRoot {
             let stat = self.contained_child(dirfd, &name)?;
             if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
                 let child =
-                    open_directory_beneath(dirfd, std::ffi::OsStr::from_bytes(name.as_bytes()))
+                    open_descendant_directory(dirfd, std::ffi::OsStr::from_bytes(name.as_bytes()))
                         .map_err(|err| {
                             format!(
                                 "cannot open contained directory {}: {err}",
@@ -3001,6 +3130,8 @@ impl PinnedContentRoot {
         after_unlink: &mut dyn FnMut(usize) -> Result<(), String>,
     ) -> Result<(), ContentReclaimFailure> {
         let mut unlinked = 0usize;
+        self.verify_root_linked()
+            .map_err(ContentReclaimFailure::Refused)?;
         for pass in 1..=MAX_CONTENT_RECLAIM_PASSES {
             if let Err(reason) =
                 self.drain_directory(self.root.as_raw_fd(), &mut unlinked, after_unlink)
@@ -3014,7 +3145,17 @@ impl PinnedContentRoot {
                 });
             }
             match self.child_names(self.root.as_raw_fd()) {
-                Ok(children) if children.is_empty() => return Ok(()),
+                Ok(children) if children.is_empty() => {
+                    return self.verify_root_linked().map_err(|reason| {
+                        if unlinked == 0 {
+                            ContentReclaimFailure::Refused(reason)
+                        } else {
+                            ContentReclaimFailure::Partial(format!(
+                                "{reason} after {unlinked} descendant unlink(s)"
+                            ))
+                        }
+                    });
+                }
                 Ok(_) if pass == MAX_CONTENT_RECLAIM_PASSES => {
                     return Err(if unlinked == 0 {
                         ContentReclaimFailure::Refused(format!(
@@ -3042,6 +3183,16 @@ impl PinnedContentRoot {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+impl PinnedContentRoot {
+    fn protection_path(&self) -> Result<PathBuf, ContentReclaimFailure> {
+        Err(ContentReclaimFailure::Refused(
+            "Linux openat2 containment is unavailable on this platform; refusing before mutation"
+                .to_string(),
+        ))
+    }
+}
+
 /// The deleter S2a hands the filesystem work to. It never removes the candidate
 /// root: on Linux it drains only descendant names relative to the pinned root fd.
 fn delete_resource_bytes(
@@ -3050,12 +3201,16 @@ fn delete_resource_bytes(
     protection: &Protection,
     pinned: &PinnedContentRoot,
 ) -> Result<i64, MemoryError> {
-    let path = Path::new(&resource.path);
-    if protection.covers(path) {
+    let pinned_path = pinned
+        .protection_path()
+        .map_err(ContentReclaimFailure::into_memory_error)?;
+    if protection.covers(&pinned_path) {
         return Err(MemoryError::InvalidArg(format!(
-            "{CONTENT_RECLAIM_REFUSED_PREFIX}protected path {} (a live build cache: \
-             CARGO_TARGET_DIR, the shared target dir, or the target of a running build)",
-            resource.path
+            "{CONTENT_RECLAIM_REFUSED_PREFIX}pinned object {} for resource {} is protected (a \
+             live build cache: CARGO_TARGET_DIR, the shared target dir, or the target of a \
+             running build)",
+            pinned_path.display(),
+            resource.path,
         )));
     }
 
@@ -3074,11 +3229,20 @@ fn delete_resource_bytes(
                 .into_memory_error());
             }
         }
+        // Ledger `bytes` is historical metadata and may be absent or stale for an
+        // active/reclaiming/reclaim_failed row. Measure the pinned object now, after
+        // the final holder fence and immediately before the first possible descendant
+        // unlink, so the reclaim receipt describes the content this operation actually
+        // attempts to drain.
+        let reclaimed_bytes = pinned
+            .measure_content_bytes()
+            .map(clamp_bytes)
+            .map_err(ContentReclaimFailure::into_memory_error)?;
         let mut no_fault = |_count: usize| Ok(());
         pinned
             .drain_contents(&mut no_fault)
             .map_err(ContentReclaimFailure::into_memory_error)?;
-        return Ok(resource.bytes.unwrap_or(0));
+        return Ok(reclaimed_bytes);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -3871,10 +4035,10 @@ mod tests {
         );
     }
 
-    /// End-to-end: `lsof` cannot answer, and a `--force` run deletes nothing and
-    /// books nothing.
+    /// End-to-end report-only eligibility: an inconclusive `lsof` answer is never
+    /// presented as reclaimable and nothing is booked.
     #[test]
-    fn inconclusive_holder_probe_survives_a_force_run() {
+    fn inconclusive_holder_probe_blocks_report_only_eligibility() {
         let root = unique_temp_dir("tachi-reaper-unknown-holder");
         let dead = make_target_dir(&root, "would-be-dead-target");
         let mut store = open_store(&root);
@@ -3884,7 +4048,7 @@ mod tests {
 
         let report = reap_uncertified(
             store.connection_mut(),
-            &opts(&root, true),
+            &opts(&root, false),
             aged_now(30),
             &unknown_probe,
         );
@@ -4280,12 +4444,18 @@ mod tests {
         let root = unique_temp_dir("tachi-reaper-unsupported-content-reclaim");
         let target = make_target_dir(&root, "unsupported-target");
         let mut store = open_store(&root);
+        let probe_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let calls_for_probe = std::rc::Rc::clone(&probe_calls);
+        let probe = move |_path: &Path| {
+            calls_for_probe.set(calls_for_probe.get() + 1);
+            HolderCheck::None
+        };
 
         let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
-            &*unheld_probe(),
+            &probe,
         );
 
         assert!(report.reclaimed.is_empty(), "{report:?}");
@@ -4298,6 +4468,11 @@ mod tests {
             "the unsupported containment primitive must be a loud refusal: {report:?}"
         );
         assert!(target.join("debug/artifact.rlib").exists());
+        assert_eq!(
+            probe_calls.get(),
+            0,
+            "an unsupported root capability refuses before any force holder observation"
+        );
         assert!(
             memcore::list_resources(store.connection(), None, None)
                 .unwrap()
@@ -4306,6 +4481,21 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `NO_XDEV` is relative to the resolution anchor. Using it on an absolute
+    /// parent from `AT_FDCWD` makes an ordinary `/tmp` or `$HOME` mount look like a
+    /// containment escape. The candidate root establishes the filesystem boundary;
+    /// only traversal below that capability carries the mount-crossing refusal.
+    #[test]
+    fn resolve_policy_anchors_mount_containment_below_the_pinned_root() {
+        assert_eq!(parent_resolve_flags() & RESOLVE_NO_XDEV, 0);
+        assert_eq!(root_resolve_flags() & RESOLVE_NO_XDEV, 0);
+        assert_ne!(descendant_resolve_flags() & RESOLVE_NO_XDEV, 0);
+        assert_ne!(root_resolve_flags() & RESOLVE_BENEATH, 0);
+        assert_ne!(descendant_resolve_flags() & RESOLVE_BENEATH, 0);
+        assert_ne!(parent_resolve_flags() & RESOLVE_NO_SYMLINKS, 0);
+        assert_ne!(descendant_resolve_flags() & RESOLVE_NO_SYMLINKS, 0);
     }
 
     /// This is deliberately Linux-only: a non-Linux host must refuse the sheathed
@@ -4358,6 +4548,105 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Both force holder observations are descriptor-based: neither the eligibility
+    /// probe nor the final pre-delete probe may re-resolve `candidate.path`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn force_holder_probes_only_the_pinned_root_fd() {
+        let root = unique_temp_dir("tachi-reaper-pinned-holder-probe");
+        let target = make_target_dir(&root, "holder-target");
+        let mut store = open_store(&root);
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PathBuf>::new()));
+        let observed_by_probe = std::rc::Rc::clone(&observed);
+        let probe = move |path: &Path| {
+            observed_by_probe.borrow_mut().push(path.to_path_buf());
+            HolderCheck::None
+        };
+
+        let report = reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &probe,
+        );
+
+        assert_eq!(report.reclaimed.len(), 1, "{report:?}");
+        let observed = observed.borrow();
+        assert_eq!(observed.len(), 2, "eligibility and final holder probes");
+        let expected_prefix = PathBuf::from(format!("/proc/{}/fd", std::process::id()));
+        assert!(
+            observed
+                .iter()
+                .all(|path| path.starts_with(&expected_prefix) && path != &target)
+        );
+        assert!(target.is_dir());
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// B* adjudication makes the filesystem capability, not ledger metadata, the
+    /// byte authority. Every re-enterable state can carry absent or stale `bytes`;
+    /// the completed reclaim must record the pinned content measured immediately
+    /// before descendant deletion.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_measurement_overrides_missing_or_stale_bytes_for_reentry_states() {
+        for (state, ledger_bytes) in [
+            ("active", None),
+            ("reclaiming", Some(1)),
+            ("reclaim_failed", Some(8192)),
+        ] {
+            let root = unique_temp_dir(&format!("tachi-reaper-pinned-bytes-{state}"));
+            let target = make_target_dir(&root, "measured-target");
+            let mut store = open_store(&root);
+            let resource_id = format!("res-pinned-bytes-{state}");
+            memcore::insert_resource(
+                store.connection_mut(),
+                &NewExecEnvResource {
+                    resource_id: resource_id.clone(),
+                    kind: ResourceKind::BuildTarget,
+                    path: target.display().to_string(),
+                    bytes: ledger_bytes,
+                    created_at: String::new(),
+                },
+            )
+            .unwrap();
+            if state != "active" {
+                store
+                    .connection_mut()
+                    .execute(
+                        "UPDATE exec_env_resources SET state = ?2 WHERE resource_id = ?1",
+                        rusqlite::params![resource_id, state],
+                    )
+                    .unwrap();
+            }
+
+            let report = reap_uncertified(
+                store.connection_mut(),
+                &opts(&root, true),
+                aged_now(30),
+                &*unheld_probe(),
+            );
+
+            assert_eq!(report.reclaimed.len(), 1, "state={state}: {report:?}");
+            assert_eq!(report.reclaimed_bytes, 2048, "state={state}: {report:?}");
+            assert!(report.reclaimed[0].root_retained, "state={state}");
+            assert!(target.is_dir(), "state={state}: root must be retained");
+            assert!(
+                std::fs::read_dir(&target).unwrap().next().is_none(),
+                "state={state}: descendants must be drained"
+            );
+            let row = memcore::get_resource(store.connection(), &resource_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.state, ResourceState::Reclaimed, "state={state}");
+            assert_eq!(row.reclaimed_bytes, Some(2048), "state={state}: {row:?}");
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// End-to-end proof of the revive: the same path is reaped, reborn, and
@@ -4601,14 +4890,14 @@ mod tests {
     }
 
     #[test]
-    fn held_directory_is_never_reclaimed() {
+    fn held_directory_is_never_reported_reclaimable() {
         let root = unique_temp_dir("tachi-reaper-held");
         let held = make_target_dir(&root, "busy-target");
         let mut store = open_store(&root);
 
         let report = reap_uncertified(
             store.connection_mut(),
-            &opts(&root, true),
+            &opts(&root, false),
             aged_now(30),
             &*held_probe(),
         );
@@ -4670,7 +4959,7 @@ mod tests {
 
     /// Defense in depth: even a row booked by some other writer — one that never
     /// went through our scan — cannot be deleted if it names a protected path.
-    /// The fence is re-asserted at the line that actually calls `remove_dir_all`.
+    /// The fence is re-asserted at the descriptor-relative deleter boundary.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_deleter_refuses_a_protected_path() {
@@ -4898,13 +5187,10 @@ mod tests {
 
     // ── sol audit · BUG 2: the object judged is the object deleted ───────────
 
-    /// `--root` is caller-supplied and `is_dir()` follows symlinks; the protection
-    /// verdict and the `remove_dir_all` each resolved the *name* independently. So a
-    /// retarget of the link between the two makes the run delete a directory nothing
-    /// ever judged.
-    ///
-    /// Discriminating: the decoy holds real bytes and is not protected by anything —
-    /// only the pinned identity stands between it and `remove_dir_all`.
+    /// B* adjudication changed this contract: a scan-root symlink retarget after the
+    /// candidate is pinned does not invalidate the capability or redirect reclaim.
+    /// The originally judged root is drained through its fd and retained; the new
+    /// symlink target and its content are outside that authority and survive.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_root_symlink_retargeted_after_the_verdict_cannot_redirect_the_delete() {
@@ -4921,10 +5207,8 @@ mod tests {
         std::os::unix::fs::symlink(&judged_root, &link).unwrap();
         let mut store = open_store(&base);
 
-        // `probe` is invoked twice per candidate (once to decide eligibility,
-        // once again inside the deleter); this closure retargets on its FIRST
-        // call, which happens during the eligibility check — see the assertions
-        // below for exactly which fence that lands the refusal on.
+        // The force path pins before its first holder probe. Retarget on that first
+        // post-pin observation and leave the link pointing at the decoy thereafter.
         let link_for_probe = link.clone();
         let decoy_for_probe = decoy_root.clone();
         let retargeting_probe = move |_path: &Path| {
@@ -4942,84 +5226,52 @@ mod tests {
 
         assert!(
             decoy.join("debug/artifact.rlib").exists(),
-            "the delete must not follow a link retargeted after the verdict: {report:?}"
+            "the pinned reclaim must not follow a retargeted scan-root link: {report:?}"
         );
         assert!(
-            judged.join("debug/artifact.rlib").exists(),
-            "and a refusal deletes nothing at all — not even the object it judged: {report:?}"
+            judged.is_dir(),
+            "the originally judged candidate root remains: {report:?}"
         );
-        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert!(
+            std::fs::read_dir(&judged).unwrap().next().is_none(),
+            "the originally judged root's descendants are drained: {report:?}"
+        );
+        assert_eq!(report.reclaimed.len(), 1, "{report:?}");
+        assert_eq!(report.reclaimed[0].outcome, "reclaimed_content");
+        assert!(report.reclaimed[0].root_retained);
+        assert_eq!(report.reclaimed[0].reclaimed_bytes, 2048);
         assert_eq!(report.candidates.len(), 1, "{report:?}");
-        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
-        // **Correction (fix-round, 2026-07-17): checkpoint 2's own claim about
-        // this test was wrong.** `probe` is not called once, at the last possible
-        // moment before `remove_dir_all` — it is called TWICE: once as one of
-        // `run_orphan_reap_uncertified`'s "expensive checks" that decide whether a
-        // candidate is even eligible (`candidate.holders = Some(probe(...))`,
-        // BEFORE the `--force` branch is entered at all), and again inside
-        // `delete_resource_bytes` itself. This closure's retarget is unconditional
-        // on invocation, so it fires on the FIRST call — during that eligibility
-        // check, well before `delete_resource_bytes` runs a single fence. By the
-        // time the deleter's own `std::fs::canonicalize` re-resolves the pinned
-        // root, the link is ALREADY retargeted, so it is THAT check — "it now
-        // resolves to X but the verdict was rendered against Y" — that refuses the
-        // delete here, not the `(dev, ino)` recheck checkpoint 2 added (which
-        // exists for the different case where the canonical *spelling* survives
-        // unchanged — see `a_directory_replaced_at_the_same_path_between_verdict_
-        // and_delete_is_refused` for that one). The safety property this test
-        // exists to prove (the decoy survives, nothing is deleted) still holds —
-        // it was the inline claim about *which* fence catches it that was wrong.
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("verdict was rendered against")),
-            "the refusal names the retargeted root: {report:?}"
-        );
-        assert!(
-            !report.errors.is_empty(),
-            "an identity that no longer resolves to the judged object must land in errors, not \
-             just a warning: {report:?}"
-        );
-        assert!(report.incomplete, "{report:?}");
+        assert_eq!(report.candidates[0].decision, "reclaim", "{report:?}");
+        assert!(report.errors.is_empty(), "{report:?}");
 
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// **The rest of BUG 2 (closed): a rename-and-replace, no symlink involved at
-    /// all.** The symlink test above catches a retargeted *link* — the canonical
-    /// spelling changes, and the pathname re-resolution alone is enough to see it.
-    /// This test is the hole THAT one leaves: `rm -rf` + `mkdir` at the exact same
-    /// path leaves the canonical spelling byte-for-byte identical (there is
-    /// nothing for `std::fs::canonicalize` to disagree about), so only a REAL
-    /// identity — `(dev, ino)`, captured at judgement and re-`stat`ed immediately
-    /// before the delete — can tell the judged directory from its replacement.
-    ///
-    /// Discriminating: on the pre-#1062 pathname-only check, `canonicalize(path)
-    /// == pinned` is TRUE here (same string, before and after), so that fence
-    /// alone would wave this delete through. Only the `(dev, ino)` re-check
-    /// added by this fix refuses it.
+    /// A rename-and-replace after pinning cannot redirect descendant deletion. B*
+    /// deliberately keeps authority on the pinned object instead of revalidating the
+    /// mutable full path: the moved original is drained and retained, while the new
+    /// object at the old name survives untouched.
     #[cfg(target_os = "linux")]
-    #[ignore = "issue #1261: assumes remove_dir_all+create_dir_all yields a fresh inode; on CI overlayfs/tmpfs inode reuse makes the (dev,ino) guard not fire. Sibling kill-test at line ~5339 is #[ignore]d for the same #1062 matrix. Run with --ignored"]
     #[test]
-    fn a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_refused() {
+    fn a_directory_replaced_after_pin_drains_original_and_preserves_replacement() {
         let root = unique_temp_dir("tachi-reaper-inode-swap");
         let target = make_target_dir(&root, "swapped-target");
+        let moved = root.join("pinned-original");
         let mut store = open_store(&root);
 
-        // `probe` is invoked twice per candidate (once to decide eligibility,
-        // once again inside the deleter); this closure swaps on its FIRST call,
-        // during the eligibility check — either invocation's identity recheck
-        // would catch it (see the assertion below).
         let target_for_probe = target.clone();
+        let moved_for_probe = moved.clone();
+        let swapped = std::cell::Cell::new(false);
         let swapping_probe = move |_path: &Path| {
-            std::fs::remove_dir_all(&target_for_probe).unwrap();
-            std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
-            std::fs::write(
-                target_for_probe.join("debug/replacement.rlib"),
-                vec![9u8; 4096],
-            )
-            .unwrap();
+            if !swapped.replace(true) {
+                std::fs::rename(&target_for_probe, &moved_for_probe).unwrap();
+                std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
+                std::fs::write(
+                    target_for_probe.join("debug/replacement.rlib"),
+                    vec![9u8; 4096],
+                )
+                .unwrap();
+            }
             HolderCheck::None
         };
 
@@ -5035,83 +5287,43 @@ mod tests {
             "the replacement directory — a different object at the same path — must survive: \
              {report:?}"
         );
-        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert!(moved.is_dir(), "the pinned root object is retained");
+        assert!(std::fs::read_dir(&moved).unwrap().next().is_none());
+        assert_eq!(report.reclaimed.len(), 1, "{report:?}");
+        assert_eq!(report.reclaimed[0].outcome, "reclaimed_content");
+        assert!(report.reclaimed[0].root_retained);
+        assert_eq!(report.reclaimed[0].reclaimed_bytes, 2048);
         assert_eq!(report.candidates.len(), 1, "{report:?}");
-        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("(dev, ino) identity")),
-            "the refusal names the (dev, ino) mismatch, not just the pathname: {report:?}"
-        );
-        // **checkpoint 2 fix (codex-9178d) — correction, 2026-07-17: this
-        // scenario is actually caught by the FIRST `(dev, ino)` check
-        // (`delete_resource_bytes`'s pre-probe recheck), not the second one added
-        // for checkpoint 2.** `probe` runs twice per candidate — once as one of
-        // `run_orphan_reap_uncertified`'s own eligibility checks, before the
-        // `--force` branch is even entered, and again inside
-        // `delete_resource_bytes`. This closure's swap is unconditional on
-        // invocation, so it fires on that FIRST call, well before the deleter's
-        // own probe or its second recheck ever run. Either check would have
-        // caught it (that is what checkpoint 2 hardened for the case where BOTH
-        // pre-existing checks run before the swap); what matters for #1062 is
-        // that this refusal must cost the run its clean exit exactly like any
-        // other identity-unresolved unit (checkpoint 3): a fence that fires here
-        // means the run does not know what is at this path anymore, not that a
-        // designed fence worked cleanly.
-        assert!(
-            !report.errors.is_empty(),
-            "an identity that changed a second time (mid-probe) must land in errors, not just a \
-             warning: {report:?}"
-        );
-        assert!(report.incomplete, "{report:?}");
+        assert_eq!(report.candidates[0].decision, "reclaim", "{report:?}");
+        assert!(report.errors.is_empty(), "{report:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **tachi#1210: the checkpoint-2 fix (codex-9178d) itself has no discriminating
-    /// coverage.** The test above swaps on `probe`'s FIRST call — the eligibility check
-    /// at `run_orphan_reap_uncertified`'s `candidate.holders = Some(probe(...))`, which
-    /// runs before `delete_resource_bytes` is even entered — so it is caught by
-    /// `delete_resource_bytes`'s FIRST `(dev, ino)` recheck (right before its own
-    /// `probe(path)` call), never reaching the SECOND recheck
-    /// (`identity_at_unlink`, right before `remove_dir_all`) that checkpoint 2 added.
-    /// Neither existing test exercises a swap that survives past the deleter's own
-    /// probe call.
-    ///
-    /// This test makes the swap fire on `probe`'s SECOND invocation instead — the one
-    /// `delete_resource_bytes` itself makes — so by the time this closure runs, the
-    /// eligibility check and the deleter's FIRST identity recheck have both already
-    /// passed against the original (unswapped) directory. The swap then lands in the
-    /// window the FIRST recheck cannot see: between the deleter's `probe(path)` call and
-    /// its `remove_dir_all`. Only the SECOND recheck — checkpoint 2's own addition — can
-    /// catch this.
+    /// The same preservation property holds when the rename lands during the deleter's
+    /// own holder probe, immediately before pinned measurement and descendant unlink.
     #[cfg(target_os = "linux")]
-    #[ignore = "issue #1261: same inode-reuse flake as the verdict-and-delete sibling above; CI overlayfs can hand back the same inode after remove_dir_all+create_dir_all. Run with --ignored"]
     #[test]
-    fn a_directory_replaced_between_the_deleters_own_probe_and_unlink_is_refused() {
+    fn a_directory_replaced_during_final_probe_preserves_replacement() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let root = unique_temp_dir("tachi-reaper-post-probe-swap");
         let target = make_target_dir(&root, "swapped-target");
+        let moved = root.join("pinned-original");
         let mut store = open_store(&root);
 
-        // `probe` is invoked twice per candidate: once during
-        // `run_orphan_reap_uncertified`'s eligibility check (BEFORE `delete_resource_bytes`
-        // runs a single fence), and once again inside `delete_resource_bytes` itself
-        // (its own defense-in-depth holder check, right before the byte walk and the
-        // second `(dev, ino)` recheck). This closure counts invocations and only swaps
-        // on the SECOND one, so the FIRST identity recheck inside `delete_resource_bytes`
-        // (which runs before its own `probe` call) still sees the original, unswapped
-        // directory and passes — leaving only the second recheck to catch this.
+        // `probe` is invoked twice against the pinned fd path: once for eligibility
+        // and once inside `delete_resource_bytes`. Rename on the second call, after
+        // every earlier force observation, to prove the final measurement and unlink
+        // still remain rooted at the capability rather than the replacement name.
         let calls = Arc::new(AtomicUsize::new(0));
         let target_for_probe = target.clone();
+        let moved_for_probe = moved.clone();
         let swap_on_second_call = move |_path: &Path| {
             let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
             if call == 2 {
-                std::fs::remove_dir_all(&target_for_probe).unwrap();
+                std::fs::rename(&target_for_probe, &moved_for_probe).unwrap();
                 std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
                 std::fs::write(
                     target_for_probe.join("debug/replacement.rlib"),
@@ -5134,23 +5346,15 @@ mod tests {
             "the replacement directory — swapped in after the deleter's own probe — must \
              survive: {report:?}"
         );
-        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert!(moved.is_dir(), "the pinned root object is retained");
+        assert!(std::fs::read_dir(&moved).unwrap().next().is_none());
+        assert_eq!(report.reclaimed.len(), 1, "{report:?}");
+        assert_eq!(report.reclaimed[0].outcome, "reclaimed_content");
+        assert!(report.reclaimed[0].root_retained);
+        assert_eq!(report.reclaimed[0].reclaimed_bytes, 2048);
         assert_eq!(report.candidates.len(), 1, "{report:?}");
-        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
-        assert!(
-            report.warnings.iter().any(|warning| warning
-                .contains("(dev, ino) identity changed again")
-                && warning.contains("a second time")),
-            "the refusal must name the SECOND recheck's own language (\"changed again\" / \
-             \"a second time\"), proving checkpoint 2's own recheck fired — not the first \
-             recheck's \"replaced between judgement and delete\" wording: {report:?}"
-        );
-        assert!(
-            !report.errors.is_empty(),
-            "an identity that changed after the deleter's own probe must land in errors, not \
-             just a warning: {report:?}"
-        );
-        assert!(report.incomplete, "{report:?}");
+        assert_eq!(report.candidates[0].decision, "reclaim", "{report:?}");
+        assert!(report.errors.is_empty(), "{report:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -5234,8 +5438,8 @@ mod tests {
     /// **BUG 4, closed: an ATTEMPTED delete that does not cleanly finish must not
     /// exit 0.** The first cut treated every non-`Ok` outcome from the delete path
     /// the same way — a warning line, run still exits 0 — which conflated "a fence
-    /// fired, working as designed" with "the delete was tried and a
-    /// `remove_dir_all` failed partway". This fixture forces the second: the
+    /// fired, working as designed" with "descendant unlinking failed partway".
+    /// This fixture forces the second: the
     /// candidate is genuinely eligible (stale, unheld, unbound — the OS itself is
     /// what refuses one entry), so the failure comes from the delete path, not
     /// from any earlier gate.
@@ -5250,7 +5454,7 @@ mod tests {
         std::fs::create_dir_all(&locked).unwrap();
         std::fs::write(locked.join("stuck.o"), vec![1u8; 16]).unwrap();
         // Unlinking `stuck.o` needs write+execute on its PARENT (`locked`), not on
-        // the file itself — stripping that makes `remove_dir_all` delete
+        // the file itself — stripping that makes the descendant drain delete
         // everything else it can (the fixture's `debug/artifact.rlib` included) and
         // then fail on this one entry: a real partial delete, not a simulated one.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -5274,7 +5478,7 @@ mod tests {
         );
         assert!(
             locked.join("stuck.o").exists(),
-            "the entry `remove_dir_all` could not touch survives: {report:?}"
+            "the entry the descendant drain could not unlink survives: {report:?}"
         );
         // The discriminating assertion: the pre-#1062 shape put this in `warnings`
         // only and still exited 0. `errors` (not just `warnings`) must carry it.
@@ -5330,9 +5534,18 @@ mod tests {
             &*unheld_probe(),
         );
 
-        // The run really did work — this is not "it failed, so it deleted nothing".
+        // B* changed the contract from root disappearance to content reclaim. The
+        // run really did work: the candidate root remains and its descendants are
+        // observed empty even though a separate missing scan root makes the overall
+        // run incomplete.
         assert_eq!(incomplete.reclaimed.len(), 1, "{incomplete:?}");
-        assert!(!dead.exists());
+        assert!(dead.is_dir(), "the reclaimed candidate root is retained");
+        assert!(std::fs::read_dir(&dead).unwrap().next().is_none());
+        assert!(incomplete.reclaimed[0].root_retained, "{incomplete:?}");
+        assert_eq!(
+            incomplete.reclaimed[0].outcome, "reclaimed_content",
+            "{incomplete:?}"
+        );
         assert!(incomplete.errors.is_empty(), "{:?}", incomplete.errors);
         assert!(
             incomplete.incomplete,
@@ -5354,7 +5567,10 @@ mod tests {
             &*unheld_probe(),
         );
         assert_eq!(complete.reclaimed.len(), 1, "{complete:?}");
-        assert!(!reborn.exists());
+        assert!(reborn.is_dir(), "the second candidate root is retained");
+        assert!(std::fs::read_dir(&reborn).unwrap().next().is_none());
+        assert!(complete.reclaimed[0].root_retained, "{complete:?}");
+        assert_eq!(complete.reclaimed[0].outcome, "reclaimed_content");
         assert!(!complete.incomplete, "{complete:?}");
         assert!(
             reap_exit_status(&complete).is_ok(),
@@ -5428,19 +5644,12 @@ mod tests {
     ///   healthy fixture now returns a top-level `Err(DestructiveRefusal)` without
     ///   touching the ledger or deleting anything — proving `certify_destructive`
     ///   went back to being the gate it was in the pre-#1062 shape.
-    /// * **second half keeps CONCERN 6 alive behind the seal.** The `(dev, ino)`
-    ///   identity is swapped out from under the verdict between judgement and delete
-    ///   (BUG 2's own fence — same swap technique as
-    ///   `a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_refused`).
-    ///   Because the entry point now refuses `--force`, this half bypasses the gate
-    ///   via `reap_uncertified` (the sheathed body tests already use) so the fence
-    ///   itself stays pinned: it still refuses the delete even though `force` is
-    ///   present. The day #1379's handle-pinning fix and an inode-reuse kill-test
-    ///   re-certify the path, this half is the existing regression test that the
-    ///   fence still works in the re-opened world.
+    /// * **second half exercises B* behind the seal.** A rename-and-replacement after
+    ///   pinning cannot redirect the test-only force body: it drains and retains the
+    ///   pinned original while preserving the replacement.
     #[cfg(target_os = "linux")]
     #[test]
-    fn force_is_refused_at_the_entry_point_and_a_broken_fence_still_refuses_behind_it() {
+    fn force_is_refused_at_entry_and_pinned_reclaim_stays_contained_behind_it() {
         // Half 1: a healthy fixture, the real entry point, `--force` — refused
         // outright now that `tachi#1379` re-sheathed the knife.
         let root = unique_temp_dir("tachi-reaper-resheathed-delete");
@@ -5475,21 +5684,26 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
 
-        // Half 2 (CONCERN 6, still true behind the seal): the same `--force` intent,
-        // routed through the sheathed body so the per-candidate fences remain covered.
+        // Half 2: the same `--force` intent routed through the sheathed body so B*'s
+        // pinned-object behavior remains covered while production stays disabled.
         let root2 = unique_temp_dir("tachi-reaper-resheathed-still-fenced");
         let target = make_target_dir(&root2, "swapped-target");
+        let moved = root2.join("pinned-original");
         let mut store2 = open_store(&root2);
 
         let target_for_probe = target.clone();
+        let moved_for_probe = moved.clone();
+        let swapped = std::cell::Cell::new(false);
         let swapping_probe = move |_path: &Path| {
-            std::fs::remove_dir_all(&target_for_probe).unwrap();
-            std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
-            std::fs::write(
-                target_for_probe.join("debug/replacement.rlib"),
-                vec![9u8; 4096],
-            )
-            .unwrap();
+            if !swapped.replace(true) {
+                std::fs::rename(&target_for_probe, &moved_for_probe).unwrap();
+                std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
+                std::fs::write(
+                    target_for_probe.join("debug/replacement.rlib"),
+                    vec![9u8; 4096],
+                )
+                .unwrap();
+            }
             HolderCheck::None
         };
 
@@ -5502,18 +5716,16 @@ mod tests {
 
         assert!(
             target.join("debug/replacement.rlib").exists(),
-            "the replacement directory must survive: the identity fence is still armed: {report2:?}"
+            "the replacement directory must survive outside the pinned authority: {report2:?}"
         );
-        assert!(report2.reclaimed.is_empty(), "{report2:?}");
+        assert!(moved.is_dir(), "the pinned root object is retained");
+        assert!(std::fs::read_dir(&moved).unwrap().next().is_none());
+        assert_eq!(report2.reclaimed.len(), 1, "{report2:?}");
+        assert_eq!(report2.reclaimed[0].outcome, "reclaimed_content");
+        assert!(report2.reclaimed[0].root_retained);
         assert_eq!(report2.candidates.len(), 1, "{report2:?}");
-        assert_eq!(report2.candidates[0].decision, "refused", "{report2:?}");
-        assert!(
-            report2
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("(dev, ino) identity")),
-            "the refusal must still name the (dev, ino) mismatch behind the seal: {report2:?}"
-        );
+        assert_eq!(report2.candidates[0].decision, "reclaim", "{report2:?}");
+        assert!(report2.errors.is_empty(), "{report2:?}");
 
         let _ = std::fs::remove_dir_all(&root2);
     }
@@ -5523,8 +5735,8 @@ mod tests {
     /// report-only request is still permitted to proceed past this gate, and a
     /// `--force` request is turned into [`DestructiveRefusal`]. Other fences (the
     /// protected set, the holder probe, the pinned `(dev, ino)` identity) still
-    /// stand; see `force_is_refused_at_the_entry_point_and_a_broken_fence_still_
-    /// refuses_behind_it` for the proof that they are still armed behind the seal.
+    /// stand; see `force_is_refused_at_entry_and_pinned_reclaim_stays_contained_
+    /// behind_it` for proof that B* remains contained behind the seal.
     ///
     /// Renamed from `certify_destructive_permits_both_once_certified`, which pinned
     /// the post-#1062 shape (`certify_destructive(true)` unconditionally `Ok`,
@@ -6077,16 +6289,21 @@ mod tests {
             {
                 let root = unique_temp_dir("tachi-reaper-kt-swap");
                 let target = make_target_dir(&root, "kt-swapped-target");
+                let moved = root.join("pinned-original");
                 let mut store = open_store(&root);
                 let target_for_probe = target.clone();
+                let moved_for_probe = moved.clone();
+                let swapped = std::cell::Cell::new(false);
                 let swapping_probe = move |_path: &Path| {
-                    std::fs::remove_dir_all(&target_for_probe).unwrap();
-                    std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
-                    std::fs::write(
-                        target_for_probe.join("debug/replacement.rlib"),
-                        vec![9u8; 4096],
-                    )
-                    .unwrap();
+                    if !swapped.replace(true) {
+                        std::fs::rename(&target_for_probe, &moved_for_probe).unwrap();
+                        std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
+                        std::fs::write(
+                            target_for_probe.join("debug/replacement.rlib"),
+                            vec![9u8; 4096],
+                        )
+                        .unwrap();
+                    }
                     HolderCheck::None
                 };
                 let report = reap_uncertified(
@@ -6099,11 +6316,15 @@ mod tests {
                     target.join("debug/replacement.rlib").exists(),
                     "2. the replacement object must survive: {report:?}"
                 );
-                assert!(report.reclaimed.is_empty(), "2. {report:?}");
+                assert!(moved.is_dir(), "2. the pinned root is retained");
+                assert!(std::fs::read_dir(&moved).unwrap().next().is_none());
+                assert_eq!(report.reclaimed.len(), 1, "2. {report:?}");
+                assert_eq!(report.reclaimed[0].outcome, "reclaimed_content");
+                assert!(report.reclaimed[0].root_retained);
                 let _ = std::fs::remove_dir_all(&root);
                 results.push(MatrixResult {
-                    label: "target_swapped_at_same_path_not_followed",
-                    outcome: "PASS: (dev, ino) mismatch refused the delete",
+                    label: "post_pin_replacement_not_followed",
+                    outcome: "PASS: pinned original drained and retained; replacement preserved",
                 });
             }
 

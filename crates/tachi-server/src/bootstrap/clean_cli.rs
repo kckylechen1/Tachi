@@ -631,9 +631,9 @@ mod tests {
     // entry point when `exec_env_reaper`'s own tests can drive the same sheathed
     // body (`run_orphan_reap_uncertified`, via `reap_uncertified`) against a fully
     // temp-dir'd store AND a temp-dir'd scan root. See
-    // `force_is_refused_at_the_entry_point_and_a_broken_fence_still_refuses_behind_it`
-    // in that module for the current shape: the entry point refuses `--force`, and
-    // the delete-path fences are still pinned by direct calls to the sheathed body.
+    // `force_is_refused_at_entry_and_pinned_reclaim_stays_contained_behind_it` in
+    // that module for the current shape: the entry point refuses `--force`, while
+    // direct sheathed-body tests prove B* drains only the pinned root's descendants.
 
     #[test]
     fn clean_target_defaults_to_dry_run_and_json_output() {
