@@ -41,6 +41,17 @@ trap 'rm -f "${KNOWN_FILE}" "${FAILED_FILE}"' EXIT
 # stderr is NOT swallowed here: a `cargo nextest list` failure (bad
 # expression, missing group, build error) must be visible, not silently
 # turn into an empty KNOWN_FILE with no diagnostic.
+#
+# --color never is load-bearing, not cosmetic: under CLICOLOR/FORCE_COLOR
+# environments cargo/nextest emit ANSI escapes in the human list output even
+# though stdout isn't a real TTY inside this subshell/pipeline. Those escapes
+# land inside the captured test-name field and break every string-equality
+# comparison downstream (comm(1) does no ANSI-aware normalization), so a run
+# with color forced on reports every known red as an "outsider" — a false
+# positive on an otherwise-green suite (reproduced 2026-07-22 under
+# FORCE_COLOR/CLICOLOR). The `sed` below is defense in depth in case some
+# other invocation path (env var nextest itself doesn't recognize, a future
+# nextest version, a differently-invoked wrapper) still injects escapes.
 if ! (
   cd "${ROOT}"
   # Default human list lines look like: `tachi-server tests::path::to::test`
@@ -48,7 +59,9 @@ if ! (
   # binary-id prefix so the sets compare.
   cargo nextest list -p tachi-server \
     -E 'group(known-deterministic-reds)' \
+    --color never \
     --target-dir "${CARGO_TARGET_DIR:-/Users/kckylechen/.cache/sigil-shared-target}" \
+    | sed -E 's/\x1b\[[0-9;]*m//g' \
     | sed -n 's/^[^ ]\{1,\} //p' \
     | sed '/^$/d' \
     | sort -u
