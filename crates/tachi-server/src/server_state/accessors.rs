@@ -306,13 +306,15 @@ mod tests {
     /// inside `block_on` (same thread, so the guard's thread-local stays
     /// valid for the whole emission path).
     ///
-    /// Plain `#[test]` + `block_on` (not `#[tokio::test]`), matching the
-    /// `global_test_lock` convention in `vault_ops/tests.rs`: the guard
-    /// serializes process-wide `SILICONFLOW_API_KEY` env against other
+    /// Plain `#[test]` + `new_current_thread().block_on` (not `#[tokio::test]`),
+    /// matching the `global_test_lock` convention in `vault_ops/tests.rs`: the
+    /// guard serializes process-wide `SILICONFLOW_API_KEY` env against other
     /// tests, so it must stay held for the whole init/set sequence including
-    /// its internal awaits — `block_on` runs that future to completion on
-    /// this thread, so there is no top-level `.await` for clippy's
-    /// `await_holding_lock` lint while the guard's coverage is unchanged.
+    /// its internal awaits — a current_thread runtime keeps TLS and
+    /// `tracing::subscriber::set_default` on one thread for the whole
+    /// emission path, and `block_on` runs that future to completion without
+    /// a top-level `.await` for clippy's `await_holding_lock` lint while the
+    /// guard's coverage is unchanged.
     ///
     /// DISCRIMINATION (RED/GREEN proof executed by the build seat, not run
     /// here — this lane is edit-only, no cargo): comment out or delete the
@@ -340,8 +342,10 @@ mod tests {
         let _env = crate::test_support::EnvRestore::set(key_name, env_sentinel);
 
         let buf = BufWriter::default();
-        tokio::runtime::Runtime::new()
-            .expect("tokio runtime")
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio current_thread runtime")
             .block_on(async {
                 server
                     .vault_init(rmcp::handler::server::wrapper::Parameters(
