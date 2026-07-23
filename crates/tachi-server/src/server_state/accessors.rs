@@ -254,4 +254,139 @@ mod tests {
             "warning must not leak vault sentinel: {warning}"
         );
     }
+
+    /// A capturing [`tracing_subscriber::fmt::MakeWriter`] so the production
+    /// `tracing::warn!` in `refresh_llm_provider_secrets_from_vault` can be
+    /// asserted on directly. Same idiom as
+    /// `bootstrap::clean_cli::tests::sweep_leaves_lease_whose_stat_is_inconclusive_and_logs_why`.
+    #[derive(Clone, Default)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// #1403 R2 / #1393 cold review (codex-2d6e7): the formatter-only test
+    /// above calls `format_bypassed_env_warning` directly, so deleting the
+    /// production warn loop below —
+    /// ```ignore
+    /// if report.env_fallbacks_bypassed > 0 {
+    ///     for name in &report.bypassed_names {
+    ///         tracing::warn!("{}", format_bypassed_env_warning(name));
+    ///     }
+    /// }
+    /// ```
+    /// (the body of `refresh_llm_provider_secrets_from_vault`, this file,
+    /// currently a few lines above the `tests` module) — would leave the
+    /// formatter test green, because it never calls
+    /// `refresh_llm_provider_secrets_from_vault` at all.
+    ///
+    /// This test drives the real emission path instead: `vault_set` on a
+    /// live `MemoryServer` with a plaintext env fallback already present
+    /// under the same key. Inside `handle_vault_set`,
+    /// `attach_provider_refresh_warning` calls the production
+    /// `refresh_llm_provider_secrets_from_vault()`, which finds
+    /// `env_fallbacks_bypassed > 0` (vault wins over the env plaintext) and
+    /// — if the loop above still exists — emits `tracing::warn!` naming the
+    /// bypassed key. We capture the real tracing output with a `MakeWriter`
+    /// held across the `.await` via `tracing::subscriber::set_default`
+    /// (safe here: `#[tokio::test]` defaults to the `current_thread`
+    /// flavor, so the guard's thread-local stays valid across the await
+    /// point).
+    ///
+    /// DISCRIMINATION (RED/GREEN proof executed by the build seat, not run
+    /// here — this lane is edit-only, no cargo): comment out or delete the
+    /// `if report.env_fallbacks_bypassed > 0 { ... }` block in
+    /// `refresh_llm_provider_secrets_from_vault` above and this test must go
+    /// RED (the captured buffer no longer contains the bypassed key name);
+    /// restoring the block must bring it back GREEN.
+    #[tokio::test]
+    async fn refresh_from_vault_emits_bypassed_env_warning_via_real_emission_path() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // `crate::tests::make_server()` runs `ensure_test_env()` (a
+        // process-wide `Once`) which sets a baseline `SILICONFLOW_API_KEY`.
+        // Construct the server FIRST so that `Once` fires before we install
+        // our own sentinel value below — otherwise, if this were the first
+        // test in the binary to touch `ensure_test_env()`, the baseline
+        // value could be set AFTER ours and clobber it.
+        let server = crate::tests::make_server();
+
+        let key_name = "SILICONFLOW_API_KEY";
+        let env_sentinel = "ENV_SENTINEL_VALUE_DO_NOT_LEAK";
+        let vault_sentinel = "VAULT_SENTINEL_VALUE_DO_NOT_LEAK";
+        let _env = crate::test_support::EnvRestore::set(key_name, env_sentinel);
+
+        server
+            .vault_init(rmcp::handler::server::wrapper::Parameters(
+                crate::vault_ops::VaultInitParams {
+                    password: "emission-path-test-password".to_string(),
+                },
+            ))
+            .await
+            .expect("vault_init should succeed");
+
+        let buf = BufWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _tracing_guard = tracing::subscriber::set_default(subscriber);
+
+        // vault_set stores `vault_sentinel` under the same name the env
+        // fallback already occupies, then internally calls
+        // `refresh_llm_provider_secrets_from_vault()` — the real production
+        // trigger for the warn loop under test.
+        server
+            .vault_set(rmcp::handler::server::wrapper::Parameters(
+                crate::vault_ops::VaultSetParams {
+                    name: key_name.to_string(),
+                    value: vault_sentinel.to_string(),
+                    agent_id: None,
+                    secret_type: "api_key".to_string(),
+                    description: "emission-path discrimination test".to_string(),
+                    allowed_agents: None,
+                    enable_rotation: false,
+                    rotation_strategy: None,
+                },
+            ))
+            .await
+            .expect("vault_set should succeed");
+
+        drop(_tracing_guard);
+
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains(key_name),
+            "the real refresh_llm_provider_secrets_from_vault() emission must name the \
+             bypassed key when the warn loop is present: {logged}"
+        );
+        assert!(
+            logged.contains("env/config.env value ignored for"),
+            "must be the bypassed-env warning, not some other log line: {logged}"
+        );
+        assert!(
+            !logged.contains(env_sentinel),
+            "must not leak the env plaintext value: {logged}"
+        );
+        assert!(
+            !logged.contains(vault_sentinel),
+            "must not leak the vault plaintext value: {logged}"
+        );
+    }
 }
