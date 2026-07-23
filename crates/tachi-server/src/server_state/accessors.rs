@@ -12,6 +12,14 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+/// Operator-facing warning when env/config.env is ignored because vault won.
+/// Names only — never interpolates secret values.
+pub(crate) fn format_bypassed_env_warning(name: &str) -> String {
+    format!(
+        "[provider] env/config.env value ignored for {name} — vault wins; if your env value is fresher: tachi vault set {name}"
+    )
+}
+
 impl MemoryServer {
     pub(crate) fn set_work_claim_connection(
         &self,
@@ -70,9 +78,7 @@ impl MemoryServer {
         }
         if report.env_fallbacks_bypassed > 0 {
             for name in &report.bypassed_names {
-                tracing::warn!(
-                    "[provider] env/config.env value ignored for {name} — vault wins; if your env value is fresher: tachi vault set {name}"
-                );
+                tracing::warn!("{}", format_bypassed_env_warning(name));
             }
         }
         // #1279: this is the single refresh seam (daemon auto-refresh, keychain
@@ -210,5 +216,42 @@ impl MemoryServer {
         &self,
     ) -> &crate::memory_search_ops::routing_config::RoutingConfigProvider {
         &self.routing_config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_bypassed_env_warning;
+
+    /// #1403 R2 / #1393: bypassed-env warn text must name the key and must not
+    /// leak env or vault secret values into the operator-facing string.
+    #[test]
+    fn bypassed_env_warning_includes_name_not_secret_values() {
+        let env_sentinel = "ENV_SENTINEL_VALUE_DO_NOT_LEAK";
+        let vault_sentinel = "VAULT_SENTINEL_VALUE_DO_NOT_LEAK";
+        let name = "OPENAI_API_KEY";
+
+        // Fixtures: distinct env vs vault payloads that a buggy formatter might
+        // interpolate. Materialize would record `name` in bypassed_names when
+        // vault wins; we format that name only.
+        let bypassed_names = vec![name.to_string()];
+        let warning = format_bypassed_env_warning(&bypassed_names[0]);
+
+        assert!(
+            warning.contains(name),
+            "warning must name the bypassed key: {warning}"
+        );
+        assert_eq!(
+            warning,
+            "[provider] env/config.env value ignored for OPENAI_API_KEY — vault wins; if your env value is fresher: tachi vault set OPENAI_API_KEY"
+        );
+        assert!(
+            !warning.contains(env_sentinel),
+            "warning must not leak env sentinel: {warning}"
+        );
+        assert!(
+            !warning.contains(vault_sentinel),
+            "warning must not leak vault sentinel: {warning}"
+        );
     }
 }
