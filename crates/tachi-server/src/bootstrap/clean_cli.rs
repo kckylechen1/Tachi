@@ -510,7 +510,7 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
 /// could not open) or whose protected set could not be fully resolved (`ps` unavailable,
 /// `HOME` unset) exits non-zero, because it cannot honestly say it saw its whole scope —
 /// `--force` waives this no more than it waives any other fence (see
-/// `cli_force_still_refuses_a_scan_that_cannot_see_its_whole_scope` below).
+/// `cli_force_is_refused_at_the_gate` below for the current gate behavior).
 fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), String> {
     // The protected set's sources are read from the process environment HERE — at the
     // edge, once — and handed to the reaper as a value. The reaper itself reads no
@@ -519,7 +519,7 @@ fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), St
     // call site of `from_process_env` in this function's call graph; everything below
     // this line is `run_orphan_reap_cli_with_sources`, which a test may call with a
     // different, deterministic `ProtectionSources` instead (see
-    // `cli_force_still_refuses_a_scan_that_cannot_see_its_whole_scope` and
+    // `cli_force_is_refused_at_the_gate` and
     // `ProtectionSources::deterministic_for_cli_test`, #1196).
     let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
     run_orphan_reap_cli_with_sources(opts, output, &sources)
