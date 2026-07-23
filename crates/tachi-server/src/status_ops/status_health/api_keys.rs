@@ -94,6 +94,26 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         canonical_key: "ZHIPUAI_API_KEY",
         aliases: &[],
     },
+    // #1355 follow-up: the `kimi-for-coding`/K3 opencode lane provider must
+    // also be a recognized provider-key name so an unlocked-vault Kimi
+    // secret is injected into the lane subprocess env (via
+    // `load_unlocked_provider_env_secrets`, gated by
+    // `provider_api_key_env_names()`). That lets the lane's provider config
+    // use `{env:KIMI_API_KEY}` substitution (or direct env read) — no
+    // literal secret on disk for vault "收权" to blank. `MOONSHOT_API_KEY`
+    // is carried as an alias (alternate ecosystem name — Moonshot AI is
+    // Kimi's vendor) so whichever name the owner stored the vault secret
+    // under is admitted by the filter; the injected env-var name is always
+    // the vault entry's own name, so that name must match the lane's
+    // `{env:...}` reference.
+    ApiKeyDef {
+        key: "KIMI_API_KEY",
+        label: "Kimi/Moonshot OpenAI-compatible LLM",
+        required: false,
+        deprecated: false,
+        canonical_key: "KIMI_API_KEY",
+        aliases: &["MOONSHOT_API_KEY"],
+    },
     ApiKeyDef {
         key: "OPENAI_API_KEY",
         label: "OpenAI-compatible agents",
