@@ -43,7 +43,7 @@ fn acquire_real_home_lock() -> std::sync::MutexGuard<'static, ()> {
     home_test_lock().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-struct TempHomeGuard {
+pub(crate) struct TempHomeGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     original_home: Option<std::ffi::OsString>,
     original_tachi_home: Option<std::ffi::OsString>,

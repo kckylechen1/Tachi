@@ -234,7 +234,7 @@ mod tests {
         // Fixtures: distinct env vs vault payloads that a buggy formatter might
         // interpolate. Materialize would record `name` in bypassed_names when
         // vault wins; we format that name only.
-        let bypassed_names = vec![name.to_string()];
+        let bypassed_names = [name.to_string()];
         let warning = format_bypassed_env_warning(&bypassed_names[0]);
 
         assert!(
@@ -302,10 +302,19 @@ mod tests {
     /// `env_fallbacks_bypassed > 0` (vault wins over the env plaintext) and
     /// — if the loop above still exists — emits `tracing::warn!` naming the
     /// bypassed key. We capture the real tracing output with a `MakeWriter`
-    /// held across the `.await` via `tracing::subscriber::set_default`
-    /// (safe here: `#[tokio::test]` defaults to the `current_thread`
-    /// flavor, so the guard's thread-local stays valid across the await
-    /// point).
+    /// held across the async work via `tracing::subscriber::set_default`
+    /// inside `block_on` (same thread, so the guard's thread-local stays
+    /// valid for the whole emission path).
+    ///
+    /// Plain `#[test]` + `new_current_thread().block_on` (not `#[tokio::test]`),
+    /// matching the `global_test_lock` convention in `vault_ops/tests.rs`: the
+    /// guard serializes process-wide `SILICONFLOW_API_KEY` env against other
+    /// tests, so it must stay held for the whole init/set sequence including
+    /// its internal awaits — a current_thread runtime keeps TLS and
+    /// `tracing::subscriber::set_default` on one thread for the whole
+    /// emission path, and `block_on` runs that future to completion without
+    /// a top-level `.await` for clippy's `await_holding_lock` lint while the
+    /// guard's coverage is unchanged.
     ///
     /// DISCRIMINATION (RED/GREEN proof executed by the build seat, not run
     /// here — this lane is edit-only, no cargo): comment out or delete the
@@ -313,8 +322,8 @@ mod tests {
     /// `refresh_llm_provider_secrets_from_vault` above and this test must go
     /// RED (the captured buffer no longer contains the bypassed key name);
     /// restoring the block must bring it back GREEN.
-    #[tokio::test]
-    async fn refresh_from_vault_emits_bypassed_env_warning_via_real_emission_path() {
+    #[test]
+    fn refresh_from_vault_emits_bypassed_env_warning_via_real_emission_path() {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -332,43 +341,47 @@ mod tests {
         let vault_sentinel = "VAULT_SENTINEL_VALUE_DO_NOT_LEAK";
         let _env = crate::test_support::EnvRestore::set(key_name, env_sentinel);
 
-        server
-            .vault_init(rmcp::handler::server::wrapper::Parameters(
-                crate::vault_ops::VaultInitParams {
-                    password: "emission-path-test-password".to_string(),
-                },
-            ))
-            .await
-            .expect("vault_init should succeed");
-
         let buf = BufWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf.clone())
-            .with_ansi(false)
-            .finish();
-        let _tracing_guard = tracing::subscriber::set_default(subscriber);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio current_thread runtime")
+            .block_on(async {
+                server
+                    .vault_init(rmcp::handler::server::wrapper::Parameters(
+                        crate::vault_ops::VaultInitParams {
+                            password: "emission-path-test-password".to_string(),
+                        },
+                    ))
+                    .await
+                    .expect("vault_init should succeed");
 
-        // vault_set stores `vault_sentinel` under the same name the env
-        // fallback already occupies, then internally calls
-        // `refresh_llm_provider_secrets_from_vault()` — the real production
-        // trigger for the warn loop under test.
-        server
-            .vault_set(rmcp::handler::server::wrapper::Parameters(
-                crate::vault_ops::VaultSetParams {
-                    name: key_name.to_string(),
-                    value: vault_sentinel.to_string(),
-                    agent_id: None,
-                    secret_type: "api_key".to_string(),
-                    description: "emission-path discrimination test".to_string(),
-                    allowed_agents: None,
-                    enable_rotation: false,
-                    rotation_strategy: None,
-                },
-            ))
-            .await
-            .expect("vault_set should succeed");
+                let subscriber = tracing_subscriber::fmt()
+                    .with_writer(buf.clone())
+                    .with_ansi(false)
+                    .finish();
+                let _tracing_guard = tracing::subscriber::set_default(subscriber);
 
-        drop(_tracing_guard);
+                // vault_set stores `vault_sentinel` under the same name the env
+                // fallback already occupies, then internally calls
+                // `refresh_llm_provider_secrets_from_vault()` — the real production
+                // trigger for the warn loop under test.
+                server
+                    .vault_set(rmcp::handler::server::wrapper::Parameters(
+                        crate::vault_ops::VaultSetParams {
+                            name: key_name.to_string(),
+                            value: vault_sentinel.to_string(),
+                            agent_id: None,
+                            secret_type: "api_key".to_string(),
+                            description: "emission-path discrimination test".to_string(),
+                            allowed_agents: None,
+                            enable_rotation: false,
+                            rotation_strategy: None,
+                        },
+                    ))
+                    .await
+                    .expect("vault_set should succeed");
+            });
 
         let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert!(

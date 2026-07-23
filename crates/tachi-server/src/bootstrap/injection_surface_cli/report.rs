@@ -550,9 +550,8 @@ fn scan_density(harness_id: &str, path: &Path) -> Vec<Finding> {
     if let Some(finding) = reject_non_regular_file(harness_id, "density", path) {
         return vec![finding];
     }
-    match fs::metadata(path) {
-        Err(_) => return vec![plane_path_io_finding(harness_id, "density", path)],
-        Ok(_) => {}
+    if fs::metadata(path).is_err() {
+        return vec![plane_path_io_finding(harness_id, "density", path)];
     }
     match fs::File::open(path) {
         Ok(_) => Vec::new(),
