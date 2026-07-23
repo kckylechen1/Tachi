@@ -273,20 +273,24 @@ pub(super) fn load_unlocked_vault_secrets(
 pub(crate) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
 ) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
-    load_unlocked_api_key_secret_pools_filtered(server, None)
+    // Materialize / env injection: each successfully decrypted pool member is an access.
+    load_unlocked_api_key_secret_pools_filtered(server, None, true)
 }
 
 pub(super) fn load_unlocked_api_key_secret_pool(
     server: &MemoryServer,
     logical_name: &str,
 ) -> Result<Vec<tachi_llm::ProviderSecret>, String> {
-    load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name))
+    // Lease path: do not bump here. The lease handler's single vault_touch_entry
+    // is the only +1 for the selected key (avoids double-count with pool load).
+    load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name), false)
         .map(|mut pools| pools.remove(logical_name).unwrap_or_default())
 }
 
 fn load_unlocked_api_key_secret_pools_filtered(
     server: &MemoryServer,
     only_logical_name: Option<&str>,
+    record_access: bool,
 ) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
     with_vault_key(server, |key| {
         let (entries, rotations, key_health_rows) = server
@@ -411,12 +415,14 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     key_id: entry.name,
                     value,
                 });
-                // Materialize/pool reads decrypt secrets; bump access_count like vault_get.
-                server
-                    .with_global_store(|store| {
-                        record_successful_vault_access(store, &key_id, None)
-                    })
-                    .map_err(|e| format!("Failed to update access stats: {e}"))?;
+                // Only after successful decrypt + inclusion in the returned pool.
+                if record_access {
+                    server
+                        .with_global_store(|store| {
+                            record_successful_vault_access(store, &key_id, None)
+                        })
+                        .map_err(|e| format!("Failed to update access stats: {e}"))?;
+                }
             }
             if !pool.is_empty() {
                 pools.insert(rotation.prefix, pool);
@@ -449,12 +455,14 @@ fn load_unlocked_api_key_secret_pools_filtered(
                         value,
                     }]
                 });
-                // Materialize/pool reads decrypt secrets; bump access_count like vault_get.
-                server
-                    .with_global_store(|store| {
-                        record_successful_vault_access(store, &key_id, None)
-                    })
-                    .map_err(|e| format!("Failed to update access stats: {e}"))?;
+                // Only after successful decrypt + inclusion in the returned pool.
+                if record_access {
+                    server
+                        .with_global_store(|store| {
+                            record_successful_vault_access(store, &key_id, None)
+                        })
+                        .map_err(|e| format!("Failed to update access stats: {e}"))?;
+                }
             }
         }
 
