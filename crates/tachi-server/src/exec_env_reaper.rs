@@ -2646,6 +2646,48 @@ const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 #[cfg(any(target_os = "linux", test))]
 const RESOLVE_BENEATH: u64 = 0x08;
 
+// Linux `stat.st_mode` file-type bits. Keep this policy independent of the host
+// libc so its complete Linux mode table can be unit-tested on the macOS build seat.
+#[cfg(any(target_os = "linux", test))]
+const LINUX_S_IFMT: u32 = 0o170000;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_S_IFSOCK: u32 = 0o140000;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_S_IFLNK: u32 = 0o120000;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_S_IFREG: u32 = 0o100000;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_S_IFBLK: u32 = 0o060000;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_S_IFDIR: u32 = 0o040000;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_S_IFCHR: u32 = 0o020000;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_S_IFIFO: u32 = 0o010000;
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllowedDescendantType {
+    RegularFile,
+    Directory,
+}
+
+/// The single descendant-type policy shared by preflight and unlink-time
+/// revalidation. Anything not explicitly allowed is a loud refusal.
+#[cfg(any(target_os = "linux", test))]
+fn allowed_descendant_type(mode: u32) -> Result<AllowedDescendantType, &'static str> {
+    match mode & LINUX_S_IFMT {
+        LINUX_S_IFREG => Ok(AllowedDescendantType::RegularFile),
+        LINUX_S_IFDIR => Ok(AllowedDescendantType::Directory),
+        LINUX_S_IFLNK => Err("symlink"),
+        LINUX_S_IFIFO => Err("fifo"),
+        LINUX_S_IFSOCK => Err("socket"),
+        LINUX_S_IFBLK => Err("block device"),
+        LINUX_S_IFCHR => Err("character device"),
+        _ => Err("unknown special file"),
+    }
+}
+
 /// Absolute ancestry is only a route to the parent capability. Applying
 /// `NO_XDEV` from `AT_FDCWD` would anchor the policy at `/` and reject an
 /// otherwise ordinary candidate merely because `/tmp`, `/home`, or another
@@ -3009,7 +3051,11 @@ impl PinnedContentRoot {
         Ok(names)
     }
 
-    fn contained_child(&self, dirfd: RawFd, name: &CStr) -> Result<libc::stat, String> {
+    fn contained_child(
+        &self,
+        dirfd: RawFd,
+        name: &CStr,
+    ) -> Result<(libc::stat, AllowedDescendantType), String> {
         let stat = child_stat(dirfd, name).map_err(|err| err.to_string())?;
         if stat.st_dev as u64 != self.identity.dev {
             return Err(format!(
@@ -3017,12 +3063,13 @@ impl PinnedContentRoot {
                 name.to_string_lossy()
             ));
         }
-        if stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            return Err(format!(
-                "refusing symlink descendant {} beneath pinned root",
+        let descendant_type = allowed_descendant_type(stat.st_mode as u32).map_err(|kind| {
+            format!(
+                "refusing unsupported {kind} descendant {} beneath pinned root; only regular \
+                 files and directories may be reclaimed",
                 name.to_string_lossy()
-            ));
-        }
+            )
+        })?;
         // `fstatat(AT_SYMLINK_NOFOLLOW)` classifies the child, but the contained
         // `openat2` is the load-bearing mount/symlink fence immediately before an
         // eventual `unlinkat`: a mount or symlink that arrives after the stat is still
@@ -3041,15 +3088,15 @@ impl PinnedContentRoot {
                 name.to_string_lossy()
             ));
         }
-        Ok(stat)
+        Ok((stat, descendant_type))
     }
 
     fn measure_directory(&self, dirfd: RawFd) -> Result<u64, String> {
         let mut bytes = 0u64;
         for name in self.child_names(dirfd)? {
-            let stat = self.contained_child(dirfd, &name)?;
-            match stat.st_mode & libc::S_IFMT {
-                libc::S_IFDIR => {
+            let (stat, descendant_type) = self.contained_child(dirfd, &name)?;
+            match descendant_type {
+                AllowedDescendantType::Directory => {
                     let child = open_descendant_directory(
                         dirfd,
                         std::ffi::OsStr::from_bytes(name.as_bytes()),
@@ -3064,7 +3111,7 @@ impl PinnedContentRoot {
                         .checked_add(self.measure_directory(child.as_raw_fd())?)
                         .ok_or_else(|| "pinned content byte count overflowed u64".to_string())?;
                 }
-                libc::S_IFREG => {
+                AllowedDescendantType::RegularFile => {
                     let file_bytes = u64::try_from(stat.st_size).map_err(|_| {
                         format!(
                             "contained file {} reported a negative size",
@@ -3075,7 +3122,6 @@ impl PinnedContentRoot {
                         .checked_add(file_bytes)
                         .ok_or_else(|| "pinned content byte count overflowed u64".to_string())?;
                 }
-                _ => {}
             }
         }
         Ok(bytes)
@@ -3088,7 +3134,26 @@ impl PinnedContentRoot {
             .map_err(ContentReclaimFailure::Refused)
     }
 
-    fn unlink_child(&self, dirfd: RawFd, name: &CStr, flags: libc::c_int) -> Result<(), String> {
+    fn unlink_child(
+        &self,
+        dirfd: RawFd,
+        name: &CStr,
+        expected_type: AllowedDescendantType,
+    ) -> Result<(), String> {
+        // Re-run the same policy at the unlink boundary. The whole-tree preflight
+        // prevents any initial special file from reaching mutation; this catches a
+        // FIFO/socket/device/symlink introduced by a concurrent creator afterward.
+        let (_, actual_type) = self.contained_child(dirfd, name)?;
+        if actual_type != expected_type {
+            return Err(format!(
+                "descendant {} changed from {expected_type:?} to {actual_type:?} before unlink",
+                name.to_string_lossy()
+            ));
+        }
+        let flags = match actual_type {
+            AllowedDescendantType::RegularFile => 0,
+            AllowedDescendantType::Directory => libc::AT_REMOVEDIR,
+        };
         // SAFETY: `name` is one `readdir` component, never an absolute or slash path;
         // `dirfd` is either the pinned root or a directory opened beneath it.
         if unsafe { libc::unlinkat(dirfd, name.as_ptr(), flags) } != 0 {
@@ -3104,20 +3169,25 @@ impl PinnedContentRoot {
         after_unlink: &mut dyn FnMut(usize) -> Result<(), String>,
     ) -> Result<(), String> {
         for name in self.child_names(dirfd)? {
-            let stat = self.contained_child(dirfd, &name)?;
-            if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
-                let child =
-                    open_descendant_directory(dirfd, std::ffi::OsStr::from_bytes(name.as_bytes()))
-                        .map_err(|err| {
-                            format!(
-                                "cannot open contained directory {}: {err}",
-                                name.to_string_lossy()
-                            )
-                        })?;
-                self.drain_directory(child.as_raw_fd(), unlinked, after_unlink)?;
-                self.unlink_child(dirfd, &name, libc::AT_REMOVEDIR)?;
-            } else {
-                self.unlink_child(dirfd, &name, 0)?;
+            let (_, descendant_type) = self.contained_child(dirfd, &name)?;
+            match descendant_type {
+                AllowedDescendantType::Directory => {
+                    let child = open_descendant_directory(
+                        dirfd,
+                        std::ffi::OsStr::from_bytes(name.as_bytes()),
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "cannot open contained directory {}: {err}",
+                            name.to_string_lossy()
+                        )
+                    })?;
+                    self.drain_directory(child.as_raw_fd(), unlinked, after_unlink)?;
+                    self.unlink_child(dirfd, &name, AllowedDescendantType::Directory)?;
+                }
+                AllowedDescendantType::RegularFile => {
+                    self.unlink_child(dirfd, &name, AllowedDescendantType::RegularFile)?;
+                }
             }
             *unlinked += 1;
             after_unlink(*unlinked)?;
@@ -3132,6 +3202,10 @@ impl PinnedContentRoot {
         let mut unlinked = 0usize;
         self.verify_root_linked()
             .map_err(ContentReclaimFailure::Refused)?;
+        // A complete recursive preflight is mandatory before the first unlink.
+        // `measure_content_bytes` shares the exact type policy used by the drain,
+        // so no special file can be silently treated as zero bytes and then deleted.
+        self.measure_content_bytes()?;
         for pass in 1..=MAX_CONTENT_RECLAIM_PASSES {
             if let Err(reason) =
                 self.drain_directory(self.root.as_raw_fd(), &mut unlinked, after_unlink)
@@ -3581,6 +3655,21 @@ mod tests {
         std::fs::create_dir_all(dir.join("debug")).unwrap();
         std::fs::write(dir.join("debug/artifact.rlib"), vec![7u8; 2048]).unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `path` is NUL-terminated and names a fresh test-fixture entry.
+        let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(
+            result,
+            0,
+            "mkfifo failed: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     fn unheld_probe() -> Box<HolderProbe> {
@@ -4498,6 +4587,50 @@ mod tests {
         assert_ne!(descendant_resolve_flags() & RESOLVE_NO_SYMLINKS, 0);
     }
 
+    #[test]
+    fn descendant_type_policy_is_exhaustive_for_linux_mode_tags() {
+        assert_eq!(
+            allowed_descendant_type(LINUX_S_IFREG | 0o644),
+            Ok(AllowedDescendantType::RegularFile)
+        );
+        assert_eq!(
+            allowed_descendant_type(LINUX_S_IFDIR | 0o755),
+            Ok(AllowedDescendantType::Directory)
+        );
+        for (mode, name) in [
+            (LINUX_S_IFLNK, "symlink"),
+            (LINUX_S_IFIFO, "fifo"),
+            (LINUX_S_IFSOCK, "socket"),
+            (LINUX_S_IFBLK, "block device"),
+            (LINUX_S_IFCHR, "character device"),
+            (0, "unknown special file"),
+        ] {
+            assert_eq!(allowed_descendant_type(mode | 0o600), Err(name));
+        }
+    }
+
+    /// Exercise the policy against a real special file on every Unix test seat,
+    /// including macOS where the Linux descriptor traversal itself is unavailable.
+    #[cfg(unix)]
+    #[test]
+    fn an_actual_fifo_is_refused_by_preflight_policy_without_mutation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = unique_temp_dir("tachi-reaper-fifo-policy");
+        let regular = root.join("regular.rlib");
+        let fifo = root.join("special.pipe");
+        std::fs::write(&regular, "keep").unwrap();
+        make_fifo(&fifo);
+
+        let mode = std::fs::symlink_metadata(&fifo).unwrap().mode();
+        assert_eq!(allowed_descendant_type(mode), Err("fifo"));
+        assert_eq!(std::fs::read_to_string(&regular).unwrap(), "keep");
+        assert!(fifo.exists());
+        assert!(root.is_dir());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// This is deliberately Linux-only: a non-Linux host must refuse the sheathed
     /// force body rather than fall back to a pathname-based delete.
     #[cfg(target_os = "linux")]
@@ -4765,6 +4898,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A special file present during the whole-tree preflight is a loud refusal
+    /// before the resource is booked or any regular sibling is unlinked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fifo_descendant_refuses_before_booking_or_mutation() {
+        let root = unique_temp_dir("tachi-reaper-fifo-contained");
+        let target = make_target_dir(&root, "fifo-target");
+        let fifo = target.join("special.pipe");
+        make_fifo(&fifo);
+        let mut store = open_store(&root);
+
+        let report = reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsupported fifo descendant")),
+            "the refusal must identify the special-file type: {report:?}"
+        );
+        assert!(
+            target.join("debug/artifact.rlib").exists(),
+            "preflight refusal must preserve regular siblings"
+        );
+        assert!(fifo.exists(), "the refused FIFO remains untouched");
+        assert!(target.is_dir(), "the candidate root remains untouched");
+        assert!(
+            memcore::list_resources(store.connection(), None, None)
+                .unwrap()
+                .is_empty(),
+            "preflight refusal happens before ledger booking"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The loop does not claim persistent emptiness. A writer that recreates one child
     /// after every unlink gets exactly the bounded number of passes and then a typed
     /// partial result, while the root descriptor/object remains valid.
@@ -4799,6 +4976,46 @@ mod tests {
             target.join("churn").exists(),
             "the final observed root was not empty"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A special file introduced after one allowed unlink is no longer a clean
+    /// refusal: the shared unlink-time policy detects it and the operation is typed
+    /// partial because mutation has already occurred.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fifo_churn_after_first_unlink_is_typed_partial() {
+        let root = unique_temp_dir("tachi-reaper-fifo-churn");
+        let target = root.join("fifo-churn-target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("first.rlib"), "delete first").unwrap();
+        let fifo = target.join("arrived-late.pipe");
+        let pinned = pin_content_root(&linux_candidate(&target)).unwrap();
+        let fifo_for_hook = fifo.clone();
+        let created = std::rc::Rc::new(std::cell::Cell::new(false));
+        let created_by_hook = std::rc::Rc::clone(&created);
+        let mut create_fifo = move |_unlinked: usize| {
+            if !created_by_hook.replace(true) {
+                make_fifo(&fifo_for_hook);
+            }
+            Ok(())
+        };
+
+        let failure = match pinned.drain_contents(&mut create_fifo) {
+            Ok(()) => panic!("late FIFO must prevent a successful content reclaim"),
+            Err(failure) => failure,
+        };
+
+        assert!(
+            matches!(failure, ContentReclaimFailure::Partial(_)),
+            "{failure:?}"
+        );
+        assert!(failure.message().contains("unsupported fifo descendant"));
+        assert!(failure.message().contains("after 1 descendant unlink"));
+        assert!(created.get());
+        assert!(fifo.exists(), "the late special file must not be unlinked");
+        assert!(target.is_dir(), "the root remains after partial reclaim");
 
         let _ = std::fs::remove_dir_all(&root);
     }
