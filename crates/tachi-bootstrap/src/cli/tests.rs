@@ -426,6 +426,36 @@ fn skill_surface_cli_parses_sync_plan() {
 }
 
 #[test]
+fn injection_surface_cli_parses_doctor() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "injection-surface",
+        "doctor",
+        "--registry",
+        "/tmp/fleet.json",
+        "--home",
+        "/tmp/fixture-home",
+        "--json",
+    ])
+    .expect("injection-surface doctor should parse");
+    match parsed.command.expect("command") {
+        Commands::InjectionSurface {
+            action:
+                InjectionSurfaceAction::Doctor {
+                    registry,
+                    home,
+                    json,
+                },
+        } => {
+            assert_eq!(registry, std::path::PathBuf::from("/tmp/fleet.json"));
+            assert_eq!(home, Some(std::path::PathBuf::from("/tmp/fixture-home")));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
 fn backfill_vectors_accepts_named_project() {
     let parsed = Cli::try_parse_from([
         "tachi",
