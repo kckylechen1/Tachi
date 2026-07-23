@@ -8,6 +8,7 @@ mod intake;
 mod keys;
 mod output;
 mod password;
+mod providers_doctor;
 mod secret_actions;
 mod session_actions;
 mod sync_actions;

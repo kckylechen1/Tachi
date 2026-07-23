@@ -108,10 +108,22 @@ pub(super) fn run_credential_action(
             Ok(())
         }
         VaultAction::Doctor {
+            providers,
+            opencode_config,
             profile,
             consumer,
             config,
         } => {
+            if providers {
+                let store = open_cli_store_read_only(global_db_path)?;
+                return super::providers_doctor::run_providers_doctor(&store, opencode_config);
+            }
+            let profile = profile.ok_or_else(|| {
+                "`tachi vault doctor` requires --profile (unless --providers)".to_string()
+            })?;
+            let consumer = consumer.ok_or_else(|| {
+                "`tachi vault doctor` requires --consumer (unless --providers)".to_string()
+            })?;
             let (config_path, profile_def) = if let Some(path) = config {
                 let profile_def =
                     crate::credential_profile::load_credential_profile_from_path(&path, &profile)?;
