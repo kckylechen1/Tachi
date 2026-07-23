@@ -361,13 +361,23 @@ pub enum VaultAction {
         mark_only: bool,
     },
     /// Diagnose a credential profile without decrypting or writing secrets.
+    ///
+    /// With `--providers`, report OpenCode provider apiKey shapes against vault
+    /// metadata only (no profile/consumer required; no writes).
     Doctor {
+        /// Report-only OpenCode providers view (apiKey shape / admitted / vault age).
+        #[arg(long)]
+        providers: bool,
+        /// OpenCode config path. Defaults to ~/.config/opencode/opencode.json.
+        /// Env `TACHI_OPENCODE_CONFIG` is also honored (CLI flag wins when both set).
+        #[arg(long, value_name = "PATH")]
+        opencode_config: Option<PathBuf>,
         /// Credential profile name to diagnose.
-        #[arg(long)]
-        profile: String,
+        #[arg(long, required_unless_present = "providers")]
+        profile: Option<String>,
         /// Agent or dispatch-profile consumer id requesting the credential.
-        #[arg(long)]
-        consumer: String,
+        #[arg(long, required_unless_present = "providers")]
+        consumer: Option<String>,
         /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
