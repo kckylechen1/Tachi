@@ -108,12 +108,12 @@ async fn find_similar_memory_excludes_sft_training_rows_by_default() {
 
 #[tokio::test]
 async fn find_similar_memory_does_not_record_access_in_global_or_project_db() {
-    let server = make_server();
+    let (server, temp_home) = make_server_with_temp_home();
     if !server.global_vec_available() {
         return;
     }
 
-    let root = crate::utils::test_fixture_path(format!("tachi-similar-access-{}", uuid::Uuid::new_v4()));
+    let root = temp_home.temp_home.join("Similar Access Repo");
     std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
     server
         .tachi_init_project_db(Parameters(InitProjectDbParams {
@@ -185,8 +185,6 @@ async fn find_similar_memory_does_not_record_access_in_global_or_project_db() {
             Ok(())
         })
         .expect("project access snapshot");
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

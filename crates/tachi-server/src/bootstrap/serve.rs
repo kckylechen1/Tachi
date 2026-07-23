@@ -32,8 +32,8 @@ fn no_project_serve_detaches_launch_cwd(command: &Commands, no_project_db: bool)
     no_project_db && matches!(command, Commands::Serve)
 }
 
-fn should_load_project_local_env(no_project_db: bool) -> bool {
-    !no_project_db
+fn should_load_project_local_env(command: &Commands, no_project_db: bool) -> bool {
+    !no_project_db && !matches!(command, Commands::Vault { .. })
 }
 
 fn should_defer_manifest_startup(command: &Commands, daemon: bool, no_project_db: bool) -> bool {
@@ -257,7 +257,7 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
             "--no-project-db serve detached launch cwd to runtime"
         );
     }
-    let load_project_local_env = should_load_project_local_env(cli.no_project_db);
+    let load_project_local_env = should_load_project_local_env(&command, cli.no_project_db);
     let defer_manifest_startup =
         should_defer_manifest_startup(&command, cli.daemon, cli.no_project_db);
     let git_root = if load_project_local_env {
@@ -1376,9 +1376,69 @@ mod tests {
     }
 
     #[test]
-    fn project_local_env_loading_is_disabled_for_no_project_db() {
-        assert!(!should_load_project_local_env(true));
-        assert!(should_load_project_local_env(false));
+    fn project_local_env_loading_skips_no_project_and_vault_commands() {
+        assert!(!should_load_project_local_env(&Commands::Serve, true));
+        assert!(!should_load_project_local_env(
+            &Commands::Vault {
+                action: tachi_bootstrap::cli::VaultAction::Status,
+            },
+            false
+        ));
+        assert!(should_load_project_local_env(&Commands::Serve, false));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn vault_exec_does_not_create_project_alias_from_cwd() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = tempfile::tempdir().expect("vault exec fixture");
+        let app_home = fixture.path().join("home");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("create synthetic git root");
+
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = crate::test_support::EnvRestore::remove("SIGIL_HOME");
+        let _app_home = crate::test_support::EnvRestore::remove("TACHI_APP_HOME");
+        let _tachi_root = crate::test_support::EnvRestore::remove("TACHI_ROOT");
+        let _memory_db = crate::test_support::EnvRestore::remove("MEMORY_DB_PATH");
+        let _cwd = crate::test_support::CwdRestore::set(&repo);
+
+        let cli = Cli {
+            daemon: false,
+            port: 6919,
+            global_db: Some(app_home.join("global/tachi-memory.db")),
+            project_db: None,
+            no_project_db: false,
+            allow_schema_migration: false,
+            profile: None,
+            gc_enabled: None,
+            gc_initial_delay_secs: None,
+            gc_interval_secs: None,
+            command: Some(Commands::Vault {
+                action: tachi_bootstrap::cli::VaultAction::Exec {
+                    stdin_password: false,
+                    keychain: false,
+                    password_file: None,
+                    insecure_password_file: false,
+                    consumer: None,
+                    require: vec![],
+                    command: vec!["/usr/bin/true".to_string()],
+                },
+            }),
+        };
+
+        tokio_main(cli).expect("vault exec should run without project identity");
+
+        assert!(
+            !app_home.join("projects").exists(),
+            "vault exec must not create a Plan C alias from its launch cwd"
+        );
+        assert!(
+            !repo.join(".tachi").exists(),
+            "vault exec must not initialize a repo-local project DB"
+        );
     }
 
     #[test]
