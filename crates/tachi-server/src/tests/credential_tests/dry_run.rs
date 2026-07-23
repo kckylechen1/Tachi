@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_materialize_dry_run_reports_redacted_outputs() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-materialize-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -72,7 +72,7 @@ fn credential_materialize_dry_run_reports_redacted_outputs() {
 
 #[test]
 fn credential_materialize_dry_run_enforces_consumer_and_entry_allowlists() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-materialize-deny-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

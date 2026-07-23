@@ -23,7 +23,7 @@ pub(super) fn native_route_definitions() -> Vec<rmcp::model::Tool> {
         .build()
         .expect("profiles test runtime");
     let _guard = runtime.enter();
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "profiles-metadata-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -47,7 +47,7 @@ fn native_route_descriptions() -> BTreeMap<String, String> {
         .build()
         .expect("profiles test runtime");
     let _guard = runtime.enter();
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "profiles-description-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

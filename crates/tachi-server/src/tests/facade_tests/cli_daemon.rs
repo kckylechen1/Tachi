@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn cli_client_detect_daemon_returns_none_when_pid_file_missing() {
-    let temp = std::env::temp_dir().join(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
+    let temp = crate::utils::test_fixture_path(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp).unwrap();
 
     let info = crate::cli_client::detect_daemon(&temp).await;
@@ -18,7 +18,7 @@ async fn cli_client_detect_daemon_returns_none_when_pid_file_missing() {
 
 #[tokio::test]
 async fn cli_client_detect_daemon_returns_none_for_stale_pid_file() {
-    let temp = std::env::temp_dir().join(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
+    let temp = crate::utils::test_fixture_path(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp).unwrap();
 
     // Write a pid file pointing at a port nobody is listening on. Pick a high
@@ -48,7 +48,7 @@ async fn cli_client_detect_daemon_returns_none_for_stale_pid_file() {
 
 #[tokio::test]
 async fn cli_client_detect_daemon_succeeds_when_port_is_open() {
-    let temp = std::env::temp_dir().join(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
+    let temp = crate::utils::test_fixture_path(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp).unwrap();
 
     // Bind a real listener on an OS-assigned port so the TCP probe succeeds.
@@ -83,7 +83,7 @@ async fn cli_client_detect_daemon_succeeds_when_port_is_open() {
 
 #[tokio::test]
 async fn cli_client_detect_daemon_rejects_nonlocal_pid_url_even_when_port_is_open() {
-    let temp = std::env::temp_dir().join(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
+    let temp = crate::utils::test_fixture_path(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp).unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -123,7 +123,7 @@ async fn cli_client_in_process_remember_round_trips_through_handler() {
     // identically to the `remember` MCP tool when no daemon is running.
     ensure_test_env();
 
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "tachi-cli-remember-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_doctor_reports_managed_target_hash_mismatch() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-doctor-managed-hash-mismatch-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -39,7 +39,7 @@ fn credential_doctor_reports_managed_target_hash_mismatch() {
 
 #[test]
 fn credential_doctor_reports_managed_target_missing() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-doctor-managed-missing-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -76,7 +76,7 @@ fn credential_doctor_reports_managed_target_missing() {
 
 #[test]
 fn credential_doctor_reports_unreadable_managed_metadata() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-doctor-managed-metadata-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

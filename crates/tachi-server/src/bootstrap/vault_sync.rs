@@ -501,7 +501,7 @@ mod tests {
     use super::*;
 
     fn temp_db_path() -> PathBuf {
-        std::env::temp_dir().join(format!("tachi-vault-sync-{}.sqlite", uuid::Uuid::new_v4()))
+        crate::utils::test_fixture_path(format!("tachi-vault-sync-{}.sqlite", uuid::Uuid::new_v4()))
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn credential_materialize_apply_writes_file_0600_and_returns_env_map() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-materialize-apply-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

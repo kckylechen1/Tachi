@@ -3,7 +3,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn tidy_apply_removes_broken_memory_db_symlink() {
-    let root = std::env::temp_dir().join(format!(
+    let root = crate::utils::test_fixture_path(format!(
         "tachi-tidy-broken-symlink-{}",
         uuid::Uuid::new_v4()
     ));
@@ -45,7 +45,7 @@ fn tidy_apply_removes_broken_memory_db_symlink() {
 
 #[test]
 fn tidy_apply_writes_report_and_only_confirms_safe_actions() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-apply-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-tidy-apply-{}", uuid::Uuid::new_v4()));
     let git_root = root.join("repo");
     let app_home = root.join(".tachi-home");
     let global_db = root.join(".tachi").join("global").join("memory.db");

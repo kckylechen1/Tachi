@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn tidy_report_scans_memory_dbs_and_suggests_scope() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-report-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-tidy-report-{}", uuid::Uuid::new_v4()));
     let git_root = root.join("repo");
     let global_db = root.join(".tachi").join("global").join("memory.db");
     let project_db = git_root.join(".tachi").join("memory.db");

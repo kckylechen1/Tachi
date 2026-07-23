@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-manual-mark-only-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

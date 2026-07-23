@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_config_patch_refuses_unsafe_targets() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-config-patch-risk-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

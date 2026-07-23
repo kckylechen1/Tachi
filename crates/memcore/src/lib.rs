@@ -179,6 +179,9 @@ pub struct MemoryStore {
 }
 
 #[cfg(test)]
+mod test_fixtures;
+
+#[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
 

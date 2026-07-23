@@ -87,7 +87,7 @@ fn release_event_claim_idempotent() {
 fn concurrent_same_id_different_payload_has_one_winner_and_one_collision() {
     crate::db::enable_simple_auto_extension().unwrap();
     register_sqlite_vec();
-    let path = std::env::temp_dir().join(format!(
+    let path = crate::test_fixtures::test_fixture_path(format!(
         "memcore-event-collision-{}.db",
         uuid::Uuid::new_v4()
     ));
