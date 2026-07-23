@@ -12,7 +12,11 @@
 #   0 — every failure is in the known-red list (matched set may be empty or
 #       a subset; extras are forbidden, missing known-reds are OK).
 #   1 — at least one failure is outside the known-red list (outsiders printed).
-#   2 — usage / parse / list error.
+#   2 — usage error; the JUnit report at <junit.xml> is missing/malformed; or
+#       `cargo nextest list` succeeded but group(known-deterministic-reds)
+#       resolved to zero tests.
+#   3 — `cargo nextest list` itself failed (nonzero exit). cargo's stderr is
+#       printed, not swallowed, so the failure has a visible diagnostic.
 #
 # No test source edits. No retries.
 
@@ -33,7 +37,11 @@ trap 'rm -f "${KNOWN_FILE}" "${FAILED_FILE}"' EXIT
 # Resolve the named group from live nextest config (source of truth).
 # Format: one fully-qualified test name per line (the `name` attr in JUnit /
 # the test path after the binary id).
-(
+#
+# stderr is NOT swallowed here: a `cargo nextest list` failure (bad
+# expression, missing group, build error) must be visible, not silently
+# turn into an empty KNOWN_FILE with no diagnostic.
+if ! (
   cd "${ROOT}"
   # Default human list lines look like: `tachi-server tests::path::to::test`
   # JUnit <testcase name="..."> carries only the `tests::…` path — strip the
@@ -41,14 +49,16 @@ trap 'rm -f "${KNOWN_FILE}" "${FAILED_FILE}"' EXIT
   cargo nextest list -p tachi-server \
     -E 'group(known-deterministic-reds)' \
     --target-dir "${CARGO_TARGET_DIR:-/Users/kckylechen/.cache/sigil-shared-target}" \
-    2>/dev/null \
     | sed -n 's/^[^ ]\{1,\} //p' \
     | sed '/^$/d' \
     | sort -u
-) > "${KNOWN_FILE}"
+) > "${KNOWN_FILE}"; then
+  echo "nextest-known-reds-diff: cargo nextest list failed (stderr above) — cannot resolve group(known-deterministic-reds)" >&2
+  exit 3
+fi
 
 if [[ ! -s "${KNOWN_FILE}" ]]; then
-  echo "nextest-known-reds-diff: failed to list group(known-deterministic-reds) — is .config/nextest.toml present?" >&2
+  echo "nextest-known-reds-diff: group(known-deterministic-reds) resolved to zero tests — is .config/nextest.toml present?" >&2
   exit 2
 fi
 
@@ -57,7 +67,17 @@ import sys
 import xml.etree.ElementTree as ET
 
 junit_path, out_path = sys.argv[1], sys.argv[2]
-root = ET.parse(junit_path).getroot()
+try:
+    root = ET.parse(junit_path).getroot()
+except FileNotFoundError as err:
+    print(f"nextest-known-reds-diff: JUnit file not found: {junit_path} ({err})", file=sys.stderr)
+    sys.exit(2)
+except ET.ParseError as err:
+    print(
+        f"nextest-known-reds-diff: JUnit XML at {junit_path} is malformed, cannot parse: {err}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 suites = list(root) if root.tag.endswith("testsuites") else (
     [root] if root.tag.endswith("testsuite") else root.findall(".//testsuite")
 )
