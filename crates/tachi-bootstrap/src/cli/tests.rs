@@ -451,16 +451,36 @@ fn backfill_vectors_accepts_named_project() {
 }
 
 #[test]
-fn backfill_vectors_rejects_db_and_project_together() {
-    let parsed = Cli::try_parse_from([
-        "tachi",
-        "backfill-vectors",
-        "--db",
-        "/tmp/memory.db",
-        "--project",
-        "sigil",
-    ]);
-    assert!(parsed.is_err());
+fn backfill_vectors_all_projects_is_exclusive_and_cache_is_opt_in() {
+    let parsed = Cli::try_parse_from(["tachi", "backfill-vectors", "--all-projects", "--dry-run"])
+        .expect("all-projects dry run should parse");
+    match parsed.command.expect("command") {
+        Commands::BackfillVectors {
+            db,
+            project,
+            all_projects,
+            dry_run,
+            include_cache,
+            ..
+        } => {
+            assert!(db.is_none());
+            assert!(project.is_none());
+            assert!(all_projects);
+            assert!(dry_run);
+            assert!(!include_cache, "recall-cache rows must be explicit opt-in");
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    for conflicting_args in [
+        vec!["--db", "/tmp/memory.db", "--all-projects"],
+        vec!["--project", "sigil", "--all-projects"],
+        vec!["--db", "/tmp/memory.db", "--project", "sigil"],
+    ] {
+        let mut args = vec!["tachi", "backfill-vectors"];
+        args.extend(conflicting_args);
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]
