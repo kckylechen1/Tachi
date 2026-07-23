@@ -21,24 +21,18 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
-# Swaps the compile-time Argon2 profile `derive`/`active_kdf_params_json`
-# use from the production cost (m=65536 KiB, t=3, p=4 — ~100-300ms/call) to
-# a lightweight test profile (m=64 KiB, t=1, p=1 — sub-millisecond).
-#
-# `#[cfg(test)]` alone only flips this for vault-kit's OWN `cargo test`; a
-# downstream crate's unit tests (e.g. tachi-server's, which link vault-kit
-# as an ordinary dependency, not build it in test mode) would otherwise pay
-# full production Argon2 cost on every derive call in their test suite.
-# Consumers get the fast profile back by depending on vault-kit twice: once
-# plainly in `[dependencies]` (production profile, used for real builds)
-# and once with `features = ["test-support"]` in `[dev-dependencies]`
-# (only unified in when a test/bench/example target is actually built).
-#
-# `test-support` alone is NOT sufficient to gate out the weak profile: it
-# also requires `debug_assertions` (see kdf.rs's cfg conditions). Cargo
-# turns `debug_assertions` off by default in `--release` profiles, so a
-# `--release --all-features` build, or a downstream crate that mistakenly
-# lists `vault-kit` with this feature under plain `[dependencies]` instead
-# of `[dev-dependencies]`, still gets the production Argon2 profile — the
-# feature flag by itself is not a trustworthy production/test switch.
+# Purely additive, opt-in only: enables the separate
+# `test_support::derive_cheap` / `test_support::cheap_kdf_params_json`
+# helpers (m=64 KiB, t=1, p=1 — sub-millisecond) as an explicit alternative
+# to the ordinary derive path. It never swaps what `derive()` /
+# `active_kdf_params_json()` return — those two always run the production
+# Argon2 profile (m=65536 KiB, t=3, p=4 — ~100-300ms/call), in every build
+# mode, whether this feature is on or off. A caller that wants the cheap
+# profile in its own tests calls `test_support::derive_cheap` explicitly;
+# ordinary `derive()` calls in the same test binary are unaffected and
+# still pay full production cost. Cargo's dev-dependency feature
+# unification (only applies when a test/bench/example target is actually
+# built) can pull this feature into a downstream crate's own test builds —
+# e.g. tachi-server's `[dev-dependencies]` entry — without that downstream
+# crate needing to depend on vault-kit twice.
 test-support = []

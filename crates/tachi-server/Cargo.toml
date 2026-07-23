@@ -118,11 +118,12 @@ vault-kit = { path = "../vault-kit" }
 [dev-dependencies]
 tempfile = "3"
 tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
-# Unifies in vault-kit's lightweight Argon2 test profile (m=64 KiB vs the
-# production m=65536 KiB) for tachi-server's own test binary only — Cargo
-# feature unification for `[dev-dependencies]` only applies when a
-# test/bench/example target is actually built, so `cargo build --release`
-# never sees this feature (see vault-kit's Cargo.toml feature docs).
+# Dev-dep only, so `cargo build --release` never sees this feature. It
+# makes vault-kit's `test_support::derive_cheap` (m=64 KiB vs the
+# production m=65536 KiB) available to tachi-server's own test binary; it
+# does not make the ordinary `derive()` calls in the same test binary
+# cheap — those still run the production Argon2 profile (see vault-kit's
+# Cargo.toml feature docs).
 vault-kit = { path = "../vault-kit", features = ["test-support"] }
 # `test-util` enables `tokio::time::pause()` / `#[tokio::test(start_paused)]`
 # for the ci_watch backoff test (finding #2): it virtualizes the watcher's
