@@ -57,6 +57,7 @@ pub enum PilotReportError {
     /// evidence for a row that was never selected/spend-gated cannot count
     /// toward this pilot's kill-gate decision.
     CaseNotInManifest(String),
+    AmbiguousLegacyCaseId(String),
 }
 
 impl std::fmt::Display for PilotReportError {
@@ -72,13 +73,17 @@ impl std::fmt::Display for PilotReportError {
                 "case_id {id} is not a row in the frozen pilot manifest — evidence for an \
                  unselected row cannot count toward the kill-gate decision"
             ),
+            Self::AmbiguousLegacyCaseId(id) => write!(
+                f,
+                "legacy case_id {id} is ambiguous; use the canonical route/id/revision binding"
+            ),
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct PilotReport {
-    pub cases: Vec<CaseReport>,
+    cases: Vec<CaseReport>,
 }
 
 impl PilotReport {
@@ -88,16 +93,18 @@ impl PilotReport {
     /// to the actual frozen 50-row pilot — a caller could report 3 cases,
     /// duplicate one case_id, or report cases for rows that were never
     /// frozen, and nothing would object). Refuses unless the case count
-    /// matches the manifest's row count exactly, every `case_id` is a
-    /// distinct member of the manifest, and no case_id repeats.
+    /// matches the manifest's row count exactly, every `case_id` resolves to
+    /// one route/id/revision binding, and no binding repeats. Legacy bare
+    /// source ids are accepted only when exactly one manifest row has that
+    /// id; accepted rows are normalized to their canonical full binding.
     ///
-    /// This is the constructor a real harness runner should use; the plain
-    /// struct literal remains available (its field is `pub`) for this
-    /// module's own unit tests, which exercise `PilotReport`'s aggregation
-    /// logic against hand-built fixtures rather than a full 50-row manifest.
+    /// This is the only public constructor for a populated report. The cases
+    /// field stays private so callers cannot bypass binding normalization;
+    /// this module's unit tests still use hand-built fixtures to exercise the
+    /// aggregation logic independently.
     pub fn from_manifest(
         manifest: &PilotManifestV1,
-        cases: Vec<CaseReport>,
+        mut cases: Vec<CaseReport>,
     ) -> Result<Self, Vec<PilotReportError>> {
         let mut errors = Vec::new();
         if cases.len() != manifest.rows().len() {
@@ -107,13 +114,29 @@ impl PilotReport {
             });
         }
         let mut seen = std::collections::HashSet::new();
-        for case in &cases {
-            if !seen.insert(case.case_id.clone()) {
-                errors.push(PilotReportError::DuplicateCaseId(case.case_id.clone()));
+        for case in &mut cases {
+            let matches: Vec<&super::pilot::PilotRowV1> = manifest
+                .rows()
+                .iter()
+                .filter(|row| {
+                    row.canonical_case_id() == case.case_id || row.source_id == case.case_id
+                })
+                .collect();
+            let Some(binding) = (matches.len() == 1).then(|| matches[0]) else {
+                if matches.is_empty() {
+                    errors.push(PilotReportError::CaseNotInManifest(case.case_id.clone()));
+                } else {
+                    errors.push(PilotReportError::AmbiguousLegacyCaseId(
+                        case.case_id.clone(),
+                    ));
+                }
+                continue;
+            };
+            let canonical_id = binding.canonical_case_id();
+            if !seen.insert(binding.binding_key()) {
+                errors.push(PilotReportError::DuplicateCaseId(canonical_id.clone()));
             }
-            if !manifest.rows().iter().any(|r| r.source_id == case.case_id) {
-                errors.push(PilotReportError::CaseNotInManifest(case.case_id.clone()));
-            }
+            case.case_id = canonical_id;
         }
         if errors.is_empty() {
             Ok(Self { cases })
@@ -127,6 +150,10 @@ impl PilotReport {
             .iter()
             .filter(|c| matches!(c.outcome, CaseOutcome::Pass))
             .count()
+    }
+
+    pub fn cases(&self) -> &[CaseReport] {
+        &self.cases
     }
 
     pub fn failed_count(&self) -> usize {
@@ -227,7 +254,7 @@ impl PilotReport {
         // outcomes, token/cost/latency, provider receipts, and old-vs-new
         // recall simulation").
         out.push_str(
-            "| case_id | outcome | reasons | treated_tokens | baseline_tokens | cost_usd | \
+            "| source_binding | outcome | reasons | treated_tokens | baseline_tokens | cost_usd | \
              latency_ms | producer_identity | adjudicator | recall_sim |\n\
              |---|---|---|---|---|---|---|---|---|---|\n",
         );
@@ -438,6 +465,63 @@ mod tests {
         let report =
             PilotReport::from_manifest(&manifest, cases).expect("exactly-matching cases must bind");
         assert_eq!(report.total(), 50);
+    }
+
+    #[test]
+    fn from_manifest_keeps_cross_route_same_id_rows_distinct() {
+        let mut rows = fifty_row_manifest().rows().to_vec();
+        rows[0].source_id = "shared-id".to_string();
+        rows[25].source_id = "shared-id".to_string();
+        let manifest = crate::lesson_forge_ops::pilot::freeze_pilot_manifest(rows)
+            .expect("cross-route ids may overlap");
+        let cases: Vec<CaseReport> = manifest
+            .rows()
+            .iter()
+            .map(|row| {
+                case(
+                    &format!(
+                        "{}:{}@{}",
+                        row.source_route.as_str(),
+                        row.source_id,
+                        row.source_revision
+                    ),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        let report = PilotReport::from_manifest(&manifest, cases)
+            .expect("full route/id/revision bindings must remain distinct");
+        assert_eq!(report.total(), 50);
+        let markdown = report.to_markdown();
+        assert!(markdown.contains("antigravity:shared-id@1"));
+        assert!(markdown.contains("hapi:shared-id@1"));
+    }
+
+    #[test]
+    fn from_manifest_rejects_ambiguous_legacy_source_id() {
+        let mut rows = fifty_row_manifest().rows().to_vec();
+        rows[0].source_id = "shared-id".to_string();
+        rows[25].source_id = "shared-id".to_string();
+        let manifest = crate::lesson_forge_ops::pilot::freeze_pilot_manifest(rows)
+            .expect("cross-route ids may overlap");
+        let mut cases: Vec<CaseReport> = manifest
+            .rows()
+            .iter()
+            .map(|row| {
+                case(
+                    &row.canonical_case_id(),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        cases[0].case_id = "shared-id".to_string();
+        let errors = PilotReport::from_manifest(&manifest, cases)
+            .expect_err("ambiguous legacy id must not alias either source route");
+        assert!(errors.iter().any(
+            |error| matches!(error, PilotReportError::AmbiguousLegacyCaseId(id) if id == "shared-id")
+        ));
     }
 
     #[test]

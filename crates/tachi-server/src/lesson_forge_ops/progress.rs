@@ -39,9 +39,19 @@ impl PilotEngineReceiptV1 {
     pub fn has_known_identity(&self) -> bool {
         self.identity.has_known_identity()
     }
+
+    pub fn has_complete_accounting(&self) -> bool {
+        self.usage.as_ref().is_some_and(|usage| {
+            usage.tokens.is_some() && usage.cost_usd_micros.is_some() && usage.latency_ms.is_some()
+        })
+    }
+
+    pub fn is_fully_attested(&self) -> bool {
+        self.has_known_identity() && self.has_complete_accounting()
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PilotCallRoleV1 {
     Producer,
@@ -49,7 +59,7 @@ pub enum PilotCallRoleV1 {
     Adjudicator,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PilotCallArmV1 {
     None,
@@ -58,7 +68,7 @@ pub enum PilotCallArmV1 {
     Blinded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PilotCallKeyV1 {
     pub contract_digest: String,
     pub source_route: PilotSourceRouteV1,

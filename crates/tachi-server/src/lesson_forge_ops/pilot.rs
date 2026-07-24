@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tachi_params::LessonCandidateKindV1;
 
-use super::privacy::{screen_manifest_metadata_for_public_pilot, PilotPrivacyErrorV1};
+use super::privacy::{
+    screen_manifest_metadata_for_public_pilot, screen_source_for_public_pilot, PilotPrivacyErrorV1,
+};
+use super::source::{verify_resolved_source_v1, PilotSourceResolverV1, SourceResolveError};
 
 pub const PILOT_SIZE: usize = 50;
 pub const PILOT_MANIFEST_FORMAT_V1: &str = "lesson_forge_pilot_manifest_v1";
@@ -86,6 +89,15 @@ pub struct PilotRowV1 {
 impl PilotRowV1 {
     pub fn binding_key(&self) -> (PilotSourceRouteV1, &str, i64) {
         (self.source_route, &self.source_id, self.source_revision)
+    }
+
+    pub fn canonical_case_id(&self) -> String {
+        format!(
+            "{}:{}@{}",
+            self.source_route.as_str(),
+            self.source_id,
+            self.source_revision
+        )
     }
 }
 
@@ -272,6 +284,9 @@ pub enum PilotManifestIoError {
     InvalidFormat(String),
     Validation(Vec<PilotFreezeError>),
     DigestMismatch { expected: String, actual: String },
+    SourceVerificationRequired,
+    Source(SourceResolveError),
+    Privacy(PilotPrivacyErrorV1),
 }
 
 impl std::fmt::Display for PilotManifestIoError {
@@ -291,6 +306,12 @@ impl std::fmt::Display for PilotManifestIoError {
                 f,
                 "pilot manifest digest mismatch: expected {expected}, recomputed {actual}"
             ),
+            Self::SourceVerificationRequired => write!(
+                f,
+                "pilot manifest persistence requires verified, privacy-screened sources"
+            ),
+            Self::Source(error) => error.fmt(f),
+            Self::Privacy(error) => error.fmt(f),
         }
     }
 }
@@ -340,9 +361,33 @@ impl PilotManifestV1 {
         Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
     }
 
-    /// Save a public-safe canonical manifest.  No source text and no model
-    /// text flow through this serializer.
-    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), PilotManifestIoError> {
+    /// The legacy unchecked save entrypoint is retained only as a loud
+    /// refusal. Durable persistence must use `verify_and_save_to_path`.
+    pub fn save_to_path(&self, _path: impl AsRef<Path>) -> Result<(), PilotManifestIoError> {
+        Err(PilotManifestIoError::SourceVerificationRequired)
+    }
+
+    /// Resolve every selected row, independently recheck its complete
+    /// binding, and privacy-screen its source text before creating any
+    /// durable artifact. Source text remains in memory and is never passed to
+    /// the serializer.
+    pub fn verify_and_save_to_path<R: PilotSourceResolverV1>(
+        &self,
+        path: impl AsRef<Path>,
+        resolver: &R,
+    ) -> Result<(), PilotManifestIoError> {
+        for binding in &self.rows {
+            let resolved = resolver
+                .resolve_verified(binding)
+                .map_err(PilotManifestIoError::Source)?;
+            verify_resolved_source_v1(binding, &resolved).map_err(PilotManifestIoError::Source)?;
+            screen_source_for_public_pilot(&resolved.full_text)
+                .map_err(PilotManifestIoError::Privacy)?;
+        }
+        self.write_verified_to_path(path)
+    }
+
+    fn write_verified_to_path(&self, path: impl AsRef<Path>) -> Result<(), PilotManifestIoError> {
         let persisted = PersistedPilotManifestV1 {
             format: PILOT_MANIFEST_FORMAT_V1.to_string(),
             contract_digest: self.contract_digest()?,
@@ -546,16 +591,21 @@ fn is_strict_rfc3339(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn fixture_text(source_id: &str) -> String {
+        format!("SYNTHETIC_PUBLIC_SOURCE_{source_id}")
+    }
+
     fn row(index: usize) -> PilotRowV1 {
+        let source_id = format!("synthetic-{index:02}");
         PilotRowV1 {
             source_route: if index < 25 {
                 PilotSourceRouteV1::Antigravity
             } else {
                 PilotSourceRouteV1::Hapi
             },
-            source_id: format!("synthetic-{index:02}"),
+            content_sha256: format!("{:x}", Sha256::digest(fixture_text(&source_id).as_bytes())),
+            source_id,
             source_revision: 1,
-            content_sha256: format!("{index:064x}"),
             capture_timestamp: "2026-07-24T00:00:00Z".to_string(),
             kind: if index.is_multiple_of(2) {
                 PilotRowKindV1::Narrative
@@ -575,6 +625,39 @@ mod tests {
 
     fn valid_rows() -> Vec<PilotRowV1> {
         (0..PILOT_SIZE).map(row).collect()
+    }
+
+    struct FixtureResolver {
+        first_override: Option<String>,
+    }
+
+    impl PilotSourceResolverV1 for FixtureResolver {
+        fn resolve_verified(
+            &self,
+            binding: &PilotRowV1,
+        ) -> Result<super::super::source::ResolvedPilotSourceV1, SourceResolveError> {
+            let full_text = if binding.source_id == "synthetic-00" {
+                self.first_override
+                    .clone()
+                    .unwrap_or_else(|| fixture_text(&binding.source_id))
+            } else {
+                fixture_text(&binding.source_id)
+            };
+            let resolved = super::super::source::ResolvedPilotSourceV1 {
+                source_route: binding.source_route,
+                source_id: binding.source_id.clone(),
+                source_revision: binding.source_revision,
+                full_text,
+            };
+            verify_resolved_source_v1(binding, &resolved)?;
+            Ok(resolved)
+        }
+    }
+
+    fn fixture_resolver() -> FixtureResolver {
+        FixtureResolver {
+            first_override: None,
+        }
     }
 
     #[test]
@@ -735,7 +818,9 @@ mod tests {
         let manifest = freeze_pilot_manifest(valid_rows()).expect("manifest");
         let path =
             std::env::temp_dir().join(format!("sigil-1073-pilot-{}.json", uuid::Uuid::new_v4()));
-        manifest.save_to_path(&path).expect("save manifest");
+        manifest
+            .verify_and_save_to_path(&path, &fixture_resolver())
+            .expect("save verified manifest");
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         value["rows"][0]["source_id"] = serde_json::Value::String("tampered-id".to_string());
@@ -751,7 +836,9 @@ mod tests {
         let manifest = freeze_pilot_manifest(valid_rows()).expect("manifest");
         let path =
             std::env::temp_dir().join(format!("sigil-1073-pilot-{}.json", uuid::Uuid::new_v4()));
-        manifest.save_to_path(&path).expect("save manifest");
+        manifest
+            .verify_and_save_to_path(&path, &fixture_resolver())
+            .expect("save verified manifest");
         let durable = DurablePilotManifestV1::load_from_path(&path).expect("durable load");
         assert_eq!(durable.artifact_path(), path.as_path());
         assert_eq!(
@@ -759,5 +846,44 @@ mod tests {
             manifest.contract_digest().unwrap()
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unchecked_save_path_cannot_create_a_durable_manifest() {
+        let manifest = freeze_pilot_manifest(valid_rows()).expect("manifest");
+        let path =
+            std::env::temp_dir().join(format!("sigil-1073-pilot-{}.json", uuid::Uuid::new_v4()));
+        let result = manifest.save_to_path(&path);
+        let wrote_artifact = path.exists();
+        let _ = std::fs::remove_file(path);
+        assert!(
+            result.is_err(),
+            "durable save must require source screening"
+        );
+        assert!(
+            !wrote_artifact,
+            "unchecked save must not create an artifact"
+        );
+    }
+
+    #[test]
+    fn verified_save_rejects_private_source_before_creating_artifact() {
+        let private_text = "credential marker with api_key material".to_string();
+        let mut rows = valid_rows();
+        rows[0].content_sha256 = format!("{:x}", Sha256::digest(private_text.as_bytes()));
+        let manifest = freeze_pilot_manifest(rows).expect("manifest");
+        let resolver = FixtureResolver {
+            first_override: Some(private_text),
+        };
+        let path =
+            std::env::temp_dir().join(format!("sigil-1073-pilot-{}.json", uuid::Uuid::new_v4()));
+        let error = manifest
+            .verify_and_save_to_path(&path, &resolver)
+            .expect_err("private source must be excluded before persistence");
+        assert!(matches!(
+            error,
+            PilotManifestIoError::Privacy(PilotPrivacyErrorV1::SecretOrCredentialLike)
+        ));
+        assert!(!path.exists());
     }
 }

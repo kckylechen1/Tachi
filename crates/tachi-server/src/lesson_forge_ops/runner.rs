@@ -16,13 +16,20 @@ use super::discrimination::{
     ColdRunScore, ColdRunText,
 };
 use super::forge::{forge_lesson_candidate, ForgeDraft, SourceBundle};
-use super::pilot::{DurablePilotManifestV1, PilotManifestV1, PilotRowV1, PilotSourceRouteV1};
+use super::pilot::{
+    DurablePilotManifestV1, PilotManifestV1, PilotRowV1, PilotSourceRouteV1, PILOT_SIZE,
+};
 use super::privacy::{screen_source_for_public_pilot, PilotPrivacyErrorV1};
 use super::progress::{
     PilotCallArmV1, PilotCallKeyV1, PilotCallRoleV1, PilotCallStateV1, PilotEngineReceiptV1,
     PilotProgressErrorV1, PilotProgressLedgerV1,
 };
-use super::source::{PilotSourceResolverV1, ResolvedPilotSourceV1, SourceResolveError};
+use super::source::{
+    verify_resolved_source_v1, PilotSourceResolverV1, ResolvedPilotSourceV1, SourceResolveError,
+};
+
+pub const PILOT_CALLS_PER_CASE_V1: usize = 1 + 6 + 1;
+pub const PILOT_COMPLETED_CALLS_V1: usize = PILOT_SIZE * PILOT_CALLS_PER_CASE_V1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PilotCaseKeyV1 {
@@ -143,6 +150,7 @@ pub enum PilotRunError {
     },
     Forge(String),
     Unblind(String),
+    ReportAccounting(PilotRunReportErrorV1),
 }
 
 impl std::fmt::Display for PilotRunError {
@@ -164,7 +172,7 @@ impl std::fmt::Display for PilotRunError {
             ),
             Self::ReceiptNotAttested { source_id, stage } => write!(
                 f,
-                "pilot {stage} receipt for source {source_id} is preview-only"
+                "pilot {stage} receipt for source {source_id} is preview-only or lacks complete accounting"
             ),
             Self::RecoveryMismatch { source_id, stage } => write!(
                 f,
@@ -178,6 +186,7 @@ impl std::fmt::Display for PilotRunError {
                 f,
                 "pilot blind adjudication could not be verified: {message}"
             ),
+            Self::ReportAccounting(error) => error.fmt(f),
         }
     }
 }
@@ -198,11 +207,81 @@ pub struct PilotRunCaseReportV1 {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PilotRunReportV1 {
-    pub manifest_digest: String,
-    pub cases: Vec<PilotRunCaseReportV1>,
+    manifest_digest: String,
+    cases: Vec<PilotRunCaseReportV1>,
+    completed_calls: Vec<PilotRunCallReportV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PilotRunCallReportV1 {
+    pub key: PilotCallKeyV1,
+    pub receipt: PilotEngineReceiptV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PilotRunReportErrorV1 {
+    WrongCaseCount { expected: usize, actual: usize },
+    WrongCompletedCallCount { expected: usize, actual: usize },
+    DuplicateCallKey,
+    UnexpectedOrMissingCall,
+    IncompleteAccounting,
+    ReceiptMismatch,
+}
+
+impl std::fmt::Display for PilotRunReportErrorV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongCaseCount { expected, actual } => {
+                write!(f, "pilot run report requires {expected} cases, got {actual}")
+            }
+            Self::WrongCompletedCallCount { expected, actual } => write!(
+                f,
+                "pilot run report requires {expected} completed calls, got {actual}"
+            ),
+            Self::DuplicateCallKey => write!(f, "pilot run report has a duplicate call key"),
+            Self::UnexpectedOrMissingCall => write!(
+                f,
+                "pilot run report call keys do not exactly cover the frozen case matrix"
+            ),
+            Self::IncompleteAccounting => write!(
+                f,
+                "pilot run report contains a call without complete token, cost, and latency accounting"
+            ),
+            Self::ReceiptMismatch => write!(
+                f,
+                "pilot run report call receipt does not match its per-case receipt"
+            ),
+        }
+    }
 }
 
 impl PilotRunReportV1 {
+    fn from_cases(
+        manifest_digest: String,
+        cases: Vec<PilotRunCaseReportV1>,
+    ) -> Result<Self, PilotRunReportErrorV1> {
+        let completed_calls = expected_call_reports(&manifest_digest, &cases);
+        let report = Self {
+            manifest_digest,
+            cases,
+            completed_calls,
+        };
+        report.validate_complete_accounting()?;
+        Ok(report)
+    }
+
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
+
+    pub fn cases(&self) -> &[PilotRunCaseReportV1] {
+        &self.cases
+    }
+
+    pub fn completed_calls(&self) -> &[PilotRunCallReportV1] {
+        &self.completed_calls
+    }
+
     pub fn passed_count(&self) -> usize {
         self.cases
             .iter()
@@ -213,6 +292,97 @@ impl PilotRunReportV1 {
     pub fn privacy_safe_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
+
+    pub fn validate_complete_accounting(&self) -> Result<(), PilotRunReportErrorV1> {
+        if self.cases.len() != PILOT_SIZE {
+            return Err(PilotRunReportErrorV1::WrongCaseCount {
+                expected: PILOT_SIZE,
+                actual: self.cases.len(),
+            });
+        }
+        if self.completed_calls.len() != PILOT_COMPLETED_CALLS_V1 {
+            return Err(PilotRunReportErrorV1::WrongCompletedCallCount {
+                expected: PILOT_COMPLETED_CALLS_V1,
+                actual: self.completed_calls.len(),
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        if self
+            .completed_calls
+            .iter()
+            .any(|call| !seen.insert(call.key.clone()))
+        {
+            return Err(PilotRunReportErrorV1::DuplicateCallKey);
+        }
+        let expected = expected_call_reports(&self.manifest_digest, &self.cases);
+        if expected
+            .iter()
+            .any(|call| !call.receipt.is_fully_attested())
+            || self
+                .completed_calls
+                .iter()
+                .any(|call| !call.receipt.is_fully_attested())
+        {
+            return Err(PilotRunReportErrorV1::IncompleteAccounting);
+        }
+        for expected_call in &expected {
+            let Some(actual) = self
+                .completed_calls
+                .iter()
+                .find(|call| call.key == expected_call.key)
+            else {
+                return Err(PilotRunReportErrorV1::UnexpectedOrMissingCall);
+            };
+            if actual.receipt != expected_call.receipt {
+                return Err(PilotRunReportErrorV1::ReceiptMismatch);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn expected_call_reports(
+    manifest_digest: &str,
+    cases: &[PilotRunCaseReportV1],
+) -> Vec<PilotRunCallReportV1> {
+    let mut calls = Vec::with_capacity(cases.len() * PILOT_CALLS_PER_CASE_V1);
+    for case in cases {
+        let mut push = |role, arm, ordinal, receipt: &PilotEngineReceiptV1| {
+            calls.push(PilotRunCallReportV1 {
+                key: PilotCallKeyV1::new(manifest_digest, &case.binding, role, arm, ordinal),
+                receipt: receipt.clone(),
+            });
+        };
+        push(
+            PilotCallRoleV1::Producer,
+            PilotCallArmV1::None,
+            0,
+            &case.producer_receipt,
+        );
+        for (ordinal, receipt) in case.treated_receipts.iter().enumerate() {
+            push(
+                PilotCallRoleV1::ColdRun,
+                PilotCallArmV1::Treated,
+                ordinal as u8,
+                receipt,
+            );
+        }
+        for (ordinal, receipt) in case.baseline_receipts.iter().enumerate() {
+            push(
+                PilotCallRoleV1::ColdRun,
+                PilotCallArmV1::Baseline,
+                ordinal as u8,
+                receipt,
+            );
+        }
+        push(
+            PilotCallRoleV1::Adjudicator,
+            PilotCallArmV1::Blinded,
+            0,
+            &case.adjudicator_receipt,
+        );
+    }
+    calls
 }
 
 /// Execute the exact frozen 50-row flow.  This remains generic over all model
@@ -286,10 +456,7 @@ where
             adjudicator,
         )?);
     }
-    Ok(PilotRunReportV1 {
-        manifest_digest: digest.to_string(),
-        cases,
-    })
+    PilotRunReportV1::from_cases(digest.to_string(), cases).map_err(PilotRunError::ReportAccounting)
 }
 
 /// Explicit synthetic seam: tests may exercise the complete runner from an
@@ -384,6 +551,7 @@ where
     let source = resolver
         .resolve_verified(&binding)
         .map_err(PilotRunError::Source)?;
+    verify_resolved_source_v1(&binding, &source).map_err(PilotRunError::Source)?;
     screen_source_for_public_pilot(&source.full_text).map_err(PilotRunError::Privacy)?;
     let produced = run_producer(digest, ledger, &binding, &source, producer)?;
     let candidate = forge_lesson_candidate(
@@ -640,13 +808,28 @@ fn execute_attested<T>(
             receipt: expected_receipt,
             output_sha256,
         }) => {
+            if !expected_receipt.is_fully_attested() {
+                ledger
+                    .record(
+                        key,
+                        PilotCallStateV1::Failed {
+                            receipt: Some(expected_receipt),
+                            failure_code: "receipt_not_attested".to_string(),
+                            retry_safe: false,
+                        },
+                    )
+                    .map_err(PilotRunError::Progress)?;
+                return Err(PilotRunError::ReceiptNotAttested {
+                    source_id: binding.source_id.clone(),
+                    stage,
+                });
+            }
             let recovered = call(true).map_err(|_| PilotRunError::RecoveryMismatch {
                 source_id: binding.source_id.clone(),
                 stage,
             })?;
             if receipt(&recovered) != &expected_receipt
                 || output_digest(&recovered) != output_sha256
-                || !expected_receipt.has_known_identity()
             {
                 return Err(PilotRunError::RecoveryMismatch {
                     source_id: binding.source_id.clone(),
@@ -690,7 +873,7 @@ fn execute_attested<T>(
         }
     };
     let actual_receipt = receipt(&result).clone();
-    if !actual_receipt.has_known_identity() {
+    if !actual_receipt.is_fully_attested() {
         ledger
             .record(
                 key,
@@ -938,10 +1121,41 @@ mod tests {
         }
     }
 
+    struct MissingAccountingProducer;
+
+    impl PilotProducerV1 for MissingAccountingProducer {
+        fn produce(
+            &mut self,
+            binding: &PilotRowV1,
+            source: &ResolvedPilotSourceV1,
+        ) -> Result<ProducedDraftV1, PilotCallErrorV1> {
+            self.recover_produced(binding, source)
+        }
+
+        fn recover_produced(
+            &mut self,
+            _binding: &PilotRowV1,
+            _source: &ResolvedPilotSourceV1,
+        ) -> Result<ProducedDraftV1, PilotCallErrorV1> {
+            let mut incomplete = receipt("producer", "producer-provider", "producer-model");
+            incomplete.usage = None;
+            Ok(ProducedDraftV1 {
+                draft: ForgeDraft {
+                    situation: "synthetic situation".to_string(),
+                    proposed_ruling: "synthetic ruling".to_string(),
+                    why: "synthetic why".to_string(),
+                    how_to_apply: "synthetic apply".to_string(),
+                },
+                receipt: incomplete,
+            })
+        }
+    }
+
     struct Cold {
         calls: usize,
         fail_once_at: Option<(String, usize)>,
         failed_once: bool,
+        receipt_override: Option<PilotEngineReceiptV1>,
     }
 
     impl Default for Cold {
@@ -950,6 +1164,7 @@ mod tests {
                 calls: 0,
                 fail_once_at: None,
                 failed_once: false,
+                receipt_override: None,
             }
         }
     }
@@ -983,7 +1198,10 @@ mod tests {
         ) -> Result<ColdRunResultV1, PilotCallErrorV1> {
             Ok(ColdRunResultV1 {
                 text: "treated synthetic result".to_string(),
-                receipt: receipt("cold", "cold-provider", "cold-model"),
+                receipt: self
+                    .receipt_override
+                    .clone()
+                    .unwrap_or_else(|| receipt("cold", "cold-provider", "cold-model")),
             })
         }
         fn run_baseline(
@@ -1002,7 +1220,10 @@ mod tests {
         ) -> Result<ColdRunResultV1, PilotCallErrorV1> {
             Ok(ColdRunResultV1 {
                 text: "baseline synthetic result".to_string(),
-                receipt: receipt("cold", "cold-provider", "cold-model"),
+                receipt: self
+                    .receipt_override
+                    .clone()
+                    .unwrap_or_else(|| receipt("cold", "cold-provider", "cold-model")),
             })
         }
     }
@@ -1010,6 +1231,7 @@ mod tests {
     struct Adjudicator {
         calls: usize,
         fail_unknown_spend: bool,
+        receipt_override: Option<PilotEngineReceiptV1>,
     }
 
     impl Default for Adjudicator {
@@ -1017,6 +1239,7 @@ mod tests {
             Self {
                 calls: 0,
                 fail_unknown_spend: false,
+                receipt_override: None,
             }
         }
     }
@@ -1061,7 +1284,9 @@ mod tests {
                         )
                     })
                     .collect(),
-                receipt: receipt("adjudicator", "adjudicator-provider", "adjudicator-model"),
+                receipt: self.receipt_override.clone().unwrap_or_else(|| {
+                    receipt("adjudicator", "adjudicator-provider", "adjudicator-model")
+                }),
             })
         }
     }
@@ -1085,11 +1310,211 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.cases.len(), 50);
+        assert_eq!(report.completed_calls.len(), PILOT_COMPLETED_CALLS_V1);
+        assert_eq!(PILOT_COMPLETED_CALLS_V1, 50 * (1 + 6 + 1));
+        report.validate_complete_accounting().unwrap();
         assert_eq!(report.passed_count(), 50);
         assert_eq!(producer.calls.get(), 50);
         assert_eq!(cold.calls, 300);
         assert_eq!(adjudicator.calls, 50);
         let _ = std::fs::remove_file(progress);
+    }
+
+    #[test]
+    fn complete_accounting_requires_tokens_cost_and_latency() {
+        let valid = receipt("producer", "provider", "model");
+        assert!(valid.is_fully_attested());
+        for field in ["tokens", "cost", "latency"] {
+            let mut incomplete = valid.clone();
+            let usage = incomplete.usage.as_mut().unwrap();
+            match field {
+                "tokens" => usage.tokens = None,
+                "cost" => usage.cost_usd_micros = None,
+                "latency" => usage.latency_ms = None,
+                _ => unreachable!(),
+            }
+            assert!(!incomplete.is_fully_attested(), "accepted missing {field}");
+        }
+    }
+
+    #[test]
+    fn incomplete_accounting_is_refused_for_every_call_role() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+
+        let mut producer = MissingAccountingProducer;
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator::default();
+        let producer_progress = progress_path();
+        assert!(run_case_for_test(
+            &manifest,
+            &producer_progress,
+            PilotCaseKeyV1 {
+                source_route: PilotSourceRouteV1::Antigravity,
+                source_id: "source-0".to_string(),
+                source_revision: 1,
+            },
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .is_err());
+        let _ = std::fs::remove_file(producer_progress);
+
+        let mut missing_cost = receipt("cold", "cold-provider", "cold-model");
+        missing_cost.usage.as_mut().unwrap().cost_usd_micros = None;
+        let mut producer = Producer::default();
+        let mut cold = Cold {
+            receipt_override: Some(missing_cost),
+            ..Cold::default()
+        };
+        let mut adjudicator = Adjudicator::default();
+        let cold_progress = progress_path();
+        assert!(run_case_for_test(
+            &manifest,
+            &cold_progress,
+            PilotCaseKeyV1 {
+                source_route: PilotSourceRouteV1::Antigravity,
+                source_id: "source-0".to_string(),
+                source_revision: 1,
+            },
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .is_err());
+        let _ = std::fs::remove_file(cold_progress);
+
+        let mut missing_latency =
+            receipt("adjudicator", "adjudicator-provider", "adjudicator-model");
+        missing_latency.usage.as_mut().unwrap().latency_ms = None;
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator {
+            receipt_override: Some(missing_latency),
+            ..Adjudicator::default()
+        };
+        let adjudicator_progress = progress_path();
+        assert!(run_case_for_test(
+            &manifest,
+            &adjudicator_progress,
+            PilotCaseKeyV1 {
+                source_route: PilotSourceRouteV1::Antigravity,
+                source_id: "source-0".to_string(),
+                source_revision: 1,
+            },
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .is_err());
+        let _ = std::fs::remove_file(adjudicator_progress);
+    }
+
+    #[test]
+    fn report_rejects_inexact_duplicate_unaccounted_and_incomplete_calls() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator::default();
+        let progress = progress_path();
+        let report = run_manifest_for_test(
+            &manifest,
+            &progress,
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(progress);
+
+        let mut fewer = report.clone();
+        fewer.completed_calls.pop();
+        assert!(matches!(
+            fewer.validate_complete_accounting(),
+            Err(PilotRunReportErrorV1::WrongCompletedCallCount { actual: 399, .. })
+        ));
+
+        let mut more = report.clone();
+        more.completed_calls.push(report.completed_calls[0].clone());
+        assert!(matches!(
+            more.validate_complete_accounting(),
+            Err(PilotRunReportErrorV1::WrongCompletedCallCount { actual: 401, .. })
+        ));
+
+        let mut duplicate = report.clone();
+        duplicate.completed_calls[1] = duplicate.completed_calls[0].clone();
+        assert!(matches!(
+            duplicate.validate_complete_accounting(),
+            Err(PilotRunReportErrorV1::DuplicateCallKey)
+        ));
+
+        let mut unaccounted = report.clone();
+        unaccounted.completed_calls[0].key.ordinal = 9;
+        assert!(matches!(
+            unaccounted.validate_complete_accounting(),
+            Err(PilotRunReportErrorV1::UnexpectedOrMissingCall)
+        ));
+
+        let mut incomplete = report.clone();
+        incomplete.completed_calls[0]
+            .receipt
+            .usage
+            .as_mut()
+            .unwrap()
+            .tokens = None;
+        assert!(matches!(
+            incomplete.validate_complete_accounting(),
+            Err(PilotRunReportErrorV1::IncompleteAccounting)
+        ));
+
+        let mut mismatched = report;
+        mismatched.completed_calls[0]
+            .receipt
+            .usage
+            .as_mut()
+            .unwrap()
+            .tokens = Some(12);
+        assert!(matches!(
+            mismatched.validate_complete_accounting(),
+            Err(PilotRunReportErrorV1::ReceiptMismatch)
+        ));
+    }
+
+    #[test]
+    fn identity_only_producer_receipt_cannot_complete_a_case() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = MissingAccountingProducer;
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator::default();
+        let progress = progress_path();
+        let result = run_case_for_test(
+            &manifest,
+            &progress,
+            PilotCaseKeyV1 {
+                source_route: PilotSourceRouteV1::Antigravity,
+                source_id: "source-0".to_string(),
+                source_revision: 1,
+            },
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        );
+        let ledger_json = std::fs::read_to_string(&progress).unwrap();
+        let _ = std::fs::remove_file(progress);
+        assert!(result.is_err(), "missing accounting must refuse completion");
+        assert!(ledger_json.contains("receipt_not_attested"));
+        assert!(!ledger_json.contains("\"status\": \"completed\""));
     }
 
     #[test]
@@ -1142,8 +1567,8 @@ mod tests {
         let mut producer = Producer::default();
         let mut cold = Cold::default();
         let mut adjudicator = Adjudicator {
-            calls: 0,
             fail_unknown_spend: true,
+            ..Adjudicator::default()
         };
         let progress = progress_path();
         let case = PilotCaseKeyV1 {

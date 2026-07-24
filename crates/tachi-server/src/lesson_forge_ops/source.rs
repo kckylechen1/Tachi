@@ -130,6 +130,37 @@ pub trait PilotSourceResolverV1 {
     ) -> Result<ResolvedPilotSourceV1, SourceResolveError>;
 }
 
+/// Recheck a resolver result at the consuming boundary. Implementations of
+/// the resolver trait are injectable, so neither durable persistence nor
+/// runtime spend trusts the implementation's claim without comparing the
+/// complete route/id/revision/digest binding again.
+pub fn verify_resolved_source_v1(
+    binding: &PilotRowV1,
+    resolved: &ResolvedPilotSourceV1,
+) -> Result<(), SourceResolveError> {
+    if resolved.source_route != binding.source_route
+        || resolved.source_id != binding.source_id
+        || resolved.source_revision != binding.source_revision
+    {
+        return Err(SourceResolveError::BindingMismatch {
+            source_route: binding.source_route,
+            source_id: binding.source_id.clone(),
+            source_revision: binding.source_revision,
+        });
+    }
+    let actual = resolved.content_sha256();
+    if actual != binding.content_sha256 {
+        return Err(SourceResolveError::DigestMismatch {
+            source_route: binding.source_route,
+            source_id: binding.source_id.clone(),
+            source_revision: binding.source_revision,
+            expected: binding.content_sha256.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
 /// The only production source resolver for phase 1.  Environment overrides
 /// are opt-in and limited to the two named variables; it never scans HOME or
 /// discovers databases dynamically.
@@ -209,26 +240,7 @@ impl PilotSourceResolverV1 for SqlitePilotSourceResolverV1 {
                 source_revision: binding.source_revision,
             })?;
 
-        if resolved.source_route != binding.source_route
-            || resolved.source_id != binding.source_id
-            || resolved.source_revision != binding.source_revision
-        {
-            return Err(SourceResolveError::BindingMismatch {
-                source_route: route,
-                source_id: binding.source_id.clone(),
-                source_revision: binding.source_revision,
-            });
-        }
-        let actual = resolved.content_sha256();
-        if actual != binding.content_sha256 {
-            return Err(SourceResolveError::DigestMismatch {
-                source_route: route,
-                source_id: binding.source_id.clone(),
-                source_revision: binding.source_revision,
-                expected: binding.content_sha256.clone(),
-                actual,
-            });
-        }
+        verify_resolved_source_v1(binding, &resolved)?;
         Ok(resolved)
     }
 }
