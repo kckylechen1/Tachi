@@ -407,6 +407,83 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn exec_action_unlock_failure_refuses_spawn_by_default() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let dir = tempfile::tempdir().expect("temp vault db");
+        let global_db_path = dir.path().join("memory.db");
+        let password_file = dir.path().join("password.txt");
+        std::fs::write(&password_file, "dummy-password\n").expect("write password file");
+        let marker = dir.path().join("must-not-exist");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch {}", marker.display()),
+        ];
+        let err = run_exec_action(
+            &global_db_path,
+            false,
+            false,
+            Some(&password_file),
+            true,
+            None,
+            &[],
+            false,
+            &command,
+        )
+        .await
+        .expect_err(
+            "default (no --allow-unauthenticated) must refuse before spawn when vault unlock fails",
+        );
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refused before spawn") && msg.contains("--allow-unauthenticated"),
+            "default refusal must name the opt-in flag: {msg}"
+        );
+        assert!(
+            msg.contains("vault unavailable"),
+            "refusal must surface the unlock failure as 'vault unavailable': {msg}"
+        );
+        assert!(!marker.exists(), "default refusal spawned the child");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn exec_action_unlock_failure_allow_unauthenticated_runs_inherited() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _inherited = EnvRestore::set("TACHI_VAULT_EXEC_ACTION_INHERITED", "sentinel-value");
+        let dir = tempfile::tempdir().expect("temp vault db");
+        let global_db_path = dir.path().join("memory.db");
+        let password_file = dir.path().join("password.txt");
+        std::fs::write(&password_file, "dummy-password\n").expect("write password file");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "test \"$TACHI_VAULT_EXEC_ACTION_INHERITED\" = sentinel-value".to_string(),
+        ];
+        run_exec_action(
+            &global_db_path,
+            false,
+            false,
+            Some(&password_file),
+            true,
+            None,
+            &[],
+            true,
+            &command,
+        )
+        .await
+        .expect(
+            "--allow-unauthenticated must run the child with the inherited environment when vault unlock fails",
+        );
+    }
+
     #[test]
     fn exec_keeps_child_exit_code() {
         let err = run_command(
