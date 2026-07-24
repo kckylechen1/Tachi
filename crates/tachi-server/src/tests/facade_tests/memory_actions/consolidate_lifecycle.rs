@@ -72,6 +72,36 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
         .as_str()
         .expect("proposal_id")
         .to_string();
+    let proposal_prefix = "lifecycle:merge_into:";
+    assert!(proposal_id.starts_with(proposal_prefix));
+    assert_eq!(proposal_id.len(), proposal_prefix.len() + 64);
+    assert!(proposal_id[proposal_prefix.len()..]
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
+    assert!(
+        !proposal_id.contains("life-old-1") && !proposal_id.contains("life-new-1"),
+        "bounded proposal IDs must not embed raw endpoint IDs: {proposal_id}"
+    );
+    let apply_payload = merge["apply_payload"]
+        .as_object()
+        .expect("v2 proposal stores typed apply_payload");
+    assert_eq!(merge["schema_version"], json!(2));
+    assert_eq!(merge["policy_version"], json!("memory-lifecycle-v2"));
+    assert_eq!(apply_payload["schema_version"], json!(2));
+    assert_eq!(
+        apply_payload["policy_version"],
+        json!("memory-lifecycle-v2")
+    );
+    assert_eq!(apply_payload["lifecycle_action"], json!("merge_into"));
+    let identity = merge["identity"].as_str().expect("v2 proposal identity");
+    assert_eq!(identity.len(), 64, "identity is a full SHA-256 hex digest");
+    let typed_payload: memcore::store::memory_lifecycle::LifecycleApplyPayload =
+        serde_json::from_value(merge["apply_payload"].clone()).expect("typed payload");
+    assert_eq!(
+        identity,
+        memcore::store::memory_lifecycle::compute_lifecycle_identity(&typed_payload),
+        "stored identity must hash the stored apply_payload"
+    );
 
     // Older still active before apply.
     let older_before = server
@@ -237,6 +267,21 @@ async fn consolidate_reject_stamps_a_ttl_immediately() {
     let review_json: Value = serde_json::from_str(&review_body).expect("review json");
     assert_eq!(review_json["proposal"]["status"], json!("rejected"));
 
+    let rejected_id = review_json["proposal"]["proposal_id"]
+        .as_str()
+        .expect("proposal id remains stored");
+    let mut retry = tachi_memory_params("consolidate");
+    retry.format = Some("json".to_string());
+    retry.proposal_id = Some(rejected_id.to_string());
+    retry.review_status = Some("approved".to_string());
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, retry)
+        .await
+        .expect_err("rejected proposal cannot transition back to approved");
+    assert!(
+        err.contains("terminal/already-reviewed"),
+        "unexpected error: {err}"
+    );
+
     let expires_at = review_json["proposal"]["expires_at"]
         .as_str()
         .expect("a rejected (terminal) proposal must carry expires_at immediately");
@@ -244,6 +289,429 @@ async fn consolidate_reject_stamps_a_ttl_immediately() {
         chrono::DateTime::parse_from_rfc3339(expires_at).is_ok(),
         "expires_at must be a valid RFC3339 timestamp: {expires_at}"
     );
+}
+
+#[tokio::test]
+async fn consolidate_legacy_v1_proposals_list_but_review_and_apply_refuse_loudly() {
+    let server = make_server();
+    let legacy_id = "lifecycle:archive:legacy-listable";
+    server
+        .with_global_store(|store| {
+            store
+                .set_state(
+                    "memory_lifecycle_proposals",
+                    legacy_id,
+                    r#"{"proposal_id":"lifecycle:archive:legacy-listable","status":"pending","source_id":"missing"}"#,
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("seed legacy proposal");
+
+    let mut list = tachi_memory_params("consolidate");
+    list.format = Some("json".to_string());
+    let listed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(&server, list)
+            .await
+            .expect("legacy proposals remain listable"),
+    )
+    .expect("list json");
+    assert!(listed["proposals"].as_array().is_some_and(|rows| rows
+        .iter()
+        .any(|row| { row["proposal_id"] == json!(legacy_id) })));
+
+    let mut review = tachi_memory_params("consolidate");
+    review.proposal_id = Some(legacy_id.to_string());
+    review.review_status = Some("approved".to_string());
+    let review_err = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect_err("legacy review must refuse");
+    assert!(
+        review_err.contains("legacy v1"),
+        "unexpected error: {review_err}"
+    );
+
+    let mut apply = tachi_memory_params("consolidate");
+    apply.proposal_id = Some(legacy_id.to_string());
+    apply.confirm = true;
+    let apply_err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("legacy apply must refuse");
+    assert!(
+        apply_err.contains("legacy v1"),
+        "unexpected error: {apply_err}"
+    );
+}
+
+#[tokio::test]
+async fn consolidate_apply_refuses_source_drift_and_keeps_approved_proposal() {
+    let server = make_server();
+    let source = seed_scratch(
+        "life-source-drift-old",
+        "/scratch/drift/source",
+        "same lifecycle source text",
+        10,
+    );
+    let target = seed_scratch(
+        "life-source-drift-new",
+        "/scratch/drift/source",
+        "same lifecycle target text",
+        1,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&source).map_err(|e| e.to_string())?;
+            store.upsert(&target).map_err(|e| e.to_string())
+        })
+        .expect("seed source drift pair");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch/drift".to_string());
+    let proposed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+            .await
+            .expect("propose"),
+    )
+    .expect("json");
+    let proposal_id = proposed["generated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|proposal| proposal["source_id"] == json!("life-source-drift-old"))
+        .expect("source proposal")["proposal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut review = tachi_memory_params("consolidate");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve");
+
+    let target_revision_before = server
+        .with_global_store_read(|store| {
+            store
+                .get("life-source-drift-new")
+                .map_err(|e| e.to_string())
+                .map(|row| row.unwrap().revision)
+        })
+        .expect("target revision");
+    server
+        .with_global_store(|store| {
+            let mut drifted = store
+                .get("life-source-drift-old")
+                .map_err(|e| e.to_string())?
+                .unwrap();
+            drifted.text.push_str(" changed after approval");
+            store.upsert(&drifted).map_err(|e| e.to_string())
+        })
+        .expect("introduce source drift");
+
+    let mut apply = tachi_memory_params("consolidate");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("source drift must refuse apply");
+    assert!(err.contains("identity mismatch"), "unexpected error: {err}");
+    server
+        .with_global_store_read(|store| {
+            let source = store
+                .get("life-source-drift-old")
+                .map_err(|e| e.to_string())?
+                .unwrap();
+            let target = store
+                .get("life-source-drift-new")
+                .map_err(|e| e.to_string())?
+                .unwrap();
+            let (proposal, _) = store
+                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .unwrap();
+            assert!(!source.archived, "failed apply must not archive source");
+            assert_eq!(
+                target.revision, target_revision_before,
+                "failed apply must not mutate target"
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(&proposal).unwrap()["status"],
+                json!("approved")
+            );
+            Ok(())
+        })
+        .expect("verify failed apply remains atomic");
+}
+
+#[tokio::test]
+async fn consolidate_apply_refuses_target_drift_and_keeps_source_unchanged() {
+    let server = make_server();
+    let source = seed_scratch(
+        "life-target-drift-old",
+        "/scratch/drift/target",
+        "same lifecycle source text",
+        10,
+    );
+    let target = seed_scratch(
+        "life-target-drift-new",
+        "/scratch/drift/target",
+        "same lifecycle target text",
+        1,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&source).map_err(|e| e.to_string())?;
+            store.upsert(&target).map_err(|e| e.to_string())
+        })
+        .expect("seed target drift pair");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch/drift".to_string());
+    let proposed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+            .await
+            .expect("propose"),
+    )
+    .expect("json");
+    let proposal_id = proposed["generated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|proposal| proposal["source_id"] == json!("life-target-drift-old"))
+        .expect("target proposal")["proposal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut review = tachi_memory_params("consolidate");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve");
+
+    server
+        .with_global_store(|store| {
+            let mut drifted = store
+                .get("life-target-drift-new")
+                .map_err(|e| e.to_string())?
+                .unwrap();
+            drifted.text.push_str(" changed after approval");
+            store.upsert(&drifted).map_err(|e| e.to_string())
+        })
+        .expect("introduce target drift");
+    let mut apply = tachi_memory_params("consolidate");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("target drift must refuse apply");
+    assert!(err.contains("identity mismatch"), "unexpected error: {err}");
+    server
+        .with_global_store_read(|store| {
+            let source = store
+                .get("life-target-drift-old")
+                .map_err(|e| e.to_string())?
+                .unwrap();
+            let (proposal, _) = store
+                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .unwrap();
+            assert!(
+                !source.archived,
+                "failed target-drift apply must not archive source"
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(&proposal).unwrap()["status"],
+                json!("approved")
+            );
+            Ok(())
+        })
+        .expect("verify target drift preserves approved proposal");
+}
+
+#[tokio::test]
+async fn consolidate_review_refuses_tampered_top_level_execution_field_without_mutation() {
+    let server = make_server();
+    let source = seed_scratch(
+        "life-review-tamper-source",
+        "/scratch/tamper/review",
+        "older lifecycle review tamper note",
+        10,
+    );
+    let target = seed_scratch(
+        "life-review-tamper-target",
+        "/scratch/tamper/review",
+        "newer lifecycle review tamper note",
+        1,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&source).map_err(|e| e.to_string())?;
+            store.upsert(&target).map_err(|e| e.to_string())
+        })
+        .expect("seed review tamper pair");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch/tamper/review".to_string());
+    let proposed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+            .await
+            .expect("propose"),
+    )
+    .expect("json");
+    let proposal_id = proposed["generated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|proposal| proposal["source_id"] == json!("life-review-tamper-source"))
+        .expect("source proposal")["proposal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    server
+        .with_global_store(|store| {
+            let (raw, _) = store
+                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("persisted proposal");
+            let mut tampered: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            tampered["lifecycle_action"] = json!("archive");
+            store
+                .set_state(
+                    "memory_lifecycle_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&tampered).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("tamper top-level action");
+
+    let mut review = tachi_memory_params("consolidate");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect_err("top-level execution tampering must refuse review");
+    assert!(
+        err.contains("top-level lifecycle_action differs"),
+        "unexpected error: {err}"
+    );
+    server
+        .with_global_store_read(|store| {
+            let source = store
+                .get("life-review-tamper-source")
+                .map_err(|e| e.to_string())?
+                .expect("source remains visible");
+            let (raw, _) = store
+                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal remains");
+            assert!(!source.archived, "rejected review must not mutate source");
+            assert_eq!(
+                serde_json::from_str::<Value>(&raw).unwrap()["status"],
+                json!("pending")
+            );
+            Ok(())
+        })
+        .expect("verify no review mutation");
+}
+
+#[tokio::test]
+async fn consolidate_apply_refuses_tampered_top_level_execution_field_without_mutation() {
+    let server = make_server();
+    let source = seed_scratch(
+        "life-apply-tamper-source",
+        "/scratch/tamper/apply",
+        "older lifecycle apply tamper note",
+        10,
+    );
+    let target = seed_scratch(
+        "life-apply-tamper-target",
+        "/scratch/tamper/apply",
+        "newer lifecycle apply tamper note",
+        1,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&source).map_err(|e| e.to_string())?;
+            store.upsert(&target).map_err(|e| e.to_string())
+        })
+        .expect("seed apply tamper pair");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch/tamper/apply".to_string());
+    let proposed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+            .await
+            .expect("propose"),
+    )
+    .expect("json");
+    let proposal_id = proposed["generated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|proposal| proposal["source_id"] == json!("life-apply-tamper-source"))
+        .expect("source proposal")["proposal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut review = tachi_memory_params("consolidate");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve intact proposal");
+
+    server
+        .with_global_store(|store| {
+            let (raw, _) = store
+                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("approved proposal");
+            let mut tampered: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            tampered["source_id"] = json!("life-apply-tamper-target");
+            store
+                .set_state(
+                    "memory_lifecycle_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&tampered).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("tamper approved proposal");
+
+    let mut apply = tachi_memory_params("consolidate");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("top-level execution tampering must refuse apply");
+    assert!(
+        err.contains("top-level source_id differs"),
+        "unexpected error: {err}"
+    );
+    server
+        .with_global_store_read(|store| {
+            let source = store
+                .get("life-apply-tamper-source")
+                .map_err(|e| e.to_string())?
+                .expect("source remains visible");
+            let (raw, _) = store
+                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal remains");
+            assert!(!source.archived, "rejected apply must not mutate source");
+            assert_eq!(
+                serde_json::from_str::<Value>(&raw).unwrap()["status"],
+                json!("approved")
+            );
+            Ok(())
+        })
+        .expect("verify no apply mutation");
 }
 
 #[tokio::test]
@@ -646,7 +1114,7 @@ async fn consolidate_near_dup_merge_never_proposes_protected_rows() {
 }
 
 #[tokio::test]
-async fn consolidate_near_dup_merge_collapses_transitive_chain_to_star() {
+async fn consolidate_no_op_sibling_star_merges_remain_applicable() {
     let server = make_server();
     let shared = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
                   kilo lima mike november oscar papa quebec romeo sierra";
@@ -679,6 +1147,14 @@ async fn consolidate_near_dup_merge_collapses_transitive_chain_to_star() {
             Ok(())
         })
         .expect("seed transitive near-dup chain");
+    let target_revision_before = server
+        .with_global_store_read(|store| {
+            store
+                .get("near-dup-chain-c")
+                .map_err(|e| e.to_string())
+                .map(|entry| entry.expect("survivor exists").revision)
+        })
+        .expect("read survivor revision");
 
     let mut propose = tachi_memory_params("consolidate");
     propose.format = Some("json".to_string());
@@ -706,6 +1182,20 @@ async fn consolidate_near_dup_merge_collapses_transitive_chain_to_star() {
         proposal_ids.len(),
         near_dups.len(),
         "star edges must have distinct proposal_ids: {near_dups:?}"
+    );
+    assert!(
+        proposal_ids.iter().all(|proposal_id| {
+            let prefix = "lifecycle:near_dup_merge:";
+            proposal_id.starts_with(prefix)
+                && proposal_id.len() == prefix.len() + 64
+                && proposal_id[prefix.len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                && !proposal_id.contains("near-dup-chain-a")
+                && !proposal_id.contains("near-dup-chain-b")
+                && !proposal_id.contains("near-dup-chain-c")
+        }),
+        "proposal IDs must be bounded identities rather than raw endpoint IDs: {proposal_ids:?}"
     );
     assert!(
         near_dups
@@ -756,6 +1246,10 @@ async fn consolidate_near_dup_merge_collapses_transitive_chain_to_star() {
         })
         .expect("read survivor");
     assert!(!survivor.archived);
+    assert_eq!(
+        survivor.revision, target_revision_before,
+        "no-op sibling merges must not rewrite/bump the shared star target"
+    );
     for source_id in ["near-dup-chain-a", "near-dup-chain-b"] {
         let archived = server
             .with_global_store_read(|store| {

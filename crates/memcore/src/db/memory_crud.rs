@@ -506,7 +506,31 @@ fn upsert_with_idless_identity(
             entry.id
         )));
     }
+    // All writes for one upsert must be atomic across main table + FTS + vec.
+    // The transaction body lives in [`upsert_within_tx`] so lifecycle-apply
+    // can run the full upsert (main row + FTS + vectors + idless semantics)
+    // inside a caller-owned `BEGIN IMMEDIATE` transaction alongside
+    // archive/supersede and the proposal-state CAS.
+    let tx = conn.transaction()?;
+    let result = upsert_within_tx(&tx, entry, vec_available, idless_identity)?;
+    tx.commit()?;
+    Ok(result)
+}
 
+/// Caller-transaction upsert body. Performs the same normalization, main-row
+/// INSERT/UPDATE, FTS sync, vector sync, and write-time Jaccard dedup as
+/// [`upsert_with_idless_identity`], but does NOT commit — the caller owns
+/// the transaction. This is the seam that lets lifecycle-apply run the full
+/// upsert inside a single `BEGIN IMMEDIATE` transaction without duplicating a
+/// reduced upsert: ordinary `upsert`/`upsert_idless` behavior (main row, FTS,
+/// vectors, idless semantics) is byte-for-byte identical because both paths
+/// execute this same body; only the commit site differs.
+pub(crate) fn upsert_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+) -> Result<IdlessUpsertResult, MemoryError> {
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.
     let path = crate::path_router::normalize_path(&entry.path);
@@ -552,9 +576,6 @@ fn upsert_with_idless_identity(
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let e_json = canonical_entities_json(entry)?;
 
-    // All writes for one upsert must be atomic across main table + FTS + vec.
-    let tx = conn.transaction()?;
-
     // ── Write-time Jaccard deduplication (new entries only) ──────────────────
     // Only for net-new IDs; ON CONFLICT path below handles updates.
     let is_new: bool = tx.query_row(
@@ -564,8 +585,7 @@ fn upsert_with_idless_identity(
     )? == 0;
 
     if is_new && idless_identity.is_none() {
-        if let Some(cand_id) =
-            merge_into_jaccard_candidate(&tx, entry, importance, &write_time_utc)?
+        if let Some(cand_id) = merge_into_jaccard_candidate(tx, entry, importance, &write_time_utc)?
         {
             // Write this entry as superseded by the candidate
             tx.execute(
@@ -592,8 +612,7 @@ fn upsert_with_idless_identity(
             // Winner was synced inside `merge_into_jaccard_candidate`; the
             // superseded loser must land in the symbolic projection too so
             // `include_superseded` recall can see it before any repair (#1331).
-            sync_memories_symbolic_fts(&tx, &entry.id)?;
-            tx.commit()?;
+            sync_memories_symbolic_fts(tx, &entry.id)?;
             return Ok(IdlessUpsertResult::Saved);
         }
     }
@@ -683,7 +702,6 @@ fn upsert_with_idless_identity(
                     "id-less identity conflict without an active winner: {identity}"
                 ))
             })?;
-        tx.commit()?;
         return Ok(IdlessUpsertResult::Duplicate { id: winner_id });
     }
 
@@ -701,8 +719,7 @@ fn upsert_with_idless_identity(
     // FTS+Jaccard search. Run it now, after the atomic decision, so the two
     // mechanisms never compete over the same row.
     if idless_identity.is_some() {
-        if let Some(cand_id) =
-            merge_into_jaccard_candidate(&tx, entry, importance, &write_time_utc)?
+        if let Some(cand_id) = merge_into_jaccard_candidate(tx, entry, importance, &write_time_utc)?
         {
             // `entry`'s row just won the identity race and is currently the
             // active holder of `idless_identity` — but it is about to become
@@ -719,8 +736,7 @@ fn upsert_with_idless_identity(
             )?;
             // Same early-return hole as the explicit-id Jaccard path: the
             // loser never reaches the post-block `sync_memories_fts` call.
-            sync_memories_symbolic_fts(&tx, &entry.id)?;
-            tx.commit()?;
+            sync_memories_symbolic_fts(tx, &entry.id)?;
             return Ok(IdlessUpsertResult::Saved);
         }
     }
@@ -730,7 +746,7 @@ fn upsert_with_idless_identity(
     crate::types::fold_person_names_into_entities(&mut ents_vec, entry.persons.clone());
     let ents = ents_vec.join(" ");
     sync_memories_fts(
-        &tx,
+        tx,
         &entry.id,
         &path,
         &clean_summary,
@@ -752,7 +768,6 @@ fn upsert_with_idless_identity(
         }
     }
 
-    tx.commit()?;
     Ok(IdlessUpsertResult::Saved)
 }
 

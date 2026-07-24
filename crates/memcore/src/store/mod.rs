@@ -38,6 +38,7 @@ pub mod lessons;
 pub mod linking;
 pub mod llm_usage;
 pub mod maintenance;
+pub mod memory_lifecycle;
 pub mod open;
 pub mod recall_cache;
 pub mod rem;
