@@ -553,6 +553,9 @@ where
         .map_err(PilotRunError::Source)?;
     verify_resolved_source_v1(&binding, &source).map_err(PilotRunError::Source)?;
     screen_source_for_public_pilot(&source.full_text).map_err(PilotRunError::Privacy)?;
+    let blind_seed = ledger
+        .case_blind_seed(&binding)
+        .map_err(PilotRunError::Progress)?;
     let produced = run_producer(digest, ledger, &binding, &source, producer)?;
     let candidate = forge_lesson_candidate(
         "lesson-forge-pilot",
@@ -567,7 +570,7 @@ where
     let (treated, treated_receipts) =
         run_treated(digest, ledger, &binding, &candidate, cold_runner)?;
     let (baseline, baseline_receipts) = run_baseline(digest, ledger, &binding, cold_runner)?;
-    let (blinded, key) = blind_case(&binding.source_id, treated, baseline, blind_seed(&binding));
+    let (blinded, key) = blind_case(&binding.source_id, treated, baseline, blind_seed);
     let adjudicated = run_adjudicator(digest, ledger, &binding, &blinded, adjudicator)?;
     let (treated, baseline) = unblind_scores(&key, adjudicated.scores)
         .map_err(|err| PilotRunError::Unblind(format!("{err:?}")))?;
@@ -950,23 +953,6 @@ fn stage_error_for_id(source_id: &str, stage: &'static str) -> PilotRunError {
     }
 }
 
-fn blind_seed(binding: &PilotRowV1) -> u64 {
-    let digest = Sha256::digest(
-        format!(
-            "{}\0{}\0{}",
-            binding.source_route.as_str(),
-            binding.source_id,
-            binding.source_revision
-        )
-        .as_bytes(),
-    );
-    u64::from_be_bytes(
-        digest[..8]
-            .try_into()
-            .expect("sha256 prefix has eight bytes"),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -1335,6 +1321,131 @@ mod tests {
             }
             assert!(!incomplete.is_fully_attested(), "accepted missing {field}");
         }
+
+        let mut zero_tokens = valid.clone();
+        zero_tokens.usage.as_mut().unwrap().tokens = Some(0);
+        assert!(
+            !zero_tokens.is_fully_attested(),
+            "zero tokens is a placeholder, not complete accounting"
+        );
+
+        let mut reported_zero_cost = valid.clone();
+        reported_zero_cost.usage.as_mut().unwrap().cost_usd_micros = Some(0);
+        assert!(
+            reported_zero_cost.is_fully_attested(),
+            "an explicitly reported zero cost is valid"
+        );
+
+        let mut zero_latency = valid;
+        zero_latency.usage.as_mut().unwrap().latency_ms = Some(0);
+        assert!(
+            !zero_latency.is_fully_attested(),
+            "zero latency is a placeholder, not complete accounting"
+        );
+    }
+
+    #[test]
+    fn public_case_binding_does_not_determine_blind_seed() {
+        let manifest = freeze_pilot_manifest(rows()).unwrap();
+        let digest = manifest.contract_digest().unwrap();
+        let binding = &manifest.rows()[0];
+        let first_path = progress_path();
+        let second_path = progress_path();
+        let first = PilotProgressLedgerV1::open(&first_path, &digest)
+            .unwrap()
+            .case_blind_seed(binding)
+            .unwrap();
+        let second = PilotProgressLedgerV1::open(&second_path, &digest)
+            .unwrap()
+            .case_blind_seed(binding)
+            .unwrap();
+        let _ = std::fs::remove_file(first_path);
+        let _ = std::fs::remove_file(second_path);
+        assert!(
+            first != second,
+            "fresh sessions must not derive arm order from public binding identity"
+        );
+    }
+
+    #[test]
+    fn restart_preserves_the_frozen_private_arm_order() {
+        let manifest = freeze_pilot_manifest(rows()).unwrap();
+        let digest = manifest.contract_digest().unwrap();
+        let binding = &manifest.rows()[0];
+        let progress = progress_path();
+        let first_seed = PilotProgressLedgerV1::open(&progress, &digest)
+            .unwrap()
+            .case_blind_seed(binding)
+            .unwrap();
+        let second_seed = PilotProgressLedgerV1::open(&progress, &digest)
+            .unwrap()
+            .case_blind_seed(binding)
+            .unwrap();
+        let texts = |seed| {
+            let treated = std::array::from_fn(|index| ColdRunText {
+                text: format!("treated-{index}"),
+            });
+            let baseline = std::array::from_fn(|index| ColdRunText {
+                text: format!("baseline-{index}"),
+            });
+            blind_case("case", treated, baseline, seed)
+                .0
+                .items
+                .into_iter()
+                .map(|item| item.text)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            first_seed == second_seed,
+            "restart must reuse private blinding without printing it"
+        );
+        assert_eq!(texts(first_seed), texts(second_seed));
+        let ledger_json = std::fs::read_to_string(&progress).unwrap();
+        let _ = std::fs::remove_file(progress);
+        assert!(ledger_json.contains("blindings"));
+        assert!(!manifest.canonical_json().unwrap().contains("blindings"));
+    }
+
+    #[test]
+    fn completed_adjudication_restart_reuses_blinding_without_double_spend() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let progress = progress_path();
+        let case = PilotCaseKeyV1 {
+            source_route: PilotSourceRouteV1::Antigravity,
+            source_id: "source-0".to_string(),
+            source_revision: 1,
+        };
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator::default();
+        let first = run_case_for_test(
+            &manifest,
+            &progress,
+            case.clone(),
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .unwrap();
+        let second = run_case_for_test(
+            &manifest,
+            &progress,
+            case,
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .unwrap();
+        assert!(matches!(first.outcome, CaseOutcome::Pass));
+        assert!(matches!(second.outcome, CaseOutcome::Pass));
+        assert_eq!(producer.calls.get(), 1);
+        assert_eq!(cold.calls, 6);
+        assert_eq!(adjudicator.calls, 1);
+        let _ = std::fs::remove_file(progress);
     }
 
     #[test]
@@ -1682,7 +1793,61 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            PilotRunError::RecordedIndeterminateCall { .. }
+            PilotRunError::Progress(PilotProgressErrorV1::MissingBlindingAfterSpend)
+        ));
+        assert_eq!(producer.calls.get(), 0);
+        let _ = std::fs::remove_file(progress);
+    }
+
+    #[test]
+    fn mismatched_blinding_after_a_started_call_is_never_regenerated() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let progress = progress_path();
+        let digest = manifest.contract_digest().unwrap();
+        let binding = &manifest.rows()[0];
+        let mut ledger = PilotProgressLedgerV1::open(&progress, &digest).unwrap();
+        ledger.case_blind_seed(binding).unwrap();
+        ledger
+            .record(
+                PilotCallKeyV1::new(
+                    &digest,
+                    binding,
+                    PilotCallRoleV1::Producer,
+                    PilotCallArmV1::None,
+                    0,
+                ),
+                PilotCallStateV1::Started,
+            )
+            .unwrap();
+        drop(ledger);
+
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&progress).unwrap()).unwrap();
+        persisted["blindings"][0]["key"]["source_revision"] = serde_json::json!(2);
+        std::fs::write(&progress, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator::default();
+        let error = run_case_for_test(
+            &manifest,
+            &progress,
+            PilotCaseKeyV1 {
+                source_route: binding.source_route,
+                source_id: binding.source_id.clone(),
+                source_revision: binding.source_revision,
+            },
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PilotRunError::Progress(PilotProgressErrorV1::MissingBlindingAfterSpend)
         ));
         assert_eq!(producer.calls.get(), 0);
         let _ = std::fs::remove_file(progress);
@@ -1790,10 +1955,13 @@ mod tests {
         assert!(!json.contains("treated synthetic result"));
         assert!(!json.contains("synthetic situation"));
         assert!(json.contains("cost_usd_micros"));
+        assert!(!json.contains("blindings"));
+        assert!(!json.contains("material_hex"));
         let ledger_json = std::fs::read_to_string(&progress).unwrap();
         assert!(!ledger_json.contains("SOURCE_TEXT_MUST_NOT_BE_REPORTED"));
         assert!(!ledger_json.contains("treated synthetic result"));
         assert!(!ledger_json.contains("synthetic situation"));
+        assert!(ledger_json.contains("blindings"));
         let _ = std::fs::remove_file(progress);
     }
 }

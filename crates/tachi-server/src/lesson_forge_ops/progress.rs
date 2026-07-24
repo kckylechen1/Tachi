@@ -7,18 +7,23 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tachi_params::LessonEngineReceiptV1;
 
 use super::pilot::{PilotRowV1, PilotSourceRouteV1};
 use super::source::{DEFAULT_ANTIGRAVITY_SOURCE_DB, DEFAULT_HAPI_PROJECT_DB};
 
-const PROGRESS_FORMAT_V1: &str = "lesson_forge_pilot_progress_v1";
+const PROGRESS_FORMAT_V2: &str = "lesson_forge_pilot_progress_v2";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PilotEngineUsageV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u64>,
+    /// `Some` means the provider explicitly reported the actual cost. Zero
+    /// is therefore distinguishable from an unknown/unreported `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,7 +47,9 @@ impl PilotEngineReceiptV1 {
 
     pub fn has_complete_accounting(&self) -> bool {
         self.usage.as_ref().is_some_and(|usage| {
-            usage.tokens.is_some() && usage.cost_usd_micros.is_some() && usage.latency_ms.is_some()
+            usage.tokens.is_some_and(|tokens| tokens > 0)
+                && usage.cost_usd_micros.is_some()
+                && usage.latency_ms.is_some_and(|latency_ms| latency_ms > 0)
         })
     }
 
@@ -121,10 +128,44 @@ pub struct PilotCallRecordV1 {
     pub state: PilotCallStateV1,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PilotBlindingKeyV1 {
+    contract_digest: String,
+    source_route: PilotSourceRouteV1,
+    source_id: String,
+    source_revision: i64,
+}
+
+impl PilotBlindingKeyV1 {
+    fn new(contract_digest: &str, binding: &PilotRowV1) -> Self {
+        Self {
+            contract_digest: contract_digest.to_string(),
+            source_route: binding.source_route,
+            source_id: binding.source_id.clone(),
+            source_revision: binding.source_revision,
+        }
+    }
+
+    fn matches_call(&self, call: &PilotCallKeyV1) -> bool {
+        self.contract_digest == call.contract_digest
+            && self.source_route == call.source_route
+            && self.source_id == call.source_id
+            && self.source_revision == call.source_revision
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PilotBlindingRecordV1 {
+    key: PilotBlindingKeyV1,
+    material_hex: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedProgressV1 {
     format: String,
     contract_digest: String,
+    #[serde(default)]
+    blindings: Vec<PilotBlindingRecordV1>,
     records: Vec<PilotCallRecordV1>,
 }
 
@@ -137,6 +178,9 @@ pub enum PilotProgressErrorV1 {
     InvalidFormat,
     ContractMismatch,
     DuplicateCallKey,
+    DuplicateBlindingKey,
+    InvalidBlindingMaterial,
+    MissingBlindingAfterSpend,
     SourceDatabasePath,
 }
 
@@ -157,6 +201,16 @@ impl std::fmt::Display for PilotProgressErrorV1 {
                 )
             }
             Self::DuplicateCallKey => write!(f, "pilot progress ledger has a duplicate call key"),
+            Self::DuplicateBlindingKey => {
+                write!(f, "pilot progress ledger has a duplicate blinding key")
+            }
+            Self::InvalidBlindingMaterial => {
+                write!(f, "pilot progress ledger has invalid private blinding material")
+            }
+            Self::MissingBlindingAfterSpend => write!(
+                f,
+                "pilot progress ledger is missing private blinding material after a call was recorded"
+            ),
             Self::SourceDatabasePath => {
                 write!(
                     f,
@@ -172,6 +226,7 @@ impl std::error::Error for PilotProgressErrorV1 {}
 pub struct PilotProgressLedgerV1 {
     path: PathBuf,
     contract_digest: String,
+    blindings: Vec<PilotBlindingRecordV1>,
     records: Vec<PilotCallRecordV1>,
 }
 
@@ -188,12 +243,16 @@ impl PilotProgressLedgerV1 {
             let bytes = std::fs::read(&path).map_err(PilotProgressErrorV1::Read)?;
             let persisted: PersistedProgressV1 =
                 serde_json::from_slice(&bytes).map_err(PilotProgressErrorV1::Parse)?;
-            if persisted.format != PROGRESS_FORMAT_V1 {
+            if persisted.format != PROGRESS_FORMAT_V2 {
                 return Err(PilotProgressErrorV1::InvalidFormat);
             }
             if persisted.contract_digest != contract_digest
                 || persisted
                     .records
+                    .iter()
+                    .any(|record| record.key.contract_digest != contract_digest)
+                || persisted
+                    .blindings
                     .iter()
                     .any(|record| record.key.contract_digest != contract_digest)
             {
@@ -207,15 +266,28 @@ impl PilotProgressLedgerV1 {
                     return Err(PilotProgressErrorV1::DuplicateCallKey);
                 }
             }
+            for (index, record) in persisted.blindings.iter().enumerate() {
+                if persisted.blindings[..index]
+                    .iter()
+                    .any(|existing| existing.key == record.key)
+                {
+                    return Err(PilotProgressErrorV1::DuplicateBlindingKey);
+                }
+                if decode_blinding_material(&record.material_hex).is_none() {
+                    return Err(PilotProgressErrorV1::InvalidBlindingMaterial);
+                }
+            }
             Ok(Self {
                 path,
                 contract_digest: contract_digest.to_string(),
+                blindings: persisted.blindings,
                 records: persisted.records,
             })
         } else {
             let ledger = Self {
                 path,
                 contract_digest: contract_digest.to_string(),
+                blindings: Vec::new(),
                 records: Vec::new(),
             };
             ledger.persist()?;
@@ -243,10 +315,44 @@ impl PilotProgressLedgerV1 {
         self.persist()
     }
 
+    /// Freeze an unpredictable seed before any call for this case. The raw
+    /// OS-random material remains private to this restart ledger; the seed is
+    /// deterministically re-derived from that material plus the complete
+    /// contract/case binding on restart.
+    pub(crate) fn case_blind_seed(
+        &mut self,
+        binding: &PilotRowV1,
+    ) -> Result<[u8; 32], PilotProgressErrorV1> {
+        let key = PilotBlindingKeyV1::new(&self.contract_digest, binding);
+        if let Some(existing) = self.blindings.iter().find(|record| record.key == key) {
+            let material = decode_blinding_material(&existing.material_hex)
+                .ok_or(PilotProgressErrorV1::InvalidBlindingMaterial)?;
+            return Ok(derive_blind_seed(&key, &material));
+        }
+        if self
+            .records
+            .iter()
+            .any(|record| key.matches_call(&record.key))
+        {
+            return Err(PilotProgressErrorV1::MissingBlindingAfterSpend);
+        }
+
+        let mut material = [0u8; 32];
+        OsRng.fill_bytes(&mut material);
+        let seed = derive_blind_seed(&key, &material);
+        self.blindings.push(PilotBlindingRecordV1 {
+            key,
+            material_hex: encode_blinding_material(&material),
+        });
+        self.persist()?;
+        Ok(seed)
+    }
+
     fn persist(&self) -> Result<(), PilotProgressErrorV1> {
         let persisted = PersistedProgressV1 {
-            format: PROGRESS_FORMAT_V1.to_string(),
+            format: PROGRESS_FORMAT_V2.to_string(),
             contract_digest: self.contract_digest.clone(),
+            blindings: self.blindings.clone(),
             records: self.records.clone(),
         };
         let mut bytes =
@@ -276,6 +382,37 @@ impl PilotProgressLedgerV1 {
             .and_then(|directory| directory.sync_all())
             .map_err(PilotProgressErrorV1::Write)
     }
+}
+
+fn encode_blinding_material(material: &[u8; 32]) -> String {
+    material.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn decode_blinding_material(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut material = [0u8; 32];
+    for (index, byte) in material.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(material)
+}
+
+fn derive_blind_seed(key: &PilotBlindingKeyV1, material: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for field in [
+        "lesson_forge_pilot_blinding_v1",
+        key.contract_digest.as_str(),
+        key.source_route.as_str(),
+        key.source_id.as_str(),
+    ] {
+        hasher.update(field.len().to_be_bytes());
+        hasher.update(field.as_bytes());
+    }
+    hasher.update(key.source_revision.to_be_bytes());
+    hasher.update(material);
+    hasher.finalize().into()
 }
 
 fn is_source_database_path(path: &Path) -> bool {

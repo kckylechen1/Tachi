@@ -24,7 +24,7 @@
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{RngCore, SeedableRng};
 use serde::Serialize;
 
 use tachi_params::LessonEngineReceiptV1;
@@ -74,11 +74,10 @@ pub struct BlindedCase {
 }
 
 /// Blind + shuffle exactly 3 treated (candidate) and 3 baseline (old
-/// summary) runs for one case. `seed` makes the shuffle reproducible for
-/// tests; a live caller should derive it from something unpredictable to
-/// the adjudicator (e.g. a per-run nonce), never from the case id or arm
-/// content itself (which would make "random" order derivable by anyone who
-/// can read the case id).
+/// summary) runs for one case. `private_seed` must be cryptographically
+/// unpredictable to the adjudicator and persisted privately for restart.
+/// It deterministically controls both opaque ids and order, so a restart can
+/// recover an already-spent adjudication without exposing arm identity.
 ///
 /// Two structural fixes over a flat `[ColdRunText; 6]` + settable `arm`
 /// field (cross-vendor review finding 4):
@@ -98,16 +97,24 @@ pub fn blind_case(
     case_id: &str,
     treated: [ColdRunText; 3],
     baseline: [ColdRunText; 3],
-    seed: u64,
+    private_seed: [u8; 32],
 ) -> (BlindedCase, UnblindKey) {
-    let mut items: Vec<(String, ArmLabel, String)> = treated
+    let mut rng = StdRng::from_seed(private_seed);
+    let arms = treated
         .into_iter()
         .map(|run| (ArmLabel::B, run.text))
-        .chain(baseline.into_iter().map(|run| (ArmLabel::A, run.text)))
-        .map(|(arm, text)| (format!("blind-{}", uuid::Uuid::new_v4()), arm, text))
-        .collect();
+        .chain(baseline.into_iter().map(|run| (ArmLabel::A, run.text)));
+    let mut items = Vec::with_capacity(6);
+    for (arm, text) in arms {
+        let mut blind_id_material = [0u8; 16];
+        rng.fill_bytes(&mut blind_id_material);
+        let blind_id = blind_id_material
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        items.push((format!("blind-{blind_id}"), arm, text));
+    }
 
-    let mut rng = StdRng::seed_from_u64(seed);
     items.shuffle(&mut rng);
 
     let mut mapping = std::collections::HashMap::new();
@@ -490,10 +497,10 @@ mod tests {
     fn blinding_never_leaks_the_arm_label_into_the_blind_id_or_text() {
         let treated = treated_runs(["b1", "b2", "b3"]);
         let baseline = treated_runs(["a1", "a2", "a3"]);
-        let (blinded, key) = blind_case("case-1", treated, baseline, 42);
+        let (blinded, key) = blind_case("case-1", treated, baseline, [42; 32]);
         assert_eq!(blinded.items.len(), 6);
         for item in &blinded.items {
-            // The blind id is a bare random uuid — it carries no
+            // The blind id is opaque random material — it carries no
             // pre-shuffle positional index and no "A"/"B" marker at all, by
             // construction (see `blind_case`).
             assert!(item.blind_id.starts_with("blind-"));
@@ -531,13 +538,13 @@ mod tests {
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            1,
+            [1; 32],
         );
         let (blinded2, _) = blind_case(
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            2,
+            [2; 32],
         );
         let order1: Vec<&str> = blinded1.items.iter().map(|i| i.text.as_str()).collect();
         let order2: Vec<&str> = blinded2.items.iter().map(|i| i.text.as_str()).collect();
@@ -550,7 +557,7 @@ mod tests {
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            7,
+            [7; 32],
         );
         let scored: Vec<(String, ColdRunScore)> = blinded
             .items
@@ -571,7 +578,7 @@ mod tests {
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            7,
+            [7; 32],
         );
         let scored = vec![("not-a-real-id".to_string(), hit(true, 0))];
         let err = unblind_scores(&key, scored).expect_err("unknown id must be refused");
@@ -587,7 +594,7 @@ mod tests {
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            7,
+            [7; 32],
         );
         // Score only 5 of the 6 items — one arm ends up short.
         let scored: Vec<(String, ColdRunScore)> = blinded

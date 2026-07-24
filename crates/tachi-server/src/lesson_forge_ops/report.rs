@@ -1,4 +1,4 @@
-//! The D2 pilot report (#1073 "Kill gate").
+//! Legacy, non-authoritative pilot preview aggregation.
 //!
 //! "Report pass yield, per-case outcomes, token/cost/latency, provider
 //! receipts, and old-vs-new recall simulation before any scale decision." —
@@ -10,10 +10,10 @@
 //! yield threshold, and inventing one here would be exactly the kind of
 //! flat, un-adjudicated magic number this repo's own engineering discipline
 //! forbids for a gate this consequential (AGENTS.md: "No flat magic
-//! numbers — thresholds are per-action, named, provisional"). `PilotReport`
-//! reports the numbers the frozen contract asks for; whether that yield
-//! constitutes "material cold-start decision change" is the reader's
-//! (leader/owner's) call, made against the reported evidence.
+//! numbers — thresholds are per-action, named, provisional"). This legacy
+//! module predates exact 400-call accounting and cannot publish the D2 pilot
+//! completion artifact. [`super::runner::PilotRunReportV1`] is the only
+//! authoritative report surface.
 
 use tachi_params::LessonEngineReceiptV1;
 
@@ -82,6 +82,8 @@ impl std::fmt::Display for PilotReportError {
 }
 
 #[derive(Debug, Clone, Default)]
+/// Legacy aggregate preview. It intentionally cannot render an authoritative
+/// D2 completion report because its optional totals do not attest 400 calls.
 pub struct PilotReport {
     cases: Vec<CaseReport>,
 }
@@ -215,11 +217,15 @@ impl PilotReport {
             .collect()
     }
 
-    pub fn to_markdown(&self) -> String {
+    pub fn to_preview_markdown(&self) -> String {
         let mut out = String::new();
-        out.push_str("# D2 50-row pilot report (#1073)\n\n");
+        out.push_str("# NON-AUTHORITATIVE LEGACY PREVIEW (#1073)\n\n");
+        out.push_str(
+            "This preview is not the D2 50-row pilot report, cannot establish pilot completion, \
+             and does not replace the authoritative 400-call runner report.\n\n",
+        );
         out.push_str(&format!(
-            "Pass yield: {}/{} ({:.1}%) — {} failed, {} inconclusive\n\n",
+            "Preview pass yield: {}/{} ({:.1}%) — {} failed, {} inconclusive\n\n",
             self.passed_count(),
             self.total(),
             self.pass_yield() * 100.0,
@@ -493,7 +499,7 @@ mod tests {
         let report = PilotReport::from_manifest(&manifest, cases)
             .expect("full route/id/revision bindings must remain distinct");
         assert_eq!(report.total(), 50);
-        let markdown = report.to_markdown();
+        let markdown = report.to_preview_markdown();
         assert!(markdown.contains("antigravity:shared-id@1"));
         assert!(markdown.contains("hapi:shared-id@1"));
     }
@@ -719,10 +725,30 @@ mod tests {
         let report = PilotReport {
             cases: vec![case("c1", CaseOutcome::Pass, Some(known_receipt()))],
         };
-        let md = report.to_markdown();
+        let md = report.to_preview_markdown();
         assert!(!md.to_ascii_lowercase().contains("verdict: stop"));
         assert!(!md.to_ascii_lowercase().contains("verdict: proceed"));
         assert!(md.contains("leader/owner adjudication"));
+    }
+
+    #[test]
+    fn legacy_markdown_cannot_claim_d2_completion_without_400_call_accounting() {
+        let manifest = fifty_row_manifest();
+        let cases: Vec<CaseReport> = manifest
+            .rows()
+            .iter()
+            .map(|row| {
+                case(
+                    &row.canonical_case_id(),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        let report = PilotReport::from_manifest(&manifest, cases).unwrap();
+        let markdown = report.to_preview_markdown();
+        assert!(markdown.contains("NON-AUTHORITATIVE LEGACY PREVIEW"));
+        assert!(!markdown.contains("# D2 50-row pilot report"));
     }
 
     #[test]
