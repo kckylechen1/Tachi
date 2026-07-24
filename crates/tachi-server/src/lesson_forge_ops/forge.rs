@@ -40,6 +40,7 @@ use super::pilot::PilotManifestV1;
 /// `coverage_reflects_the_true_source_length_never_a_fixed_cap` test below.
 #[derive(Debug, Clone)]
 pub struct SourceBundle {
+    pub source_route: super::pilot::PilotSourceRouteV1,
     pub row_id: String,
     pub revision: i64,
     pub full_text: String,
@@ -64,6 +65,7 @@ pub enum ForgeError {
     /// manifest — the spend gate the frozen contract requires ("Record
     /// ids/revisions and selection reason before model spend").
     NotInFrozenManifest {
+        source_route: super::pilot::PilotSourceRouteV1,
         row_id: String,
         revision: i64,
     },
@@ -76,10 +78,15 @@ pub enum ForgeError {
 impl std::fmt::Display for ForgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotInFrozenManifest { row_id, revision } => write!(
+            Self::NotInFrozenManifest {
+                source_route,
+                row_id,
+                revision,
+            } => write!(
                 f,
-                "source row {row_id}@{revision} is not a member of the frozen pilot manifest \
-                 — refusing to spend a forge call on an unselected row"
+                "source row {}:{row_id}@{revision} is not a member of the frozen pilot manifest \
+                 — refusing to spend a forge call on an unselected row",
+                source_route.as_str()
             ),
             Self::EmptyDraftField(field) => {
                 write!(f, "forge draft field `{field}` is empty")
@@ -166,8 +173,9 @@ pub fn forge_lesson_candidate(
     draft: &ForgeDraft,
     engine_receipt: Option<LessonEngineReceiptV1>,
 ) -> Result<LessonCandidateV1, ForgeError> {
-    if !manifest.contains(&bundle.row_id, bundle.revision) {
+    if !manifest.contains(bundle.source_route, &bundle.row_id, bundle.revision) {
         return Err(ForgeError::NotInFrozenManifest {
+            source_route: bundle.source_route,
             row_id: bundle.row_id.clone(),
             revision: bundle.revision,
         });
@@ -211,7 +219,9 @@ pub fn forge_lesson_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lesson_forge_ops::pilot::{freeze_pilot_manifest, PilotRowKindV1, PilotRowV1};
+    use crate::lesson_forge_ops::pilot::{
+        freeze_pilot_manifest, PilotRowKindV1, PilotRowV1, PilotSourceRouteV1, PilotStratumV1,
+    };
     use tachi_params::{EvidenceRelationV1, ImmutableRevisionV1, SourceKindV1};
 
     fn sample_ref() -> EvidenceRefV1 {
@@ -234,60 +244,47 @@ mod tests {
         }
     }
 
-    fn manifest_with_row(row_id: &str, revision: i64) -> PilotManifestV1 {
-        let mut rows = Vec::new();
-        for i in 0..49 {
-            rows.push(PilotRowV1 {
-                row_id: format!("filler-{i}"),
-                revision: 1,
-                kind: PilotRowKindV1::Narrative,
-                selection_reason: "filler".to_string(),
-                reference_decision: "filler decision".to_string(),
+    fn manifest_with_rows(entries: &[(&str, i64)]) -> PilotManifestV1 {
+        let mut rows: Vec<PilotRowV1> = (0..50)
+            .map(|index| PilotRowV1 {
+                source_route: if index < 25 {
+                    PilotSourceRouteV1::Antigravity
+                } else {
+                    PilotSourceRouteV1::Hapi
+                },
+                source_id: format!("filler-{index}"),
+                source_revision: 1,
+                content_sha256: format!("{index:064x}"),
+                capture_timestamp: "2026-07-24T00:00:00Z".to_string(),
+                kind: if index % 2 == 0 {
+                    PilotRowKindV1::Narrative
+                } else {
+                    PilotRowKindV1::StructuredControl
+                },
+                stratum: match index {
+                    0..=16 => PilotStratumV1::CorrectionAlignment,
+                    17..=33 => PilotStratumV1::VerificationRecovery,
+                    _ => PilotStratumV1::RoutingStoreProvenance,
+                },
+                selection_reason: "fixture reason".to_string(),
+                reference_decision: "fixture decision".to_string(),
                 target_kind: LessonCandidateKindV1::Precedent,
-            });
+            })
+            .collect();
+        for (index, (row_id, revision)) in entries.iter().enumerate() {
+            rows[index].source_id = (*row_id).to_string();
+            rows[index].source_revision = *revision;
         }
-        rows.push(PilotRowV1 {
-            row_id: row_id.to_string(),
-            revision,
-            kind: PilotRowKindV1::StructuredControl,
-            selection_reason: "control row for forge test".to_string(),
-            reference_decision: "reference decision".to_string(),
-            target_kind: LessonCandidateKindV1::Precedent,
-        });
         freeze_pilot_manifest(rows).expect("test manifest must freeze")
     }
 
-    /// Like `manifest_with_row`, but freezes every `(row_id, revision)` pair
-    /// given, padded to 50 with filler narrative rows — used by the
-    /// candidate-grouping tests below, which need more than one real row in
-    /// the same frozen manifest.
-    fn manifest_with_rows(entries: &[(&str, i64)]) -> PilotManifestV1 {
-        let mut rows = Vec::new();
-        for i in 0..(50 - entries.len()) {
-            rows.push(PilotRowV1 {
-                row_id: format!("filler-{i}"),
-                revision: 1,
-                kind: PilotRowKindV1::Narrative,
-                selection_reason: "filler".to_string(),
-                reference_decision: "filler decision".to_string(),
-                target_kind: LessonCandidateKindV1::Precedent,
-            });
-        }
-        for (row_id, revision) in entries {
-            rows.push(PilotRowV1 {
-                row_id: row_id.to_string(),
-                revision: *revision,
-                kind: PilotRowKindV1::StructuredControl,
-                selection_reason: "control row for forge test".to_string(),
-                reference_decision: "reference decision".to_string(),
-                target_kind: LessonCandidateKindV1::Precedent,
-            });
-        }
-        freeze_pilot_manifest(rows).expect("test manifest must freeze")
+    fn manifest_with_row(row_id: &str, revision: i64) -> PilotManifestV1 {
+        manifest_with_rows(&[(row_id, revision)])
     }
 
     fn valid_bundle() -> SourceBundle {
         SourceBundle {
+            source_route: PilotSourceRouteV1::Antigravity,
             row_id: "row-0".to_string(),
             revision: 1,
             full_text: "x".repeat(5000),
@@ -551,6 +548,7 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
+            ..Default::default()
         };
         let candidate = forge_lesson_candidate(
             "proj",

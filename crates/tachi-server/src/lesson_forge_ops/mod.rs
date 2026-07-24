@@ -38,7 +38,10 @@
 pub mod discrimination;
 pub mod forge;
 pub mod pilot;
+pub mod privacy;
 pub mod report;
+pub mod runner;
+pub mod source;
 // `storage` is `pub(crate)`, not `pub`: its one entry point takes
 // `&crate::MemoryServer`, which is itself `pub(crate)` — a public function
 // can never expose a less-visible type in its signature (E0446), so this

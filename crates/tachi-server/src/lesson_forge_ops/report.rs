@@ -111,7 +111,7 @@ impl PilotReport {
             if !seen.insert(case.case_id.clone()) {
                 errors.push(PilotReportError::DuplicateCaseId(case.case_id.clone()));
             }
-            if !manifest.rows().iter().any(|r| r.row_id == case.case_id) {
+            if !manifest.rows().iter().any(|r| r.source_id == case.case_id) {
                 errors.push(PilotReportError::CaseNotInManifest(case.case_id.clone()));
             }
         }
@@ -302,6 +302,7 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
+            ..Default::default()
         }
     }
 
@@ -329,28 +330,37 @@ mod tests {
     /// A 50-row frozen manifest whose row ids are `row-0..row-49`, for the
     /// `PilotReport::from_manifest` binding tests below.
     fn fifty_row_manifest() -> PilotManifestV1 {
-        use crate::lesson_forge_ops::pilot::{freeze_pilot_manifest, PilotRowKindV1, PilotRowV1};
+        use crate::lesson_forge_ops::pilot::{
+            freeze_pilot_manifest, PilotRowKindV1, PilotRowV1, PilotSourceRouteV1, PilotStratumV1,
+        };
         use tachi_params::LessonCandidateKindV1;
 
-        let mut rows = Vec::new();
-        for i in 0..49 {
-            rows.push(PilotRowV1 {
-                row_id: format!("row-{i}"),
-                revision: 1,
-                kind: PilotRowKindV1::Narrative,
-                selection_reason: "narrative row".to_string(),
-                reference_decision: "reference decision".to_string(),
+        let rows = (0..50)
+            .map(|index| PilotRowV1 {
+                source_route: if index < 25 {
+                    PilotSourceRouteV1::Antigravity
+                } else {
+                    PilotSourceRouteV1::Hapi
+                },
+                source_id: format!("row-{index}"),
+                source_revision: 1,
+                content_sha256: format!("{index:064x}"),
+                capture_timestamp: "2026-07-24T00:00:00Z".to_string(),
+                kind: if index % 2 == 0 {
+                    PilotRowKindV1::Narrative
+                } else {
+                    PilotRowKindV1::StructuredControl
+                },
+                stratum: match index {
+                    0..=16 => PilotStratumV1::CorrectionAlignment,
+                    17..=33 => PilotStratumV1::VerificationRecovery,
+                    _ => PilotStratumV1::RoutingStoreProvenance,
+                },
+                selection_reason: "public-safe fixture reason".to_string(),
+                reference_decision: "public-safe fixture decision".to_string(),
                 target_kind: LessonCandidateKindV1::Precedent,
-            });
-        }
-        rows.push(PilotRowV1 {
-            row_id: "row-49".to_string(),
-            revision: 1,
-            kind: PilotRowKindV1::StructuredControl,
-            selection_reason: "control row".to_string(),
-            reference_decision: "reference decision".to_string(),
-            target_kind: LessonCandidateKindV1::Precedent,
-        });
+            })
+            .collect();
         freeze_pilot_manifest(rows).expect("test manifest must freeze")
     }
 

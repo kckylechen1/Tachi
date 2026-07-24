@@ -25,6 +25,7 @@
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use serde::Serialize;
 
 use tachi_params::LessonEngineReceiptV1;
 
@@ -284,7 +285,7 @@ pub const REQUIRED_TREATED_HITS: usize = 2;
 /// at least two of three runs").
 pub const BASELINE_ALREADY_SUFFICIENT_HITS: usize = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum FailReason {
     TreatedBelowThreshold {
         hits: usize,
@@ -301,7 +302,7 @@ pub enum FailReason {
     ClaimsEstablishment,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum CaseOutcome {
     Pass,
     Fail(Vec<FailReason>),
@@ -383,6 +384,7 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
+            ..Default::default()
         }
     }
 
