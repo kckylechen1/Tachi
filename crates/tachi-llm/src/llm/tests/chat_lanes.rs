@@ -1,4 +1,6 @@
-use super::super::{ChatLaneConfig, LaneFallbackConfig, ProviderRuntimeConfig};
+use super::super::{
+    ChatLaneConfig, LaneFallbackConfig, ProviderInvocationFailureClass, ProviderRuntimeConfig,
+};
 use super::*;
 
 #[test]
@@ -602,6 +604,85 @@ async fn call_reasoning_llm_provider_only_is_pure_http_no_cli_ceremony_needed() 
         !outcome.receipt.degraded && outcome.receipt.fallback_chain.is_empty(),
         "the primary mock tier must not be misreported as a fallback"
     );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn provider_only_receipt_401_is_one_attempt_without_pool_retry_or_fallback() {
+    use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/chat/completions",
+            post(|State(calls): State<Arc<AtomicUsize>>| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                (StatusCode::UNAUTHORIZED, "provider body must stay private").into_response()
+            }),
+        )
+        .with_state(Arc::clone(&calls));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "mock-reasoning-only-model".to_string(),
+            api_key_envs: vec!["REASONING_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    client.set_provider_secret_pool(
+        "REASONING_API_KEY",
+        vec![
+            ProviderSecret {
+                key_id: "REASONING_API_KEY_1".to_string(),
+                value: "test-key-one".to_string(),
+            },
+            ProviderSecret {
+                key_id: "REASONING_API_KEY_2".to_string(),
+                value: "test-key-two".to_string(),
+            },
+        ],
+    );
+
+    let err = client
+        .call_reasoning_llm_provider_only_with_receipt("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("401 must stop the spend-aware provider-only receipt call");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "401 must not rotate keys");
+    assert_eq!(err.class, ProviderInvocationFailureClass::AuthFailed);
+    assert_eq!(err.provider_attempts, 1);
 
     server_task.abort();
 }

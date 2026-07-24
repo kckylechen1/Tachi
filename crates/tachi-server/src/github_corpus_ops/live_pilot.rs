@@ -20,6 +20,26 @@ use super::parse::CaseCorpusBundle;
 use super::pilot::{freeze_corpus_manifest, CorpusCaseV1, CorpusManifestV1, CORPUS_PILOT_SIZE};
 use super::reader::{fetch_case_bundle, GithubCorpusReader};
 
+mod serde_millis {
+    use serde::{ser::Error as _, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = u64::try_from(*value)
+            .map_err(|_| S::Error::custom("millisecond receipt exceeds u64"))?;
+        serializer.serialize_u64(value)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        u64::deserialize(deserializer).map(u128::from)
+    }
+}
+
 pub const INPUT_SCHEMA_VERSION: &str = "github_corpus_exact20_input_v1";
 pub const REPORT_SCHEMA_VERSION: &str = "github_corpus_exact20_report_v1";
 /// The digest ratified with the exact 20-case owner manifest in PR #1416.
@@ -136,6 +156,7 @@ pub struct CorpusPilotModelRequestV1 {
 pub struct CorpusPilotModelCompletionV1 {
     pub draft: CaseDraft,
     pub engine_receipt: LessonEngineReceiptV1,
+    pub provider_attempts: usize,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
@@ -147,6 +168,51 @@ pub struct CorpusPilotModelCompletionV1 {
     pub truncated: bool,
 }
 
+/// Public-safe failure taxonomy for the exact-20 execution ledger. Serialized
+/// values are stable checkpoint/report API; no variant carries provider text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusPilotFailureClassV1 {
+    AuthFailed,
+    ProviderExhausted,
+    Transient,
+    LaneOutage,
+    ModelResolverFailed,
+    CandidateAdaptationFailed,
+    AttemptInterruptedBeforeReceipt,
+    NotAttemptedAfterTerminalFailure,
+    /// Compatibility for checkpoints written before typed provider failures.
+    ModelInvocationFailed,
+}
+
+impl CorpusPilotFailureClassV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthFailed => "auth_failed",
+            Self::ProviderExhausted => "provider_exhausted",
+            Self::Transient => "transient",
+            Self::LaneOutage => "lane_outage",
+            Self::ModelResolverFailed => "model_resolver_failed",
+            Self::CandidateAdaptationFailed => "candidate_adaptation_failed",
+            Self::AttemptInterruptedBeforeReceipt => "attempt_interrupted_before_receipt",
+            Self::NotAttemptedAfterTerminalFailure => "not_attempted_after_terminal_failure",
+            Self::ModelInvocationFailed => "model_invocation_failed",
+        }
+    }
+}
+
+/// Model-boundary failure receipt. It is intentionally incapable of carrying
+/// a raw error, prompt, response, source body, endpoint, or credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorpusPilotModelFailureV1 {
+    pub failure_class: CorpusPilotFailureClassV1,
+    pub provider_attempts: usize,
+    pub latency_ms: u128,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+}
+
 /// Injectable production boundary. Tests supply a synthetic implementation;
 /// the phase-3 CLI supplies the existing Tachi/tachi-llm provider path.
 #[async_trait]
@@ -154,7 +220,7 @@ pub trait CorpusPilotModelClient: Send + Sync {
     async fn generate(
         &self,
         request: CorpusPilotModelRequestV1,
-    ) -> Result<CorpusPilotModelCompletionV1, String>;
+    ) -> Result<CorpusPilotModelCompletionV1, CorpusPilotModelFailureV1>;
 }
 
 pub struct ResolvedCorpusPilotModelV1 {
@@ -205,8 +271,13 @@ pub struct CorpusPilotCheckpointAttemptV1 {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CorpusPilotCheckpointOutcomeV1 {
     Failure {
-        failure_class: String,
+        failure_class: CorpusPilotFailureClassV1,
+        #[serde(with = "serde_millis")]
         latency_ms: u128,
+        #[serde(default)]
+        provider_attempts: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Box<CaseLatencyCostV1>>,
     },
     Candidate {
         fully_attested: bool,
@@ -266,6 +337,9 @@ pub struct CandidateYieldV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseLatencyCostV1 {
+    #[serde(default)]
+    pub provider_attempts: usize,
+    #[serde(with = "serde_millis")]
     pub latency_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<i64>,
@@ -303,7 +377,7 @@ pub struct CorpusPilotCaseReportV1 {
     pub behavior_test_handoff: String,
     pub follow_up_context: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_class: Option<String>,
+    pub failure_class: Option<CorpusPilotFailureClassV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +393,7 @@ pub struct CorpusPilotReportV1 {
     pub model_invocations: usize,
     pub completed_cases: usize,
     pub candidates_emitted: usize,
+    #[serde(with = "serde_millis")]
     pub total_latency_ms: u128,
     pub cases: Vec<CorpusPilotCaseReportV1>,
 }
@@ -726,6 +801,7 @@ fn run_preview_prepared(
             result,
             engine_receipt.clone(),
             CaseLatencyCostV1 {
+                provider_attempts: 0,
                 latency_ms: case_started.elapsed().as_millis(),
                 prompt_tokens: None,
                 completion_tokens: None,
@@ -975,6 +1051,14 @@ fn reconcile_checkpoint(
                             .to_string(),
                     );
                 }
+                if report.cost_latency.provider_attempts == 0 {
+                    // A durable Candidate outcome can only be produced after a
+                    // successful model completion. Legacy checkpoints predate
+                    // this explicit accounting field, so derive the one proven
+                    // request instead of reporting zero spend.
+                    report.cost_latency.provider_attempts = 1;
+                    changed = true;
+                }
                 let derived = checkpoint_candidate_is_fully_attested(report, candidate);
                 if *fully_attested != derived {
                     *fully_attested = derived;
@@ -1054,8 +1138,8 @@ fn checkpoint_candidate_is_fully_attested(
 
 fn failure_report_case(
     prepared_case: &PreparedCorpusCaseV1,
-    failure_class: &str,
-    latency_ms: u128,
+    failure_class: CorpusPilotFailureClassV1,
+    cost_latency: CaseLatencyCostV1,
 ) -> CorpusPilotCaseReportV1 {
     let pull_request = prepared_case
         .bundle
@@ -1089,19 +1173,24 @@ fn failure_report_case(
             outcome_evidence: false,
             overturn_appended: false,
         },
-        cost_latency: CaseLatencyCostV1 {
-            latency_ms,
-            prompt_tokens: None,
-            completion_tokens: None,
-            total_tokens: None,
-            cost_usd: None,
-            cost_status: "unknown_model_invocation_failed".to_string(),
-            cost_basis: None,
-            cost_version: None,
-        },
+        cost_latency,
         behavior_test_handoff: prepared_case.owner_case.behavior_test_handoff.clone(),
         follow_up_context: prepared_case.owner_case.follow_up_context.clone(),
-        failure_class: Some(failure_class.to_string()),
+        failure_class: Some(failure_class),
+    }
+}
+
+fn failed_attempt_accounting(provider_attempts: usize, latency_ms: u128) -> CaseLatencyCostV1 {
+    CaseLatencyCostV1 {
+        provider_attempts,
+        latency_ms,
+        prompt_tokens: None,
+        completion_tokens: None,
+        total_tokens: None,
+        cost_usd: None,
+        cost_status: "unknown_failed_provider_attempt".to_string(),
+        cost_basis: None,
+        cost_version: None,
     }
 }
 
@@ -1124,6 +1213,28 @@ fn latest_candidate_attempt(
     })
 }
 
+fn checkpoint_resume_blocker(checkpoint: &CorpusPilotCheckpointV1) -> Option<String> {
+    for case in &checkpoint.cases {
+        match case.attempts.last().map(|attempt| attempt.outcome.as_ref()) {
+            Some(None) => {
+                return Some(format!(
+                    "case {} has an uncertain in-progress provider attempt; explicit operator auth validation is required before any resume",
+                    case.case_id
+                ));
+            }
+            Some(Some(CorpusPilotCheckpointOutcomeV1::Failure { failure_class, .. })) => {
+                return Some(format!(
+                    "case {} has terminal failure class {}; explicit operator clearance is required before any resume",
+                    case.case_id,
+                    failure_class.as_str()
+                ));
+            }
+            Some(Some(CorpusPilotCheckpointOutcomeV1::Candidate { .. })) | None => {}
+        }
+    }
+    None
+}
+
 async fn execute_preflighted_corpus_pilot(
     preflight: CorpusPilotPreflightV1,
     captured_at: &str,
@@ -1134,6 +1245,9 @@ async fn execute_preflighted_corpus_pilot(
         Some(mut checkpoint) => {
             if reconcile_checkpoint(&mut checkpoint, &preflight)? {
                 checkpoint_store.save_atomic(&checkpoint)?;
+            }
+            if let Some(blocker) = checkpoint_resume_blocker(&checkpoint) {
+                return Err(blocker);
             }
             checkpoint
         }
@@ -1172,8 +1286,10 @@ async fn execute_preflighted_corpus_pilot(
                 Err(_) => {
                     checkpoint.cases[index].attempts[attempt - 1].outcome =
                         Some(CorpusPilotCheckpointOutcomeV1::Failure {
-                            failure_class: "model_resolver_failed".to_string(),
+                            failure_class: CorpusPilotFailureClassV1::ModelResolverFailed,
                             latency_ms: 0,
+                            provider_attempts: 0,
+                            usage: Some(Box::new(failed_attempt_accounting(0, 0))),
                         });
                     checkpoint_store.save_atomic(&checkpoint)?;
                     break;
@@ -1200,14 +1316,21 @@ async fn execute_preflighted_corpus_pilot(
             .await
         {
             Ok(completion) => completion,
-            Err(_) => {
+            Err(failure) => {
+                let mut usage =
+                    failed_attempt_accounting(failure.provider_attempts, failure.latency_ms);
+                usage.prompt_tokens = failure.prompt_tokens;
+                usage.completion_tokens = failure.completion_tokens;
+                usage.total_tokens = failure.total_tokens;
                 checkpoint.cases[index].attempts[attempt - 1].outcome =
                     Some(CorpusPilotCheckpointOutcomeV1::Failure {
-                        failure_class: "model_invocation_failed".to_string(),
-                        latency_ms: call_started.elapsed().as_millis(),
+                        failure_class: failure.failure_class,
+                        latency_ms: failure.latency_ms,
+                        provider_attempts: failure.provider_attempts,
+                        usage: Some(Box::new(usage)),
                     });
                 checkpoint_store.save_atomic(&checkpoint)?;
-                continue;
+                break;
             }
         };
         let mut engine_receipt = completion.engine_receipt;
@@ -1226,16 +1349,30 @@ async fn execute_preflighted_corpus_pilot(
         ) {
             Ok(result) => result,
             Err(_) => {
+                let usage = CaseLatencyCostV1 {
+                    provider_attempts: completion.provider_attempts,
+                    latency_ms: completion.latency_ms,
+                    prompt_tokens: completion.prompt_tokens,
+                    completion_tokens: completion.completion_tokens,
+                    total_tokens: completion.total_tokens,
+                    cost_usd: completion.cost_usd,
+                    cost_status: completion.cost_status,
+                    cost_basis: completion.cost_basis,
+                    cost_version: completion.cost_version,
+                };
                 checkpoint.cases[index].attempts[attempt - 1].outcome =
                     Some(CorpusPilotCheckpointOutcomeV1::Failure {
-                        failure_class: "candidate_adaptation_failed".to_string(),
+                        failure_class: CorpusPilotFailureClassV1::CandidateAdaptationFailed,
                         latency_ms: call_started.elapsed().as_millis(),
+                        provider_attempts: completion.provider_attempts,
+                        usage: Some(Box::new(usage)),
                     });
                 checkpoint_store.save_atomic(&checkpoint)?;
-                continue;
+                break;
             }
         };
         let cost_latency = CaseLatencyCostV1 {
+            provider_attempts: completion.provider_attempts,
             latency_ms: completion.latency_ms,
             prompt_tokens: completion.prompt_tokens,
             completion_tokens: completion.completion_tokens,
@@ -1280,7 +1417,7 @@ async fn execute_preflighted_corpus_pilot(
                 candidates.push(candidate.as_ref().clone());
             }
             _ => {
-                let (failure_class, latency_ms) = checkpoint_case
+                let (failure_class, cost_latency) = checkpoint_case
                     .attempts
                     .last()
                     .and_then(|attempt| attempt.outcome.as_ref())
@@ -1288,14 +1425,28 @@ async fn execute_preflighted_corpus_pilot(
                         CorpusPilotCheckpointOutcomeV1::Failure {
                             failure_class,
                             latency_ms,
-                        } => Some((failure_class.as_str(), *latency_ms)),
+                            provider_attempts,
+                            usage,
+                        } => Some((
+                            *failure_class,
+                            usage.as_deref().cloned().unwrap_or_else(|| {
+                                failed_attempt_accounting(*provider_attempts, *latency_ms)
+                            }),
+                        )),
                         CorpusPilotCheckpointOutcomeV1::Candidate { .. } => None,
                     })
-                    .unwrap_or(("attempt_interrupted_before_receipt", 0));
+                    .unwrap_or_else(|| {
+                        let failure_class = if checkpoint_case.attempts.is_empty() {
+                            CorpusPilotFailureClassV1::NotAttemptedAfterTerminalFailure
+                        } else {
+                            CorpusPilotFailureClassV1::AttemptInterruptedBeforeReceipt
+                        };
+                        (failure_class, failed_attempt_accounting(0, 0))
+                    });
                 reports.push(failure_report_case(
                     prepared_case,
                     failure_class,
-                    latency_ms,
+                    cost_latency,
                 ));
             }
         }
@@ -1310,8 +1461,16 @@ async fn execute_preflighted_corpus_pilot(
         .cases
         .iter()
         .flat_map(|case| &case.attempts)
-        .filter(|attempt| attempt.outcome.is_some())
-        .count();
+        .map(|attempt| match attempt.outcome.as_ref() {
+            Some(CorpusPilotCheckpointOutcomeV1::Failure {
+                provider_attempts, ..
+            }) => *provider_attempts,
+            Some(CorpusPilotCheckpointOutcomeV1::Candidate { report, .. }) => {
+                report.cost_latency.provider_attempts.max(1)
+            }
+            None => 0,
+        })
+        .sum();
     let complete = completed_cases == CORPUS_PILOT_SIZE;
     let engine_receipt = if complete {
         reports[0].engine_receipt.clone()
@@ -1471,6 +1630,7 @@ mod tests {
         full_coverage: bool,
         actual_cost: bool,
         fail_case: Option<String>,
+        failure_class: CorpusPilotFailureClassV1,
         marker: String,
     }
 
@@ -1483,6 +1643,7 @@ mod tests {
                 full_coverage: false,
                 actual_cost: false,
                 fail_case: None,
+                failure_class: CorpusPilotFailureClassV1::Transient,
                 marker: String::new(),
             }
         }
@@ -1493,17 +1654,21 @@ mod tests {
         async fn generate(
             &self,
             request: CorpusPilotModelRequestV1,
-        ) -> Result<CorpusPilotModelCompletionV1, String> {
+        ) -> Result<CorpusPilotModelCompletionV1, CorpusPilotModelFailureV1> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.requested_cases
                 .lock()
                 .expect("requested cases lock")
                 .push(request.case_id.clone());
             if self.fail_case.as_deref() == Some(request.case_id.as_str()) {
-                return Err(format!(
-                    "RAW_MODEL_FAILURE_BODY {} {}",
-                    request.case_id, request.bundle.issue.body
-                ));
+                return Err(CorpusPilotModelFailureV1 {
+                    failure_class: self.failure_class,
+                    provider_attempts: 1,
+                    latency_ms: 9,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: None,
+                });
             }
             let known = self.known_identity;
             let mut situation = format!(
@@ -1541,6 +1706,7 @@ mod tests {
                     fallback_chain: Vec::new(),
                     degraded: false,
                 },
+                provider_attempts: 1,
                 prompt_tokens: Some(11),
                 completion_tokens: Some(7),
                 total_tokens: Some(18),
@@ -1630,6 +1796,35 @@ mod tests {
 
     fn baseline_bytes_for_fixture(input: &[u8], reader: &FixtureCorpusReader) -> Vec<u8> {
         serde_json::to_vec(&baseline_for_fixture(input, reader)).expect("serialize baseline")
+    }
+
+    #[test]
+    fn typed_failure_checkpoint_keeps_legacy_shape_compatible_and_body_free() {
+        let legacy: CorpusPilotCheckpointOutcomeV1 = serde_json::from_slice(
+            br#"{"status":"failure","failure_class":"model_invocation_failed","latency_ms":9}"#,
+        )
+        .expect("legacy failure checkpoint remains readable");
+        assert!(matches!(
+            legacy,
+            CorpusPilotCheckpointOutcomeV1::Failure {
+                failure_class: CorpusPilotFailureClassV1::ModelInvocationFailed,
+                provider_attempts: 0,
+                usage: None,
+                ..
+            }
+        ));
+
+        let typed = CorpusPilotCheckpointOutcomeV1::Failure {
+            failure_class: CorpusPilotFailureClassV1::AuthFailed,
+            latency_ms: 12,
+            provider_attempts: 1,
+            usage: Some(Box::new(failed_attempt_accounting(1, 12))),
+        };
+        let encoded = serde_json::to_string(&typed).expect("serialize typed failure receipt");
+        assert!(encoded.contains("\"failure_class\":\"auth_failed\""));
+        assert!(!encoded.contains("response"));
+        assert!(!encoded.contains("prompt"));
+        assert!(!encoded.contains("credential"));
     }
 
     async fn run_fixture_with(
@@ -1934,7 +2129,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_preserves_partial_case_twenty_and_restart_skips_only_completed_cases() {
+    async fn checkpoint_preserves_partial_case_twenty_and_refuses_automatic_retry() {
         let input = input_bytes(MERGE_SHA);
         let reader = fixture_reader(false);
         let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
@@ -1958,12 +2153,10 @@ mod tests {
         assert_eq!(first.report.candidates_emitted, 19);
         assert_eq!(first.report.disposition, "partial_preview_only");
         assert_eq!(
-            first.report.cases[19].failure_class.as_deref(),
-            Some("model_invocation_failed")
+            first.report.cases[19].failure_class,
+            Some(CorpusPilotFailureClassV1::Transient)
         );
-        assert!(!serde_json::to_string(&first.report)
-            .expect("serialize partial report")
-            .contains("RAW_MODEL_FAILURE_BODY"));
+        assert_eq!(first.report.model_invocations, CORPUS_PILOT_SIZE);
 
         let first_checkpoint = store.snapshot();
         assert!(first_checkpoint.cases[..19]
@@ -1972,7 +2165,7 @@ mod tests {
         assert!(matches!(
             first_checkpoint.cases[19].attempts[0].outcome.as_ref(),
             Some(CorpusPilotCheckpointOutcomeV1::Failure { failure_class, .. })
-                if failure_class == "model_invocation_failed"
+                if *failure_class == CorpusPilotFailureClassV1::Transient
         ));
 
         let retry_model = SyntheticModel {
@@ -1983,36 +2176,19 @@ mod tests {
         };
         let retry_calls = retry_model.calls.clone();
         let retry_resolver = SyntheticResolver::new(retry_model);
-        let retry = run_fixture_with(&input, &reader, &baseline_bytes, &store, &retry_resolver)
+        let err = run_fixture_with(&input, &reader, &baseline_bytes, &store, &retry_resolver)
             .await
-            .expect("restart completes only the unfinished case");
-        assert_eq!(retry_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(retry.report.completed_cases, CORPUS_PILOT_SIZE);
-        assert_eq!(retry.report.candidates_emitted, CORPUS_PILOT_SIZE);
-        assert_eq!(retry.report.disposition, "complete");
-        assert_eq!(store.snapshot().cases[19].attempts.len(), 2);
-
-        let completed_model = SyntheticModel::default();
-        let completed_calls = completed_model.calls.clone();
-        let completed_resolver = SyntheticResolver::new(completed_model);
-        let completed = run_fixture_with(
-            &input,
-            &reader,
-            &baseline_bytes,
-            &store,
-            &completed_resolver,
-        )
-        .await
-        .expect("fully completed matching checkpoint is idempotent");
-        assert_eq!(completed.report.disposition, "complete");
-        assert_eq!(completed_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            .expect_err("a failed provider attempt requires explicit operator clearance");
+        assert!(err.contains("operator"), "{err}");
+        assert_eq!(retry_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(
-            completed_resolver
+            retry_resolver
                 .calls
                 .load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "an all-complete restart must not resolve Vault or construct a model"
+            "terminal failure resume must not resolve Vault or construct a model"
         );
+        assert_eq!(store.snapshot().cases[19].attempts.len(), 1);
 
         store
             .checkpoint
@@ -2086,6 +2262,152 @@ mod tests {
             .expect_err("completion/failure receipt checkpoint failure must be loud");
             assert_eq!(receipt_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_auth_failure_stops_run_and_resume_before_resolver() {
+        let input = input_bytes(MERGE_SHA);
+        let reader = fixture_reader(false);
+        let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
+        let store = MemoryCheckpointStore::default();
+        let first_model = SyntheticModel {
+            fail_case: Some("owner-case-0".to_string()),
+            failure_class: CorpusPilotFailureClassV1::AuthFailed,
+            ..Default::default()
+        };
+        let first_calls = first_model.calls.clone();
+        let first_requested = first_model.requested_cases.clone();
+        let first_resolver = SyntheticResolver::new(first_model);
+
+        let first = run_fixture_with(&input, &reader, &baseline_bytes, &store, &first_resolver)
+            .await
+            .expect("terminal auth failure still emits a public-safe partial report");
+
+        assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            first_requested
+                .lock()
+                .expect("requested cases lock")
+                .as_slice(),
+            ["owner-case-0"],
+            "the pilot must stop before the next case"
+        );
+        assert_eq!(
+            first.report.cases[0].failure_class,
+            Some(CorpusPilotFailureClassV1::AuthFailed)
+        );
+        assert_eq!(first.report.model_invocations, 1);
+        assert_eq!(first.report.cases[0].cost_latency.provider_attempts, 1);
+        assert_eq!(first.report.completed_cases, 0);
+
+        let resume_model = SyntheticModel::default();
+        let resume_calls = resume_model.calls.clone();
+        let resume_resolver = SyntheticResolver::new(resume_model);
+        let err = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resume_resolver)
+            .await
+            .expect_err("terminal auth failure requires explicit operator clearance");
+        assert!(err.contains("operator"), "{err}");
+        assert_eq!(resume_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            resume_resolver
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn all_typed_provider_failures_are_single_attempt_terminal_receipts() {
+        let input = input_bytes(MERGE_SHA);
+        let reader = fixture_reader(false);
+        let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
+
+        for failure_class in [
+            CorpusPilotFailureClassV1::ProviderExhausted,
+            CorpusPilotFailureClassV1::Transient,
+            CorpusPilotFailureClassV1::LaneOutage,
+        ] {
+            let store = MemoryCheckpointStore::default();
+            let first_model = SyntheticModel {
+                fail_case: Some("owner-case-0".to_string()),
+                failure_class,
+                ..Default::default()
+            };
+            let first_calls = first_model.calls.clone();
+            let first_resolver = SyntheticResolver::new(first_model);
+            let first = run_fixture_with(&input, &reader, &baseline_bytes, &store, &first_resolver)
+                .await
+                .expect("typed provider failure emits a safe partial report");
+
+            assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(first.report.model_invocations, 1);
+            assert_eq!(first.report.completed_cases, 0);
+            assert_eq!(first.report.cases[0].failure_class, Some(failure_class));
+            assert_eq!(first.report.cases[0].cost_latency.provider_attempts, 1);
+            assert!(first.report.cases[1..].iter().all(|case| {
+                case.failure_class
+                    == Some(CorpusPilotFailureClassV1::NotAttemptedAfterTerminalFailure)
+                    && case.cost_latency.provider_attempts == 0
+            }));
+
+            let resume_model = SyntheticModel::default();
+            let resume_calls = resume_model.calls.clone();
+            let resume_resolver = SyntheticResolver::new(resume_model);
+            let err = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resume_resolver)
+                .await
+                .expect_err("typed provider failure requires explicit operator clearance");
+            assert!(err.contains("operator"), "{err}");
+            assert_eq!(resume_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(
+                resume_resolver
+                    .calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_in_progress_attempt_refuses_resume_before_resolver() {
+        let input = input_bytes(MERGE_SHA);
+        let reader = fixture_reader(false);
+        let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
+        let store = MemoryCheckpointStore::default();
+        let preflight = preflight_corpus_pilot(
+            &input,
+            &reader,
+            "2026-07-24T00:00:00Z",
+            &sha256_hex(&input),
+            &baseline_bytes,
+            &sha256_hex(&baseline_bytes),
+        )
+        .expect("fixture preflight");
+        let mut checkpoint = new_checkpoint(&preflight);
+        checkpoint.cases[0]
+            .attempts
+            .push(CorpusPilotCheckpointAttemptV1 {
+                attempt: 1,
+                started_at: "2026-07-24T00:00:00Z".to_string(),
+                outcome: None,
+            });
+        store
+            .save_atomic(&checkpoint)
+            .expect("seed uncertain checkpoint");
+
+        let resume_model = SyntheticModel::default();
+        let resume_calls = resume_model.calls.clone();
+        let resume_resolver = SyntheticResolver::new(resume_model);
+        let err = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resume_resolver)
+            .await
+            .expect_err("uncertain spend requires explicit operator clearance");
+        assert!(err.contains("operator"), "{err}");
+        assert_eq!(resume_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            resume_resolver
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]
@@ -2244,8 +2566,10 @@ mod tests {
             let case_b = &mut checkpoint.cases[1];
             case_b.fully_attested_completion_attempt = None;
             case_b.attempts[0].outcome = Some(CorpusPilotCheckpointOutcomeV1::Failure {
-                failure_class: "model_invocation_failed".to_string(),
+                failure_class: CorpusPilotFailureClassV1::ModelInvocationFailed,
                 latency_ms: 9,
+                provider_attempts: 1,
+                usage: Some(Box::new(failed_attempt_accounting(1, 9))),
             });
             checkpoint.cases.swap(0, 1);
         }
@@ -2258,37 +2582,24 @@ mod tests {
         };
         let requested_cases = resume_model.requested_cases.clone();
         let resume_resolver = SyntheticResolver::new(resume_model);
-        let resumed = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resume_resolver)
+        let err = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resume_resolver)
             .await
-            .expect("a valid permutation is canonicalized before execution");
+            .expect_err("legacy uncertain failure must not be retried automatically");
+        assert!(err.contains("operator"), "{err}");
 
-        assert_eq!(
+        assert!(
             requested_cases
                 .lock()
                 .expect("requested cases lock")
-                .as_slice(),
-            ["owner-case-1"],
-            "the terminal missing-cost case must not be spent again"
+                .is_empty(),
+            "neither the terminal missing-cost case nor the uncertain failure may be spent again"
         );
         assert_eq!(
             resume_resolver
                 .calls
                 .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "only the genuinely unfinished case may require resolution"
-        );
-        assert_eq!(
-            resumed
-                .report
-                .cases
-                .iter()
-                .map(|case| case.case_id.as_str())
-                .collect::<Vec<_>>(),
-            parsed_input
-                .cases
-                .iter()
-                .map(|case| case.case_id.as_str())
-                .collect::<Vec<_>>()
+            0,
+            "resume refusal must happen before resolver construction"
         );
         let checkpoint = store.snapshot();
         assert_eq!(
@@ -2304,7 +2615,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(checkpoint.cases[0].attempts.len(), 1);
-        assert_eq!(checkpoint.cases[1].attempts.len(), 2);
+        assert_eq!(checkpoint.cases[1].attempts.len(), 1);
     }
 
     #[tokio::test]

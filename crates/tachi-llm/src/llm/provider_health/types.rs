@@ -39,6 +39,38 @@ pub struct ProviderInvocationOutcome {
     pub receipt: ProviderInvocationReceipt,
 }
 
+/// Public-safe failure classes for spend-aware provider calls. These values
+/// deliberately contain no provider response, prompt, source text, endpoint,
+/// key identifier, or credential material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderInvocationFailureClass {
+    AuthFailed,
+    ProviderExhausted,
+    Transient,
+    LaneOutage,
+}
+
+impl ProviderInvocationFailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthFailed => "auth_failed",
+            Self::ProviderExhausted => "provider_exhausted",
+            Self::Transient => "transient",
+            Self::LaneOutage => "lane_outage",
+        }
+    }
+}
+
+/// Failure receipt for a bounded provider-only call. `provider_attempts`
+/// counts HTTP requests actually started; a resolver, selection, or open
+/// circuit failure therefore records zero rather than inventing spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderInvocationFailure {
+    pub class: ProviderInvocationFailureClass,
+    pub provider_attempts: usize,
+    pub latency_ms: u128,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderKeyCooldownStatus {
     pub key_id: String,

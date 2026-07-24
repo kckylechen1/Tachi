@@ -7,8 +7,8 @@ use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
 use super::super::provider_health::{
-    ChatLane, ChatLaneConfig, ProviderInvocationOutcome, ProviderInvocationReceipt,
-    SelectedProviderSecret,
+    ChatLane, ChatLaneConfig, ProviderInvocationFailure, ProviderInvocationFailureClass,
+    ProviderInvocationOutcome, ProviderInvocationReceipt, SelectedProviderSecret,
 };
 
 #[derive(Clone, Copy)]
@@ -16,6 +16,23 @@ struct ChatUsageTokens {
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     total_tokens: Option<i64>,
+}
+
+struct ProviderTierFailure {
+    class: ProviderInvocationFailureClass,
+    provider_attempts: usize,
+    latency_ms: u128,
+    safe_detail: String,
+}
+
+impl ProviderTierFailure {
+    fn public_receipt(&self) -> ProviderInvocationFailure {
+        ProviderInvocationFailure {
+            class: self.class,
+            provider_attempts: self.provider_attempts,
+            latency_ms: self.latency_ms,
+        }
+    }
 }
 
 impl super::super::LlmClient {
@@ -119,10 +136,10 @@ impl super::super::LlmClient {
         .map(|outcome| outcome.text)
     }
 
-    /// Provider-only reasoning call with a public-safe, effective-engine
-    /// receipt. Unlike `call_reasoning_llm_with_receipt`, this never tries the
-    /// Claude CLI, so the returned provider identity belongs to the actual HTTP
-    /// provider that generated the text.
+    /// Spend-aware provider-only reasoning call with a public-safe receipt.
+    /// It makes at most one HTTP request against the primary reasoning tier:
+    /// no key-pool retry, same-case retry, fallback provider, or Claude CLI.
+    /// Failures retain only a typed class, request count, and latency.
     pub async fn call_reasoning_llm_provider_only_with_receipt(
         &self,
         system: &str,
@@ -130,16 +147,46 @@ impl super::super::LlmClient {
         model: Option<&str>,
         temperature: f32,
         max_tokens: u32,
-    ) -> Result<ProviderInvocationOutcome, String> {
-        self.call_lane_llm(
-            ChatLane::Reasoning,
-            system,
-            user,
-            model,
-            temperature,
-            max_tokens,
-        )
-        .await
+    ) -> Result<ProviderInvocationOutcome, ProviderInvocationFailure> {
+        let lane = ChatLane::Reasoning;
+        let cfg = self.lane(lane).clone();
+        let breaker_key = format!("chat:{}", lane.as_str());
+        if !self.circuit_breakers.allow(&breaker_key) {
+            return Err(ProviderInvocationFailure {
+                class: ProviderInvocationFailureClass::LaneOutage,
+                provider_attempts: 0,
+                latency_ms: 0,
+            });
+        }
+        match self
+            .call_provider_tier(
+                lane,
+                &cfg,
+                &breaker_key,
+                1,
+                system,
+                user,
+                model,
+                temperature,
+                max_tokens,
+            )
+            .await
+        {
+            Ok(result) => {
+                self.lane_outage.record_chain_success(lane.as_str());
+                Ok(result)
+            }
+            Err(failure) => {
+                let now_utc =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                self.lane_outage.record_chain_exhausted(
+                    lane.as_str(),
+                    now_utc,
+                    format!("class={}", failure.class.as_str()),
+                );
+                Err(failure.public_receipt())
+            }
+        }
     }
 
     pub async fn call_summary_llm(
@@ -222,6 +269,7 @@ impl super::super::LlmClient {
                     lane,
                     &cfg,
                     &breaker_key,
+                    Self::MAX_ATTEMPTS,
                     system,
                     user,
                     model_override,
@@ -241,7 +289,7 @@ impl super::super::LlmClient {
                     }
                     return Ok(result);
                 }
-                Err(e) => last_err = e,
+                Err(e) => last_err = e.safe_detail,
             }
         }
 
@@ -271,12 +319,15 @@ impl super::super::LlmClient {
         lane: ChatLane,
         cfg: &ChatLaneConfig,
         breaker_key: &str,
+        max_attempts: usize,
         system: &str,
         user: &str,
         model_override: Option<&str>,
         temperature: f32,
         max_tokens: u32,
-    ) -> Result<ProviderInvocationOutcome, String> {
+    ) -> Result<ProviderInvocationOutcome, ProviderTierFailure> {
+        debug_assert!(max_attempts > 0);
+        let tier_started = Instant::now();
         let model = model_override.unwrap_or(&cfg.model);
 
         let mut body = serde_json::json!({
@@ -293,15 +344,24 @@ impl super::super::LlmClient {
         }
 
         let mut last_err = String::new();
+        let mut last_class = ProviderInvocationFailureClass::LaneOutage;
+        let mut provider_attempts = 0;
 
-        for attempt in 1..=Self::MAX_ATTEMPTS {
+        for attempt in 1..=max_attempts {
             let Some(selected) = self
                 .required_selected_secret_or_wait(&cfg.api_key_envs, attempt, "chat lane")
-                .await?
+                .await
+                .map_err(|safe_detail| ProviderTierFailure {
+                    class: ProviderInvocationFailureClass::LaneOutage,
+                    provider_attempts,
+                    latency_ms: tier_started.elapsed().as_millis(),
+                    safe_detail,
+                })?
             else {
                 continue;
             };
             let attempt_started = Instant::now();
+            provider_attempts += 1;
             let resp = self
                 .http_client()
                 .post(&cfg.base_url)
@@ -315,19 +375,24 @@ impl super::super::LlmClient {
                 Ok(r) => r,
                 Err(e) => {
                     last_err = format!("HTTP request failed: {e}");
-                    if attempt < Self::MAX_ATTEMPTS
+                    last_class = ProviderInvocationFailureClass::Transient;
+                    if attempt < max_attempts
                         && (e.is_timeout() || e.is_connect() || e.is_request())
                     {
                         eprintln!(
                             "[llm] transient error (attempt {}/{}): {e}; retrying",
-                            attempt,
-                            Self::MAX_ATTEMPTS
+                            attempt, max_attempts
                         );
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
                         continue;
                     }
                     self.circuit_breakers.record_failure(breaker_key);
-                    return Err(last_err);
+                    return Err(ProviderTierFailure {
+                        class: last_class,
+                        provider_attempts,
+                        latency_ms: tier_started.elapsed().as_millis(),
+                        safe_detail: last_err,
+                    });
                 }
             };
 
@@ -350,6 +415,7 @@ impl super::super::LlmClient {
                         );
                     }
                     last_err = format!("Chat response body read failed after HTTP {status}: {e}");
+                    last_class = failure_class_for_status(status.as_u16(), "");
                     // #1197 BUG-1 (codex review): a single bad key must not
                     // fail the whole tier while the primary pool still has
                     // another usable key — same fix as the main 401/403
@@ -357,8 +423,7 @@ impl super::super::LlmClient {
                     // the body read itself also failed.
                     let pool_has_another_key =
                         is_auth_status && self.has_usable_secret_readonly(&cfg.api_key_envs);
-                    if attempt < Self::MAX_ATTEMPTS
-                        && (status.is_server_error() || pool_has_another_key)
+                    if attempt < max_attempts && (status.is_server_error() || pool_has_another_key)
                     {
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
                         continue;
@@ -366,25 +431,37 @@ impl super::super::LlmClient {
                     if status.as_u16() == 429 || status.is_server_error() || is_auth_status {
                         self.circuit_breakers.record_failure(breaker_key);
                     }
-                    return Err(last_err);
+                    return Err(ProviderTierFailure {
+                        class: last_class,
+                        provider_attempts,
+                        latency_ms: tier_started.elapsed().as_millis(),
+                        safe_detail: last_err,
+                    });
                 }
             };
 
             // Retry on 429 rate-limit or 5xx server errors
             if status.as_u16() == 429 {
+                last_class = ProviderInvocationFailureClass::ProviderExhausted;
                 self.mark_secret_rate_limited(&selected, retry_after);
                 last_err = format!(
                     "API error {status}: {}",
                     redact_provider_response(&resp_text)
                 );
-                if attempt < Self::MAX_ATTEMPTS {
+                if attempt < max_attempts {
                     continue;
                 }
                 self.circuit_breakers.record_failure(breaker_key);
-                return Err(last_err);
+                return Err(ProviderTierFailure {
+                    class: last_class,
+                    provider_attempts,
+                    latency_ms: tier_started.elapsed().as_millis(),
+                    safe_detail: last_err,
+                });
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
                 let failure_class = chat_auth_failure_class(&resp_text);
+                last_class = failure_class_for_status(status.as_u16(), &resp_text);
                 if status.as_u16() == 403 && failure_class == "billing_or_quota" {
                     self.mark_secret_exhausted(
                         &selected,
@@ -415,25 +492,29 @@ impl super::super::LlmClient {
                 // above, not "try every key in the pool no matter how
                 // many". A larger retry budget, if ever wanted, is a
                 // config knob for a future PR, not this one.
-                if attempt < Self::MAX_ATTEMPTS
-                    && self.has_usable_secret_readonly(&cfg.api_key_envs)
-                {
+                if attempt < max_attempts && self.has_usable_secret_readonly(&cfg.api_key_envs) {
                     eprintln!(
                         "[llm] auth/exhausted error {status} (attempt {}/{}); pool has another key, retrying",
                         attempt,
-                        Self::MAX_ATTEMPTS
+                        max_attempts
                     );
                     continue;
                 }
                 self.circuit_breakers.record_failure(breaker_key);
-                return Err(last_err);
+                return Err(ProviderTierFailure {
+                    class: last_class,
+                    provider_attempts,
+                    latency_ms: tier_started.elapsed().as_millis(),
+                    safe_detail: last_err,
+                });
             }
             if status.is_server_error() {
+                last_class = ProviderInvocationFailureClass::Transient;
                 last_err = format!(
                     "API error {status}: {}",
                     redact_provider_response(&resp_text)
                 );
-                if attempt < Self::MAX_ATTEMPTS {
+                if attempt < max_attempts {
                     let delay = if let Some(secs) = retry_after {
                         Duration::from_secs(secs)
                     } else {
@@ -442,30 +523,44 @@ impl super::super::LlmClient {
                     eprintln!(
                         "[llm] API error {status} (attempt {}/{}); retrying after {}ms",
                         attempt,
-                        Self::MAX_ATTEMPTS,
+                        max_attempts,
                         delay.as_millis()
                     );
                     tokio::time::sleep(delay).await;
                     continue;
                 }
                 self.circuit_breakers.record_failure(breaker_key);
-                return Err(last_err);
+                return Err(ProviderTierFailure {
+                    class: last_class,
+                    provider_attempts,
+                    latency_ms: tier_started.elapsed().as_millis(),
+                    safe_detail: last_err,
+                });
             }
 
             if !status.is_success() {
-                return Err(format!(
-                    "Chat API error {status}: {}",
-                    redact_provider_response(&resp_text)
-                ));
+                return Err(ProviderTierFailure {
+                    class: ProviderInvocationFailureClass::LaneOutage,
+                    provider_attempts,
+                    latency_ms: tier_started.elapsed().as_millis(),
+                    safe_detail: format!(
+                        "Chat API error {status}: {}",
+                        redact_provider_response(&resp_text)
+                    ),
+                });
             }
 
             // Parse JSON response
-            let json: Value = serde_json::from_str(&resp_text).map_err(|e| {
-                format!(
-                    "Failed to parse chat response JSON: {e} — {}",
-                    redact_provider_response(&resp_text)
-                )
-            })?;
+            let json: Value =
+                serde_json::from_str(&resp_text).map_err(|e| ProviderTierFailure {
+                    class: ProviderInvocationFailureClass::LaneOutage,
+                    provider_attempts,
+                    latency_ms: tier_started.elapsed().as_millis(),
+                    safe_detail: format!(
+                        "Failed to parse chat response JSON: {e} — {}",
+                        redact_provider_response(&resp_text)
+                    ),
+                })?;
 
             // #1071 fix-round checkpoint 6: read `finish_reason` regardless
             // of whether content came back, so a non-empty-but-cut-off
@@ -538,12 +633,12 @@ impl super::super::LlmClient {
             last_err = format!(
                 "Empty assistant content (finish_reason={finish_reason}, usage={usage}, model={model})"
             );
+            last_class = ProviderInvocationFailureClass::LaneOutage;
 
-            if attempt < Self::MAX_ATTEMPTS {
+            if attempt < max_attempts {
                 eprintln!(
                     "[llm] empty content (attempt {}/{}): {last_err}; retrying",
-                    attempt,
-                    Self::MAX_ATTEMPTS
+                    attempt, max_attempts
                 );
                 tokio::time::sleep(Self::retry_delay(attempt)).await;
                 continue;
@@ -551,7 +646,12 @@ impl super::super::LlmClient {
         }
 
         self.circuit_breakers.record_failure(breaker_key);
-        Err(last_err)
+        Err(ProviderTierFailure {
+            class: last_class,
+            provider_attempts,
+            latency_ms: tier_started.elapsed().as_millis(),
+            safe_detail: last_err,
+        })
     }
 
     // TODO(#1197 issue-ask #3, deferred — needs a `memcore` schema change,
@@ -657,6 +757,19 @@ fn chat_auth_failure_class(resp_text: &str) -> &'static str {
     }
 }
 
+fn failure_class_for_status(status: u16, resp_text: &str) -> ProviderInvocationFailureClass {
+    match status {
+        401 => ProviderInvocationFailureClass::AuthFailed,
+        403 if is_retriable_billing_failure(resp_text) => {
+            ProviderInvocationFailureClass::ProviderExhausted
+        }
+        403 => ProviderInvocationFailureClass::AuthFailed,
+        429 => ProviderInvocationFailureClass::ProviderExhausted,
+        500..=599 => ProviderInvocationFailureClass::Transient,
+        _ => ProviderInvocationFailureClass::LaneOutage,
+    }
+}
+
 /// First boundary for an untrusted provider response body. Callers may inspect
 /// the body in memory to classify a retry, but errors, health state, outage
 /// aggregation, and tracing receive only this bounded marker.
@@ -676,4 +789,43 @@ fn persist_llm_usage_blocking(
     store
         .record_llm_usage(&record)
         .map_err(|err| format!("persist llm usage insert: {err}"))
+}
+
+#[cfg(test)]
+mod failure_class_tests {
+    use super::*;
+
+    #[test]
+    fn spend_aware_failure_classes_are_stable_and_body_free() {
+        assert_eq!(
+            failure_class_for_status(401, "echoed secret and prompt"),
+            ProviderInvocationFailureClass::AuthFailed
+        );
+        assert_eq!(
+            failure_class_for_status(403, "account balance is insufficient"),
+            ProviderInvocationFailureClass::ProviderExhausted
+        );
+        assert_eq!(
+            failure_class_for_status(429, "quota body"),
+            ProviderInvocationFailureClass::ProviderExhausted
+        );
+        assert_eq!(
+            failure_class_for_status(503, "provider outage body"),
+            ProviderInvocationFailureClass::Transient
+        );
+        assert_eq!(
+            failure_class_for_status(400, "unexpected body"),
+            ProviderInvocationFailureClass::LaneOutage
+        );
+        for class in [
+            ProviderInvocationFailureClass::AuthFailed,
+            ProviderInvocationFailureClass::ProviderExhausted,
+            ProviderInvocationFailureClass::Transient,
+            ProviderInvocationFailureClass::LaneOutage,
+        ] {
+            assert!(!class.as_str().contains("body"));
+            assert!(!class.as_str().contains("secret"));
+            assert!(!class.as_str().contains("prompt"));
+        }
+    }
 }

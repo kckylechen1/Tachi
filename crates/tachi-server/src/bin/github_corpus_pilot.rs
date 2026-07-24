@@ -11,9 +11,9 @@ use serde_json::{json, Value};
 use tachi_server::github_corpus_ops::live_pilot::{
     dry_run_owner_approved_corpus_pilot, rebaseline_owner_approved_corpus_pilot,
     run_owner_approved_corpus_pilot, CorpusPilotCheckpointStore, CorpusPilotCheckpointV1,
-    CorpusPilotModelClient, CorpusPilotModelCompletionV1, CorpusPilotModelRequestV1,
-    CorpusPilotModelResolver, CorpusPilotReportV1, ProviderResolutionReceiptV1,
-    ResolvedCorpusPilotModelV1,
+    CorpusPilotFailureClassV1, CorpusPilotModelClient, CorpusPilotModelCompletionV1,
+    CorpusPilotModelFailureV1, CorpusPilotModelRequestV1, CorpusPilotModelResolver,
+    CorpusPilotReportV1, ProviderResolutionReceiptV1, ResolvedCorpusPilotModelV1,
 };
 use tachi_server::github_corpus_ops::GithubCorpusReader;
 
@@ -184,8 +184,15 @@ impl CorpusPilotModelClient for TachiReasoningModelClient {
     async fn generate(
         &self,
         request: CorpusPilotModelRequestV1,
-    ) -> Result<CorpusPilotModelCompletionV1, String> {
-        let prompt = Self::prompt(&request)?;
+    ) -> Result<CorpusPilotModelCompletionV1, CorpusPilotModelFailureV1> {
+        let prompt = Self::prompt(&request).map_err(|_| CorpusPilotModelFailureV1 {
+            failure_class: CorpusPilotFailureClassV1::LaneOutage,
+            provider_attempts: 0,
+            latency_ms: 0,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+        })?;
         let outcome = self
             .llm
             .call_reasoning_llm_provider_only_with_receipt(
@@ -196,8 +203,35 @@ impl CorpusPilotModelClient for TachiReasoningModelClient {
                 800,
             )
             .await
-            .map_err(|_| "provider invocation failed".to_string())?;
-        let draft = Self::parse_draft(&outcome.text)?;
+            .map_err(|failure| CorpusPilotModelFailureV1 {
+                failure_class: match failure.class {
+                    tachi_llm::ProviderInvocationFailureClass::AuthFailed => {
+                        CorpusPilotFailureClassV1::AuthFailed
+                    }
+                    tachi_llm::ProviderInvocationFailureClass::ProviderExhausted => {
+                        CorpusPilotFailureClassV1::ProviderExhausted
+                    }
+                    tachi_llm::ProviderInvocationFailureClass::Transient => {
+                        CorpusPilotFailureClassV1::Transient
+                    }
+                    tachi_llm::ProviderInvocationFailureClass::LaneOutage => {
+                        CorpusPilotFailureClassV1::LaneOutage
+                    }
+                },
+                provider_attempts: failure.provider_attempts,
+                latency_ms: failure.latency_ms,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+            })?;
+        let draft = Self::parse_draft(&outcome.text).map_err(|_| CorpusPilotModelFailureV1 {
+            failure_class: CorpusPilotFailureClassV1::LaneOutage,
+            provider_attempts: 1,
+            latency_ms: outcome.receipt.latency_ms,
+            prompt_tokens: outcome.receipt.prompt_tokens,
+            completion_tokens: outcome.receipt.completion_tokens,
+            total_tokens: outcome.receipt.total_tokens,
+        })?;
         Ok(CorpusPilotModelCompletionV1 {
             draft,
             engine_receipt: tachi_params::LessonEngineReceiptV1 {
@@ -208,6 +242,7 @@ impl CorpusPilotModelClient for TachiReasoningModelClient {
                 fallback_chain: outcome.receipt.fallback_chain,
                 degraded: outcome.receipt.degraded,
             },
+            provider_attempts: 1,
             prompt_tokens: outcome.receipt.prompt_tokens,
             completion_tokens: outcome.receipt.completion_tokens,
             total_tokens: outcome.receipt.total_tokens,
