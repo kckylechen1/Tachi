@@ -1,5 +1,6 @@
 //! Owner-operated, read-only launcher for the #1059 exact-20 corpus pilot.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
@@ -9,8 +10,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tachi_server::github_corpus_ops::live_pilot::{
     dry_run_owner_approved_corpus_pilot, run_owner_approved_corpus_pilot, CorpusPilotModelClient,
-    CorpusPilotModelCompletionV1, CorpusPilotModelRequestV1, CorpusPilotProvenanceBaselineV1,
-    CorpusPilotReportV1, ProviderResolutionReceiptV1,
+    CorpusPilotCheckpointStore, CorpusPilotCheckpointV1, CorpusPilotModelCompletionV1,
+    CorpusPilotModelRequestV1, CorpusPilotModelResolver, CorpusPilotReportV1,
+    ProviderResolutionReceiptV1, ResolvedCorpusPilotModelV1,
 };
 use tachi_server::github_corpus_ops::GithubCorpusReader;
 
@@ -31,6 +33,13 @@ struct Args {
     /// against every live GitHub read before a model can be invoked.
     #[arg(long)]
     baseline_report: PathBuf,
+    /// Owner-approved SHA-256 of the exact baseline report bytes.
+    #[arg(long)]
+    baseline_sha256: String,
+    /// Durable, atomically replaced partial-spend checkpoint. Required with
+    /// --execute; a dry run never creates it.
+    #[arg(long)]
+    checkpoint: Option<PathBuf>,
     /// Immutable capture time recorded on every adapter receipt.
     #[arg(long)]
     captured_at: String,
@@ -91,6 +100,19 @@ struct ModelDraftV1 {
 
 struct TachiReasoningModelClient {
     llm: tachi_llm::LlmClient,
+}
+
+struct TachiModelResolver;
+
+impl CorpusPilotModelResolver for TachiModelResolver {
+    fn resolve(&self) -> Result<ResolvedCorpusPilotModelV1, String> {
+        let (model, provider_resolution) =
+            TachiReasoningModelClient::from_existing_tachi_resolver()?;
+        Ok(ResolvedCorpusPilotModelV1 {
+            provider_resolution,
+            model: Box::new(model),
+        })
+    }
 }
 
 impl TachiReasoningModelClient {
@@ -184,9 +206,73 @@ impl CorpusPilotModelClient for TachiReasoningModelClient {
             total_tokens: outcome.receipt.total_tokens,
             cost_usd: None,
             cost_status: "provider_price_not_reported".to_string(),
+            cost_basis: None,
+            cost_version: None,
             latency_ms: outcome.receipt.latency_ms,
             truncated: outcome.truncated,
         })
+    }
+}
+
+struct FileCheckpointStore {
+    path: PathBuf,
+}
+
+impl FileCheckpointStore {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn temporary_path(&self) -> PathBuf {
+        self.path.with_extension(format!(
+            "checkpoint-tmp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ))
+    }
+}
+
+impl CorpusPilotCheckpointStore for FileCheckpointStore {
+    fn load(&self) -> Result<Option<CorpusPilotCheckpointV1>, String> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&self.path)
+            .map_err(|error| format!("read checkpoint {}: {error}", self.path.display()))?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| "checkpoint JSON is invalid".to_string())
+    }
+
+    fn save_atomic(&self, checkpoint: &CorpusPilotCheckpointV1) -> Result<(), String> {
+        let body = serde_json::to_vec_pretty(checkpoint)
+            .map_err(|_| "serialize checkpoint".to_string())?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "checkpoint path has no parent".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create checkpoint directory: {error}"))?;
+        let temporary = self.temporary_path();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("create checkpoint temporary file: {error}"))?;
+        file.write_all(&body)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("persist checkpoint temporary file: {error}"))?;
+        std::fs::rename(&temporary, &self.path)
+            .map_err(|error| format!("atomically replace checkpoint: {error}"))?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync checkpoint directory: {error}"))?;
+        Ok(())
     }
 }
 
@@ -210,19 +296,20 @@ async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
             args.baseline_report.display()
         )
     })?;
-    let baseline: CorpusPilotProvenanceBaselineV1 = serde_json::from_slice(&baseline_bytes)
-        .map_err(|_| "parse baseline report provenance fields".to_string())?;
     let (report, executed) = if args.execute {
-        let (model, provider_resolution) =
-            TachiReasoningModelClient::from_existing_tachi_resolver()?;
+        let checkpoint = args
+            .checkpoint
+            .ok_or_else(|| "--execute requires --checkpoint".to_string())?;
+        let checkpoint_store = FileCheckpointStore::new(checkpoint);
         (
             run_owner_approved_corpus_pilot(
                 &input,
                 &GhCliReader,
                 &args.captured_at,
-                &baseline,
-                provider_resolution,
-                &model,
+                &baseline_bytes,
+                &args.baseline_sha256,
+                &checkpoint_store,
+                &TachiModelResolver,
             )
             .await?
             .report,
@@ -234,7 +321,8 @@ async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
                 &input,
                 &GhCliReader,
                 &args.captured_at,
-                &baseline,
+                &baseline_bytes,
+                &args.baseline_sha256,
             )?,
             false,
         )

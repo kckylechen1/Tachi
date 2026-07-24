@@ -373,7 +373,10 @@ impl super::super::LlmClient {
             // Retry on 429 rate-limit or 5xx server errors
             if status.as_u16() == 429 {
                 self.mark_secret_rate_limited(&selected, retry_after);
-                last_err = format!("API error {status}: {resp_text}");
+                last_err = format!(
+                    "API error {status}: {}",
+                    redact_provider_response(&resp_text)
+                );
                 if attempt < Self::MAX_ATTEMPTS {
                     continue;
                 }
@@ -392,7 +395,10 @@ impl super::super::LlmClient {
                         Some(&chat_auth_failure_reason(status.as_u16(), &resp_text)),
                     );
                 }
-                last_err = format!("API error {status}: {resp_text}");
+                last_err = format!(
+                    "API error {status}: {}",
+                    redact_provider_response(&resp_text)
+                );
                 // #1197 BUG-1 fix (codex review): marking *this* key
                 // auth-failed/exhausted must not, by itself, fail the whole
                 // tier — the contract is "fallback fires when the PRIMARY
@@ -422,7 +428,10 @@ impl super::super::LlmClient {
                 return Err(last_err);
             }
             if status.is_server_error() {
-                last_err = format!("API error {status}: {resp_text}");
+                last_err = format!(
+                    "API error {status}: {}",
+                    redact_provider_response(&resp_text)
+                );
                 if attempt < Self::MAX_ATTEMPTS {
                     let delay = if let Some(secs) = retry_after {
                         Duration::from_secs(secs)
@@ -443,12 +452,18 @@ impl super::super::LlmClient {
             }
 
             if !status.is_success() {
-                return Err(format!("Chat API error {status}: {resp_text}"));
+                return Err(format!(
+                    "Chat API error {status}: {}",
+                    redact_provider_response(&resp_text)
+                ));
             }
 
             // Parse JSON response
             let json: Value = serde_json::from_str(&resp_text).map_err(|e| {
-                format!("Failed to parse chat response JSON: {e} — raw: {resp_text}")
+                format!(
+                    "Failed to parse chat response JSON: {e} — {}",
+                    redact_provider_response(&resp_text)
+                )
             })?;
 
             // #1071 fix-round checkpoint 6: read `finish_reason` regardless
@@ -626,12 +641,22 @@ fn is_retriable_billing_failure(resp_text: &str) -> bool {
 }
 
 fn chat_auth_failure_reason(status: u16, resp_text: &str) -> String {
-    let snippet: String = resp_text.chars().take(300).collect();
-    if snippet.trim().is_empty() {
-        format!("Chat auth failure {status}")
+    let class = if is_retriable_billing_failure(resp_text) {
+        "billing_or_quota"
     } else {
-        format!("Chat auth failure {status}: {snippet}")
-    }
+        "authentication_or_authorization"
+    };
+    format!(
+        "Chat auth failure {status}: class={class}; {}",
+        redact_provider_response(resp_text)
+    )
+}
+
+/// First boundary for an untrusted provider response body. Callers may inspect
+/// the body in memory to classify a retry, but errors, health state, outage
+/// aggregation, and tracing receive only this bounded marker.
+fn redact_provider_response(resp_text: &str) -> String {
+    format!("provider response redacted ({} bytes)", resp_text.len())
 }
 
 fn persist_llm_usage_blocking(

@@ -667,7 +667,8 @@ async fn chat_lane_marks_insufficient_balance_as_exhausted() {
         .call_extract_llm("system", "user", None, 0.0, 16)
         .await
         .expect_err("insufficient balance should still fail this call");
-    assert!(err.contains("balance is insufficient"), "got: {err}");
+    assert!(err.contains("class=billing_or_quota"), "got: {err}");
+    assert!(!err.contains("balance is insufficient"), "got: {err}");
 
     let status = client
         .provider_pool_statuses()
@@ -688,9 +689,87 @@ async fn chat_lane_marks_insufficient_balance_as_exhausted() {
         health
             .last_error
             .as_deref()
-            .is_some_and(|error| error.contains("balance is insufficient")),
-        "last_error should explain the exhausted balance: {health:?}"
+            .is_some_and(|error| error.contains("class=billing_or_quota")
+                && !error.contains("balance is insufficient")),
+        "last_error should classify but redact the provider body: {health:?}"
     );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn provider_error_boundary_redacts_echoed_prompt_source_and_secret() {
+    use axum::{http::HeaderMap, http::StatusCode, response::IntoResponse, routing::post, Router};
+
+    const SOURCE_SENTINEL: &str = "OWNER_SOURCE_MUST_NOT_ESCAPE";
+    const SYSTEM_SENTINEL: &str = "SYSTEM_PROMPT_MUST_NOT_ESCAPE";
+    const SECRET_SENTINEL: &str = "provider-secret-must-not-escape";
+    const BODY_SENTINEL: &str = "RAW_PROVIDER_BODY_MUST_NOT_ESCAPE";
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|headers: HeaderMap, body: String| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            (
+                StatusCode::BAD_REQUEST,
+                format!("{BODY_SENTINEL} auth={authorization} request={body}"),
+            )
+                .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let client = LlmClient::new_with_config(
+        config_with_extract(ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "mock-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY"],
+        }),
+        None,
+    )
+    .expect("client should initialize");
+    client.set_provider_secret_pool(
+        "EXTRACT_API_KEY",
+        vec![ProviderSecret {
+            key_id: "EXTRACT_API_KEY_1".to_string(),
+            value: SECRET_SENTINEL.to_string(),
+        }],
+    );
+
+    let err = client
+        .call_extract_llm(SYSTEM_SENTINEL, SOURCE_SENTINEL, None, 0.0, 16)
+        .await
+        .expect_err("provider rejection must remain loud");
+    let outage = client
+        .provider_health_status()
+        .lane_outages
+        .into_iter()
+        .find(|status| status.lane == "extract")
+        .and_then(|status| status.last_error)
+        .expect("outage aggregation must retain a safe failure");
+
+    for unsafe_value in [
+        SOURCE_SENTINEL,
+        SYSTEM_SENTINEL,
+        SECRET_SENTINEL,
+        BODY_SENTINEL,
+    ] {
+        assert!(!err.contains(unsafe_value), "unsafe provider error: {err}");
+        assert!(
+            !outage.contains(unsafe_value),
+            "unsafe outage aggregation: {outage}"
+        );
+    }
+    assert!(err.contains("provider response redacted"), "got: {err}");
 
     server_task.abort();
 }
