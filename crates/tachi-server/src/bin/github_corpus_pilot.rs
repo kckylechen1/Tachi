@@ -288,40 +288,116 @@ fn write_report(path: &std::path::Path, report: &CorpusPilotReportV1) -> Result<
 }
 
 fn normalized_path_for_comparison(path: &Path) -> Result<PathBuf, String> {
-    let absolute = if path.is_absolute() {
+    let original = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
             .map_err(|error| format!("resolve current directory: {error}"))?
             .join(path)
     };
-    let mut lexical = PathBuf::new();
-    for component in absolute.components() {
+    if let Ok(canonical) = std::fs::canonicalize(&original) {
+        return Ok(canonical);
+    }
+
+    let mut resolved = PathBuf::new();
+    let mut unresolved = false;
+    for component in original.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                lexical.pop();
+                if unresolved {
+                    return Err(format!(
+                        "cannot safely resolve path identity through `..` after a nonexistent component: {}",
+                        path.display()
+                    ));
+                }
+                resolved = std::fs::canonicalize(resolved.join("..")).map_err(|error| {
+                    format!(
+                        "cannot safely resolve parent traversal in {}: {error}",
+                        path.display()
+                    )
+                })?;
             }
             Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                lexical.push(component.as_os_str());
+                if !matches!(component, Component::Normal(_)) {
+                    resolved.push(component.as_os_str());
+                    continue;
+                }
+                if unresolved {
+                    resolved.push(component.as_os_str());
+                    continue;
+                }
+                let candidate = resolved.join(component.as_os_str());
+                match std::fs::canonicalize(&candidate) {
+                    Ok(canonical) => resolved = canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        match std::fs::symlink_metadata(&candidate) {
+                            Ok(metadata) if metadata.file_type().is_symlink() => {
+                                return Err(format!(
+                                    "cannot safely resolve dangling symlink identity: {}",
+                                    candidate.display()
+                                ));
+                            }
+                            Ok(_) => {
+                                return Err(format!(
+                                    "cannot safely resolve existing path identity: {}",
+                                    candidate.display()
+                                ));
+                            }
+                            Err(metadata_error)
+                                if metadata_error.kind() == std::io::ErrorKind::NotFound =>
+                            {
+                                unresolved = true;
+                                resolved.push(component.as_os_str());
+                            }
+                            Err(metadata_error) => {
+                                return Err(format!(
+                                    "cannot inspect path identity {}: {metadata_error}",
+                                    candidate.display()
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "cannot safely resolve path identity {}: {error}",
+                            candidate.display()
+                        ));
+                    }
+                }
             }
         }
     }
-    if let Ok(canonical) = std::fs::canonicalize(&lexical) {
-        return Ok(canonical);
-    }
-    if let (Some(parent), Some(file_name)) = (lexical.parent(), lexical.file_name()) {
-        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
-            return Ok(canonical_parent.join(file_name));
-        }
-    }
-    Ok(lexical)
+    Ok(resolved)
+}
+
+#[cfg(unix)]
+fn existing_paths_share_inode(left: &Path, right: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = |path: &Path| match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "cannot inspect path identity {}: {error}",
+            path.display()
+        )),
+    };
+    let (Some(left), Some(right)) = (metadata(left)?, metadata(right)?) else {
+        return Ok(false);
+    };
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+#[cfg(not(unix))]
+fn existing_paths_share_inode(_left: &Path, _right: &Path) -> Result<bool, String> {
+    Ok(false)
 }
 
 fn refuse_baseline_report_alias(args: &Args) -> Result<(), String> {
     let baseline = normalized_path_for_comparison(&args.baseline_report)?;
     let report = normalized_path_for_comparison(&args.report)?;
-    if baseline == report {
+    if baseline == report || existing_paths_share_inode(&args.baseline_report, &args.report)? {
         return Err("--baseline-report and --report must resolve to distinct paths".to_string());
     }
     Ok(())
@@ -399,10 +475,12 @@ mod tests {
 
     #[tokio::test]
     async fn report_alias_is_refused_before_any_input_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(root.path().join("nested")).expect("create nested directory");
         let error = run(Args {
-            manifest: PathBuf::from("/definitely/not/read/manifest.json"),
-            report: PathBuf::from("/private/tmp/1059-alias/result.json"),
-            baseline_report: PathBuf::from("/private/tmp/1059-alias/./nested/../result.json"),
+            manifest: root.path().join("manifest-must-not-be-read.json"),
+            report: root.path().join("result.json"),
+            baseline_report: root.path().join("./nested/../result.json"),
             baseline_sha256: "not-read".to_string(),
             checkpoint: None,
             captured_at: "2026-07-24T00:00:00Z".to_string(),
@@ -410,6 +488,87 @@ mod tests {
         })
         .await
         .expect_err("report output must not alias the immutable baseline");
+        assert!(error.contains("distinct"), "{error}");
+        assert!(!error.contains("read manifest"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_parent_alias_is_refused_before_any_input_read() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join("subdir")).expect("create real/subdir");
+        let report = real.join("result.json");
+        std::fs::write(&report, b"owner-approved baseline").expect("write baseline");
+        symlink(real.join("subdir"), root.path().join("link")).expect("create directory symlink");
+
+        let error = run(Args {
+            manifest: root.path().join("manifest-must-not-be-read.json"),
+            report,
+            baseline_report: root.path().join("link/../result.json"),
+            baseline_sha256: "not-read".to_string(),
+            checkpoint: None,
+            captured_at: "2026-07-24T00:00:00Z".to_string(),
+            execute: false,
+        })
+        .await
+        .expect_err("symlink/.. alias must not overwrite the baseline");
+        assert!(error.contains("distinct"), "{error}");
+        assert!(!error.contains("read manifest"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonexistent_output_uses_original_symlink_traversal_to_existing_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join("subdir")).expect("create real/subdir");
+        symlink(real.join("subdir"), root.path().join("link")).expect("create directory symlink");
+
+        let resolved =
+            normalized_path_for_comparison(&root.path().join("link/../new-output/result.json"))
+                .expect("nearest existing ancestor resolves");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(real)
+                .expect("canonical real directory")
+                .join("new-output/result.json")
+        );
+    }
+
+    #[test]
+    fn unresolved_parent_traversal_is_refused_instead_of_guessed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let error =
+            normalized_path_for_comparison(&root.path().join("missing-directory/../result.json"))
+                .expect_err("parent traversal after an unresolved component is ambiguous");
+        assert!(error.contains("cannot safely resolve"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_link_alias_is_refused_before_any_input_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let baseline = root.path().join("baseline.json");
+        let report = root.path().join("report.json");
+        std::fs::write(&baseline, b"owner-approved baseline").expect("write baseline");
+        std::fs::hard_link(&baseline, &report).expect("create hard link");
+
+        let error = run(Args {
+            manifest: root.path().join("manifest-must-not-be-read.json"),
+            report,
+            baseline_report: baseline,
+            baseline_sha256: "not-read".to_string(),
+            checkpoint: None,
+            captured_at: "2026-07-24T00:00:00Z".to_string(),
+            execute: false,
+        })
+        .await
+        .expect_err("hard-link alias must not overwrite the baseline");
         assert!(error.contains("distinct"), "{error}");
         assert!(!error.contains("read manifest"), "{error}");
     }
