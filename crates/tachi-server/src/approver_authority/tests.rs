@@ -148,8 +148,7 @@ fn a_present_but_malformed_value_refuses_instead_of_defaulting() {
     ];
     for inputs in cases {
         let denial = build_policy(inputs)
-            .err()
-            .expect("a malformed configuration value must refuse");
+            .expect_err("a malformed configuration value must refuse");
         assert_eq!(denial.kind(), "policy_unusable");
     }
 }
@@ -173,16 +172,14 @@ fn configuration_cannot_exceed_the_receipt_lifetime_ceilings() {
         max_receipt_age_secs: Some("86400".to_string()),
         ..PolicyInputs::default()
     })
-    .err()
-    .expect("a day-long approval receipt is refused");
+    .expect_err("a day-long approval receipt is refused");
     assert_eq!(denial.kind(), "policy_unusable");
 
     let skew = build_policy(PolicyInputs {
         future_skew_tolerance_secs: Some("3600".to_string()),
         ..PolicyInputs::default()
     })
-    .err()
-    .expect("an hour of tolerated skew is refused");
+    .expect_err("an hour of tolerated skew is refused");
     assert_eq!(skew.kind(), "policy_unusable");
 }
 
@@ -192,8 +189,7 @@ fn a_policy_authorizing_nobody_is_refused_not_silently_denying() {
         allow_repository_owner: Some("false".to_string()),
         ..PolicyInputs::default()
     })
-    .err()
-    .expect("no owner and no team authorizes nobody");
+    .expect_err("no owner and no team authorizes nobody");
     assert_eq!(denial.kind(), "policy_unusable");
 }
 
