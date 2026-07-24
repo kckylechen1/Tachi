@@ -1424,6 +1424,12 @@ mod tests {
                     insecure_password_file: false,
                     consumer: None,
                     require: vec![],
+                    // This regression test deliberately executes `/usr/bin/true`
+                    // without a configured Vault to prove the CLI path does not
+                    // derive a project alias from its cwd. Keep that synthetic
+                    // credential-less path explicit now that production defaults
+                    // to refusal.
+                    allow_unauthenticated: true,
                     command: vec!["/usr/bin/true".to_string()],
                 },
             }),
