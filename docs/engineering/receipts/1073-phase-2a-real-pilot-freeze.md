@@ -2,7 +2,7 @@
 
 - Status: real 50-row manifest selected and frozen; no model calls performed.
 - Manifest: `1073-phase-2a-real-pilot-manifest.json`
-- Contract SHA-256: `5ffb20e6d400b3d96a61ac14e55c6193f00cf83fd24cd1c19839b22a35f62ded`
+- Contract SHA-256: `e82940af2c3a16f5fcc1447e5ac05fe83b56cfb2dcb63de19293d6082c5d850c`
 - Privacy: every selected source passed the production privacy gate before verified save; no source text is persisted.
 - Source access: strict read-only SQLite, `query_only`, stable transactions.
 

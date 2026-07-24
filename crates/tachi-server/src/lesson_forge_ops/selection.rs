@@ -4,7 +4,8 @@
 //! classified. Public results contain bindings and aggregate counts only.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -14,7 +15,7 @@ use super::pilot::{
     freeze_pilot_manifest, PilotManifestV1, PilotRowKindV1, PilotRowV1, PilotSourceRouteV1,
     PilotStratumV1,
 };
-use super::privacy::screen_source_for_public_pilot;
+use super::privacy::{screen_manifest_metadata_for_public_pilot, screen_source_for_public_pilot};
 use super::source::{
     verify_resolved_source_v1, PilotSourceResolverV1, ResolvedPilotSourceV1, SourceResolveError,
 };
@@ -43,6 +44,8 @@ pub struct PilotSelectionReceiptV1 {
 
 #[derive(Debug)]
 pub enum PilotSelectionErrorV1 {
+    OutputPathIdentity,
+    OutputPathAlias,
     ReadOnlyOpen(PilotSourceRouteV1),
     ReadOnlyInvariant(PilotSourceRouteV1),
     Query(PilotSourceRouteV1),
@@ -52,12 +55,20 @@ pub enum PilotSelectionErrorV1 {
     Save,
     Reload,
     IndependentVerification(PilotSourceRouteV1),
+    AtomicReplace(std::io::Error),
     ReceiptWrite(std::io::Error),
 }
 
 impl std::fmt::Display for PilotSelectionErrorV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::OutputPathIdentity => {
+                write!(f, "pilot output path identity could not be resolved safely")
+            }
+            Self::OutputPathAlias => write!(
+                f,
+                "pilot manifest and receipt outputs must be distinct from both source databases and each other"
+            ),
             Self::ReadOnlyOpen(route) => write!(
                 f,
                 "could not open the {} source in strict read-only mode",
@@ -108,6 +119,9 @@ impl std::fmt::Display for PilotSelectionErrorV1 {
                 "independent {} source binding verification failed",
                 route.as_str()
             ),
+            Self::AtomicReplace(error) => {
+                write!(f, "could not atomically replace a verified pilot artifact: {error}")
+            }
             Self::ReceiptWrite(error) => write!(f, "could not write public receipt: {error}"),
         }
     }
@@ -188,6 +202,8 @@ impl PilotSourceResolverV1 for SnapshotResolver {
 pub fn select_and_freeze_real_manifest_v1(
     config: &PilotSelectionConfigV1,
 ) -> Result<PilotSelectionReceiptV1, PilotSelectionErrorV1> {
+    validate_output_path_identity(config)?;
+
     let mut candidates = Vec::new();
     candidates.extend(load_eligible_candidates(
         PilotSourceRouteV1::Antigravity,
@@ -228,14 +244,15 @@ pub fn select_and_freeze_real_manifest_v1(
             .collect(),
     };
 
-    if let Some(parent) = config.manifest_path.parent() {
-        std::fs::create_dir_all(parent).map_err(PilotSelectionErrorV1::ReceiptWrite)?;
-    }
+    create_output_parent(&config.manifest_path)?;
+    create_output_parent(&config.receipt_path)?;
+    let manifest_staging = StagedArtifact::new(&config.manifest_path)?;
+    let receipt_staging = StagedArtifact::new(&config.receipt_path)?;
     manifest
-        .verify_and_save_to_path(&config.manifest_path, &resolver)
+        .verify_and_save_to_path(manifest_staging.path(), &resolver)
         .map_err(|_| PilotSelectionErrorV1::Save)?;
 
-    let loaded = PilotManifestV1::load_from_path(&config.manifest_path)
+    let loaded = PilotManifestV1::load_from_path(manifest_staging.path())
         .map_err(|_| PilotSelectionErrorV1::Reload)?;
     if loaded
         .contract_digest()
@@ -247,8 +264,164 @@ pub fn select_and_freeze_real_manifest_v1(
     independently_verify_manifest_sources(&loaded, &config.antigravity_db, &config.hapi_db)?;
 
     let receipt = receipt_from_manifest(&loaded, digest);
-    write_public_receipt(&config.receipt_path, &config.manifest_path, &receipt)?;
+    write_public_receipt(receipt_staging.path(), &config.manifest_path, &receipt)?;
+    // Recheck after verification to close a symlink/ancestor retarget window.
+    // The manifest is the authority marker, so replace it last.
+    validate_output_path_identity(config)?;
+    receipt_staging.commit(&config.receipt_path)?;
+    manifest_staging.commit(&config.manifest_path)?;
     Ok(receipt)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathIdentity {
+    expected: PathBuf,
+    file: Option<FileIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn validate_output_path_identity(
+    config: &PilotSelectionConfigV1,
+) -> Result<(), PilotSelectionErrorV1> {
+    let sources = [
+        path_identity(&config.antigravity_db)?,
+        path_identity(&config.hapi_db)?,
+    ];
+    let outputs = [
+        path_identity(&config.manifest_path)?,
+        path_identity(&config.receipt_path)?,
+    ];
+    if paths_alias(&outputs[0], &outputs[1])
+        || outputs
+            .iter()
+            .any(|output| sources.iter().any(|source| paths_alias(output, source)))
+    {
+        return Err(PilotSelectionErrorV1::OutputPathAlias);
+    }
+    Ok(())
+}
+
+fn path_identity(path: &Path) -> Result<PathIdentity, PilotSelectionErrorV1> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| PilotSelectionErrorV1::OutputPathIdentity)?
+            .join(path)
+    };
+    Ok(PathIdentity {
+        expected: canonicalize_expected(&absolute)
+            .ok_or(PilotSelectionErrorV1::OutputPathIdentity)?,
+        file: file_identity(&absolute),
+    })
+}
+
+/// Adapted from `exec_env_reaper::canonicalize_expected`: resolve an existing
+/// path normally, or canonicalize the deepest existing ancestor and rejoin a
+/// normalized missing tail. This preserves symlink identity for outputs that
+/// do not exist yet.
+fn canonicalize_expected(path: &Path) -> Option<PathBuf> {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return Some(real);
+    }
+    let mut tail: Vec<OsString> = Vec::new();
+    let mut cursor = path;
+    loop {
+        let parent = cursor.parent()?;
+        tail.push(cursor.file_name()?.to_os_string());
+        if let Ok(real_parent) = std::fs::canonicalize(parent) {
+            let mut expected = real_parent;
+            for component in tail.iter().rev() {
+                expected.push(component);
+            }
+            return Some(normalize_absolute_lexically(&expected));
+        }
+        cursor = parent;
+    }
+}
+
+fn normalize_absolute_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+        }
+    }
+    normalized
+}
+
+fn paths_alias(left: &PathIdentity, right: &PathIdentity) -> bool {
+    left.expected == right.expected
+        || left
+            .file
+            .zip(right.file)
+            .is_some_and(|(left, right)| left == right)
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn file_identity(_path: &Path) -> Option<FileIdentity> {
+    None
+}
+
+fn create_output_parent(path: &Path) -> Result<(), PilotSelectionErrorV1> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(PilotSelectionErrorV1::ReceiptWrite)?;
+    }
+    Ok(())
+}
+
+struct StagedArtifact {
+    path: PathBuf,
+}
+
+impl StagedArtifact {
+    fn new(destination: &Path) -> Result<Self, PilotSelectionErrorV1> {
+        let parent = destination
+            .parent()
+            .ok_or(PilotSelectionErrorV1::OutputPathIdentity)?;
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(PilotSelectionErrorV1::OutputPathIdentity)?;
+        Ok(Self {
+            path: parent.join(format!(".{name}.{}.phase2a-tmp", uuid::Uuid::new_v4())),
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn commit(self, destination: &Path) -> Result<(), PilotSelectionErrorV1> {
+        std::fs::rename(&self.path, destination).map_err(PilotSelectionErrorV1::AtomicReplace)
+    }
+}
+
+impl Drop for StagedArtifact {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn open_readonly_snapshot(
@@ -301,11 +474,13 @@ fn load_eligible_candidates(
         for row in rows {
             let (source_id, source_revision, full_text) =
                 row.map_err(|_| PilotSelectionErrorV1::Query(route))?;
+            if screen_manifest_metadata_for_public_pilot(&source_id).is_err()
+                || screen_source_for_public_pilot(&full_text).is_err()
+            {
+                continue;
+            }
             if !seen.insert((source_id.clone(), source_revision)) {
                 return Err(PilotSelectionErrorV1::DuplicateBinding(route));
-            }
-            if screen_source_for_public_pilot(&full_text).is_err() {
-                continue;
             }
             let Some((kind, stratum)) = classify_source(&full_text) else {
                 continue;
@@ -777,10 +952,208 @@ mod tests {
         ))
     }
 
+    fn config_with_outputs(
+        antigravity: &Path,
+        hapi: &Path,
+        manifest: PathBuf,
+        receipt: PathBuf,
+    ) -> PilotSelectionConfigV1 {
+        PilotSelectionConfigV1 {
+            antigravity_db: antigravity.to_path_buf(),
+            hapi_db: hapi.to_path_buf(),
+            capture_timestamp: "2026-07-24T04:00:00Z".to_string(),
+            manifest_path: manifest,
+            receipt_path: receipt,
+        }
+    }
+
+    fn relative_path(from: &Path, to: &Path) -> PathBuf {
+        let from: Vec<_> = from.components().collect();
+        let to: Vec<_> = to.components().collect();
+        let common = from
+            .iter()
+            .zip(&to)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let mut relative = PathBuf::new();
+        for _ in common..from.len() {
+            relative.push("..");
+        }
+        for component in &to[common..] {
+            relative.push(component.as_os_str());
+        }
+        relative
+    }
+
     #[test]
     fn privacy_rejection_precedes_classification() {
         let unsafe_text = "- first check\n- second check\nsk-abcdefghijklmnopqrstuvwxyz123456";
         assert!(classify_source(unsafe_text).is_none());
+    }
+
+    #[test]
+    fn output_alias_never_corrupts_a_synthetic_source_database() {
+        let antigravity = fixture_db("alias-a");
+        let hapi = fixture_db("alias-h");
+        let receipt_path = temp_artifact("md");
+        let before = std::fs::read(&antigravity).unwrap();
+        let config = PilotSelectionConfigV1 {
+            antigravity_db: antigravity.clone(),
+            hapi_db: hapi.clone(),
+            capture_timestamp: "2026-07-24T04:00:00Z".to_string(),
+            manifest_path: antigravity.clone(),
+            receipt_path: receipt_path.clone(),
+        };
+        assert!(select_and_freeze_real_manifest_v1(&config).is_err());
+        let after = std::fs::read(&antigravity).unwrap();
+        for path in [antigravity, hapi, receipt_path] {
+            let _ = std::fs::remove_file(path);
+        }
+        assert!(
+            after == before,
+            "an output alias must be refused before a source can be overwritten"
+        );
+    }
+
+    #[test]
+    fn alias_refusal_precedes_any_sqlite_source_read() {
+        let antigravity = temp_artifact("db");
+        let hapi = temp_artifact("db");
+        std::fs::write(&antigravity, b"not a sqlite database").unwrap();
+        std::fs::write(&hapi, b"not a sqlite database").unwrap();
+        let config = config_with_outputs(
+            &antigravity,
+            &hapi,
+            antigravity.clone(),
+            temp_artifact("md"),
+        );
+        let error = select_and_freeze_real_manifest_v1(&config).unwrap_err();
+        for path in [antigravity, hapi] {
+            let _ = std::fs::remove_file(path);
+        }
+        assert!(matches!(error, PilotSelectionErrorV1::OutputPathAlias));
+    }
+
+    #[test]
+    fn lexical_relative_absolute_and_output_output_aliases_are_refused() {
+        let antigravity = fixture_db("path-a");
+        let hapi = fixture_db("path-h");
+        let receipt = temp_artifact("md");
+        let exact = config_with_outputs(&antigravity, &hapi, antigravity.clone(), receipt.clone());
+        assert!(matches!(
+            validate_output_path_identity(&exact),
+            Err(PilotSelectionErrorV1::OutputPathAlias)
+        ));
+
+        let relative = relative_path(&std::env::current_dir().unwrap(), &antigravity);
+        let relative_absolute = config_with_outputs(&antigravity, &hapi, relative, receipt.clone());
+        assert!(matches!(
+            validate_output_path_identity(&relative_absolute),
+            Err(PilotSelectionErrorV1::OutputPathAlias)
+        ));
+
+        let receipt_source =
+            config_with_outputs(&antigravity, &hapi, temp_artifact("json"), hapi.clone());
+        assert!(matches!(
+            validate_output_path_identity(&receipt_source),
+            Err(PilotSelectionErrorV1::OutputPathAlias)
+        ));
+
+        let output_output =
+            config_with_outputs(&antigravity, &hapi, receipt.clone(), receipt.clone());
+        assert!(matches!(
+            validate_output_path_identity(&output_output),
+            Err(PilotSelectionErrorV1::OutputPathAlias)
+        ));
+        for path in [antigravity, hapi] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_dotdot_and_hard_link_aliases_are_refused() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "sigil-1073-selection-alias-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = root.join("target");
+        let subdirectory = target.join("subdirectory");
+        std::fs::create_dir_all(&subdirectory).unwrap();
+        let original = fixture_db("symlink-a");
+        let antigravity = target.join("memory.db");
+        std::fs::rename(original, &antigravity).unwrap();
+        let hapi = fixture_db("symlink-h");
+        let link = root.join("link");
+        symlink(&subdirectory, &link).unwrap();
+        let through_dotdot = link.join("..").join("memory.db");
+        let symlink_config =
+            config_with_outputs(&antigravity, &hapi, through_dotdot, temp_artifact("md"));
+        assert!(matches!(
+            validate_output_path_identity(&symlink_config),
+            Err(PilotSelectionErrorV1::OutputPathAlias)
+        ));
+
+        let hard_link = root.join("hard-link.db");
+        std::fs::hard_link(&antigravity, &hard_link).unwrap();
+        let hard_link_config =
+            config_with_outputs(&antigravity, &hapi, hard_link, temp_artifact("md"));
+        assert!(matches!(
+            validate_output_path_identity(&hard_link_config),
+            Err(PilotSelectionErrorV1::OutputPathAlias)
+        ));
+        let _ = std::fs::remove_file(hapi);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonexistent_outputs_resolve_through_their_deepest_existing_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "sigil-1073-selection-missing-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root_alias = root.with_extension("alias");
+        symlink(&root, &root_alias).unwrap();
+        let antigravity = fixture_db("missing-a");
+        let hapi = fixture_db("missing-h");
+        let manifest = root.join("missing").join("artifact.json");
+        let receipt = root_alias.join("missing").join("artifact.json");
+        let config = config_with_outputs(&antigravity, &hapi, manifest, receipt);
+        assert!(matches!(
+            validate_output_path_identity(&config),
+            Err(PilotSelectionErrorV1::OutputPathAlias)
+        ));
+        assert!(!root.join("missing").exists());
+        for path in [antigravity, hapi] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_file(root_alias);
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn unsafe_source_ids_never_enter_the_eligible_pool() {
+        let database = fixture_db("unsafe-id");
+        let conn = Connection::open(&database).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, revision, text, archived) VALUES (?1, 1, ?2, 0)",
+            (
+                "sk-abcdefghijklmnopqrstuvwxyz123456",
+                fixture_text(0, 0, 99),
+            ),
+        )
+        .unwrap();
+        drop(conn);
+        let eligible = load_eligible_candidates(PilotSourceRouteV1::Antigravity, &database)
+            .expect("synthetic source must remain readable");
+        let _ = std::fs::remove_file(database);
+        assert_eq!(eligible.len(), 60);
     }
 
     #[test]
