@@ -65,9 +65,12 @@
 //! commit no such transition exists in the crate (there is no precedent
 //! *apply* path yet — `precedent_ops` and `precedent_candidate_ops` only
 //! capture caller-supplied rulings as memory rows), so this module has no
-//! production caller. It is declared `pub` for the same reason
-//! `exec_env_postflight` is: the gate must exist and be reviewable before
-//! the path it gates is built.
+//! production caller. This *module* is declared `pub` (in `lib.rs`) for the
+//! same reason `exec_env_postflight` is: the gate must exist and be
+//! reviewable before the path it gates is built. The choke-point functions
+//! themselves are `pub(crate)`, not `pub`, because they take `&MemoryServer`
+//! — itself `pub(crate)` — so #1077's caller must live inside this crate
+//! regardless of what visibility these functions declare.
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -363,7 +366,12 @@ pub struct GhApproverAuthorityProbe<'a> {
 }
 
 impl<'a> GhApproverAuthorityProbe<'a> {
-    pub fn new(server: &'a MemoryServer) -> Self {
+    /// `pub(crate)`, not `pub`: `MemoryServer` is itself `pub(crate)`
+    /// (`crates/tachi-server/src/lib.rs`'s `pub(crate) use
+    /// server_state::{..., MemoryServer, ...}`), so a wider visibility here
+    /// would be unreachable from outside the crate anyway and trips
+    /// the rustc `private_interfaces` lint.
+    pub(crate) fn new(server: &'a MemoryServer) -> Self {
         Self { server }
     }
 }
@@ -675,7 +683,19 @@ pub fn build_policy(
 ///
 /// `caller_asserted` is recorded on the receipt and hashed into it; it is
 /// never consulted when deciding authority.
-pub fn authorize_governed_mutation(
+///
+/// `pub(crate)`, not `pub`: it takes `&MemoryServer`, which is itself
+/// `pub(crate)`, so a wider visibility would be unreachable from outside the
+/// crate and trips the rustc `private_interfaces` lint.
+///
+/// `#[allow(dead_code)]`: this is one of the two genuinely uncalled
+/// choke-point entry points in this module (see "Not wired yet" above) —
+/// #1077's establishment/overturn transition is the intended production
+/// caller, not yet built. Same shape as
+/// `lesson_forge_ops::storage::persist_pending_lesson_candidate`. Flagged
+/// here rather than silently suppressed at the module level.
+#[allow(dead_code)]
+pub(crate) fn authorize_governed_mutation(
     server: &MemoryServer,
     policy: &ApproverAuthorizationPolicyV1,
     target: &ApprovalTargetV1,
@@ -691,7 +711,15 @@ pub fn authorize_governed_mutation(
 /// refusal — a revoked permission, a team removal, a credential swap, a
 /// moved branch, an edited proposal, an unreachable GitHub — leaves the
 /// caller with an [`AuthorityDenialV1`] and nothing mutated.
-pub fn revalidate_governed_mutation(
+///
+/// `pub(crate)`, not `pub`: it takes `&MemoryServer`, which is itself
+/// `pub(crate)`, so a wider visibility would be unreachable from outside the
+/// crate and trips the rustc `private_interfaces` lint.
+///
+/// `#[allow(dead_code)]`: the other of the two genuinely uncalled
+/// choke-point entry points — see [`authorize_governed_mutation`]'s note.
+#[allow(dead_code)]
+pub(crate) fn revalidate_governed_mutation(
     server: &MemoryServer,
     policy: &ApproverAuthorizationPolicyV1,
     receipt: &ApprovalReceiptV1,

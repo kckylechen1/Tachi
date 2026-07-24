@@ -126,15 +126,12 @@ pub enum AuthorityDenialV1 {
     },
     /// The principal appears on an authorized team but the membership is not
     /// usable: a pending invitation, a removed member, or a role below what
-    /// the policy requires.
-    TeamMembershipNotUsable {
-        org: String,
-        team_slug: String,
-        login: String,
-        state: String,
-        role: String,
-        detail: String,
-    },
+    /// the policy requires. Boxed (clippy `result_large_err`): at six owned
+    /// `String` fields this is by far the largest denial variant, so boxing
+    /// only this one keeps every other, far more common `Result<_,
+    /// AuthorityDenialV1>` pointer-sized instead of every call site paying
+    /// to carry room for this variant's worst case.
+    TeamMembershipNotUsable(Box<TeamMembershipNotUsableDetail>),
     /// The repository the probe answered for is not the repository the
     /// approval targets (a rename/redirect, or a caller-supplied repo string
     /// that GitHub resolved elsewhere).
@@ -194,7 +191,7 @@ impl AuthorityDenialV1 {
             Self::PrincipalNotHuman { .. } => "principal_not_human",
             Self::NotAuthorized { .. } => "not_authorized",
             Self::InsufficientRepoPermission { .. } => "insufficient_repo_permission",
-            Self::TeamMembershipNotUsable { .. } => "team_membership_not_usable",
+            Self::TeamMembershipNotUsable(_) => "team_membership_not_usable",
             Self::RepositoryMismatch { .. } => "repository_mismatch",
             Self::PolicyUnusable { .. } => "policy_unusable",
             Self::PrincipalChanged { .. } => "principal_changed",
@@ -256,17 +253,11 @@ impl fmt::Display for AuthorityDenialV1 {
                  '{repo}', below the required floor '{}'",
                 required.as_str()
             ),
-            Self::TeamMembershipNotUsable {
-                org,
-                team_slug,
-                login,
-                state,
-                role,
-                detail,
-            } => write!(
+            Self::TeamMembershipNotUsable(d) => write!(
                 f,
-                "approval refused: '{login}' membership in {org}/{team_slug} is unusable \
-                 (state={state}, role={role}): {detail}"
+                "approval refused: '{}' membership in {}/{} is unusable \
+                 (state={}, role={}): {}",
+                d.login, d.org, d.team_slug, d.state, d.role, d.detail
             ),
             Self::RepositoryMismatch { expected, actual } => write!(
                 f,
@@ -353,6 +344,19 @@ impl fmt::Display for AuthorityDenialV1 {
 }
 
 impl std::error::Error for AuthorityDenialV1 {}
+
+/// Detail payload for [`AuthorityDenialV1::TeamMembershipNotUsable`], boxed
+/// out of the enum to keep `AuthorityDenialV1` small. Field set and meaning
+/// are unchanged from when these were inline enum fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMembershipNotUsableDetail {
+    pub org: String,
+    pub team_slug: String,
+    pub login: String,
+    pub state: String,
+    pub role: String,
+    pub detail: String,
+}
 
 /// One concrete way a pinned revision stopped matching reality.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1106,28 +1110,35 @@ fn evaluate_authority_basis<P: ApproverAuthorityProbe + ?Sized>(
             TeamMembershipProbeV1::NotMember { .. } => continue,
             TeamMembershipProbeV1::Member(m) => {
                 if m.state != TeamMembershipV1::ACTIVE_STATE {
-                    last_unusable = Some(AuthorityDenialV1::TeamMembershipNotUsable {
-                        org: team.org.clone(),
-                        team_slug: team.team_slug.clone(),
-                        login: principal.login.clone(),
-                        state: m.state.clone(),
-                        role: m.role.clone(),
-                        detail: format!(
-                            "membership state must be '{}'",
-                            TeamMembershipV1::ACTIVE_STATE
-                        ),
-                    });
+                    last_unusable = Some(AuthorityDenialV1::TeamMembershipNotUsable(Box::new(
+                        TeamMembershipNotUsableDetail {
+                            org: team.org.clone(),
+                            team_slug: team.team_slug.clone(),
+                            login: principal.login.clone(),
+                            state: m.state.clone(),
+                            role: m.role.clone(),
+                            detail: format!(
+                                "membership state must be '{}'",
+                                TeamMembershipV1::ACTIVE_STATE
+                            ),
+                        },
+                    )));
                     continue;
                 }
                 if !team.required_role.satisfied_by(&m.role) {
-                    last_unusable = Some(AuthorityDenialV1::TeamMembershipNotUsable {
-                        org: team.org.clone(),
-                        team_slug: team.team_slug.clone(),
-                        login: principal.login.clone(),
-                        state: m.state.clone(),
-                        role: m.role.clone(),
-                        detail: format!("policy requires role '{}'", team.required_role.as_str()),
-                    });
+                    last_unusable = Some(AuthorityDenialV1::TeamMembershipNotUsable(Box::new(
+                        TeamMembershipNotUsableDetail {
+                            org: team.org.clone(),
+                            team_slug: team.team_slug.clone(),
+                            login: principal.login.clone(),
+                            state: m.state.clone(),
+                            role: m.role.clone(),
+                            detail: format!(
+                                "policy requires role '{}'",
+                                team.required_role.as_str()
+                            ),
+                        },
+                    )));
                     continue;
                 }
                 return Ok(AuthorityBasisV1::AuthorizedOrgTeam {
@@ -1217,17 +1228,19 @@ fn revalidate_authority_basis<P: ApproverAuthorityProbe + ?Sized>(
                     if m.state != TeamMembershipV1::ACTIVE_STATE
                         || !required_role.satisfied_by(&m.role)
                     {
-                        return Err(AuthorityDenialV1::TeamMembershipNotUsable {
-                            org: org.clone(),
-                            team_slug: team_slug.clone(),
-                            login: principal.login.clone(),
-                            state: m.state,
-                            role: m.role,
-                            detail: format!(
-                                "membership no longer satisfies required role '{}'",
-                                required_role.as_str()
-                            ),
-                        });
+                        return Err(AuthorityDenialV1::TeamMembershipNotUsable(Box::new(
+                            TeamMembershipNotUsableDetail {
+                                org: org.clone(),
+                                team_slug: team_slug.clone(),
+                                login: principal.login.clone(),
+                                state: m.state,
+                                role: m.role,
+                                detail: format!(
+                                    "membership no longer satisfies required role '{}'",
+                                    required_role.as_str()
+                                ),
+                            },
+                        )));
                     }
                     if m.state != *membership_state || m.role != *membership_role {
                         return Err(AuthorityDenialV1::AuthorityEvidenceChanged {
