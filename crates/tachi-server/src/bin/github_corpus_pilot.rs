@@ -1,7 +1,7 @@
 //! Owner-operated, read-only launcher for the #1059 exact-20 corpus pilot.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use async_trait::async_trait;
@@ -287,7 +287,48 @@ fn write_report(path: &std::path::Path, report: &CorpusPilotReportV1) -> Result<
     std::fs::write(path, body).map_err(|error| format!("write report {}: {error}", path.display()))
 }
 
+fn normalized_path_for_comparison(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("resolve current directory: {error}"))?
+            .join(path)
+    };
+    let mut lexical = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                lexical.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                lexical.push(component.as_os_str());
+            }
+        }
+    }
+    if let Ok(canonical) = std::fs::canonicalize(&lexical) {
+        return Ok(canonical);
+    }
+    if let (Some(parent), Some(file_name)) = (lexical.parent(), lexical.file_name()) {
+        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
+            return Ok(canonical_parent.join(file_name));
+        }
+    }
+    Ok(lexical)
+}
+
+fn refuse_baseline_report_alias(args: &Args) -> Result<(), String> {
+    let baseline = normalized_path_for_comparison(&args.baseline_report)?;
+    let report = normalized_path_for_comparison(&args.report)?;
+    if baseline == report {
+        return Err("--baseline-report and --report must resolve to distinct paths".to_string());
+    }
+    Ok(())
+}
+
 async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
+    refuse_baseline_report_alias(&args)?;
     let input = std::fs::read(&args.manifest)
         .map_err(|error| format!("read manifest {}: {error}", args.manifest.display()))?;
     let baseline_bytes = std::fs::read(&args.baseline_report).map_err(|error| {
@@ -349,5 +390,27 @@ async fn main() -> ExitCode {
             eprintln!("github-corpus-pilot: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn report_alias_is_refused_before_any_input_read() {
+        let error = run(Args {
+            manifest: PathBuf::from("/definitely/not/read/manifest.json"),
+            report: PathBuf::from("/private/tmp/1059-alias/result.json"),
+            baseline_report: PathBuf::from("/private/tmp/1059-alias/./nested/../result.json"),
+            baseline_sha256: "not-read".to_string(),
+            checkpoint: None,
+            captured_at: "2026-07-24T00:00:00Z".to_string(),
+            execute: false,
+        })
+        .await
+        .expect_err("report output must not alias the immutable baseline");
+        assert!(error.contains("distinct"), "{error}");
+        assert!(!error.contains("read manifest"), "{error}");
     }
 }

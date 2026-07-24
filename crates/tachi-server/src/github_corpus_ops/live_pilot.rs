@@ -921,6 +921,17 @@ fn reconcile_checkpoint(
         {
             return Err("checkpoint case binding is invalid".to_string());
         }
+        if saved
+            .attempts
+            .iter()
+            .enumerate()
+            .any(|(index, attempt)| attempt.attempt != index + 1)
+        {
+            return Err(
+                "checkpoint attempt IDs must be unique, contiguous, and strictly increasing"
+                    .to_string(),
+            );
+        }
 
         let saved_case_id = saved.case_id.clone();
         let saved_preflight = saved.preflight.clone();
@@ -1076,10 +1087,8 @@ fn completed_attempt(
     checkpoint_case: &CorpusPilotCheckpointCaseV1,
 ) -> Option<&CorpusPilotCheckpointAttemptV1> {
     let completed = checkpoint_case.fully_attested_completion_attempt?;
-    checkpoint_case
-        .attempts
-        .iter()
-        .find(|attempt| attempt.attempt == completed)
+    let attempt = checkpoint_case.attempts.get(completed.checked_sub(1)?)?;
+    (attempt.attempt == completed).then_some(attempt)
 }
 
 fn latest_candidate_attempt(
@@ -2335,6 +2344,95 @@ mod tests {
                 resolver.calls.load(std::sync::atomic::Ordering::SeqCst),
                 0,
                 "{label} checkpoint must fail before resolver construction"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_attempt_ids_must_be_unique_contiguous_and_monotonic() {
+        let input = input_bytes(MERGE_SHA);
+        let reader = fixture_reader(false);
+        let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
+        let seed_store = MemoryCheckpointStore::default();
+        run_fixture_with(
+            &input,
+            &reader,
+            &baseline_bytes,
+            &seed_store,
+            &SyntheticResolver::new(SyntheticModel {
+                known_identity: true,
+                full_coverage: true,
+                actual_cost: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("fixture creates a checkpoint");
+        let seed = seed_store.snapshot();
+
+        for (label, mutate) in [
+            (
+                "duplicate",
+                Box::new(|checkpoint: &mut CorpusPilotCheckpointV1| {
+                    let case = &mut checkpoint.cases[0];
+                    let mut unattested = case.attempts[0].clone();
+                    let Some(CorpusPilotCheckpointOutcomeV1::Candidate {
+                        fully_attested,
+                        report,
+                        ..
+                    }) = unattested.outcome.as_mut()
+                    else {
+                        panic!("fixture attempt must contain a candidate");
+                    };
+                    *fully_attested = false;
+                    report.cost_latency.cost_usd = None;
+                    report.cost_latency.cost_status = "provider_price_not_reported".to_string();
+                    report.cost_latency.cost_basis = None;
+                    report.cost_latency.cost_version = None;
+                    case.attempts.insert(0, unattested);
+                }) as Box<dyn Fn(&mut CorpusPilotCheckpointV1)>,
+            ),
+            (
+                "gap",
+                Box::new(|checkpoint: &mut CorpusPilotCheckpointV1| {
+                    checkpoint.cases[0].attempts[0].attempt = 2;
+                    checkpoint.cases[0].fully_attested_completion_attempt = Some(2);
+                }),
+            ),
+            (
+                "reordered",
+                Box::new(|checkpoint: &mut CorpusPilotCheckpointV1| {
+                    let case = &mut checkpoint.cases[0];
+                    let mut earlier = case.attempts[0].clone();
+                    earlier.attempt = 1;
+                    case.attempts[0].attempt = 2;
+                    case.attempts.push(earlier);
+                    case.fully_attested_completion_attempt = Some(2);
+                }),
+            ),
+        ] {
+            let mut checkpoint = seed.clone();
+            mutate(&mut checkpoint);
+            let store = MemoryCheckpointStore {
+                checkpoint: std::sync::Mutex::new(Some(checkpoint)),
+                ..Default::default()
+            };
+            let model = SyntheticModel::default();
+            let model_calls = model.calls.clone();
+            let resolver = SyntheticResolver::new(model);
+            let error = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resolver)
+                .await
+                .expect_err("ambiguous attempt identity must be refused");
+            assert!(error.contains("checkpoint"), "{label}: {error}");
+            assert_eq!(
+                resolver.calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{label} attempts must fail before resolver construction"
+            );
+            assert_eq!(
+                model_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{label} attempts must not spend"
             );
         }
     }
