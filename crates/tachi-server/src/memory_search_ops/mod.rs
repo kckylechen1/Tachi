@@ -43,4 +43,4 @@ pub(crate) use search_memory::invalidate_recall_cache_after_write;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;
 pub(crate) use search_memory::search_memory_rows_with_recall_config;
-pub(crate) use text_scrub::{scrub_secrets, scrub_think_tags};
+pub(crate) use text_scrub::{contains_secret_like, scrub_secrets, scrub_think_tags};

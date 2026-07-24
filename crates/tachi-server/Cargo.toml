@@ -97,6 +97,7 @@ base64 = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 dialoguer = "0.12"
 rpassword = "7"
 glob = "0.3"

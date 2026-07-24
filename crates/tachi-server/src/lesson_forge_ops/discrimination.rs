@@ -24,7 +24,8 @@
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{RngCore, SeedableRng};
+use serde::Serialize;
 
 use tachi_params::LessonEngineReceiptV1;
 
@@ -73,11 +74,10 @@ pub struct BlindedCase {
 }
 
 /// Blind + shuffle exactly 3 treated (candidate) and 3 baseline (old
-/// summary) runs for one case. `seed` makes the shuffle reproducible for
-/// tests; a live caller should derive it from something unpredictable to
-/// the adjudicator (e.g. a per-run nonce), never from the case id or arm
-/// content itself (which would make "random" order derivable by anyone who
-/// can read the case id).
+/// summary) runs for one case. `private_seed` must be cryptographically
+/// unpredictable to the adjudicator and persisted privately for restart.
+/// It deterministically controls both opaque ids and order, so a restart can
+/// recover an already-spent adjudication without exposing arm identity.
 ///
 /// Two structural fixes over a flat `[ColdRunText; 6]` + settable `arm`
 /// field (cross-vendor review finding 4):
@@ -97,16 +97,24 @@ pub fn blind_case(
     case_id: &str,
     treated: [ColdRunText; 3],
     baseline: [ColdRunText; 3],
-    seed: u64,
+    private_seed: [u8; 32],
 ) -> (BlindedCase, UnblindKey) {
-    let mut items: Vec<(String, ArmLabel, String)> = treated
+    let mut rng = StdRng::from_seed(private_seed);
+    let arms = treated
         .into_iter()
         .map(|run| (ArmLabel::B, run.text))
-        .chain(baseline.into_iter().map(|run| (ArmLabel::A, run.text)))
-        .map(|(arm, text)| (format!("blind-{}", uuid::Uuid::new_v4()), arm, text))
-        .collect();
+        .chain(baseline.into_iter().map(|run| (ArmLabel::A, run.text)));
+    let mut items = Vec::with_capacity(6);
+    for (arm, text) in arms {
+        let mut blind_id_material = [0u8; 16];
+        rng.fill_bytes(&mut blind_id_material);
+        let blind_id = blind_id_material
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        items.push((format!("blind-{blind_id}"), arm, text));
+    }
 
-    let mut rng = StdRng::seed_from_u64(seed);
     items.shuffle(&mut rng);
 
     let mut mapping = std::collections::HashMap::new();
@@ -181,20 +189,30 @@ pub fn unblind_scores(
     Ok((ArmRunSet { runs: treated }, ArmRunSet { runs: baseline }))
 }
 
-/// The adjudicator's engine identity — deliberately a separate type from
-/// `LessonEngineReceiptV1` (the producer's receipt): a caller must supply
-/// an actual, distinct value, not reuse the producer's receipt type as a
-/// stand-in and risk accidentally aliasing it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdjudicatorReceipt {
-    pub effective_provider: Option<String>,
-    pub effective_model: Option<String>,
+/// The adjudicator must carry the same complete engine identity attestation
+/// as the producer. The alias keeps the role explicit at call sites without
+/// reducing the receipt to provider/model.
+pub type AdjudicatorReceipt = LessonEngineReceiptV1;
+
+/// Two effective engine identities are independently attested only when both
+/// are fully known, non-fallback, non-degraded identities and at least one of
+/// provider, model, or version differs. Requested role is not an engine
+/// identity component.
+pub(crate) fn effective_engine_identities_are_independent(
+    left: &LessonEngineReceiptV1,
+    right: &LessonEngineReceiptV1,
+) -> bool {
+    left.has_known_identity()
+        && right.has_known_identity()
+        && (left.effective_provider != right.effective_provider
+            || left.effective_model != right.effective_model
+            || left.effective_version != right.effective_version)
 }
 
 /// True only when the producer has a FULLY known, non-fallback,
 /// non-degraded identity (`LessonEngineReceiptV1::has_known_identity` —
 /// provider + model + version, no fallback chain, not degraded) AND the
-/// adjudicator has a known (provider + model) identity AND those identities
+/// adjudicator has a fully known non-fallback/non-degraded identity AND those identities
 /// differ. An unknown/fallback/degraded producer identity, an unknown
 /// adjudicator identity, or matching identities all fail this check — see
 /// module doc guarantee 2.
@@ -215,17 +233,7 @@ pub fn dual_track_attested(
     let Some(producer) = producer else {
         return false;
     };
-    if !producer.has_known_identity() {
-        return false;
-    }
-    let (Some(a_provider), Some(a_model)) = (
-        &adjudicator.effective_provider,
-        &adjudicator.effective_model,
-    ) else {
-        return false;
-    };
-    producer.effective_provider.as_ref() != Some(a_provider)
-        || producer.effective_model.as_ref() != Some(a_model)
+    effective_engine_identities_are_independent(producer, adjudicator)
 }
 
 /// One cold run's adjudicator score.
@@ -284,7 +292,7 @@ pub const REQUIRED_TREATED_HITS: usize = 2;
 /// at least two of three runs").
 pub const BASELINE_ALREADY_SUFFICIENT_HITS: usize = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum FailReason {
     TreatedBelowThreshold {
         hits: usize,
@@ -301,7 +309,7 @@ pub enum FailReason {
     ClaimsEstablishment,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum CaseOutcome {
     Pass,
     Fail(Vec<FailReason>),
@@ -383,13 +391,18 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
+            ..Default::default()
         }
     }
 
     fn different_adjudicator() -> AdjudicatorReceipt {
         AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
             effective_provider: Some("openai".to_string()),
             effective_model: Some("gpt".to_string()),
+            effective_version: Some("v1".to_string()),
+            fallback_chain: Vec::new(),
+            degraded: false,
         }
     }
 
@@ -401,8 +414,10 @@ mod tests {
     #[test]
     fn dual_track_false_when_adjudicator_identity_unknown() {
         let adjudicator = AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
             effective_provider: None,
             effective_model: None,
+            ..different_adjudicator()
         };
         assert!(!dual_track_attested(Some(&known_producer()), &adjudicator));
     }
@@ -410,8 +425,12 @@ mod tests {
     #[test]
     fn dual_track_false_when_producer_and_adjudicator_are_the_same_engine() {
         let same = AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
             effective_provider: Some("anthropic".to_string()),
             effective_model: Some("claude".to_string()),
+            effective_version: Some("v1".to_string()),
+            fallback_chain: Vec::new(),
+            degraded: false,
         };
         assert!(!dual_track_attested(Some(&known_producer()), &same));
     }
@@ -420,6 +439,37 @@ mod tests {
     fn dual_track_true_when_engines_genuinely_differ() {
         assert!(dual_track_attested(
             Some(&known_producer()),
+            &different_adjudicator()
+        ));
+    }
+
+    #[test]
+    fn dual_track_true_when_only_effective_version_differs() {
+        let adjudicator = AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
+            effective_version: Some("v2".to_string()),
+            ..known_producer()
+        };
+        assert!(dual_track_attested(Some(&known_producer()), &adjudicator));
+    }
+
+    #[test]
+    fn dual_track_false_for_each_incomplete_adjudicator_identity_shape() {
+        let producer = known_producer();
+        let mut missing_version = different_adjudicator();
+        missing_version.effective_version = None;
+        assert!(!dual_track_attested(Some(&producer), &missing_version));
+
+        let mut fallback = different_adjudicator();
+        fallback.fallback_chain = vec!["backup".to_string()];
+        assert!(!dual_track_attested(Some(&producer), &fallback));
+
+        let mut degraded = different_adjudicator();
+        degraded.degraded = true;
+        assert!(!dual_track_attested(Some(&producer), &degraded));
+
+        assert!(dual_track_attested(
+            Some(&producer),
             &different_adjudicator()
         ));
     }
@@ -468,10 +518,10 @@ mod tests {
     fn blinding_never_leaks_the_arm_label_into_the_blind_id_or_text() {
         let treated = treated_runs(["b1", "b2", "b3"]);
         let baseline = treated_runs(["a1", "a2", "a3"]);
-        let (blinded, key) = blind_case("case-1", treated, baseline, 42);
+        let (blinded, key) = blind_case("case-1", treated, baseline, [42; 32]);
         assert_eq!(blinded.items.len(), 6);
         for item in &blinded.items {
-            // The blind id is a bare random uuid — it carries no
+            // The blind id is opaque random material — it carries no
             // pre-shuffle positional index and no "A"/"B" marker at all, by
             // construction (see `blind_case`).
             assert!(item.blind_id.starts_with("blind-"));
@@ -509,13 +559,13 @@ mod tests {
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            1,
+            [1; 32],
         );
         let (blinded2, _) = blind_case(
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            2,
+            [2; 32],
         );
         let order1: Vec<&str> = blinded1.items.iter().map(|i| i.text.as_str()).collect();
         let order2: Vec<&str> = blinded2.items.iter().map(|i| i.text.as_str()).collect();
@@ -528,7 +578,7 @@ mod tests {
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            7,
+            [7; 32],
         );
         let scored: Vec<(String, ColdRunScore)> = blinded
             .items
@@ -549,7 +599,7 @@ mod tests {
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            7,
+            [7; 32],
         );
         let scored = vec![("not-a-real-id".to_string(), hit(true, 0))];
         let err = unblind_scores(&key, scored).expect_err("unknown id must be refused");
@@ -565,7 +615,7 @@ mod tests {
             "case-1",
             treated_runs(["b1", "b2", "b3"]),
             treated_runs(["a1", "a2", "a3"]),
-            7,
+            [7; 32],
         );
         // Score only 5 of the 6 items — one arm ends up short.
         let scored: Vec<(String, ColdRunScore)> = blinded

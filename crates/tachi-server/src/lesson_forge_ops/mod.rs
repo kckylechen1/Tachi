@@ -14,9 +14,10 @@
 //! - [`discrimination`] — blind + score one pilot case's 3 treated / 3
 //!   baseline cold runs against the frozen contract's 4 pass criteria,
 //!   with a structural dual-track-independence guarantee.
-//! - [`report`] — aggregate case outcomes into a `PilotReport`: pass yield,
-//!   per-case outcomes, receipts. Reports the numbers; does NOT auto-decide
-//!   stop/proceed (see that module's doc for why no threshold is hardcoded).
+//! - [`runner`] — the only authoritative report path, requiring exact
+//!   accounting for all 400 uniquely keyed calls.
+//! - [`report`] — legacy, non-authoritative preview aggregation. It cannot
+//!   render or claim D2 pilot completion.
 //! - `storage` (crate-private) — persist a forged candidate as a pending
 //!   row, never an established `/precedents` row.
 //!
@@ -31,14 +32,19 @@
 //! whatever dispatch/engine call is appropriate) can plug in a real
 //! producer/cold-task/adjudicator without this module's validation, spend
 //! gate, blinding, or scoring logic changing at all. Running the actual
-//! 50-row pilot against real models and publishing its `PilotReport` is
+//! 50-row pilot against real models and publishing its authoritative runner report is
 //! explicitly NOT claimed as done by this leaf — see the PR description's
 //! not-done section.
 
 pub mod discrimination;
 pub mod forge;
 pub mod pilot;
+pub mod privacy;
+pub mod progress;
 pub mod report;
+pub mod runner;
+pub mod selection;
+pub mod source;
 // `storage` is `pub(crate)`, not `pub`: its one entry point takes
 // `&crate::MemoryServer`, which is itself `pub(crate)` — a public function
 // can never expose a less-visible type in its signature (E0446), so this
