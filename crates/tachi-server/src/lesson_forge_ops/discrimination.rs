@@ -194,6 +194,21 @@ pub fn unblind_scores(
 /// reducing the receipt to provider/model.
 pub type AdjudicatorReceipt = LessonEngineReceiptV1;
 
+/// Two effective engine identities are independently attested only when both
+/// are fully known, non-fallback, non-degraded identities and at least one of
+/// provider, model, or version differs. Requested role is not an engine
+/// identity component.
+pub(crate) fn effective_engine_identities_are_independent(
+    left: &LessonEngineReceiptV1,
+    right: &LessonEngineReceiptV1,
+) -> bool {
+    left.has_known_identity()
+        && right.has_known_identity()
+        && (left.effective_provider != right.effective_provider
+            || left.effective_model != right.effective_model
+            || left.effective_version != right.effective_version)
+}
+
 /// True only when the producer has a FULLY known, non-fallback,
 /// non-degraded identity (`LessonEngineReceiptV1::has_known_identity` —
 /// provider + model + version, no fallback chain, not degraded) AND the
@@ -218,11 +233,7 @@ pub fn dual_track_attested(
     let Some(producer) = producer else {
         return false;
     };
-    if !producer.has_known_identity() || !adjudicator.has_known_identity() {
-        return false;
-    }
-    producer.effective_provider != adjudicator.effective_provider
-        || producer.effective_model != adjudicator.effective_model
+    effective_engine_identities_are_independent(producer, adjudicator)
 }
 
 /// One cold run's adjudicator score.
@@ -430,6 +441,16 @@ mod tests {
             Some(&known_producer()),
             &different_adjudicator()
         ));
+    }
+
+    #[test]
+    fn dual_track_true_when_only_effective_version_differs() {
+        let adjudicator = AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
+            effective_version: Some("v2".to_string()),
+            ..known_producer()
+        };
+        assert!(dual_track_attested(Some(&known_producer()), &adjudicator));
     }
 
     #[test]

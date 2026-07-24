@@ -12,8 +12,8 @@ use tachi_params::{
 };
 
 use super::discrimination::{
-    blind_case, evaluate_case, unblind_scores, AdjudicatorReceipt, BlindedCase, CaseOutcome,
-    ColdRunScore, ColdRunText,
+    blind_case, effective_engine_identities_are_independent, evaluate_case, unblind_scores,
+    AdjudicatorReceipt, BlindedCase, CaseOutcome, ColdRunScore, ColdRunText,
 };
 use super::forge::{forge_lesson_candidate, ForgeDraft, SourceBundle};
 use super::pilot::{
@@ -222,6 +222,7 @@ pub struct PilotRunCallReportV1 {
 pub enum PilotRunReportErrorV1 {
     WrongCaseCount { expected: usize, actual: usize },
     WrongCompletedCallCount { expected: usize, actual: usize },
+    CollapsedProducerAdjudicatorIdentity,
     CollapsedColdAdjudicatorIdentity,
     DuplicateCallKey,
     UnexpectedOrMissingCall,
@@ -238,6 +239,10 @@ impl std::fmt::Display for PilotRunReportErrorV1 {
             Self::WrongCompletedCallCount { expected, actual } => write!(
                 f,
                 "pilot run report requires {expected} completed calls, got {actual}"
+            ),
+            Self::CollapsedProducerAdjudicatorIdentity => write!(
+                f,
+                "pilot run report contains a producer engine identity collapsed into the adjudicator"
             ),
             Self::CollapsedColdAdjudicatorIdentity => write!(
                 f,
@@ -312,6 +317,10 @@ impl PilotRunReportV1 {
             });
         }
         for case in &self.cases {
+            validate_producer_adjudicator_independence(
+                &case.producer_receipt,
+                &case.adjudicator_receipt,
+            )?;
             validate_cold_adjudicator_independence(
                 &case.treated_receipts,
                 &case.baseline_receipts,
@@ -353,33 +362,29 @@ impl PilotRunReportV1 {
     }
 }
 
+fn validate_producer_adjudicator_independence(
+    producer: &PilotEngineReceiptV1,
+    adjudicator: &PilotEngineReceiptV1,
+) -> Result<(), PilotRunReportErrorV1> {
+    if effective_engine_identities_are_independent(&producer.identity, &adjudicator.identity) {
+        Ok(())
+    } else {
+        Err(PilotRunReportErrorV1::CollapsedProducerAdjudicatorIdentity)
+    }
+}
+
 fn validate_cold_adjudicator_independence(
     treated: &[PilotEngineReceiptV1; 3],
     baseline: &[PilotEngineReceiptV1; 3],
     adjudicator: &PilotEngineReceiptV1,
 ) -> Result<(), PilotRunReportErrorV1> {
-    if treated
-        .iter()
-        .chain(baseline.iter())
-        .all(|cold| effective_engine_identities_are_independent(cold, adjudicator))
-    {
+    if treated.iter().chain(baseline.iter()).all(|cold| {
+        effective_engine_identities_are_independent(&cold.identity, &adjudicator.identity)
+    }) {
         Ok(())
     } else {
         Err(PilotRunReportErrorV1::CollapsedColdAdjudicatorIdentity)
     }
-}
-
-fn effective_engine_identities_are_independent(
-    cold: &PilotEngineReceiptV1,
-    adjudicator: &PilotEngineReceiptV1,
-) -> bool {
-    let cold = &cold.identity;
-    let adjudicator = &adjudicator.identity;
-    cold.has_known_identity()
-        && adjudicator.has_known_identity()
-        && (cold.effective_provider != adjudicator.effective_provider
-            || cold.effective_model != adjudicator.effective_model
-            || cold.effective_version != adjudicator.effective_version)
 }
 
 fn expected_call_reports(
@@ -1464,33 +1469,66 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_report_validation_refuses_collapsed_producer_identity() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator::default();
+        let progress = progress_path();
+        let mut report = run_manifest_for_test(
+            &manifest,
+            &progress,
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .unwrap();
+        for case in &mut report.cases {
+            case.producer_receipt = case.adjudicator_receipt.clone();
+        }
+        report.completed_calls = expected_call_reports(&report.manifest_digest, &report.cases);
+
+        let result = report.validate_complete_accounting();
+        let _ = std::fs::remove_file(progress);
+
+        assert_eq!(
+            result,
+            Err(PilotRunReportErrorV1::CollapsedProducerAdjudicatorIdentity),
+            "authoritative completion must reject producer/adjudicator identity collapse"
+        );
+    }
+
+    #[test]
     fn cold_adjudicator_independence_uses_complete_effective_identity() {
         let adjudicator = receipt("adjudicator", "adjudicator-provider", "adjudicator-model");
         let collapsed = receipt("cold", "adjudicator-provider", "adjudicator-model");
         assert!(!effective_engine_identities_are_independent(
-            &collapsed,
-            &adjudicator
+            &collapsed.identity,
+            &adjudicator.identity
         ));
 
         let mut version_distinct = collapsed.clone();
         version_distinct.identity.effective_version = Some("test-v2".to_string());
         assert!(effective_engine_identities_are_independent(
-            &version_distinct,
-            &adjudicator
+            &version_distinct.identity,
+            &adjudicator.identity
         ));
 
         let mut fallback = receipt("cold", "cold-provider", "cold-model");
         fallback.identity.fallback_chain = vec!["backup".to_string()];
         assert!(!effective_engine_identities_are_independent(
-            &fallback,
-            &adjudicator
+            &fallback.identity,
+            &adjudicator.identity
         ));
 
         let mut degraded = receipt("cold", "cold-provider", "cold-model");
         degraded.identity.degraded = true;
         assert!(!effective_engine_identities_are_independent(
-            &degraded,
-            &adjudicator
+            &degraded.identity,
+            &adjudicator.identity
         ));
     }
 
