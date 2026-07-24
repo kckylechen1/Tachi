@@ -803,8 +803,20 @@ async fn route_apply_refuses_tampered_unbound_top_level_policy_rule() {
     let (server, _temp_home) = make_server_with_temp_home();
 
     for (task_id, profile, outcome, cost, quality) in [
-        ("unbound-tamper-1", "opencode_builder", "success", 0.01, 0.80),
-        ("unbound-tamper-2", "opencode_builder", "failure", 0.01, 0.20),
+        (
+            "unbound-tamper-1",
+            "opencode_builder",
+            "success",
+            0.01,
+            0.80,
+        ),
+        (
+            "unbound-tamper-2",
+            "opencode_builder",
+            "failure",
+            0.01,
+            0.20,
+        ),
         ("unbound-tamper-3", "glm_51_impl", "success", 2.00, 0.98),
     ] {
         server
@@ -885,7 +897,11 @@ async fn route_apply_refuses_tampered_unbound_top_level_policy_rule() {
             value["policy_rule"]["prefer_profile"] = json!("attacker_controlled_profile");
             let next = serde_json::to_string(&value).expect("serialize");
             store
-                .set_state(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id, &next)
+                .set_state(
+                    tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+                    &proposal_id,
+                    &next,
+                )
                 .map_err(|e| e.to_string())?;
             Ok::<_, String>(())
         })
@@ -968,9 +984,27 @@ async fn route_review_refuses_tampered_unbound_top_level_policy_rule() {
     let (server, _temp_home) = make_server_with_temp_home();
 
     for (task_id, profile, outcome, cost, quality) in [
-        ("review-unbound-tamper-1", "opencode_builder", "success", 0.01, 0.80),
-        ("review-unbound-tamper-2", "opencode_builder", "failure", 0.01, 0.20),
-        ("review-unbound-tamper-3", "glm_51_impl", "success", 2.00, 0.98),
+        (
+            "review-unbound-tamper-1",
+            "opencode_builder",
+            "success",
+            0.01,
+            0.80,
+        ),
+        (
+            "review-unbound-tamper-2",
+            "opencode_builder",
+            "failure",
+            0.01,
+            0.20,
+        ),
+        (
+            "review-unbound-tamper-3",
+            "glm_51_impl",
+            "success",
+            2.00,
+            0.98,
+        ),
     ] {
         server
             .tachi_complete(Parameters(TachiCompleteParams {
@@ -1040,7 +1074,11 @@ async fn route_review_refuses_tampered_unbound_top_level_policy_rule() {
             value["policy_rule"]["prefer_profile"] = json!("softened_but_wrong_profile");
             let next = serde_json::to_string(&value).expect("serialize");
             store
-                .set_state(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id, &next)
+                .set_state(
+                    tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+                    &proposal_id,
+                    &next,
+                )
                 .map_err(|e| e.to_string())?;
             Ok::<_, String>(())
         })
@@ -1058,12 +1096,9 @@ async fn route_review_refuses_tampered_unbound_top_level_policy_rule() {
     let mut review = task_params("review_proposal");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    let err = server
-        .tachi_task(Parameters(review))
-        .await
-        .expect_err(
-            "review of a proposal whose display copy drifted from its bound copy must refuse",
-        );
+    let err = server.tachi_task(Parameters(review)).await.expect_err(
+        "review of a proposal whose display copy drifted from its bound copy must refuse",
+    );
     assert!(
         err.contains("display_copy_drift"),
         "expected display_copy_drift refusal, got: {err}"
