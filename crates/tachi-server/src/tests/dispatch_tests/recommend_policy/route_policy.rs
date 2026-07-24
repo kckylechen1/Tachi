@@ -415,10 +415,21 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
 async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     let (server, _temp_home) = make_server_with_temp_home();
 
-    let seed_one = |task_id: &str, profile: &str, outcome: &str, cost: f64, quality: f64| async move {
+    let seed_one = |task_id: &str, profile: &str, outcome: &str, cost: f64, quality: f64| {
+        // Borrow the server and own the &str arguments before building the
+        // future. The closure is invoked repeatedly, so it must stay `Fn`: an
+        // `async move` block that captured `server` directly would move it out
+        // of the closure's environment and make the closure `FnOnce`. Owning
+        // the arguments here also keeps any borrow of the caller's &str from
+        // escaping into the returned future.
+        let server = &server;
+        let task_id = task_id.to_string();
+        let profile = profile.to_string();
+        let outcome = outcome.to_string();
+        async move {
         server
             .tachi_complete(Parameters(TachiCompleteParams {
-                task_id: Some(task_id.to_string()),
+                task_id: Some(task_id),
                 task: "Implement dispatch policy".to_string(),
                 agent: "custom".to_string(),
                 outcome: outcome.to_string(),
@@ -453,6 +464,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
             }))
             .await
             .expect("seed eval row")
+        }
     };
 
     // Phase 1: seed evidence where `opencode_builder` is the cheaper choice
