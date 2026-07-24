@@ -6,11 +6,14 @@
 //! stores source text or model output.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tachi_params::LessonCandidateKindV1;
+
+use super::privacy::{screen_manifest_metadata_for_public_pilot, PilotPrivacyErrorV1};
 
 pub const PILOT_SIZE: usize = 50;
 pub const PILOT_MANIFEST_FORMAT_V1: &str = "lesson_forge_pilot_manifest_v1";
@@ -107,7 +110,7 @@ pub enum PilotFreezeError {
     InvalidContentDigest {
         source_id: String,
     },
-    MissingCaptureTimestamp {
+    InvalidCaptureTimestamp {
         source_id: String,
     },
     MissingSelectionReason {
@@ -115,6 +118,14 @@ pub enum PilotFreezeError {
     },
     MissingReferenceDecision {
         source_id: String,
+    },
+    UnsafeSelectionReason {
+        source_id: String,
+        reason: PilotPrivacyErrorV1,
+    },
+    UnsafeReferenceDecision {
+        source_id: String,
+        reason: PilotPrivacyErrorV1,
     },
     WrongSourceCount {
         source_route: PilotSourceRouteV1,
@@ -171,8 +182,11 @@ impl std::fmt::Display for PilotFreezeError {
                     "frozen pilot row {source_id} lacks a SHA-256 content digest"
                 )
             }
-            Self::MissingCaptureTimestamp { source_id } => {
-                write!(f, "frozen pilot row {source_id} lacks a capture timestamp")
+            Self::InvalidCaptureTimestamp { source_id } => {
+                write!(
+                    f,
+                    "frozen pilot row {source_id} has an invalid RFC3339 capture timestamp"
+                )
             }
             Self::MissingSelectionReason { source_id } => {
                 write!(f, "frozen pilot row {source_id} has no selection reason")
@@ -180,6 +194,14 @@ impl std::fmt::Display for PilotFreezeError {
             Self::MissingReferenceDecision { source_id } => {
                 write!(f, "frozen pilot row {source_id} has no reference decision")
             }
+            Self::UnsafeSelectionReason { source_id, reason } => write!(
+                f,
+                "frozen pilot row {source_id} has an unsafe selection reason: {reason}"
+            ),
+            Self::UnsafeReferenceDecision { source_id, reason } => write!(
+                f,
+                "frozen pilot row {source_id} has an unsafe reference decision: {reason}"
+            ),
             Self::WrongSourceCount {
                 source_route,
                 expected,
@@ -218,6 +240,14 @@ impl std::fmt::Display for PilotFreezeError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PilotManifestV1 {
     rows: Vec<PilotRowV1>,
+}
+
+/// Spend-capable manifest origin. This wrapper is constructible only by
+/// loading and validating a durable canonical JSON artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurablePilotManifestV1 {
+    manifest: PilotManifestV1,
+    artifact_path: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -347,6 +377,29 @@ impl PilotManifestV1 {
     }
 }
 
+impl DurablePilotManifestV1 {
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, PilotManifestIoError> {
+        let artifact_path = path.as_ref().to_path_buf();
+        let manifest = PilotManifestV1::load_from_path(&artifact_path)?;
+        Ok(Self {
+            manifest,
+            artifact_path,
+        })
+    }
+
+    pub fn manifest(&self) -> &PilotManifestV1 {
+        &self.manifest
+    }
+
+    pub fn artifact_path(&self) -> &Path {
+        &self.artifact_path
+    }
+
+    pub fn contract_digest(&self) -> Result<String, PilotManifestIoError> {
+        self.manifest.contract_digest()
+    }
+}
+
 /// Validate and canonicalize the exact pilot contract, reporting every
 /// mismatch rather than silently accepting an approximate sample.
 pub fn freeze_pilot_manifest(
@@ -364,7 +417,8 @@ pub fn freeze_pilot_manifest(
     let mut sources = BTreeMap::new();
     let mut kinds = BTreeMap::new();
     let mut strata = BTreeMap::new();
-    for row in &rows {
+    for row in &mut rows {
+        row.content_sha256.make_ascii_lowercase();
         *sources.entry(row.source_route).or_insert(0usize) += 1;
         *kinds.entry(row.kind).or_insert(0usize) += 1;
         *strata.entry(row.stratum).or_insert(0usize) += 1;
@@ -391,8 +445,8 @@ pub fn freeze_pilot_manifest(
                 source_id: row.source_id.clone(),
             });
         }
-        if row.capture_timestamp.trim().is_empty() {
-            errors.push(PilotFreezeError::MissingCaptureTimestamp {
+        if !is_strict_rfc3339(&row.capture_timestamp) {
+            errors.push(PilotFreezeError::InvalidCaptureTimestamp {
                 source_id: row.source_id.clone(),
             });
         }
@@ -404,6 +458,18 @@ pub fn freeze_pilot_manifest(
         if row.reference_decision.trim().is_empty() {
             errors.push(PilotFreezeError::MissingReferenceDecision {
                 source_id: row.source_id.clone(),
+            });
+        }
+        if let Err(reason) = screen_manifest_metadata_for_public_pilot(&row.selection_reason) {
+            errors.push(PilotFreezeError::UnsafeSelectionReason {
+                source_id: row.source_id.clone(),
+                reason,
+            });
+        }
+        if let Err(reason) = screen_manifest_metadata_for_public_pilot(&row.reference_decision) {
+            errors.push(PilotFreezeError::UnsafeReferenceDecision {
+                source_id: row.source_id.clone(),
+                reason,
             });
         }
     }
@@ -470,6 +536,10 @@ fn exact_count(
 
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_strict_rfc3339(value: &str) -> bool {
+    value.as_bytes().get(10) == Some(&b'T') && DateTime::parse_from_rfc3339(value).is_ok()
 }
 
 #[cfg(test)]
@@ -581,7 +651,7 @@ mod tests {
             .any(|error| matches!(error, PilotFreezeError::InvalidContentDigest { .. })));
         assert!(errors
             .iter()
-            .any(|error| matches!(error, PilotFreezeError::MissingCaptureTimestamp { .. })));
+            .any(|error| matches!(error, PilotFreezeError::InvalidCaptureTimestamp { .. })));
         assert!(errors
             .iter()
             .any(|error| matches!(error, PilotFreezeError::MissingSourceId { .. })));
@@ -607,6 +677,60 @@ mod tests {
     }
 
     #[test]
+    fn digest_is_normalized_to_lowercase_before_contract_hashing() {
+        let mut rows = valid_rows();
+        rows[0].content_sha256 = rows[0].content_sha256.to_ascii_uppercase();
+        let manifest = freeze_pilot_manifest(rows).expect("uppercase hex is valid input");
+        assert!(manifest.rows()[0]
+            .content_sha256
+            .bytes()
+            .all(|byte| !byte.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn invalid_digest_and_capture_time_boundaries_are_rejected() {
+        for digest in [
+            "0".repeat(63),
+            "0".repeat(65),
+            format!("{}g", "0".repeat(63)),
+        ] {
+            let mut rows = valid_rows();
+            rows[0].content_sha256 = digest;
+            assert!(freeze_pilot_manifest(rows).is_err());
+        }
+        for timestamp in [
+            "2026-07-24T00:00:00",
+            "2026-07-24 00:00:00Z",
+            "2026-13-24T00:00:00Z",
+            "",
+        ] {
+            let mut rows = valid_rows();
+            rows[0].capture_timestamp = timestamp.to_string();
+            assert!(freeze_pilot_manifest(rows).is_err(), "accepted {timestamp}");
+        }
+        for timestamp in [
+            "2026-07-24T00:00:00Z",
+            "2026-07-24T23:59:59.999999999+14:00",
+            "2026-07-24T00:00:00-12:00",
+        ] {
+            let mut rows = valid_rows();
+            rows[0].capture_timestamp = timestamp.to_string();
+            assert!(freeze_pilot_manifest(rows).is_ok(), "rejected {timestamp}");
+        }
+    }
+
+    #[test]
+    fn manifest_metadata_with_tokens_or_source_excerpts_is_rejected() {
+        let mut token = valid_rows();
+        token[0].reference_decision = "use ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij".to_string();
+        assert!(freeze_pilot_manifest(token).is_err());
+
+        let mut excerpt = valid_rows();
+        excerpt[0].selection_reason = "source excerpt: private row contents".to_string();
+        assert!(freeze_pilot_manifest(excerpt).is_err());
+    }
+
+    #[test]
     fn load_rejects_a_tampered_public_binding_before_spend() {
         let manifest = freeze_pilot_manifest(valid_rows()).expect("manifest");
         let path =
@@ -620,5 +744,20 @@ mod tests {
             PilotManifestV1::load_from_path(&path).expect_err("digest must reject tampering");
         let _ = std::fs::remove_file(&path);
         assert!(matches!(error, PilotManifestIoError::DigestMismatch { .. }));
+    }
+
+    #[test]
+    fn durable_manifest_origin_is_created_only_by_artifact_load() {
+        let manifest = freeze_pilot_manifest(valid_rows()).expect("manifest");
+        let path =
+            std::env::temp_dir().join(format!("sigil-1073-pilot-{}.json", uuid::Uuid::new_v4()));
+        manifest.save_to_path(&path).expect("save manifest");
+        let durable = DurablePilotManifestV1::load_from_path(&path).expect("durable load");
+        assert_eq!(durable.artifact_path(), path.as_path());
+        assert_eq!(
+            durable.contract_digest().unwrap(),
+            manifest.contract_digest().unwrap()
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

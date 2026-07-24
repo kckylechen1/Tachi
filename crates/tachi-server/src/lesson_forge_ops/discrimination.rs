@@ -182,20 +182,15 @@ pub fn unblind_scores(
     Ok((ArmRunSet { runs: treated }, ArmRunSet { runs: baseline }))
 }
 
-/// The adjudicator's engine identity — deliberately a separate type from
-/// `LessonEngineReceiptV1` (the producer's receipt): a caller must supply
-/// an actual, distinct value, not reuse the producer's receipt type as a
-/// stand-in and risk accidentally aliasing it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdjudicatorReceipt {
-    pub effective_provider: Option<String>,
-    pub effective_model: Option<String>,
-}
+/// The adjudicator must carry the same complete engine identity attestation
+/// as the producer. The alias keeps the role explicit at call sites without
+/// reducing the receipt to provider/model.
+pub type AdjudicatorReceipt = LessonEngineReceiptV1;
 
 /// True only when the producer has a FULLY known, non-fallback,
 /// non-degraded identity (`LessonEngineReceiptV1::has_known_identity` —
 /// provider + model + version, no fallback chain, not degraded) AND the
-/// adjudicator has a known (provider + model) identity AND those identities
+/// adjudicator has a fully known non-fallback/non-degraded identity AND those identities
 /// differ. An unknown/fallback/degraded producer identity, an unknown
 /// adjudicator identity, or matching identities all fail this check — see
 /// module doc guarantee 2.
@@ -216,17 +211,11 @@ pub fn dual_track_attested(
     let Some(producer) = producer else {
         return false;
     };
-    if !producer.has_known_identity() {
+    if !producer.has_known_identity() || !adjudicator.has_known_identity() {
         return false;
     }
-    let (Some(a_provider), Some(a_model)) = (
-        &adjudicator.effective_provider,
-        &adjudicator.effective_model,
-    ) else {
-        return false;
-    };
-    producer.effective_provider.as_ref() != Some(a_provider)
-        || producer.effective_model.as_ref() != Some(a_model)
+    producer.effective_provider != adjudicator.effective_provider
+        || producer.effective_model != adjudicator.effective_model
 }
 
 /// One cold run's adjudicator score.
@@ -390,8 +379,12 @@ mod tests {
 
     fn different_adjudicator() -> AdjudicatorReceipt {
         AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
             effective_provider: Some("openai".to_string()),
             effective_model: Some("gpt".to_string()),
+            effective_version: Some("v1".to_string()),
+            fallback_chain: Vec::new(),
+            degraded: false,
         }
     }
 
@@ -403,8 +396,10 @@ mod tests {
     #[test]
     fn dual_track_false_when_adjudicator_identity_unknown() {
         let adjudicator = AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
             effective_provider: None,
             effective_model: None,
+            ..different_adjudicator()
         };
         assert!(!dual_track_attested(Some(&known_producer()), &adjudicator));
     }
@@ -412,8 +407,12 @@ mod tests {
     #[test]
     fn dual_track_false_when_producer_and_adjudicator_are_the_same_engine() {
         let same = AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
             effective_provider: Some("anthropic".to_string()),
             effective_model: Some("claude".to_string()),
+            effective_version: Some("v1".to_string()),
+            fallback_chain: Vec::new(),
+            degraded: false,
         };
         assert!(!dual_track_attested(Some(&known_producer()), &same));
     }
@@ -422,6 +421,27 @@ mod tests {
     fn dual_track_true_when_engines_genuinely_differ() {
         assert!(dual_track_attested(
             Some(&known_producer()),
+            &different_adjudicator()
+        ));
+    }
+
+    #[test]
+    fn dual_track_false_for_each_incomplete_adjudicator_identity_shape() {
+        let producer = known_producer();
+        let mut missing_version = different_adjudicator();
+        missing_version.effective_version = None;
+        assert!(!dual_track_attested(Some(&producer), &missing_version));
+
+        let mut fallback = different_adjudicator();
+        fallback.fallback_chain = vec!["backup".to_string()];
+        assert!(!dual_track_attested(Some(&producer), &fallback));
+
+        let mut degraded = different_adjudicator();
+        degraded.degraded = true;
+        assert!(!dual_track_attested(Some(&producer), &degraded));
+
+        assert!(dual_track_attested(
+            Some(&producer),
             &different_adjudicator()
         ));
     }

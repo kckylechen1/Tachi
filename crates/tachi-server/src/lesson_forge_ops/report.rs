@@ -308,8 +308,12 @@ mod tests {
 
     fn adjudicator() -> AdjudicatorReceipt {
         AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
             effective_provider: Some("openai".to_string()),
             effective_model: Some("gpt".to_string()),
+            effective_version: Some("v1".to_string()),
+            fallback_chain: Vec::new(),
+            degraded: false,
         }
     }
 

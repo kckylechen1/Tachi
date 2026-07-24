@@ -9,6 +9,8 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::memory_search_ops::contains_secret_like;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PilotPrivacyErrorV1 {
     SecretOrCredentialLike,
@@ -37,22 +39,7 @@ impl std::error::Error for PilotPrivacyErrorV1 {}
 /// from the public pilot rather than redacted into an apparently safe row.
 pub fn screen_source_for_public_pilot(text: &str) -> Result<(), PilotPrivacyErrorV1> {
     let lower = text.to_ascii_lowercase();
-    if [
-        "api_key",
-        "api-key",
-        "authorization:",
-        "bearer ",
-        "client_secret",
-        "oauth",
-        "password=",
-        "private key",
-        "secret_key",
-        "access_token",
-        "refresh_token",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
-    {
+    if contains_secret_like(text) {
         return Err(PilotPrivacyErrorV1::SecretOrCredentialLike);
     }
     if email_pattern().is_match(text)
@@ -63,6 +50,21 @@ pub fn screen_source_for_public_pilot(text: &str) -> Result<(), PilotPrivacyErro
             "date of birth",
             "home address",
         ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return Err(PilotPrivacyErrorV1::PersonalData);
+    }
+    Ok(())
+}
+
+/// Manifest reasons and decisions are committed public metadata. They must be
+/// screened at freeze/load time, before spend, and may never contain an
+/// excerpt label that invites raw source text into the artifact.
+pub fn screen_manifest_metadata_for_public_pilot(text: &str) -> Result<(), PilotPrivacyErrorV1> {
+    screen_source_for_public_pilot(text)?;
+    let lower = text.to_ascii_lowercase();
+    if ["source excerpt:", "raw source:", "verbatim source:"]
         .iter()
         .any(|marker| lower.contains(marker))
     {
@@ -105,5 +107,21 @@ mod tests {
                 .unwrap_err(),
             PilotPrivacyErrorV1::PersonalData
         );
+    }
+
+    #[test]
+    fn common_naked_token_shapes_are_excluded() {
+        for token in [
+            "sk-abcdefghijklmnopqrstuvwxyz123456",
+            "voy-abcdefghijklmnopqrstuvwxyz123456",
+            "xoxb-123456789012345678901234",
+            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+            "AKIAIOSFODNN7EXAMPLE",
+        ] {
+            assert_eq!(
+                screen_source_for_public_pilot(token).unwrap_err(),
+                PilotPrivacyErrorV1::SecretOrCredentialLike
+            );
+        }
     }
 }

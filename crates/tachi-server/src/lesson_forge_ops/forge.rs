@@ -128,12 +128,14 @@ fn frame_field(value: &str) -> String {
 /// the SAME row share a group.
 fn group_seed(
     project: &str,
+    source_route: super::pilot::PilotSourceRouteV1,
     row_id: &str,
     kind: LessonCandidateKindV1,
     draft: &ForgeDraft,
 ) -> String {
     let mut seed = String::new();
     seed.push_str(&frame_field(project));
+    seed.push_str(&frame_field(source_route.as_str()));
     seed.push_str(&frame_field(row_id));
     seed.push_str(&frame_field(kind.as_str()));
     seed.push_str(&frame_field(&draft.situation));
@@ -145,11 +147,12 @@ fn group_seed(
 
 fn candidate_group_id(
     project: &str,
+    source_route: super::pilot::PilotSourceRouteV1,
     row_id: &str,
     kind: LessonCandidateKindV1,
     draft: &ForgeDraft,
 ) -> String {
-    hash16(&group_seed(project, row_id, kind, draft))
+    hash16(&group_seed(project, source_route, row_id, kind, draft))
 }
 
 fn candidate_id(
@@ -158,7 +161,7 @@ fn candidate_id(
     draft: &ForgeDraft,
     bundle: &SourceBundle,
 ) -> String {
-    let mut seed = group_seed(project, &bundle.row_id, kind, draft);
+    let mut seed = group_seed(project, bundle.source_route, &bundle.row_id, kind, draft);
     seed.push_str(&frame_field(&bundle.revision.to_string()));
     hash16(&seed)
 }
@@ -196,7 +199,7 @@ pub fn forge_lesson_candidate(
         return Err(ForgeError::NoSourceRefs);
     }
 
-    let group_id = candidate_group_id(project, &bundle.row_id, kind, draft);
+    let group_id = candidate_group_id(project, bundle.source_route, &bundle.row_id, kind, draft);
     let id = candidate_id(project, kind, draft, bundle);
 
     Ok(LessonCandidateV1 {
@@ -208,7 +211,7 @@ pub fn forge_lesson_candidate(
         why: draft.why.clone(),
         how_to_apply: draft.how_to_apply.clone(),
         refs: bundle.refs.clone(),
-        source_row_id: bundle.row_id.clone(),
+        source_row_id: format!("{}:{}", bundle.source_route.as_str(), bundle.row_id),
         source_revision: bundle.revision.to_string(),
         coverage: LessonCoverageV1::full(bundle.full_text.len()),
         candidate_status: LessonCandidateStatusV1::Pending,
@@ -493,6 +496,66 @@ mod tests {
             "identical drafts from unrelated rows must not collapse into the same group"
         );
         assert_ne!(a.candidate_id, b.candidate_id);
+    }
+
+    #[test]
+    fn same_id_revision_in_different_routes_has_distinct_identity_and_provenance() {
+        let mut rows: Vec<PilotRowV1> = (0..50)
+            .map(|index| PilotRowV1 {
+                source_route: if index < 25 {
+                    PilotSourceRouteV1::Antigravity
+                } else {
+                    PilotSourceRouteV1::Hapi
+                },
+                source_id: format!("route-filler-{index}"),
+                source_revision: 1,
+                content_sha256: format!("{index:064x}"),
+                capture_timestamp: "2026-07-24T00:00:00Z".to_string(),
+                kind: if index % 2 == 0 {
+                    PilotRowKindV1::Narrative
+                } else {
+                    PilotRowKindV1::StructuredControl
+                },
+                stratum: match index {
+                    0..=16 => PilotStratumV1::CorrectionAlignment,
+                    17..=33 => PilotStratumV1::VerificationRecovery,
+                    _ => PilotStratumV1::RoutingStoreProvenance,
+                },
+                selection_reason: "public-safe route fixture".to_string(),
+                reference_decision: "public-safe route decision".to_string(),
+                target_kind: LessonCandidateKindV1::Precedent,
+            })
+            .collect();
+        rows[0].source_id = "shared-id".to_string();
+        rows[25].source_id = "shared-id".to_string();
+        let manifest = freeze_pilot_manifest(rows).expect("cross-route ids are valid");
+        let mut antigravity = valid_bundle();
+        antigravity.row_id = "shared-id".to_string();
+        let mut hapi = antigravity.clone();
+        hapi.source_route = PilotSourceRouteV1::Hapi;
+
+        let first = forge_lesson_candidate(
+            "proj",
+            &manifest,
+            &antigravity,
+            LessonCandidateKindV1::Precedent,
+            &valid_draft(),
+            None,
+        )
+        .expect("antigravity forge");
+        let second = forge_lesson_candidate(
+            "proj",
+            &manifest,
+            &hapi,
+            LessonCandidateKindV1::Precedent,
+            &valid_draft(),
+            None,
+        )
+        .expect("hapi forge");
+
+        assert_ne!(first.candidate_id, second.candidate_id);
+        assert_ne!(first.candidate_group_id, second.candidate_group_id);
+        assert_ne!(first.source_row_id, second.source_row_id);
     }
 
     #[test]

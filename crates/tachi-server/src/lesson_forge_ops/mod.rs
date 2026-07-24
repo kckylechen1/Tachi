@@ -39,6 +39,7 @@ pub mod discrimination;
 pub mod forge;
 pub mod pilot;
 pub mod privacy;
+pub mod progress;
 pub mod report;
 pub mod runner;
 pub mod source;

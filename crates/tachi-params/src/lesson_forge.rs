@@ -87,16 +87,6 @@ pub struct LessonEngineReceiptV1 {
     pub fallback_chain: Vec<String>,
     #[serde(default)]
     pub degraded: bool,
-    /// Total tokens reported by the effective engine.  Absent is explicit:
-    /// callers must not invent a cost record when the provider omitted it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<u64>,
-    /// Provider-reported cost in USD micros, avoiding a floating-point money
-    /// value in an immutable receipt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_usd_micros: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latency_ms: Option<u64>,
 }
 
 impl LessonEngineReceiptV1 {
@@ -191,6 +181,9 @@ pub struct LessonCandidateV1 {
     /// criterion 4 ("cites its immutable source refs") and the forge
     /// refuses to construct one (see `tachi-server::lesson_forge_ops::forge`).
     pub refs: Vec<EvidenceRefV1>,
+    /// Source key. Route-based pilot sources use the canonical
+    /// `<route>:<stable-id>` form so provenance stays collision-free without
+    /// adding a required public field to this shipped struct-literal surface.
     pub source_row_id: String,
     pub source_revision: String,
     pub coverage: LessonCoverageV1,
@@ -349,26 +342,6 @@ mod tests {
         };
         assert_eq!(lesson_identity_status(Some(&receipt)), "known");
         assert!(receipt.has_known_identity());
-    }
-
-    #[test]
-    fn effective_receipt_preserves_tokens_cost_and_latency_without_weakening_identity_gate() {
-        let receipt = LessonEngineReceiptV1 {
-            requested_role: "producer".to_string(),
-            effective_provider: Some("provider".to_string()),
-            effective_model: Some("model".to_string()),
-            effective_version: Some("v1".to_string()),
-            fallback_chain: Vec::new(),
-            degraded: false,
-            tokens: Some(123),
-            cost_usd_micros: Some(456),
-            latency_ms: Some(789),
-        };
-        let encoded = serde_json::to_value(&receipt).unwrap();
-        assert_eq!(encoded["tokens"], 123);
-        assert_eq!(encoded["cost_usd_micros"], 456);
-        assert_eq!(encoded["latency_ms"], 789);
-        assert_eq!(receipt.identity_status(), "known");
     }
 
     #[test]
