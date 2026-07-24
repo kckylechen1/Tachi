@@ -17,7 +17,7 @@ pub(crate) fn handle_route_policy_apply(
     }
     let applied_at = Utc::now().to_rfc3339();
     let updated = server.with_global_store(|store| {
-        let (raw, _version) = store
+        let (raw, version) = store
             .get_state_kv(DISPATCH_POLICY_PROPOSAL_NS, proposal_id)
             .map_err(|e| format!("load route policy proposal: {e}"))?
             .ok_or_else(|| format!("route policy proposal not found: {proposal_id}"))?;
@@ -38,16 +38,67 @@ pub(crate) fn handle_route_policy_apply(
             .unwrap_or("route_policy");
         match kind {
             "route_policy" => {
+                // Legacy route_policy proposals (pre-v2 schema) carry no
+                // content-addressed binding, so what the human reviewed is no
+                // guarantee of what apply will persist. Refuse loudly; the row
+                // remains listable with `legacy_unbound_proposal: true` but
+                // cannot be applied.
+                if !value
+                    .get("schema_version")
+                    .and_then(Value::as_u64)
+                    .map(|v| v >= 2)
+                    .unwrap_or(false)
+                {
+                    return Err(format!(
+                        "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be applied; regenerate with action='proposals' to mint a fresh pending v2 proposal"
+                    ));
+                }
+                // Re-validate the persisted content_digest against the
+                // identity_payload still in the row. A mismatch means the row
+                // was mutated after review (a hand-edit, a partial write);
+                // refuse rather than silently applying unreviewed content.
+                let stored_digest = value
+                    .get("content_digest")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let identity_payload = value.get("identity_payload").cloned().unwrap_or(json!({}));
+                let recomputed = super::handlers::content_digest_hex(&identity_payload);
+                if stored_digest.is_empty() || recomputed != stored_digest {
+                    return Err(format!(
+                        "content_digest_mismatch: route policy proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing to apply unreviewed content"
+                    ));
+                }
+
                 value["status"] = json!("applied");
                 value["applied_at"] = json!(applied_at);
                 let next = serde_json::to_string(&value)
                     .map_err(|e| format!("serialize applied route policy proposal: {e}"))?;
-                store
-                    .set_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next)
-                    .map_err(|e| format!("persist applied route policy proposal: {e}"))?;
-                store
-                    .set_state(ROUTE_POLICY_RULE_NS, proposal_id, &next)
+                // Atomically write proposal + route rule in ONE SQLite
+                // transaction with a hard_state version CAS on the proposal
+                // row's approved -> applied transition. A late write failure
+                // (the rule write, the commit, the CAS itself) rolls back both
+                // rows: the apply either fully lands or leaves no trace.
+                let tx = store
+                    .connection_mut()
+                    .transaction()
+                    .map_err(|e| format!("open route policy apply tx: {e}"))?;
+                let cas_ok = memcore::db::set_state_if_version(
+                    &tx,
+                    DISPATCH_POLICY_PROPOSAL_NS,
+                    proposal_id,
+                    &next,
+                    version,
+                )
+                .map_err(|e| format!("CAS applied route policy proposal: {e}"))?;
+                if !cas_ok {
+                    return Err(format!(
+                        "stale_state_version: route policy proposal {proposal_id} changed before apply; reload and retry"
+                    ));
+                }
+                memcore::db::set_state(&tx, ROUTE_POLICY_RULE_NS, proposal_id, &next)
                     .map_err(|e| format!("persist route policy rule: {e}"))?;
+                tx.commit()
+                    .map_err(|e| format!("commit route policy apply tx: {e}"))?;
             }
             "loadout_evolution" => {
                 let profile_name = value

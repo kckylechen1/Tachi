@@ -388,3 +388,357 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
         json!("dispatch_route_policy_rules")
     );
 }
+
+
+// ─── v2 proposal-safety discrimination tests ─────────────────────────────────
+//
+// These are end-to-end tests through tachi_task / tachi_complete. They are
+// written but NOT run by this lane — the leader runs the full suite in the
+// delivery worktree. Each test names the production path it bites and the
+// red->green property it discriminates.
+
+/// Discrimination: regenerating route-policy proposals after the underlying
+/// eval evidence changed (here: a different fallback/current profile wins)
+/// MUST mint a fresh v2 proposal id and a fresh pending row, never inheriting
+/// the prior approval.
+///
+/// Production path: `handle_route_policy_proposals` -> v2 content-addressed
+/// id derived from `route_policy_v2_identity_payload` (which binds the
+/// apply payload's `fallback_to_current_profile` and the evidence row/limit).
+/// Pre-fix red: proposals used a deterministic id keyed only on
+/// (policy, task_type, proposed_profile), so flipping the *fallback* profile
+/// (or the evidence row count) kept the same id and silently inherited the
+/// prior approval.
+/// Post-fix green: changing the fallback/evidence rotates the SHA-256 id,
+/// and the regenerate path finds no prior row at the new id, so the new
+/// proposal starts pending.
+#[tokio::test]
+async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    let seed_one = |task_id: &str, profile: &str, outcome: &str, cost: f64, quality: f64| async {
+        server
+            .tachi_complete(Parameters(TachiCompleteParams {
+                task_id: Some(task_id.to_string()),
+                task: "Implement dispatch policy".to_string(),
+                agent: "custom".to_string(),
+                outcome: outcome.to_string(),
+                task_type: Some("fix_request".to_string()),
+                profile: Some(profile.to_string()),
+                risk: Some("medium".to_string()),
+                duration_ms: Some(100_000),
+                skills_used: vec!["skill:superpowers-executing-plans".to_string()],
+                cost_tokens: Some(1000),
+                cost_usd: Some(cost),
+                quality_score: Some(quality),
+                notes: None,
+                trajectory: None,
+                diff: Some("diff --git a/x b/x".to_string()),
+                worktree: None,
+                subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
+                dispatch_id: None,
+                flow_id: Some("flow-regen-fallback".to_string()),
+                issue_ref: Some("kckylechen1/tachi#194".to_string()),
+                pr_ref: None,
+                evidence_refs: vec!["crates/tachi-server/src/dispatch_profile.rs".to_string()],
+                tests_run: vec!["cargo test".to_string()],
+                diff_present: Some(true),
+                scope: Some("project".to_string()),
+                project: None,
+                format: None,
+                signatures: Vec::new(),
+                rulings: Vec::new(),
+                adjudication: None,
+                eval_run_ids: Vec::new(),
+            }))
+            .await
+            .expect("seed eval row")
+    };
+
+    // Phase 1: seed evidence where `opencode_builder` is the cheaper choice
+    // for fix_request and `claude_plan` is the current/baseline.
+    seed_one("regen-fallback-A1", "claude_plan", "success", 0.50, 0.85).await;
+    seed_one("regen-fallback-A2", "opencode_builder", "success", 0.05, 0.80).await;
+    seed_one("regen-fallback-A3", "opencode_builder", "success", 0.05, 0.80).await;
+
+    let mut proposals = task_params("proposals");
+    proposals.limit = Some(50);
+    let raw = server
+        .tachi_task(Parameters(proposals))
+        .await
+        .expect("proposals A");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON A");
+    let first = parsed["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|proposal| proposal["kind"] == json!("route_policy"))
+        })
+        .expect("at least one route_policy proposal in phase A");
+    let first_id = first["proposal_id"].as_str().expect("id").to_string();
+    assert!(
+        first_id.starts_with("route_policy:v2:"),
+        "v2 id format expected, got: {first_id}"
+    );
+    assert_eq!(first["status"], json!("pending"));
+    assert_eq!(first["schema_version"], json!(2));
+
+    // Approve the v1-id-rotation proposal so we can prove the regenerated
+    // proposal under a different id does NOT inherit this approval.
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(first_id.clone());
+    review.review_status = Some("approved".to_string());
+    let _ = server
+        .tachi_task(Parameters(review))
+        .await
+        .expect("review A");
+
+    // Phase 2: shift the current/baseline profile for fix_request from
+    // `claude_plan` to `glm_51_impl`. This changes the apply payload's
+    // `fallback_to_current_profile`, which is bound to the v2 identity.
+    seed_one("regen-fallback-B1", "glm_51_impl", "success", 0.40, 0.92).await;
+    seed_one("regen-fallback-B2", "glm_51_impl", "success", 0.40, 0.92).await;
+    seed_one("regen-fallback-B3", "glm_51_impl", "success", 0.40, 0.92).await;
+
+    let mut proposals_b = task_params("proposals");
+    proposals_b.limit = Some(50);
+    let raw_b = server.tachi_task(Parameters(proposals_b)).await.expect("proposals B");
+    let parsed_b: serde_json::Value = serde_json::from_str(&raw_b).expect("proposals JSON B");
+    let route_proposals_b: Vec<&serde_json::Value> = parsed_b["proposals"]
+        .as_array()
+        .expect("proposals")
+        .iter()
+        .filter(|proposal| proposal["kind"] == json!("route_policy"))
+        .collect();
+    assert!(
+        !route_proposals_b.is_empty(),
+        "expected at least one route_policy proposal in phase B"
+    );
+
+    // At least one phase-B id must be different from the phase-A id (the
+    // identity rotated because the fallback/current profile changed). And
+    // whichever phase-B proposal shares the phase-A id (if any) keeps the
+    // approval; any new id must be pending.
+    let any_new_id = route_proposals_b
+        .iter()
+        .find(|proposal| proposal["proposal_id"].as_str() != Some(first_id.as_str()));
+    let new = any_new_id.expect(
+        "expected at least one phase-B proposal with a new v2 id after the fallback flipped;          if every proposal kept the same id, the identity is not bound to fallback_to_current_profile",
+    );
+    let new_id = new["proposal_id"].as_str().expect("id").to_string();
+    assert_ne!(new_id, first_id, "id must rotate when fallback changes");
+    assert_eq!(
+        new["status"],
+        json!("pending"),
+        "the rotated-id proposal must NOT inherit the prior approval"
+    );
+    assert_eq!(new["schema_version"], json!(2));
+}
+
+/// Discrimination: once a route-policy proposal is in a terminal state
+/// (rejected OR applied), it cannot be reviewed again. The review path must
+/// refuse loudly with the terminal-state error.
+///
+/// Production path: `handle_route_policy_review` -> pending-state guard.
+/// Pre-fix red: review used `set_state` (no CAS, no terminal guard), so a
+/// rejected proposal could be re-approved, or an applied one re-rejected.
+/// Post-fix green: only `pending -> approved | rejected` is permitted.
+#[tokio::test]
+async fn route_terminal_state_cannot_be_rereviewed() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    for (task_id, profile, outcome, cost, quality) in [
+        ("terminal-1", "opencode_builder", "success", 0.01, 0.80),
+        ("terminal-2", "opencode_builder", "failure", 0.01, 0.20),
+        ("terminal-3", "glm_51_impl", "success", 2.00, 0.98),
+    ] {
+        server
+            .tachi_complete(Parameters(TachiCompleteParams {
+                task_id: Some(task_id.to_string()),
+                task: "Implement dispatch policy terminal test".to_string(),
+                agent: "custom".to_string(),
+                outcome: outcome.to_string(),
+                task_type: Some("fix_request".to_string()),
+                profile: Some(profile.to_string()),
+                risk: Some("medium".to_string()),
+                duration_ms: Some(100_000),
+                skills_used: vec!["skill:superpowers-executing-plans".to_string()],
+                cost_tokens: Some(1000),
+                cost_usd: Some(cost),
+                quality_score: Some(quality),
+                notes: None,
+                trajectory: None,
+                diff: Some("diff --git a/x b/x".to_string()),
+                worktree: None,
+                subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
+                dispatch_id: None,
+                flow_id: Some("flow-terminal-test".to_string()),
+                issue_ref: Some("kckylechen1/tachi#194".to_string()),
+                pr_ref: None,
+                evidence_refs: vec!["crates/tachi-server/src/dispatch_profile.rs".to_string()],
+                tests_run: vec!["cargo test".to_string()],
+                diff_present: Some(true),
+                scope: Some("project".to_string()),
+                project: None,
+                format: None,
+                signatures: Vec::new(),
+                rulings: Vec::new(),
+                adjudication: None,
+                eval_run_ids: Vec::new(),
+            }))
+            .await
+            .expect("seed eval row");
+    }
+
+    let mut proposals = task_params("proposals");
+    proposals.limit = Some(50);
+    let raw = server.tachi_task(Parameters(proposals)).await.expect("proposals");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
+    let first = parsed["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|proposal| proposal["kind"] == json!("route_policy"))
+        })
+        .expect("at least one route_policy proposal");
+    let proposal_id = first["proposal_id"].as_str().expect("id").to_string();
+
+    // Move the proposal to terminal "rejected".
+    let mut reject = task_params("review_proposal");
+    reject.proposal_id = Some(proposal_id.clone());
+    reject.review_status = Some("rejected".to_string());
+    let _ = server.tachi_task(Parameters(reject)).await.expect("reject");
+
+    // Re-review the rejected row: must refuse with a terminal-state error.
+    let mut re_approve = task_params("review_proposal");
+    re_approve.proposal_id = Some(proposal_id.clone());
+    re_approve.review_status = Some("approved".to_string());
+    let err = server
+        .tachi_task(Parameters(re_approve))
+        .await
+        .expect_err("a rejected proposal must not be re-reviewable");
+    assert!(
+        err.contains("terminal state"),
+        "expected a terminal-state refusal, got: {err}"
+    );
+}
+
+/// Discrimination: two applies of the same approved proposal must yield
+/// exactly one terminal receipt. The first apply succeeds (status -> applied,
+/// rule row created); the second apply is refused because the status is no
+/// longer `approved`. The hard_state CAS on the apply path guarantees even a
+/// truly concurrent pair of applies produces exactly one terminal write.
+///
+/// Production path: `handle_route_policy_apply` -> status==approved guard
+/// AND the `set_state_if_version` CAS inside the atomic transaction.
+/// Pre-fix red: apply used `set_state` (no CAS), so a concurrent pair could
+/// both read `approved`, both write `applied`, and stamp two apply_at
+/// receipts on the same row (last-write-wins, no single-winner guarantee).
+/// Post-fix green: the CAS makes one apply the winner and the other a
+/// `stale_state_version` refusal (or, for a sequential pair, an
+/// `must be approved before apply` refusal because the first already moved
+/// the status to `applied`).
+#[tokio::test]
+async fn route_two_applies_yield_one_terminal_receipt() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    for (task_id, profile, outcome, cost, quality) in [
+        ("two-apply-1", "opencode_builder", "success", 0.01, 0.80),
+        ("two-apply-2", "opencode_builder", "failure", 0.01, 0.20),
+        ("two-apply-3", "glm_51_impl", "success", 2.00, 0.98),
+    ] {
+        server
+            .tachi_complete(Parameters(TachiCompleteParams {
+                task_id: Some(task_id.to_string()),
+                task: "two-apply fixture".to_string(),
+                agent: "custom".to_string(),
+                outcome: outcome.to_string(),
+                task_type: Some("fix_request".to_string()),
+                profile: Some(profile.to_string()),
+                risk: Some("medium".to_string()),
+                duration_ms: Some(100_000),
+                skills_used: vec!["skill:superpowers-executing-plans".to_string()],
+                cost_tokens: Some(1000),
+                cost_usd: Some(cost),
+                quality_score: Some(quality),
+                notes: None,
+                trajectory: None,
+                diff: Some("diff --git a/x b/x".to_string()),
+                worktree: None,
+                subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
+                dispatch_id: None,
+                flow_id: Some("flow-two-apply".to_string()),
+                issue_ref: Some("kckylechen1/tachi#194".to_string()),
+                pr_ref: None,
+                evidence_refs: vec!["crates/tachi-server/src/dispatch_profile.rs".to_string()],
+                tests_run: vec!["cargo test".to_string()],
+                diff_present: Some(true),
+                scope: Some("project".to_string()),
+                project: None,
+                format: None,
+                signatures: Vec::new(),
+                rulings: Vec::new(),
+                adjudication: None,
+                eval_run_ids: Vec::new(),
+            }))
+            .await
+            .expect("seed eval row");
+    }
+
+    let mut proposals = task_params("proposals");
+    proposals.limit = Some(50);
+    let raw = server.tachi_task(Parameters(proposals)).await.expect("proposals");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
+    let first = parsed["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|proposal| proposal["kind"] == json!("route_policy"))
+        })
+        .expect("at least one route_policy proposal");
+    let proposal_id = first["proposal_id"].as_str().expect("id").to_string();
+
+    let mut approve = task_params("review_proposal");
+    approve.proposal_id = Some(proposal_id.clone());
+    approve.review_status = Some("approved".to_string());
+    let _ = server.tachi_task(Parameters(approve)).await.expect("approve");
+
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let applied_raw = server.tachi_task(Parameters(apply.clone())).await.expect("apply #1");
+    let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply #1 JSON");
+    assert_eq!(applied["applied"], json!(true));
+    assert_eq!(applied["proposal"]["status"], json!("applied"));
+
+    // Second apply: must refuse because status is now `applied`, not
+    // `approved`. Exactly one terminal receipt exists.
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("second apply must be refused; status is no longer approved");
+    assert!(
+        err.contains("must be approved before apply"),
+        "expected 'must be approved before apply' refusal on the second apply, got: {err}"
+    );
+
+    // Exactly one rule row in the route-rule namespace for this proposal id.
+    let rules = server
+        .with_global_store_read(|store| {
+            store
+                .list_state(tachi_dispatch::ROUTE_POLICY_RULE_NS)
+                .map_err(|e| e.to_string())
+        })
+        .expect("list rules");
+    let matching = rules
+        .iter()
+        .filter(|row| row.key == proposal_id)
+        .count();
+    assert_eq!(matching, 1, "exactly one rule row for the applied proposal");
+}
