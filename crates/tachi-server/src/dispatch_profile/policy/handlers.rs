@@ -2,7 +2,7 @@ use super::super::*;
 use super::simulation::{route_simulation_caveats, simulate_route_policy};
 use sha2::{Digest, Sha256};
 use tachi_dispatch::policy::{
-    build_loadout_evolution_proposals, build_route_policy_proposals,
+    build_loadout_evolution_proposals, build_route_policy_proposals, canonical_json_eq,
     route_policy_v2_identity_payload, LoadoutEvalEntry, ProfileCardRiskInputs,
     ProfilePositiveEvolutionInputs, ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
     ROUTE_POLICY_PROPOSAL_TARGET,
@@ -24,6 +24,49 @@ pub(super) fn content_digest_hex(identity_payload: &Value) -> String {
         out.push_str(&format!("{:02x}", byte));
     }
     out
+}
+
+/// Which unbound top-level DISPLAY field (`policy_rule` or `evidence`) — the
+/// exact fields `handle_route_policy_proposals`/`handle_route_policy_review`
+/// return verbatim to a caller — diverged from its digest-bound
+/// `identity_payload` counterpart, if any. `None` means both match after
+/// canonicalizing through the SAME `canonical_json` the identity hash uses
+/// (`canonical_json_eq`), which is the only comparison rule this repo has for
+/// "these two JSON values represent the same content."
+///
+/// This is a DIFFERENT question from `content_digest_mismatch`:
+/// `content_digest_hex(identity_payload) == content_digest` proves
+/// `identity_payload` is internally self-consistent with the stored digest —
+/// it says nothing about whether the row's DISPLAY copy (what a human
+/// reviewing the proposal actually sees) still matches it. A row can pass the
+/// digest check and still have a drifted display copy if only `policy_rule`/
+/// `evidence` were hand-edited or partially written after generation; a human
+/// who approves based on the (wrong) display copy has not actually approved
+/// what `identity_payload` binds. Refuse loudly rather than silently either
+/// applying the (safe) bound copy or trusting the (possibly wrong) display
+/// copy — see the review/apply call sites for why silent correction is not
+/// this repo's call to make on a human's behalf.
+pub(super) fn route_policy_display_drift(
+    value: &Value,
+    identity_payload: &Value,
+) -> Option<&'static str> {
+    let apply_payload = identity_payload
+        .get("apply_payload")
+        .cloned()
+        .unwrap_or(json!({}));
+    let evidence_review = identity_payload
+        .get("evidence_review")
+        .cloned()
+        .unwrap_or(json!({}));
+    let policy_rule = value.get("policy_rule").cloned().unwrap_or(json!({}));
+    let evidence = value.get("evidence").cloned().unwrap_or(json!({}));
+    if !canonical_json_eq(&policy_rule, &apply_payload) {
+        return Some("policy_rule");
+    }
+    if !canonical_json_eq(&evidence, &evidence_review) {
+        return Some("evidence");
+    }
+    None
 }
 
 /// v2 proposal id: human-readable kind prefix + the content digest. The digest
@@ -331,6 +374,18 @@ pub(crate) fn handle_route_policy_review(
             if stored_digest.is_empty() || recomputed != stored_digest {
                 return Err(format!(
                     "content_digest_mismatch: route policy proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing to review a proposal that drifted from what was generated"
+                ));
+            }
+            // Distinct from the digest check above: prove the DISPLAY copy
+            // this action's own response returns (`policy_rule`/`evidence` at
+            // the top level) still matches what `identity_payload` binds. A
+            // reviewer approves based on the display copy, not
+            // `identity_payload` — if it drifted, the approval about to be
+            // recorded would not actually cover the bound content. Refuse
+            // rather than silently reviewing content the caller never saw.
+            if let Some(field) = route_policy_display_drift(&value, &identity_payload) {
+                return Err(format!(
+                    "display_copy_drift: route policy proposal {proposal_id} top-level `{field}` does not match its digest-bound identity_payload copy; refusing to record a review decision against display content that has diverged from what was actually generated"
                 ));
             }
         }

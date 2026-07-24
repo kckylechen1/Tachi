@@ -29,7 +29,14 @@ pub const ROUTE_POLICY_PROPOSAL_TARGET: &str = "route_policy_rule";
 /// that built the "same" proposal from different code paths must hash to the
 /// same id, and any change to the apply payload, review evidence, policy
 /// version, or target must produce a different id.
-fn canonical_json(value: &Value) -> Value {
+///
+/// `pub` (not crate-private) so the server crate's display/bound drift checks
+/// — comparing an unbound top-level display field (`policy_rule`, `evidence`,
+/// `config_env`) against its digest-bound `identity_payload` counterpart —
+/// normalize through the SAME canonicalization the identity hash itself uses,
+/// rather than inventing a second comparison rule that could silently drift
+/// from this one. See `canonical_json_eq`.
+pub fn canonical_json(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut sorted = BTreeMap::new();
@@ -41,6 +48,15 @@ fn canonical_json(value: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
         scalar => scalar.clone(),
     }
+}
+
+/// `true` iff `a` and `b` are equal after canonicalization through the same
+/// [`canonical_json`] the v2 identity hash uses. The single comparison rule
+/// for every display-copy-vs-bound-copy drift check in the server crate
+/// (route policy's `policy_rule`/`evidence`, recall's `config_env`) — never
+/// duplicate this as a second normalization.
+pub fn canonical_json_eq(a: &Value, b: &Value) -> bool {
+    canonical_json(a) == canonical_json(b)
 }
 
 /// Build the canonical identity payload that the v2 proposal id hashes. The

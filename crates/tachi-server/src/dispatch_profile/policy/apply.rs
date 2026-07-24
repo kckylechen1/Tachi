@@ -68,6 +68,26 @@ pub(crate) fn handle_route_policy_apply(
                         "content_digest_mismatch: route policy proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing to apply unreviewed content"
                     ));
                 }
+                // Distinct from the digest check above: prove the DISPLAY
+                // copy (`policy_rule`/`evidence` at the top level — what
+                // `handle_route_policy_proposals`/`handle_route_policy_review`
+                // actually return to a caller) still matches what
+                // `identity_payload` binds. A human approves based on the
+                // display copy; if it drifted after review (a hand-edit, a
+                // partial write) — even in a "softer" direction that a human
+                // would have approved — that approval did not actually cover
+                // the bound content, and silently applying the bound copy
+                // would be this code deciding on the human's behalf that they
+                // "really meant" the bound version. Refuse instead: zero
+                // mutation, loud enough for an operator to reconcile the row.
+                if let Some(field) = super::handlers::route_policy_display_drift(
+                    &value,
+                    &identity_payload,
+                ) {
+                    return Err(format!(
+                        "display_copy_drift: route policy proposal {proposal_id} top-level `{field}` does not match its digest-bound identity_payload copy; refusing to apply content that diverged from what was reviewed"
+                    ));
+                }
                 // Overwrite the top-level `policy_rule` / `evidence` fields
                 // with the digest-validated `identity_payload` copies
                 // immediately before persisting. `routing.rs`'s live
@@ -76,16 +96,14 @@ pub(crate) fn handle_route_policy_apply(
                 // legacy pre-v2 rows already applied before this change)
                 // reads `policy_rule` and `evidence` from the top level, NOT
                 // from `identity_payload` — so it cannot be repointed at the
-                // bound copy without breaking those pre-existing legacy
-                // rows. The content_digest check above only proves
-                // `identity_payload` is internally self-consistent; it says
-                // nothing about whether `policy_rule`/`evidence` (which a
-                // reviewer's UI/response shows) still match it. Forcing them
-                // to the bound copy here — the moment content lands in
-                // `ROUTE_POLICY_RULE_NS`/`DISPATCH_POLICY_PROPOSAL_NS` — closes
-                // that gap by construction for every row this apply path
-                // writes, without touching the external consumer or its
-                // legacy rows.
+                // bound copy without breaking those pre-existing legacy rows.
+                // At this point the drift check above has already proven the
+                // two copies are canonically equal, so this write is a
+                // normalization (stable key order, no literal-vs-canonical
+                // mismatch), never a content change — the refusal above is
+                // what actually stops a drifted proposal; this is defense in
+                // depth for what lands in the namespace every routing
+                // decision reads.
                 if let Some(bound_apply_payload) = identity_payload.get("apply_payload") {
                     value["policy_rule"] = bound_apply_payload.clone();
                 }

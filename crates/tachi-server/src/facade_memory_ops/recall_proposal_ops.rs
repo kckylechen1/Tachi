@@ -11,12 +11,37 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tachi_dispatch::policy::{
-    recall_config_v2_identity_payload, RECALL_CONFIG_PROPOSAL_POLICY_VERSION,
+    canonical_json_eq, recall_config_v2_identity_payload, RECALL_CONFIG_PROPOSAL_POLICY_VERSION,
     RECALL_CONFIG_PROPOSAL_TARGET,
 };
 
 const RECALL_CONFIG_PROPOSAL_NS: &str = "recall_config_proposals";
 const EPSILON: f64 = 0.000_001;
+
+/// `true` iff the row's unbound top-level DISPLAY field (`config_env` — the
+/// exact field `handle_recall_config_proposals`/`handle_recall_config_review`
+/// return verbatim to a caller) has drifted from its digest-bound
+/// `identity_payload.apply_payload.config_env` counterpart. Compares through
+/// the SAME `canonical_json_eq` the identity hash itself normalizes through —
+/// the only comparison rule this repo has for "these two JSON values
+/// represent the same content," never a second one invented here.
+///
+/// A DIFFERENT question from `content_digest_mismatch`: that check proves
+/// `identity_payload` is internally self-consistent with `content_digest`; it
+/// says nothing about whether the DISPLAY copy a human actually reviewed
+/// still matches it. A row can pass the digest check and still have a
+/// drifted display copy if only `config_env` was hand-edited or partially
+/// written after generation — a human who approves based on that (wrong)
+/// display copy has not actually approved what `identity_payload` binds.
+fn recall_config_display_drifted(value: &Value, identity_payload: &Value) -> bool {
+    let bound_config_env = identity_payload
+        .get("apply_payload")
+        .and_then(|apply_payload| apply_payload.get("config_env"))
+        .cloned()
+        .unwrap_or(json!({}));
+    let display_config_env = value.get("config_env").cloned().unwrap_or(json!({}));
+    !canonical_json_eq(&display_config_env, &bound_config_env)
+}
 
 pub(crate) async fn handle_recall_config_proposals(
     server: &MemoryServer,
@@ -123,6 +148,18 @@ pub(crate) fn handle_recall_config_review(
         if stored_digest.is_empty() || recomputed_digest != stored_digest {
             return Err(format!(
                 "content_digest_mismatch: recall config proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed_digest}; refusing to review a proposal that drifted from what was generated"
+            ));
+        }
+        // Distinct from the digest check above: prove the DISPLAY copy
+        // (top-level `config_env` — what this action's own response returns)
+        // still matches what `identity_payload` binds. A reviewer approves
+        // based on the display copy, not `identity_payload` — if it drifted,
+        // the approval about to be recorded would not actually cover the
+        // bound content. Refuse rather than silently reviewing content the
+        // caller never saw.
+        if recall_config_display_drifted(&value, &identity_payload) {
+            return Err(format!(
+                "display_copy_drift: recall config proposal {proposal_id} top-level `config_env` does not match its digest-bound identity_payload copy; refusing to record a review decision against display content that has diverged from what was actually generated"
             ));
         }
         // Review only permits pending -> approved | rejected. A terminal
@@ -323,6 +360,19 @@ fn drive_recall_apply_state_machine(
     if stored_digest.is_empty() || recomputed_digest != stored_digest {
         return Err(format!(
             "content_digest_mismatch: recall config proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed_digest}; refusing to apply unreviewed content"
+        ));
+    }
+    // Distinct from the digest check above: prove the DISPLAY copy
+    // (top-level `config_env` — what a reviewer's UI/response actually shows)
+    // still matches what `identity_payload` binds. Reading the bound copy
+    // below (never the display copy) already makes it impossible for a
+    // drifted display copy to reach config.env — but a drifted display copy
+    // still means the human's review was recorded against content that
+    // differs from what actually gets applied, which is a fact worth
+    // refusing loudly on rather than silently overriding.
+    if recall_config_display_drifted(&proposal, &identity_payload) {
+        return Err(format!(
+            "display_copy_drift: recall config proposal {proposal_id} top-level `config_env` does not match its digest-bound identity_payload copy; refusing to apply content that diverged from what was reviewed"
         ));
     }
 
