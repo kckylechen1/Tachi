@@ -329,8 +329,10 @@ mod tests {
 
     #[test]
     fn top_consumers_rank_live_resources_and_exclude_reclaimed_bytes() {
-        let dir =
-            crate::utils::test_fixture_path(format!("tachi-disk-consumers-{}", uuid::Uuid::new_v4()));
+        let dir = crate::utils::test_fixture_path(format!(
+            "tachi-disk-consumers-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("memory.db");
         let mut store = memcore::MemoryStore::open(db.to_str().unwrap()).unwrap();
