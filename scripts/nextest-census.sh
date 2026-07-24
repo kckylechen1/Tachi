@@ -231,7 +231,15 @@ with open(jsonl_path, encoding="utf-8") as prior_rows:
         key = (prior.get("test_id"), prior.get("failure_line1_hash"))
         if all(key):
             previous[key] += 1
-tree = ET.parse(junit_path)
+try:
+    tree = ET.parse(junit_path)
+except ET.ParseError as err:
+    print(
+        "nextest-census: STOP — malformed JUnit at "
+        f"{junit_path}; nextest_exit={nextest_exit}; refusing capture: {err}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 root = tree.getroot()
 
 # nextest may emit <testsuites><testsuite>… or a bare <testsuite>.

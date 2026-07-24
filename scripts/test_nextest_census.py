@@ -176,7 +176,7 @@ sys.exit(7)
             ("nonzero_with_failure", 100, "failure", 0, 1),
             ("nonzero_without_failures", 100, "empty", 100, 0),
             ("missing_junit", 100, "missing", 2, 0),
-            ("malformed_junit", 100, "malformed", 1, 0),
+            ("malformed_junit", 100, "malformed", 2, 0),
         )
         for name, cargo_exit, junit_mode, wrapper_exit, expected_rows in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
@@ -199,6 +199,18 @@ sys.exit(7)
                         "nextest exited 100 but valid JUnit contained zero failure/error nodes",
                         result.stderr,
                     )
+
+    def test_malformed_junit_names_original_nextest_exit_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result, jsonl = run_exit_contract_case(
+                Path(temp_dir), cargo_exit=100, junit_mode="malformed"
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("malformed JUnit", result.stderr)
+            self.assertIn("nextest_exit=100", result.stderr)
+            rows = jsonl.read_text(encoding="utf-8").splitlines() if jsonl.exists() else []
+            self.assertEqual(rows, [], "malformed JUnit must not append a receipt")
 
 
 if __name__ == "__main__":
