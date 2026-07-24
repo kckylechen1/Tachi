@@ -462,7 +462,27 @@ fn existing_paths_share_inode(_left: &Path, _right: &Path) -> Result<bool, Strin
     Ok(false)
 }
 
-fn refuse_baseline_report_alias(args: &Args) -> Result<(), String> {
+fn require_distinct_paths(
+    left_label: &str,
+    left: &Path,
+    right_label: &str,
+    right: &Path,
+) -> Result<(), String> {
+    let normalized_left = normalized_path_for_comparison(left)?;
+    let normalized_right = normalized_path_for_comparison(right)?;
+    if normalized_left == normalized_right || existing_paths_share_inode(left, right)? {
+        return Err(format!(
+            "{left_label} and {right_label} must resolve to distinct paths"
+        ));
+    }
+    Ok(())
+}
+
+fn refuse_input_output_aliases(args: &Args) -> Result<(), String> {
+    let manifest = args
+        .manifest
+        .as_deref()
+        .ok_or_else(|| "--manifest is required for pilot modes".to_string())?;
     let baseline_report = args
         .baseline_report
         .as_deref()
@@ -471,16 +491,37 @@ fn refuse_baseline_report_alias(args: &Args) -> Result<(), String> {
         .report
         .as_deref()
         .ok_or_else(|| "--report is required for pilot modes".to_string())?;
-    let baseline = normalized_path_for_comparison(baseline_report)?;
-    let normalized_report = normalized_path_for_comparison(report)?;
-    if baseline == normalized_report || existing_paths_share_inode(baseline_report, report)? {
-        return Err("--baseline-report and --report must resolve to distinct paths".to_string());
+
+    let immutable_inputs = [
+        ("--manifest", manifest),
+        ("--baseline-report", baseline_report),
+    ];
+    let mut mutable_outputs = vec![("--report", report)];
+    if args.execute {
+        let checkpoint = args
+            .checkpoint
+            .as_deref()
+            .ok_or_else(|| "--execute requires --checkpoint".to_string())?;
+        mutable_outputs.push(("--checkpoint", checkpoint));
+    }
+
+    for (input_label, input) in immutable_inputs {
+        for (output_label, output) in &mutable_outputs {
+            require_distinct_paths(input_label, input, output_label, output)?;
+        }
+    }
+    for left_index in 0..mutable_outputs.len() {
+        for right_index in (left_index + 1)..mutable_outputs.len() {
+            let (left_label, left) = mutable_outputs[left_index];
+            let (right_label, right) = mutable_outputs[right_index];
+            require_distinct_paths(left_label, left, right_label, right)?;
+        }
     }
     Ok(())
 }
 
 async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
-    refuse_baseline_report_alias(&args)?;
+    refuse_input_output_aliases(&args)?;
     let manifest = args
         .manifest
         .as_deref()
@@ -649,13 +690,16 @@ mod tests {
     async fn rebaseline_skips_old_baseline_bytes_and_pins_manifest_before_github() {
         let root = tempfile::tempdir().expect("tempdir");
         let manifest = root.path().join("wrong-manifest.json");
+        // Checkpoint is an execute-only output, so rebaseline must ignore even
+        // an otherwise dangerous report alias instead of reading or writing it.
+        let report = root.path().join("new-baseline.json");
         std::fs::write(&manifest, b"{}").expect("write wrong manifest");
         let error = run(Args {
             manifest: Some(manifest),
-            report: Some(root.path().join("new-baseline.json")),
+            report: Some(report.clone()),
             baseline_report: Some(root.path().join("old-baseline-must-not-be-read.json")),
             baseline_sha256: None,
-            checkpoint: None,
+            checkpoint: Some(report),
             captured_at: Some("2026-07-24T04:56:05Z".to_string()),
             execute: false,
             rebaseline: true,
@@ -684,6 +728,90 @@ mod tests {
         })
         .await
         .expect_err("report output must not alias the immutable baseline");
+        assert!(error.contains("distinct"), "{error}");
+        assert!(!error.contains("read manifest"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn report_aliasing_manifest_is_refused_before_any_input_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let manifest_and_report = root.path().join("manifest-and-report.json");
+        let error = run(Args {
+            manifest: Some(manifest_and_report.clone()),
+            report: Some(manifest_and_report),
+            baseline_report: Some(root.path().join("baseline-must-not-be-read.json")),
+            baseline_sha256: Some("not-read".to_string()),
+            checkpoint: None,
+            captured_at: Some("2026-07-24T00:00:00Z".to_string()),
+            execute: false,
+            rebaseline: false,
+            auth_clearance_probe: false,
+        })
+        .await
+        .expect_err("report output must not alias the immutable manifest");
+        assert!(error.contains("distinct"), "{error}");
+        assert!(!error.contains("read manifest"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_aliasing_manifest_is_refused_before_any_input_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let manifest_and_checkpoint = root.path().join("manifest-and-checkpoint.json");
+        let error = run(Args {
+            manifest: Some(manifest_and_checkpoint.clone()),
+            report: Some(root.path().join("report.json")),
+            baseline_report: Some(root.path().join("baseline-must-not-be-read.json")),
+            baseline_sha256: Some("not-read".to_string()),
+            checkpoint: Some(manifest_and_checkpoint),
+            captured_at: Some("2026-07-24T00:00:00Z".to_string()),
+            execute: true,
+            rebaseline: false,
+            auth_clearance_probe: false,
+        })
+        .await
+        .expect_err("execute checkpoint must not alias the immutable manifest");
+        assert!(error.contains("distinct"), "{error}");
+        assert!(!error.contains("read manifest"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_aliasing_baseline_is_refused_before_any_input_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let baseline_and_checkpoint = root.path().join("baseline-and-checkpoint.json");
+        let error = run(Args {
+            manifest: Some(root.path().join("manifest-must-not-be-read.json")),
+            report: Some(root.path().join("report.json")),
+            baseline_report: Some(baseline_and_checkpoint.clone()),
+            baseline_sha256: Some("not-read".to_string()),
+            checkpoint: Some(baseline_and_checkpoint),
+            captured_at: Some("2026-07-24T00:00:00Z".to_string()),
+            execute: true,
+            rebaseline: false,
+            auth_clearance_probe: false,
+        })
+        .await
+        .expect_err("execute checkpoint must not alias the immutable baseline");
+        assert!(error.contains("distinct"), "{error}");
+        assert!(!error.contains("read manifest"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn report_aliasing_checkpoint_via_parent_normalization_is_refused_before_input_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(root.path().join("nested")).expect("create nested directory");
+        let error = run(Args {
+            manifest: Some(root.path().join("manifest-must-not-be-read.json")),
+            report: Some(root.path().join("result.json")),
+            baseline_report: Some(root.path().join("baseline-must-not-be-read.json")),
+            baseline_sha256: Some("not-read".to_string()),
+            checkpoint: Some(root.path().join("nested/../result.json")),
+            captured_at: Some("2026-07-24T00:00:00Z".to_string()),
+            execute: true,
+            rebaseline: false,
+            auth_clearance_probe: false,
+        })
+        .await
+        .expect_err("report and execute checkpoint must resolve to distinct paths");
         assert!(error.contains("distinct"), "{error}");
         assert!(!error.contains("read manifest"), "{error}");
     }
