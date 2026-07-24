@@ -32,8 +32,11 @@ or credential read.
 
 The machine-readable per-case fields — candidate yield, source coverage,
 cost/latency, selected-comment revision receipts, effective engine receipt,
-and behavior-test handoff — are in
-[1059-exact20-pilot-report.json](1059-exact20-pilot-report.json).
+and behavior-test handoff — are in the owner-approved
+[legacy preview baseline artifact](1059-exact20-pilot-report.json). Execution
+preflight reads only its immutable provenance fields through the narrow legacy
+compatibility type; it is not an output destination. New executions emit the
+current expanded report schema to a distinct result path.
 
 ## Scope constraints retained in the receipt
 
@@ -52,6 +55,6 @@ CARGO_TARGET_DIR=/private/tmp/sigil-target-1059-cde718ec \
   --manifest docs/engineering/receipts/1059-exact20-manifest.json \
   --baseline-report docs/engineering/receipts/1059-exact20-pilot-report.json \
   --baseline-sha256 3bbb067f90c57009eeb45e9129becf7bf28062a718735686f088761e68e2765e \
-  --report docs/engineering/receipts/1059-exact20-pilot-report.json \
+  --report /private/tmp/1059-exact20-phase3-report.json \
   --captured-at 2026-07-23T17:42:43Z
 ```

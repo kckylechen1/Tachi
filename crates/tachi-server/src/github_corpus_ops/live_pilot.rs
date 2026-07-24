@@ -864,6 +864,45 @@ fn reconcile_checkpoint(
         );
     }
     let mut changed = false;
+    let expected_case_ids = preflight
+        .prepared
+        .cases
+        .iter()
+        .map(|prepared_case| prepared_case.owner_case.case_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen_case_ids = HashSet::with_capacity(checkpoint.cases.len());
+    for saved in &checkpoint.cases {
+        if !expected_case_ids.contains(saved.case_id.as_str()) {
+            return Err("checkpoint contains a case outside the immutable manifest".to_string());
+        }
+        if !seen_case_ids.insert(saved.case_id.as_str()) {
+            return Err("checkpoint contains a duplicate case ID".to_string());
+        }
+    }
+    if seen_case_ids.len() != expected_case_ids.len() {
+        return Err("checkpoint omits an owner-approved case".to_string());
+    }
+    if checkpoint
+        .cases
+        .iter()
+        .zip(&preflight.prepared.cases)
+        .any(|(saved, prepared_case)| saved.case_id != prepared_case.owner_case.case_id)
+    {
+        let mut unordered = std::mem::take(&mut checkpoint.cases);
+        checkpoint.cases = preflight
+            .prepared
+            .cases
+            .iter()
+            .map(|prepared_case| {
+                let index = unordered
+                    .iter()
+                    .position(|saved| saved.case_id == prepared_case.owner_case.case_id)
+                    .expect("case ID set was validated above");
+                unordered.remove(index)
+            })
+            .collect();
+        changed = true;
+    }
     for prepared_case in &preflight.prepared.cases {
         let Some(saved) = checkpoint
             .cases
@@ -1396,6 +1435,7 @@ mod tests {
     #[derive(Clone)]
     struct SyntheticModel {
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        requested_cases: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         known_identity: bool,
         full_coverage: bool,
         actual_cost: bool,
@@ -1407,6 +1447,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                requested_cases: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 known_identity: false,
                 full_coverage: false,
                 actual_cost: false,
@@ -1423,6 +1464,10 @@ mod tests {
             request: CorpusPilotModelRequestV1,
         ) -> Result<CorpusPilotModelCompletionV1, String> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.requested_cases
+                .lock()
+                .expect("requested cases lock")
+                .push(request.case_id.clone());
             if self.fail_case.as_deref() == Some(request.case_id.as_str()) {
                 return Err(format!(
                     "RAW_MODEL_FAILURE_BODY {} {}",
@@ -2128,12 +2173,197 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn reordered_checkpoint_preserves_case_routing_without_duplicate_spend() {
+        let input = input_bytes(MERGE_SHA);
+        let parsed_input: CorpusPilotInputV1 =
+            serde_json::from_slice(&input).expect("fixture input parses");
+        let reader = fixture_reader(false);
+        let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
+        let store = MemoryCheckpointStore::default();
+        let initial_resolver = SyntheticResolver::new(SyntheticModel {
+            known_identity: true,
+            full_coverage: true,
+            actual_cost: true,
+            ..Default::default()
+        });
+        run_fixture_with(&input, &reader, &baseline_bytes, &store, &initial_resolver)
+            .await
+            .expect("fixture creates a complete checkpoint");
+
+        {
+            let mut saved = store.checkpoint.lock().expect("checkpoint lock");
+            let checkpoint = saved.as_mut().expect("checkpoint saved");
+            let case_a = &mut checkpoint.cases[0];
+            case_a.fully_attested_completion_attempt = None;
+            let Some(CorpusPilotCheckpointOutcomeV1::Candidate {
+                fully_attested,
+                report,
+                ..
+            }) = case_a.attempts[0].outcome.as_mut()
+            else {
+                panic!("case A must contain a candidate");
+            };
+            *fully_attested = false;
+            report.cost_latency.cost_usd = None;
+            report.cost_latency.cost_status = "provider_price_not_reported".to_string();
+            report.cost_latency.cost_basis = None;
+            report.cost_latency.cost_version = None;
+
+            let case_b = &mut checkpoint.cases[1];
+            case_b.fully_attested_completion_attempt = None;
+            case_b.attempts[0].outcome = Some(CorpusPilotCheckpointOutcomeV1::Failure {
+                failure_class: "model_invocation_failed".to_string(),
+                latency_ms: 9,
+            });
+            checkpoint.cases.swap(0, 1);
+        }
+
+        let resume_model = SyntheticModel {
+            known_identity: true,
+            full_coverage: true,
+            actual_cost: true,
+            ..Default::default()
+        };
+        let requested_cases = resume_model.requested_cases.clone();
+        let resume_resolver = SyntheticResolver::new(resume_model);
+        let resumed = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resume_resolver)
+            .await
+            .expect("a valid permutation is canonicalized before execution");
+
+        assert_eq!(
+            requested_cases
+                .lock()
+                .expect("requested cases lock")
+                .as_slice(),
+            ["owner-case-1"],
+            "the terminal missing-cost case must not be spent again"
+        );
+        assert_eq!(
+            resume_resolver
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the genuinely unfinished case may require resolution"
+        );
+        assert_eq!(
+            resumed
+                .report
+                .cases
+                .iter()
+                .map(|case| case.case_id.as_str())
+                .collect::<Vec<_>>(),
+            parsed_input
+                .cases
+                .iter()
+                .map(|case| case.case_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        let checkpoint = store.snapshot();
+        assert_eq!(
+            checkpoint
+                .cases
+                .iter()
+                .map(|case| case.case_id.as_str())
+                .collect::<Vec<_>>(),
+            parsed_input
+                .cases
+                .iter()
+                .map(|case| case.case_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(checkpoint.cases[0].attempts.len(), 1);
+        assert_eq!(checkpoint.cases[1].attempts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_duplicate_missing_and_extra_case_ids_refuse_before_resolver() {
+        let input = input_bytes(MERGE_SHA);
+        let reader = fixture_reader(false);
+        let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
+        let seed_store = MemoryCheckpointStore::default();
+        run_fixture_with(
+            &input,
+            &reader,
+            &baseline_bytes,
+            &seed_store,
+            &SyntheticResolver::new(SyntheticModel {
+                known_identity: true,
+                full_coverage: true,
+                actual_cost: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("fixture creates a checkpoint");
+        let seed = seed_store.snapshot();
+
+        for (label, mutate) in [
+            (
+                "duplicate",
+                Box::new(|checkpoint: &mut CorpusPilotCheckpointV1| {
+                    checkpoint.cases[1].case_id = checkpoint.cases[0].case_id.clone();
+                }) as Box<dyn Fn(&mut CorpusPilotCheckpointV1)>,
+            ),
+            (
+                "missing",
+                Box::new(|checkpoint: &mut CorpusPilotCheckpointV1| {
+                    checkpoint.cases.remove(0);
+                }),
+            ),
+            (
+                "extra",
+                Box::new(|checkpoint: &mut CorpusPilotCheckpointV1| {
+                    let mut extra = checkpoint.cases[0].clone();
+                    extra.case_id = "owner-case-extra".to_string();
+                    checkpoint.cases.push(extra);
+                }),
+            ),
+        ] {
+            let mut checkpoint = seed.clone();
+            mutate(&mut checkpoint);
+            let store = MemoryCheckpointStore {
+                checkpoint: std::sync::Mutex::new(Some(checkpoint)),
+                ..Default::default()
+            };
+            let resolver = SyntheticResolver::new(SyntheticModel::default());
+            let error = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resolver)
+                .await
+                .expect_err("invalid checkpoint case IDs must be refused");
+            assert!(error.contains("checkpoint"), "{label}: {error}");
+            assert_eq!(
+                resolver.calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{label} checkpoint must fail before resolver construction"
+            );
+        }
+    }
+
     #[test]
-    fn documented_reproduction_command_includes_pinned_baseline_arguments() {
+    fn legacy_baseline_is_compatible_and_reproduction_output_is_distinct() {
         let receipt = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/engineering/receipts/1059-exact20-pilot-report.md"
         ));
+        let baseline_bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/engineering/receipts/1059-exact20-pilot-report.json"
+        ));
+        let manifest_bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/engineering/receipts/1059-exact20-manifest.json"
+        ));
+        assert_eq!(
+            sha256_hex(baseline_bytes),
+            OWNER_APPROVED_EXACT20_BASELINE_SHA256
+        );
+        let baseline: CorpusPilotProvenanceBaselineV1 =
+            serde_json::from_slice(baseline_bytes).expect("legacy preview baseline must parse");
+        let input: CorpusPilotInputV1 =
+            serde_json::from_slice(manifest_bytes).expect("committed manifest must parse");
+        validate_provenance_baseline(&input, &sha256_hex(manifest_bytes), &baseline)
+            .expect("legacy baseline provenance remains compatible");
+
         let reproduce = receipt
             .split_once("## Reproduce")
             .map(|(_, section)| section)
@@ -2144,5 +2374,8 @@ mod tests {
         assert!(reproduce.contains(&format!(
             "--baseline-sha256 {OWNER_APPROVED_EXACT20_BASELINE_SHA256}"
         )));
+        assert!(reproduce.contains("--report /private/tmp/1059-exact20-phase3-report.json"));
+        assert!(!reproduce
+            .contains("--report docs/engineering/receipts/1059-exact20-pilot-report.json"));
     }
 }
