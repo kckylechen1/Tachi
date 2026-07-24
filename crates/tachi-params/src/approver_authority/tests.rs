@@ -73,7 +73,8 @@ impl FakeProbe {
         team_slug: &str,
         answer: Result<TeamMembershipProbeV1, AuthorityDenialV1>,
     ) -> Self {
-        self.memberships.insert(format!("{org}/{team_slug}"), answer);
+        self.memberships
+            .insert(format!("{org}/{team_slug}"), answer);
         self
     }
 
@@ -634,7 +635,10 @@ fn unavailable_principal_probe_refuses_loudly() {
     .expect_err("an unreachable GitHub must refuse");
     assert!(denial.is_unavailable());
     let message = denial.to_string();
-    assert!(message.contains("refused"), "denial must be loud: {message}");
+    assert!(
+        message.contains("refused"),
+        "denial must be loud: {message}"
+    );
     assert!(
         message.contains("never treated as approval"),
         "denial must say why: {message}"
@@ -1219,7 +1223,10 @@ fn a_receipt_from_the_future_beyond_skew_tolerance_refuses() {
 fn no_credential_value_reaches_the_receipt() {
     let (_probe, _policy, receipt) = issue_owner_receipt();
     let json = serde_json::to_string(&receipt).expect("receipt serializes");
-    assert!(!json.contains(TOKEN), "credential value leaked into receipt");
+    assert!(
+        !json.contains(TOKEN),
+        "credential value leaked into receipt"
+    );
     assert!(!json.contains("ghp_"), "credential-shaped value in receipt");
 
     let fingerprint = &receipt.principal.credential_context.credential_fingerprint;
@@ -1266,7 +1273,10 @@ fn permission_floor_has_no_default_allow_arm() {
         RepoPermissionLevelV1::Push,
     ] {
         assert!(!none.satisfies(level), "empty permissions satisfy nothing");
-        assert!(!read_permissions().satisfies(level), "read satisfies nothing");
+        assert!(
+            !read_permissions().satisfies(level),
+            "read satisfies nothing"
+        );
         assert!(full_permissions().satisfies(level), "admin satisfies all");
     }
     assert!(push_permissions().satisfies(RepoPermissionLevelV1::Push));

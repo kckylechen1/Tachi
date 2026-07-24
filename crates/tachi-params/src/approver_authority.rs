@@ -343,7 +343,10 @@ impl fmt::Display for AuthorityDenialV1 {
                  ({detail})"
             ),
             Self::BindingComputationFailed { detail } => {
-                write!(f, "refused: could not compute an approval binding ({detail})")
+                write!(
+                    f,
+                    "refused: could not compute an approval binding ({detail})"
+                )
             }
         }
     }
@@ -477,7 +480,10 @@ impl VerifiedPrincipalV1 {
         }
         if self.account_type != other.account_type {
             return Err(AuthorityDenialV1::PrincipalChanged {
-                detail: format!("account_type {} -> {}", other.account_type, self.account_type),
+                detail: format!(
+                    "account_type {} -> {}",
+                    other.account_type, self.account_type
+                ),
             });
         }
         Ok(())
@@ -746,10 +752,8 @@ impl ApproverAuthorizationPolicyV1 {
     /// unusable policy cannot mint a revision that a receipt then binds.
     pub fn authorization_revision(&self) -> Result<String, AuthorityDenialV1> {
         self.validate()?;
-        canonical_json_sha256(self).map_err(|detail| {
-            AuthorityDenialV1::BindingComputationFailed {
-                detail: format!("authorization_revision: {detail}"),
-            }
+        canonical_json_sha256(self).map_err(|detail| AuthorityDenialV1::BindingComputationFailed {
+            detail: format!("authorization_revision: {detail}"),
         })
     }
 }
@@ -1059,11 +1063,8 @@ pub trait ApproverAuthorityProbe {
 
     /// `GET /repos/{owner}/{repo}/commits/{ref}` — the commit a ref resolves
     /// to right now.
-    fn repo_revision(
-        &self,
-        repo: &str,
-        git_ref: &str,
-    ) -> Result<RepoRevisionV1, AuthorityDenialV1>;
+    fn repo_revision(&self, repo: &str, git_ref: &str)
+        -> Result<RepoRevisionV1, AuthorityDenialV1>;
 }
 
 // ─── evaluation (pure) ──────────────────────────────────────────────────────
@@ -1125,10 +1126,7 @@ fn evaluate_authority_basis<P: ApproverAuthorityProbe + ?Sized>(
                         login: principal.login.clone(),
                         state: m.state.clone(),
                         role: m.role.clone(),
-                        detail: format!(
-                            "policy requires role '{}'",
-                            team.required_role.as_str()
-                        ),
+                        detail: format!("policy requires role '{}'", team.required_role.as_str()),
                     });
                     continue;
                 }
@@ -1412,7 +1410,10 @@ pub fn revalidate_approval<P: ApproverAuthorityProbe + ?Sized>(
             actual: repo_facts.full_name,
         });
     }
-    if !repo_facts.permissions.satisfies(receipt.required_permission) {
+    if !repo_facts
+        .permissions
+        .satisfies(receipt.required_permission)
+    {
         return Err(AuthorityDenialV1::InsufficientRepoPermission {
             login: live_principal.login.clone(),
             repo: repo_facts.full_name.clone(),

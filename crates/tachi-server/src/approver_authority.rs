@@ -572,9 +572,7 @@ fn parse_permission_level(raw: &str) -> Result<RepoPermissionLevelV1, AuthorityD
 
 fn parse_secs(key: &str, raw: &str) -> Result<i64, AuthorityDenialV1> {
     raw.parse::<i64>().map_err(|err| {
-        policy_unusable(format!(
-            "{key} must be an integer number of seconds: {err}"
-        ))
+        policy_unusable(format!("{key} must be an integer number of seconds: {err}"))
     })
 }
 
