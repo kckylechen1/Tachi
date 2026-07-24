@@ -299,6 +299,13 @@ PY
 FAIL_N=$(wc -l < "${NEW_ROWS}" | tr -d ' ')
 REPEAT_M=0
 NOVEL_K=0
+EMPTY_FAILURE_SET_WITH_NONZERO_EXIT=false
+if [[ "${NEXTEST_EXIT}" -ne 0 && "${FAIL_N}" -eq 0 ]]; then
+  # Invariant: a nonzero nextest result cannot be represented as a successful
+  # zero-failure census. It may be an infrastructure or capture failure that
+  # JUnit cannot describe, so preserve the underlying exit after cleanup.
+  EMPTY_FAILURE_SET_WITH_NONZERO_EXIT=true
+fi
 if [[ "${FAIL_N}" -gt 0 ]]; then
   REPEAT_M="$(python3 - "${NEW_ROWS}" <<'PY'
 import json
@@ -319,7 +326,13 @@ trap - EXIT
 echo "nextest-census: summary nextest_exit=${NEXTEST_EXIT} runtime_s=${RUN_RUNTIME_S} failed=${FAIL_N} previously_seen=${REPEAT_M} novel=${NOVEL_K}"
 echo "nextest-census: jsonl_lines=$(wc -l < "${JSONL}" | tr -d ' ') path=${JSONL}"
 
+if [[ "${EMPTY_FAILURE_SET_WITH_NONZERO_EXIT}" == true ]]; then
+  echo "nextest-census: STOP — nextest exited ${NEXTEST_EXIT} but valid JUnit contained zero failure/error nodes; refusing a hollow-green capture." >&2
+  exit "${NEXTEST_EXIT}"
+fi
+
 # This is a census recorder, not a pass/fail gate: successful capture exits 0
 # even when tests fail. nextest_exit remains loud in every failure row and the
-# summary above; missing JUnit or evidence-lock failures still exit nonzero.
+# summary above; missing/malformed JUnit, a nonzero exit with no JUnit failure
+# rows, or evidence-lock failures still exit nonzero.
 exit 0

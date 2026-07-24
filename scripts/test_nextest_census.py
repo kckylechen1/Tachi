@@ -13,6 +13,61 @@ import unittest
 SOURCE_SCRIPT = Path(__file__).with_name("nextest-census.sh")
 
 
+def run_exit_contract_case(
+    temp: Path, *, cargo_exit: int, junit_mode: str
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    workspace = temp / "workspace"
+    script_dir = workspace / "scripts"
+    script_dir.mkdir(parents=True)
+    script = script_dir / "nextest-census.sh"
+    shutil.copy2(SOURCE_SCRIPT, script)
+
+    fake_bin = temp / "bin"
+    fake_bin.mkdir()
+    fake_cargo = fake_bin / "cargo"
+    fake_cargo.write_text(
+        """#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+junit = Path(os.environ["FAKE_WORKSPACE"]) / "target/nextest/census/junit.xml"
+mode = os.environ["FAKE_JUNIT_MODE"]
+if mode != "missing":
+    junit.parent.mkdir(parents=True, exist_ok=True)
+if mode == "failure":
+    junit.write_text('<testsuites><testsuite><testcase classname="census" name="fails"><failure message="deliberate failure" /></testcase></testsuite></testsuites>')
+elif mode == "empty":
+    junit.write_text('<testsuites><testsuite><testcase classname="census" name="passes" /></testsuite></testsuites>')
+elif mode == "malformed":
+    junit.write_text("<testsuites>")
+elif mode != "missing":
+    raise ValueError(f"unsupported FAKE_JUNIT_MODE: {mode}")
+sys.exit(int(os.environ["FAKE_CARGO_EXIT"]))
+""",
+        encoding="utf-8",
+    )
+    fake_cargo.chmod(0o755)
+
+    evidence_dir = temp / "evidence"
+    env = os.environ | {
+        "CARGO_TARGET_DIR": str(temp / "cargo-target"),
+        "NEXTEST_CENSUS_DIR": str(evidence_dir),
+        "FAKE_CARGO_EXIT": str(cargo_exit),
+        "FAKE_JUNIT_MODE": junit_mode,
+        "FAKE_WORKSPACE": str(workspace),
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+    }
+    result = subprocess.run(
+        ["bash", str(script)],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    return result, evidence_dir / "census.jsonl"
+
+
 class NextestCensusScriptTest(unittest.TestCase):
     def test_records_explicit_parallel_clean_target_and_recurrence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -114,6 +169,36 @@ sys.exit(7)
             self.assertFalse(second_row["target_clean_at_invocation"])
             self.assertEqual(second_row["prior_matching_failures"], 1)
             self.assertEqual(second_row["recurrence"], "recurrent")
+
+    def test_exit_contract_distinguishes_capture_failures(self) -> None:
+        cases = (
+            ("success_without_failures", 0, "empty", 0, 0),
+            ("nonzero_with_failure", 100, "failure", 0, 1),
+            ("nonzero_without_failures", 100, "empty", 100, 0),
+            ("missing_junit", 100, "missing", 2, 0),
+            ("malformed_junit", 100, "malformed", 1, 0),
+        )
+        for name, cargo_exit, junit_mode, wrapper_exit, expected_rows in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
+                result, jsonl = run_exit_contract_case(
+                    Path(temp_dir), cargo_exit=cargo_exit, junit_mode=junit_mode
+                )
+
+                self.assertEqual(result.returncode, wrapper_exit, result.stderr)
+                rows = jsonl.read_text(encoding="utf-8").splitlines() if jsonl.exists() else []
+                self.assertEqual(len(rows), expected_rows)
+                if expected_rows:
+                    self.assertEqual(json.loads(rows[0])["nextest_exit"], cargo_exit)
+                if name == "nonzero_without_failures":
+                    self.assertIn(
+                        "summary nextest_exit=100",
+                        result.stdout,
+                    )
+                    self.assertIn("failed=0", result.stdout)
+                    self.assertIn(
+                        "nextest exited 100 but valid JUnit contained zero failure/error nodes",
+                        result.stderr,
+                    )
 
 
 if __name__ == "__main__":
