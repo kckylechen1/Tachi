@@ -115,6 +115,10 @@ pub enum PilotFreezeError {
     MissingSourceId {
         source_route: PilotSourceRouteV1,
     },
+    UnsafeSourceId {
+        source_route: PilotSourceRouteV1,
+        reason: PilotPrivacyErrorV1,
+    },
     InvalidSourceRevision {
         source_id: String,
         revision: i64,
@@ -177,6 +181,14 @@ impl std::fmt::Display for PilotFreezeError {
             Self::MissingSourceId { source_route } => write!(
                 f,
                 "frozen pilot row for {} has an empty stable id",
+                source_route.as_str()
+            ),
+            Self::UnsafeSourceId {
+                source_route,
+                reason,
+            } => write!(
+                f,
+                "frozen pilot row for {} has an unsafe stable id: {reason}",
                 source_route.as_str()
             ),
             Self::InvalidSourceRevision {
@@ -467,16 +479,24 @@ pub fn freeze_pilot_manifest(
         *sources.entry(row.source_route).or_insert(0usize) += 1;
         *kinds.entry(row.kind).or_insert(0usize) += 1;
         *strata.entry(row.stratum).or_insert(0usize) += 1;
+        if row.source_id.trim().is_empty() {
+            errors.push(PilotFreezeError::MissingSourceId {
+                source_route: row.source_route,
+            });
+            continue;
+        }
+        if let Err(reason) = screen_manifest_metadata_for_public_pilot(&row.source_id) {
+            errors.push(PilotFreezeError::UnsafeSourceId {
+                source_route: row.source_route,
+                reason,
+            });
+            continue;
+        }
         if !seen.insert((row.source_route, row.source_id.clone(), row.source_revision)) {
             errors.push(PilotFreezeError::DuplicateRow {
                 source_route: row.source_route,
                 source_id: row.source_id.clone(),
                 revision: row.source_revision,
-            });
-        }
-        if row.source_id.trim().is_empty() {
-            errors.push(PilotFreezeError::MissingSourceId {
-                source_route: row.source_route,
             });
         }
         if row.source_revision <= 0 {
@@ -811,6 +831,37 @@ mod tests {
         let mut excerpt = valid_rows();
         excerpt[0].selection_reason = "source excerpt: private row contents".to_string();
         assert!(freeze_pilot_manifest(excerpt).is_err());
+    }
+
+    #[test]
+    fn durable_load_rejects_an_unsafe_source_id_before_spend() {
+        let mut rows = valid_rows();
+        rows[0].source_id = "sk-abcdefghijklmnopqrstuvwxyz123456".to_string();
+        rows.sort_by(|left, right| left.binding_key().cmp(&right.binding_key()));
+        let unchecked = PilotManifestV1 { rows: rows.clone() };
+        let persisted = PersistedPilotManifestV1 {
+            format: PILOT_MANIFEST_FORMAT_V1.to_string(),
+            contract_digest: unchecked.contract_digest().unwrap(),
+            rows,
+        };
+        let path =
+            std::env::temp_dir().join(format!("sigil-1073-pilot-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+
+        let result = PilotManifestV1::load_from_path(&path);
+        let _ = std::fs::remove_file(path);
+
+        let errors = match result {
+            Err(PilotManifestIoError::Validation(errors)) => errors,
+            other => panic!("expected durable validation failure, got {other:?}"),
+        };
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            PilotFreezeError::UnsafeSourceId {
+                source_route: PilotSourceRouteV1::Antigravity,
+                ..
+            }
+        )));
     }
 
     #[test]

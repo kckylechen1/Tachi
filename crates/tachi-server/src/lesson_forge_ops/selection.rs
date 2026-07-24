@@ -55,8 +55,8 @@ pub enum PilotSelectionErrorV1 {
     Save,
     Reload,
     IndependentVerification(PilotSourceRouteV1),
-    AtomicReplace(std::io::Error),
-    ReceiptWrite(std::io::Error),
+    AuthoritativePublish(std::io::Error),
+    DocumentationPublish(std::io::Error),
 }
 
 impl std::fmt::Display for PilotSelectionErrorV1 {
@@ -119,10 +119,14 @@ impl std::fmt::Display for PilotSelectionErrorV1 {
                 "independent {} source binding verification failed",
                 route.as_str()
             ),
-            Self::AtomicReplace(error) => {
-                write!(f, "could not atomically replace a verified pilot artifact: {error}")
-            }
-            Self::ReceiptWrite(error) => write!(f, "could not write public receipt: {error}"),
+            Self::AuthoritativePublish(error) => write!(
+                f,
+                "could not durably publish the authoritative pilot manifest: {error}"
+            ),
+            Self::DocumentationPublish(error) => write!(
+                f,
+                "authoritative manifest is valid, but non-authoritative documentation publication failed: {error}"
+            ),
         }
     }
 }
@@ -244,32 +248,52 @@ pub fn select_and_freeze_real_manifest_v1(
             .collect(),
     };
 
-    create_output_parent(&config.manifest_path)?;
-    create_output_parent(&config.receipt_path)?;
+    create_output_parent(&config.manifest_path)
+        .map_err(PilotSelectionErrorV1::AuthoritativePublish)?;
     let manifest_staging = StagedArtifact::new(&config.manifest_path)?;
-    let receipt_staging = StagedArtifact::new(&config.receipt_path)?;
     manifest
         .verify_and_save_to_path(manifest_staging.path(), &resolver)
         .map_err(|_| PilotSelectionErrorV1::Save)?;
+    sync_file(manifest_staging.path()).map_err(PilotSelectionErrorV1::AuthoritativePublish)?;
 
-    let loaded = PilotManifestV1::load_from_path(manifest_staging.path())
+    let staged = PilotManifestV1::load_from_path(manifest_staging.path())
         .map_err(|_| PilotSelectionErrorV1::Reload)?;
-    if loaded
+    if staged
         .contract_digest()
         .map_err(|_| PilotSelectionErrorV1::Reload)?
         != digest
     {
         return Err(PilotSelectionErrorV1::Reload);
     }
-    independently_verify_manifest_sources(&loaded, &config.antigravity_db, &config.hapi_db)?;
+    independently_verify_manifest_sources(&staged, &config.antigravity_db, &config.hapi_db)?;
 
-    let receipt = receipt_from_manifest(&loaded, digest);
-    write_public_receipt(receipt_staging.path(), &config.manifest_path, &receipt)?;
     // Recheck after verification to close a symlink/ancestor retarget window.
-    // The manifest is the authority marker, so replace it last.
+    // JSON is the only authority marker and is published before documentation.
     validate_output_path_identity(config)?;
-    receipt_staging.commit(&config.receipt_path)?;
-    manifest_staging.commit(&config.manifest_path)?;
+    manifest_staging
+        .commit(&config.manifest_path)
+        .map_err(PilotSelectionErrorV1::AuthoritativePublish)?;
+
+    let authoritative = PilotManifestV1::load_from_path(&config.manifest_path)
+        .map_err(|_| PilotSelectionErrorV1::Reload)?;
+    let authoritative_digest = authoritative
+        .contract_digest()
+        .map_err(|_| PilotSelectionErrorV1::Reload)?;
+    if authoritative_digest != digest {
+        return Err(PilotSelectionErrorV1::Reload);
+    }
+
+    let receipt = receipt_from_manifest(&authoritative, authoritative_digest);
+    create_output_parent(&config.receipt_path)
+        .map_err(PilotSelectionErrorV1::DocumentationPublish)?;
+    let receipt_staging = StagedArtifact::new(&config.receipt_path)?;
+    write_non_authoritative_documentation(receipt_staging.path(), &config.manifest_path, &receipt)
+        .map_err(PilotSelectionErrorV1::DocumentationPublish)?;
+    sync_file(receipt_staging.path()).map_err(PilotSelectionErrorV1::DocumentationPublish)?;
+    validate_output_path_identity(config)?;
+    receipt_staging
+        .commit(&config.receipt_path)
+        .map_err(PilotSelectionErrorV1::DocumentationPublish)?;
     Ok(receipt)
 }
 
@@ -384,11 +408,28 @@ fn file_identity(_path: &Path) -> Option<FileIdentity> {
     None
 }
 
-fn create_output_parent(path: &Path) -> Result<(), PilotSelectionErrorV1> {
+fn create_output_parent(path: &Path) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(PilotSelectionErrorV1::ReceiptWrite)?;
+        std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+fn sync_file(path: &Path) -> Result<(), std::io::Error> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(path)?
+        .sync_all()
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), std::io::Error> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pilot artifact path has no parent directory",
+        )
+    })?;
+    std::fs::File::open(parent)?.sync_all()
 }
 
 struct StagedArtifact {
@@ -413,8 +454,9 @@ impl StagedArtifact {
         &self.path
     }
 
-    fn commit(self, destination: &Path) -> Result<(), PilotSelectionErrorV1> {
-        std::fs::rename(&self.path, destination).map_err(PilotSelectionErrorV1::AtomicReplace)
+    fn commit(self, destination: &Path) -> Result<(), std::io::Error> {
+        std::fs::rename(&self.path, destination)?;
+        sync_parent_directory(destination)
     }
 }
 
@@ -835,22 +877,20 @@ fn receipt_from_manifest(
     receipt
 }
 
-fn write_public_receipt(
+fn write_non_authoritative_documentation(
     path: &Path,
     manifest_path: &Path,
     receipt: &PilotSelectionReceiptV1,
-) -> Result<(), PilotSelectionErrorV1> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(PilotSelectionErrorV1::ReceiptWrite)?;
-    }
+) -> Result<(), std::io::Error> {
     let manifest_name = manifest_path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("phase-2a-manifest.json");
     let markdown = format!(
-        "# #1073 phase-2a manifest freeze receipt\n\n\
-         - Status: real 50-row manifest selected and frozen; no model calls performed.\n\
-         - Manifest: `{manifest_name}`\n\
+        "# #1073 phase-2a manifest documentation\n\n\
+         > **Non-authoritative:** this file is deterministic, rebuildable documentation derived from the reloaded JSON manifest. The JSON manifest alone carries freeze authority. Missing or stale documentation is a loud documentation failure, not a change to manifest authority.\n\n\
+         - Status: derived from the validated authoritative 50-row JSON manifest; no model calls performed.\n\
+         - Authoritative manifest: `{manifest_name}`\n\
          - Contract SHA-256: `{}`\n\
          - Privacy: every selected source passed the production privacy gate before verified save; no source text is persisted.\n\
          - Source access: strict read-only SQLite, `query_only`, stable transactions.\n\n\
@@ -870,7 +910,7 @@ fn write_public_receipt(
         receipt.by_stratum[1],
         receipt.by_stratum[2],
     );
-    std::fs::write(path, markdown).map_err(PilotSelectionErrorV1::ReceiptWrite)
+    std::fs::write(path, markdown)
 }
 
 const fn route_index(route: PilotSourceRouteV1) -> usize {
@@ -1157,6 +1197,62 @@ mod tests {
     }
 
     #[test]
+    fn manifest_replace_failure_never_publishes_new_documentation() {
+        let antigravity = fixture_db("publish-a");
+        let hapi = fixture_db("publish-h");
+        let manifest_path = temp_artifact("json");
+        let receipt_path = temp_artifact("md");
+        std::fs::create_dir(&manifest_path).unwrap();
+        std::fs::write(&receipt_path, b"OLD_NON_AUTHORITATIVE_DOCUMENTATION").unwrap();
+        let config = config_with_outputs(
+            &antigravity,
+            &hapi,
+            manifest_path.clone(),
+            receipt_path.clone(),
+        );
+
+        let result = select_and_freeze_real_manifest_v1(&config);
+        let receipt_after = std::fs::read(&receipt_path).unwrap();
+
+        for path in [antigravity, hapi, receipt_path] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(manifest_path);
+
+        assert!(result.is_err());
+        assert_eq!(receipt_after, b"OLD_NON_AUTHORITATIVE_DOCUMENTATION");
+    }
+
+    #[test]
+    fn documentation_failure_leaves_authoritative_manifest_valid() {
+        let antigravity = fixture_db("docs-a");
+        let hapi = fixture_db("docs-h");
+        let manifest_path = temp_artifact("json");
+        let receipt_path = temp_artifact("md");
+        std::fs::create_dir(&receipt_path).unwrap();
+        let config = config_with_outputs(
+            &antigravity,
+            &hapi,
+            manifest_path.clone(),
+            receipt_path.clone(),
+        );
+
+        let result = select_and_freeze_real_manifest_v1(&config);
+        let authoritative = PilotManifestV1::load_from_path(&manifest_path);
+
+        for path in [antigravity, hapi, manifest_path] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(receipt_path);
+
+        assert!(matches!(
+            result,
+            Err(PilotSelectionErrorV1::DocumentationPublish(_))
+        ));
+        assert!(authoritative.is_ok());
+    }
+
+    #[test]
     fn deterministic_selector_fills_the_exact_frozen_matrix() {
         let antigravity = fixture_db("a");
         let hapi = fixture_db("h");
@@ -1185,6 +1281,9 @@ mod tests {
         let public = String::from_utf8(first).unwrap();
         assert!(!public.contains("Synthetic narrative"));
         assert!(!public.contains("Synthetic control"));
+        let documentation = std::fs::read_to_string(&receipt_path).unwrap();
+        assert!(documentation.contains("**Non-authoritative:**"));
+        assert!(documentation.contains("JSON manifest alone carries freeze authority"));
 
         for path in [antigravity, hapi, manifest_path, receipt_path] {
             let _ = std::fs::remove_file(path);
