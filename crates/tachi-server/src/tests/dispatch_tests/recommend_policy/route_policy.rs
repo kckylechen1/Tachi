@@ -427,43 +427,43 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         let profile = profile.to_string();
         let outcome = outcome.to_string();
         async move {
-        server
-            .tachi_complete(Parameters(TachiCompleteParams {
-                task_id: Some(task_id),
-                task: "Implement dispatch policy".to_string(),
-                agent: "custom".to_string(),
-                outcome: outcome.to_string(),
-                task_type: Some("fix_request".to_string()),
-                profile: Some(profile.to_string()),
-                risk: Some("medium".to_string()),
-                duration_ms: Some(100_000),
-                skills_used: vec!["skill:superpowers-executing-plans".to_string()],
-                cost_tokens: Some(1000),
-                cost_usd: Some(cost),
-                quality_score: Some(quality),
-                notes: None,
-                trajectory: None,
-                diff: Some("diff --git a/x b/x".to_string()),
-                worktree: None,
-                subagents: Vec::new(),
-                feedback_rules_applied: Vec::new(),
-                dispatch_id: None,
-                flow_id: Some("flow-regen-fallback".to_string()),
-                issue_ref: Some("kckylechen1/tachi#194".to_string()),
-                pr_ref: None,
-                evidence_refs: vec!["crates/tachi-server/src/dispatch_profile.rs".to_string()],
-                tests_run: vec!["cargo test".to_string()],
-                diff_present: Some(true),
-                scope: Some("project".to_string()),
-                project: None,
-                format: None,
-                signatures: Vec::new(),
-                rulings: Vec::new(),
-                adjudication: None,
-                eval_run_ids: Vec::new(),
-            }))
-            .await
-            .expect("seed eval row")
+            server
+                .tachi_complete(Parameters(TachiCompleteParams {
+                    task_id: Some(task_id),
+                    task: "Implement dispatch policy".to_string(),
+                    agent: "custom".to_string(),
+                    outcome: outcome.to_string(),
+                    task_type: Some("fix_request".to_string()),
+                    profile: Some(profile.to_string()),
+                    risk: Some("medium".to_string()),
+                    duration_ms: Some(100_000),
+                    skills_used: vec!["skill:superpowers-executing-plans".to_string()],
+                    cost_tokens: Some(1000),
+                    cost_usd: Some(cost),
+                    quality_score: Some(quality),
+                    notes: None,
+                    trajectory: None,
+                    diff: Some("diff --git a/x b/x".to_string()),
+                    worktree: None,
+                    subagents: Vec::new(),
+                    feedback_rules_applied: Vec::new(),
+                    dispatch_id: None,
+                    flow_id: Some("flow-regen-fallback".to_string()),
+                    issue_ref: Some("kckylechen1/tachi#194".to_string()),
+                    pr_ref: None,
+                    evidence_refs: vec!["crates/tachi-server/src/dispatch_profile.rs".to_string()],
+                    tests_run: vec!["cargo test".to_string()],
+                    diff_present: Some(true),
+                    scope: Some("project".to_string()),
+                    project: None,
+                    format: None,
+                    signatures: Vec::new(),
+                    rulings: Vec::new(),
+                    adjudication: None,
+                    eval_run_ids: Vec::new(),
+                }))
+                .await
+                .expect("seed eval row")
         }
     };
 
