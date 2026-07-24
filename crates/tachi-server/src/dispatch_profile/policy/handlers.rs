@@ -8,7 +8,6 @@ use tachi_dispatch::policy::{
     ROUTE_POLICY_PROPOSAL_TARGET,
 };
 
-
 /// SHA-256 hex of the canonical identity payload. Used as the content-addressed
 /// half of the v2 proposal id and stored verbatim as `content_digest` so apply
 /// can re-validate the persisted row was not mutated after review.
@@ -161,7 +160,10 @@ pub(crate) fn handle_route_policy_proposals(
             let mut next = proposal.clone();
             next["proposal_id"] = json!(id);
             next["legacy_proposal_id"] = json!(legacy_id);
-            if matches!(proposal.get("kind").and_then(Value::as_str), Some("route_policy")) {
+            if matches!(
+                proposal.get("kind").and_then(Value::as_str),
+                Some("route_policy")
+            ) {
                 next["content_digest"] = json!(content_digest);
             }
 

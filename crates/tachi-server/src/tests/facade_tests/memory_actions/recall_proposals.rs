@@ -262,8 +262,6 @@ async fn recall_proposal_reject_stamps_a_ttl_immediately() {
     );
 }
 
-
-
 /// Local mirror of `recall_proposal_ops::compute_recall_digest`. The recovery
 /// path recomputes this same digest on the live config.env and compares it to
 /// the applying_receipt's before/after digests, so the receipt we stamp in
@@ -414,9 +412,16 @@ async fn recall_regen_with_changed_evidence_does_not_inherit_approval() {
     let parsed_a: Value = serde_json::from_str(&body_a).expect("proposal response A JSON");
     let proposal_a = parsed_a["proposals"]
         .as_array()
-        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p["variant"] == json!("or-fallback-0.6"))
+        })
         .expect("phase A proposal");
-    let id_a = proposal_a["proposal_id"].as_str().expect("id A").to_string();
+    let id_a = proposal_a["proposal_id"]
+        .as_str()
+        .expect("id A")
+        .to_string();
     assert!(
         id_a.starts_with("recall_config:v2:"),
         "v2 id format expected, got: {id_a}"
@@ -471,9 +476,16 @@ async fn recall_regen_with_changed_evidence_does_not_inherit_approval() {
     let parsed_b: Value = serde_json::from_str(&body_b).expect("proposal response B JSON");
     let proposal_b = parsed_b["proposals"]
         .as_array()
-        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p["variant"] == json!("or-fallback-0.6"))
+        })
         .expect("phase B proposal");
-    let id_b = proposal_b["proposal_id"].as_str().expect("id B").to_string();
+    let id_b = proposal_b["proposal_id"]
+        .as_str()
+        .expect("id B")
+        .to_string();
 
     assert_ne!(
         id_a, id_b,
@@ -548,7 +560,11 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
     let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
     let proposal = parsed["proposals"]
         .as_array()
-        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p["variant"] == json!("or-fallback-0.6"))
+        })
         .expect("proposal");
     let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
 
@@ -571,17 +587,19 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
         .iter()
         .map(|(k, v)| (k.clone(), v.as_str().expect("string").to_string()))
         .collect();
-    let before_digest =
-        test_recall_digest_of(&config_env_path);
+    let before_digest = test_recall_digest_of(&config_env_path);
     // Apply the patch by hand so we can capture the after_digest.
     let tmp = config_env_path.with_extension("env.crash-tmp");
-    std::fs::write(&tmp, "VOYAGE_API_KEY=vault:VOYAGE_API_KEY
+    std::fs::write(
+        &tmp,
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY
 TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6
 TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
-").expect("write tmp");
+",
+    )
+    .expect("write tmp");
     let _ = std::fs::rename(&tmp, &config_env_path);
-    let after_digest =
-        test_recall_digest_of(&config_env_path);
+    let after_digest = test_recall_digest_of(&config_env_path);
 
     server
         .with_global_store(|store| {
@@ -690,7 +708,11 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
     let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
     let proposal = parsed["proposals"]
         .as_array()
-        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p["variant"] == json!("or-fallback-0.6"))
+        })
         .expect("proposal");
     let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
 
@@ -703,14 +725,14 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
         .await
         .expect("approve");
 
-    let before_digest =
-        test_recall_digest_of(&config_env_path);
+    let before_digest = test_recall_digest_of(&config_env_path);
     // Compute the projected after_digest WITHOUT mutating the file: hand-apply
     // the patch to a throwaway copy and hash it.
     let projected = {
-        let mut pairs: Vec<(String, String)> = vec![
-            ("TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR".to_string(), "0.1".to_string()),
-        ];
+        let mut pairs: Vec<(String, String)> = vec![(
+            "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR".to_string(),
+            "0.1".to_string(),
+        )];
         let mut seen = std::collections::BTreeSet::new();
         for pair in pairs.iter_mut() {
             if pair.0 == "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR" {
@@ -719,7 +741,10 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
             seen.insert(pair.0.clone());
         }
         if !seen.contains("TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS") {
-            pairs.push(("TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS".to_string(), "4".to_string()));
+            pairs.push((
+                "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS".to_string(),
+                "4".to_string(),
+            ));
         }
         pairs.sort();
         // Hash the projected pairs with the same algorithm the production
@@ -862,11 +887,7 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
     server
         .with_global_store(|store| {
             store
-                .set_state(
-                    "recall_config_proposals",
-                    proposal_id,
-                    &legacy.to_string(),
-                )
+                .set_state("recall_config_proposals", proposal_id, &legacy.to_string())
                 .map_err(|e| e.to_string())
         })
         .expect("seed legacy approved recall proposal");
@@ -954,7 +975,11 @@ async fn recall_terminal_state_cannot_be_rereviewed() {
     let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
     let proposal = parsed["proposals"]
         .as_array()
-        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p["variant"] == json!("or-fallback-0.6"))
+        })
         .expect("proposal");
     let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
 
@@ -1061,7 +1086,11 @@ async fn recall_two_applies_yield_one_terminal_receipt() {
     let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
     let proposal = parsed["proposals"]
         .as_array()
-        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p["variant"] == json!("or-fallback-0.6"))
+        })
         .expect("proposal");
     let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
 
@@ -1103,8 +1132,7 @@ async fn recall_two_applies_yield_one_terminal_receipt() {
     );
 
     // Post-invariant: no second file mutation, no second terminal receipt.
-    let config_after_second =
-        std::fs::read_to_string(&config_env_path).expect("read config.env");
+    let config_after_second = std::fs::read_to_string(&config_env_path).expect("read config.env");
     assert_eq!(
         config_after_first, config_after_second,
         "a refused second apply must not mutate config.env again"
@@ -1181,7 +1209,11 @@ async fn recall_apply_content_digest_mismatch_refuses() {
     let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
     let proposal = parsed["proposals"]
         .as_array()
-        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p["variant"] == json!("or-fallback-0.6"))
+        })
         .expect("proposal");
     let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
 

@@ -672,7 +672,10 @@ fn build_proposals_from_simulation(
             RECALL_CONFIG_PROPOSAL_TARGET,
         );
         let content_digest = content_digest_hex(&identity_payload);
-        let id = format!("recall_config:v2:{}", &content_digest[..16.min(content_digest.len())]);
+        let id = format!(
+            "recall_config:v2:{}",
+            &content_digest[..16.min(content_digest.len())]
+        );
         out.push(json!({
             "proposal_id": id,
             "legacy_proposal_id": legacy_id,
@@ -1010,7 +1013,11 @@ fn write_recall_config_env(path: &Path, values: &BTreeMap<String, String>) -> Re
 
 fn tmp_path_for(path: &Path) -> PathBuf {
     let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(format!(".tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple()));
+    tmp.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
     PathBuf::from(tmp)
 }
 

@@ -8,7 +8,6 @@ use crate::{
     DISPATCH_PROFILES, MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES,
 };
 
-
 /// Policy-version tag bound into every v2 route-policy proposal identity. The
 /// identity binds the *complete immutable apply payload + the evidence used
 /// for review + this policy version + the apply target*, so any change to the
@@ -90,7 +89,10 @@ pub fn recall_config_v2_identity_payload(
     let mut map = BTreeMap::new();
     map.insert("policy_version", json!(policy_version));
     map.insert("target", json!(target));
-    map.insert("apply_payload", json!({ "config_env": canonical_json(config_env) }));
+    map.insert(
+        "apply_payload",
+        json!({ "config_env": canonical_json(config_env) }),
+    );
     map.insert("evidence_review", canonical_json(evidence_review));
     Value::Object(map.into_iter().collect())
 }
@@ -1237,7 +1239,8 @@ mod tests {
         };
         let mk_identity = |row_count: usize, limit: usize| {
             let (current, variant) = mk_summary();
-            let proposals = build_route_policy_proposals(&current, &[variant], row_count, limit, "now");
+            let proposals =
+                build_route_policy_proposals(&current, &[variant], row_count, limit, "now");
             serde_json::to_string(&proposals[0]["identity_payload"]).unwrap()
         };
 

@@ -389,7 +389,6 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
     );
 }
 
-
 // ─── v2 proposal-safety discrimination tests ─────────────────────────────────
 //
 // These are end-to-end tests through tachi_task / tachi_complete. They are
@@ -459,8 +458,22 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     // Phase 1: seed evidence where `opencode_builder` is the cheaper choice
     // for fix_request and `claude_plan` is the current/baseline.
     seed_one("regen-fallback-A1", "claude_plan", "success", 0.50, 0.85).await;
-    seed_one("regen-fallback-A2", "opencode_builder", "success", 0.05, 0.80).await;
-    seed_one("regen-fallback-A3", "opencode_builder", "success", 0.05, 0.80).await;
+    seed_one(
+        "regen-fallback-A2",
+        "opencode_builder",
+        "success",
+        0.05,
+        0.80,
+    )
+    .await;
+    seed_one(
+        "regen-fallback-A3",
+        "opencode_builder",
+        "success",
+        0.05,
+        0.80,
+    )
+    .await;
 
     let mut proposals = task_params("proposals");
     proposals.limit = Some(50);
@@ -504,7 +517,10 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
 
     let mut proposals_b = task_params("proposals");
     proposals_b.limit = Some(50);
-    let raw_b = server.tachi_task(Parameters(proposals_b)).await.expect("proposals B");
+    let raw_b = server
+        .tachi_task(Parameters(proposals_b))
+        .await
+        .expect("proposals B");
     let parsed_b: serde_json::Value = serde_json::from_str(&raw_b).expect("proposals JSON B");
     let route_proposals_b: Vec<&serde_json::Value> = parsed_b["proposals"]
         .as_array()
@@ -595,7 +611,10 @@ async fn route_terminal_state_cannot_be_rereviewed() {
 
     let mut proposals = task_params("proposals");
     proposals.limit = Some(50);
-    let raw = server.tachi_task(Parameters(proposals)).await.expect("proposals");
+    let raw = server
+        .tachi_task(Parameters(proposals))
+        .await
+        .expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
     let first = parsed["proposals"]
         .as_array()
@@ -692,7 +711,10 @@ async fn route_two_applies_yield_one_terminal_receipt() {
 
     let mut proposals = task_params("proposals");
     proposals.limit = Some(50);
-    let raw = server.tachi_task(Parameters(proposals)).await.expect("proposals");
+    let raw = server
+        .tachi_task(Parameters(proposals))
+        .await
+        .expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
     let first = parsed["proposals"]
         .as_array()
@@ -707,12 +729,18 @@ async fn route_two_applies_yield_one_terminal_receipt() {
     let mut approve = task_params("review_proposal");
     approve.proposal_id = Some(proposal_id.clone());
     approve.review_status = Some("approved".to_string());
-    let _ = server.tachi_task(Parameters(approve)).await.expect("approve");
+    let _ = server
+        .tachi_task(Parameters(approve))
+        .await
+        .expect("approve");
 
     let mut apply = task_params("apply_proposals");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let applied_raw = server.tachi_task(Parameters(apply.clone())).await.expect("apply #1");
+    let applied_raw = server
+        .tachi_task(Parameters(apply.clone()))
+        .await
+        .expect("apply #1");
     let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply #1 JSON");
     assert_eq!(applied["applied"], json!(true));
     assert_eq!(applied["proposal"]["status"], json!("applied"));
@@ -736,9 +764,6 @@ async fn route_two_applies_yield_one_terminal_receipt() {
                 .map_err(|e| e.to_string())
         })
         .expect("list rules");
-    let matching = rules
-        .iter()
-        .filter(|row| row.key == proposal_id)
-        .count();
+    let matching = rules.iter().filter(|row| row.key == proposal_id).count();
     assert_eq!(matching, 1, "exactly one rule row for the applied proposal");
 }

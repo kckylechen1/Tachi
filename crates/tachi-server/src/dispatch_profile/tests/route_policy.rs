@@ -132,7 +132,6 @@ fn load_route_policy_rule_loadout_classifies_persisted_rules() {
             .contains("blocked_by_risk_classifier:codex_53_fast")));
 }
 
-
 // ─── v2 proposal-safety discrimination tests ─────────────────────────────────
 //
 // These tests pin the route-policy side of the v2 content-addressed proposal
@@ -389,7 +388,6 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
     );
 }
 
-
 /// Discrimination: the hard_state version CAS that gates every review/apply
 /// transition must refuse a stale snapshot. The full review() function reads
 /// the version fresh, so its CAS cannot fail in a single-threaded test
@@ -417,31 +415,20 @@ fn route_policy_review_cas_refuses_on_stale_state_version() {
     let pending = r#"{"status":"pending","schema_version":2}"#;
 
     let v1 = server
-        .with_global_store(|store| {
-            store.set_state(ns, key, pending).map_err(|e| e.to_string())
-        })
+        .with_global_store(|store| store.set_state(ns, key, pending).map_err(|e| e.to_string()))
         .expect("seed pending row");
     assert_eq!(v1, 1, "first write is version 1");
 
     // Simulate a concurrent writer bumping the version out from under us.
     server
-        .with_global_store(|store| {
-            store
-                .set_state(ns, key, pending)
-                .map_err(|e| e.to_string())
-        })
+        .with_global_store(|store| store.set_state(ns, key, pending).map_err(|e| e.to_string()))
         .expect("bump");
 
     // CAS with the stale snapshot's version (v1): must refuse, not overwrite.
     let cas_ok = server
         .with_global_store(|store| {
             store
-                .set_state_if_version(
-                    ns,
-                    key,
-                    r#"{"status":"approved","schema_version":2}"#,
-                    v1,
-                )
+                .set_state_if_version(ns, key, r#"{"status":"approved","schema_version":2}"#, v1)
                 .map_err(|e| e.to_string())
         })
         .expect("CAS call should not error");
@@ -452,11 +439,7 @@ fn route_policy_review_cas_refuses_on_stale_state_version() {
 
     // The row stayed pending — the stale CAS did not mutate it.
     let (raw, current_version) = server
-        .with_global_store_read(|store| {
-            store
-                .get_state_kv(ns, key)
-                .map_err(|e| e.to_string())
-        })
+        .with_global_store_read(|store| store.get_state_kv(ns, key).map_err(|e| e.to_string()))
         .expect("load")
         .expect("row present");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json");
