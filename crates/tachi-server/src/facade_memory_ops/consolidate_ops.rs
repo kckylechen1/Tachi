@@ -463,22 +463,23 @@ fn apply_lifecycle_action(
                     .get(target)
                     .map_err(|e| format!("load target: {e}"))?
                     .ok_or_else(|| format!("target not found: {target}"))?;
-                let target_keywords = survivor.keywords.clone();
-                let target_entities = survivor.entities.clone();
+                // Canonical on both sides of the no-op guard below — the fold
+                // is sorted+deduplicated while the stored column keeps the last
+                // writer's serialization order, so a raw comparison would
+                // report "changed" for any target whose array is not already
+                // sorted and unique. Same helper as the reviewed apply path in
+                // `memcore::store::memory_lifecycle`, so the two agree on what
+                // "unchanged" means.
+                let target_keywords = lifecycle::canonical_tags(&survivor.keywords);
+                let target_entities = lifecycle::canonical_tags(&survivor.entities);
                 let target_importance = survivor.importance;
                 // Fold unique keywords/entities; keep survivor text as canonical.
-                let mut kw: std::collections::BTreeSet<String> =
-                    survivor.keywords.iter().cloned().collect();
-                for k in &source.keywords {
-                    kw.insert(k.clone());
-                }
-                survivor.keywords = kw.into_iter().collect();
-                let mut ents: std::collections::BTreeSet<String> =
-                    survivor.entities.iter().cloned().collect();
-                for e in &source.entities {
-                    ents.insert(e.clone());
-                }
-                survivor.entities = ents.into_iter().collect();
+                let mut merged_kw = survivor.keywords.clone();
+                merged_kw.extend(source.keywords.iter().cloned());
+                survivor.keywords = lifecycle::canonical_tags(&merged_kw);
+                let mut merged_ents = survivor.entities.clone();
+                merged_ents.extend(source.entities.iter().cloned());
+                survivor.entities = lifecycle::canonical_tags(&merged_ents);
                 if survivor.importance < source.importance {
                     survivor.importance = source.importance;
                 }

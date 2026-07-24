@@ -150,12 +150,14 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
     // proposal rows — `pending`/`approved` rows must stay TTL-less until
     // their own terminal write.
     for namespace in [
-        // `consolidate_ops::LIFECYCLE_PROPOSAL_NS` and
-        // `recall_proposal_ops::RECALL_CONFIG_PROPOSAL_NS` are module-private
-        // (not reachable from here) — hardcoded literals, source of truth:
-        // crates/tachi-server/src/facade_memory_ops/consolidate_ops.rs:42 and
+        // The lifecycle namespace moved into memcore and is `pub` there, so
+        // this reads the constant instead of a literal — one less string to
+        // drift.
+        memcore::store::memory_lifecycle::LIFECYCLE_PROPOSAL_NS,
+        // `recall_proposal_ops::RECALL_CONFIG_PROPOSAL_NS` is still
+        // module-private (not reachable from here) — hardcoded literal, source
+        // of truth:
         // crates/tachi-server/src/facade_memory_ops/recall_proposal_ops.rs:12.
-        "memory_lifecycle_proposals",
         "recall_config_proposals",
     ] {
         total += store
