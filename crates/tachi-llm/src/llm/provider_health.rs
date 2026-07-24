@@ -26,8 +26,9 @@ pub(super) use self::types::{
     KeyRetryStatus, SelectedProviderSecret,
 };
 pub use self::types::{
-    ChatLaneConfig, ProviderInvocationFailure, ProviderInvocationFailureClass,
-    ProviderInvocationOutcome, ProviderInvocationReceipt,
+    ChatLaneConfig, ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult,
+    ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
+    ProviderInvocationReceipt,
 };
 pub use self::types::{
     LaneOutageStatus, ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus,

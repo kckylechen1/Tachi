@@ -6,7 +6,7 @@ use std::process::{Command, ExitCode};
 
 use async_trait::async_trait;
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tachi_server::github_corpus_ops::live_pilot::{
     dry_run_owner_approved_corpus_pilot, rebaseline_owner_approved_corpus_pilot,
@@ -55,6 +55,11 @@ struct Args {
     /// constructs a model resolver. Output must be a distinct temporary path.
     #[arg(long, conflicts_with = "execute")]
     rebaseline: bool,
+    /// Resolve the normal reasoning provider credential read-only and perform
+    /// one official, non-generating auth/model-list GET. This branch runs
+    /// before any manifest, baseline, checkpoint, report, or GitHub access.
+    #[arg(long, conflicts_with_all = ["execute", "rebaseline"])]
+    auth_clearance_probe: bool,
 }
 
 struct GhCliReader;
@@ -110,6 +115,24 @@ struct TachiReasoningModelClient {
 }
 
 struct TachiModelResolver;
+
+#[derive(Debug, Serialize)]
+struct AuthClearanceReceipt {
+    #[serde(flatten)]
+    probe: tachi_llm::ProviderAuthProbeResult,
+    vault_status_checked: bool,
+    provider_cache_loaded: bool,
+}
+
+async fn run_auth_clearance_probe() -> Result<AuthClearanceReceipt, String> {
+    let (llm, provider_cache_loaded) = tachi_server::resolve_standalone_tachi_model_client()
+        .map_err(|_| "Tachi provider resolver or secret materializer failed".to_string())?;
+    Ok(AuthClearanceReceipt {
+        probe: llm.probe_reasoning_auth_no_content().await,
+        vault_status_checked: true,
+        provider_cache_loaded,
+    })
+}
 
 impl CorpusPilotModelResolver for TachiModelResolver {
     fn resolve(&self) -> Result<ResolvedCorpusPilotModelV1, String> {
@@ -502,7 +525,31 @@ async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Args::parse()).await {
+    let args = Args::parse();
+    if args.auth_clearance_probe {
+        return match run_auth_clearance_probe().await {
+            Ok(receipt) => {
+                let cleared = receipt.probe.clears_configured_model();
+                match serde_json::to_string(&receipt) {
+                    Ok(public_safe_json) => println!("{public_safe_json}"),
+                    Err(_) => {
+                        eprintln!("github-corpus-pilot: serialize public-safe auth probe receipt");
+                        return ExitCode::from(1);
+                    }
+                }
+                if cleared {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                }
+            }
+            Err(error) => {
+                eprintln!("github-corpus-pilot: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    match run(args).await {
         Ok((report, executed)) => {
             println!(
                 "#1059 pilot: disposition={} candidates={} manifest_sha256={} executed={} effective_engine_gate={} report contains no prompt, model output, or credential values",
@@ -525,6 +572,26 @@ async fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    #[test]
+    fn auth_clearance_probe_cli_shape_is_accepted_without_execution() {
+        let parsed = Args::try_parse_from([
+            "github-corpus-pilot",
+            "--auth-clearance-probe",
+            "--manifest",
+            "must-not-be-read.json",
+            "--report",
+            "must-not-be-written.json",
+            "--baseline-report",
+            "must-not-be-read-baseline.json",
+            "--baseline-sha256",
+            "not-read",
+            "--captured-at",
+            "not-read",
+        ]);
+        assert!(parsed.is_ok(), "{parsed:?}");
+        assert!(parsed.expect("accepted probe CLI").auth_clearance_probe);
+    }
+
     #[tokio::test]
     async fn rebaseline_skips_old_baseline_bytes_and_pins_manifest_before_github() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -539,6 +606,7 @@ mod tests {
             captured_at: "2026-07-24T04:56:05Z".to_string(),
             execute: false,
             rebaseline: true,
+            auth_clearance_probe: false,
         })
         .await
         .expect_err("wrong manifest must stop rebaseline before GitHub reads");
@@ -559,6 +627,7 @@ mod tests {
             captured_at: "2026-07-24T00:00:00Z".to_string(),
             execute: false,
             rebaseline: false,
+            auth_clearance_probe: false,
         })
         .await
         .expect_err("report output must not alias the immutable baseline");
@@ -587,6 +656,7 @@ mod tests {
             captured_at: "2026-07-24T00:00:00Z".to_string(),
             execute: false,
             rebaseline: false,
+            auth_clearance_probe: false,
         })
         .await
         .expect_err("symlink/.. alias must not overwrite the baseline");
@@ -642,6 +712,7 @@ mod tests {
             captured_at: "2026-07-24T00:00:00Z".to_string(),
             execute: false,
             rebaseline: false,
+            auth_clearance_probe: false,
         })
         .await
         .expect_err("hard-link alias must not overwrite the baseline");
