@@ -705,6 +705,36 @@ mod tests {
     }
 
     #[test]
+    fn committed_phase_2a_manifest_loads_as_the_exact_fifty_row_contract() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/engineering/receipts/1073-phase-2a-real-pilot-manifest.json");
+        let manifest = PilotManifestV1::load_from_path(path)
+            .expect("committed phase-2a manifest has valid bindings and digest");
+        assert_eq!(manifest.rows().len(), PILOT_SIZE);
+    }
+
+    #[test]
+    fn local_phase_2a_sources_match_committed_manifest_without_row_output() {
+        if std::env::var_os("LESSON_FORGE_VERIFY_LOCAL_SOURCES").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return;
+        }
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/engineering/receipts/1073-phase-2a-real-pilot-manifest.json");
+        let manifest = PilotManifestV1::load_from_path(path)
+            .expect("committed phase-2a manifest has valid bindings and digest");
+        let resolver = super::super::source::SqlitePilotSourceResolverV1::from_env();
+        let verified = manifest
+            .rows()
+            .iter()
+            .filter(|binding| resolver.resolve_verified(binding).is_ok())
+            .count();
+        assert_eq!(verified, PILOT_SIZE);
+    }
+
+    #[test]
     fn wrong_source_kind_and_stratum_allocations_are_red() {
         let mut rows = valid_rows();
         rows[25].source_route = PilotSourceRouteV1::Antigravity;

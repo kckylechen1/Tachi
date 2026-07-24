@@ -182,6 +182,7 @@ pub enum PilotProgressErrorV1 {
     InvalidBlindingMaterial,
     MissingBlindingAfterSpend,
     SourceDatabasePath,
+    InsecurePermissions,
 }
 
 impl std::fmt::Display for PilotProgressErrorV1 {
@@ -217,6 +218,9 @@ impl std::fmt::Display for PilotProgressErrorV1 {
                     "pilot progress ledger path must not be a source database"
                 )
             }
+            Self::InsecurePermissions => {
+                write!(f, "pilot progress ledger must be private to its owner")
+            }
         }
     }
 }
@@ -240,6 +244,7 @@ impl PilotProgressLedgerV1 {
             return Err(PilotProgressErrorV1::SourceDatabasePath);
         }
         if path.exists() {
+            require_private_recovery_state(&path)?;
             let bytes = std::fs::read(&path).map_err(PilotProgressErrorV1::Read)?;
             let persisted: PersistedProgressV1 =
                 serde_json::from_slice(&bytes).map_err(PilotProgressErrorV1::Parse)?;
@@ -349,6 +354,12 @@ impl PilotProgressLedgerV1 {
     }
 
     fn persist(&self) -> Result<(), PilotProgressErrorV1> {
+        if is_source_database_path(&self.path) {
+            return Err(PilotProgressErrorV1::SourceDatabasePath);
+        }
+        if self.path.exists() {
+            require_private_recovery_state(&self.path)?;
+        }
         let persisted = PersistedProgressV1 {
             format: PROGRESS_FORMAT_V2.to_string(),
             contract_digest: self.contract_digest.clone(),
@@ -365,9 +376,15 @@ impl PilotProgressLedgerV1 {
             .and_then(|name| name.to_str())
             .unwrap_or("pilot-progress.json");
         let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&temporary)
             .map_err(PilotProgressErrorV1::Write)?;
         if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
@@ -416,16 +433,70 @@ fn derive_blind_seed(key: &PilotBlindingKeyV1, material: &[u8; 32]) -> [u8; 32] 
 }
 
 fn is_source_database_path(path: &Path) -> bool {
-    if path == Path::new(DEFAULT_ANTIGRAVITY_SOURCE_DB)
-        || path == Path::new(DEFAULT_HAPI_PROJECT_DB)
+    source_database_paths()
+        .iter()
+        .any(|source_path| paths_alias(path, source_path))
+}
+
+fn source_database_paths() -> Vec<PathBuf> {
+    [
+        PathBuf::from(DEFAULT_ANTIGRAVITY_SOURCE_DB),
+        PathBuf::from(DEFAULT_HAPI_PROJECT_DB),
+    ]
+    .into_iter()
+    .chain(
+        ["ANTIGRAVITY_SOURCE_DB", "HAPI_PROJECT_DB"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from),
+    )
+    .collect()
+}
+
+fn paths_alias(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    if std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
     {
         return true;
     }
-    ["ANTIGRAVITY_SOURCE_DB", "HAPI_PROJECT_DB"]
-        .iter()
-        .filter_map(std::env::var_os)
-        .map(PathBuf::from)
-        .any(|source_path| source_path == path)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        return std::fs::metadata(left)
+            .ok()
+            .zip(std::fs::metadata(right).ok())
+            .is_some_and(|(left, right)| left.dev() == right.dev() && left.ino() == right.ino());
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+#[cfg(unix)]
+fn require_private_recovery_state(path: &Path) -> Result<(), PilotProgressErrorV1> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(path)
+        .map_err(PilotProgressErrorV1::Read)?
+        .permissions()
+        .mode();
+    if mode & 0o077 == 0 {
+        Ok(())
+    } else {
+        Err(PilotProgressErrorV1::InsecurePermissions)
+    }
+}
+
+#[cfg(not(unix))]
+fn require_private_recovery_state(_path: &Path) -> Result<(), PilotProgressErrorV1> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -440,5 +511,82 @@ mod tests {
                 Err(PilotProgressErrorV1::SourceDatabasePath)
             ));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn progress_ledger_refuses_source_database_path_aliases_without_opening_them() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source = directory.path().join("source.db");
+        std::fs::write(&source, []).expect("source placeholder");
+        let alias = directory.path().join("source-database-alias");
+        symlink(&source, &alias).expect("source alias");
+        let hard_link = directory.path().join("source-database-hard-link");
+        std::fs::hard_link(&source, &hard_link).expect("source hard link");
+        let prior = std::env::var_os("ANTIGRAVITY_SOURCE_DB");
+        std::env::set_var("ANTIGRAVITY_SOURCE_DB", &source);
+
+        let results = [&alias, &hard_link]
+            .into_iter()
+            .map(|path| PilotProgressLedgerV1::open(path, &"0".repeat(64)))
+            .collect::<Vec<_>>();
+
+        match prior {
+            Some(value) => std::env::set_var("ANTIGRAVITY_SOURCE_DB", value),
+            None => std::env::remove_var("ANTIGRAVITY_SOURCE_DB"),
+        }
+        assert!(results
+            .iter()
+            .all(|result| matches!(result, Err(PilotProgressErrorV1::SourceDatabasePath))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn progress_ledger_creates_private_recovery_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("pilot-progress.json");
+        let _ledger =
+            PilotProgressLedgerV1::open(&path, &"0".repeat(64)).expect("new progress ledger");
+        let mode = std::fs::metadata(&path)
+            .expect("progress metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn progress_ledger_refuses_existing_nonprivate_recovery_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("pilot-progress.json");
+        let mut ledger =
+            PilotProgressLedgerV1::open(&path, &"0".repeat(64)).expect("new progress ledger");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make state nonprivate");
+
+        let key = PilotCallKeyV1 {
+            contract_digest: "0".repeat(64),
+            source_route: PilotSourceRouteV1::Antigravity,
+            source_id: "row-1".to_string(),
+            source_revision: 1,
+            role: PilotCallRoleV1::Producer,
+            arm: PilotCallArmV1::None,
+            ordinal: 0,
+        };
+        assert!(matches!(
+            ledger.record(key, PilotCallStateV1::Started),
+            Err(PilotProgressErrorV1::InsecurePermissions)
+        ));
+        assert!(matches!(
+            PilotProgressLedgerV1::open(&path, &"0".repeat(64)),
+            Err(PilotProgressErrorV1::InsecurePermissions)
+        ));
     }
 }
