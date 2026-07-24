@@ -630,10 +630,17 @@ pub fn build_policy(
     // owner may approve", which is the ratified trust root's primary basis
     // and the narrowest non-empty policy that exists. It grants nothing to a
     // principal GitHub does not confirm is the owner, and it authorizes no
-    // delegate at all — `authorized_teams` still defaults to empty. Setting
-    // it to `false` by default would make an unconfigured daemon's policy
-    // authorize nobody, which `validate()` correctly rejects as unusable, so
-    // the gate would be inert out of the box rather than safe.
+    // delegate at all — `authorized_teams` still defaults to empty.
+    //
+    // The justification is the ratified decision itself, NOT convenience:
+    // #1382 names verified repository ownership as a trust root, so enabling
+    // it by default enacts that decision rather than requiring an operator to
+    // switch the decision on. Defaulting to `false` would not be "safer" —
+    // a policy that authorizes nobody is a loud refusal at `validate()`, and
+    // that crate's own note (`tachi_params::approver_authority`, at the
+    // `validate` PolicyUnusable arm) calls such a policy *safe* precisely
+    // because it fails closed. Choosing `true` trades none of that away; it
+    // only declines to make the ratified trust root opt-in.
     let allow_repository_owner = match inputs.allow_repository_owner.as_deref() {
         Some(raw) => parse_bool(ENV_ALLOW_REPO_OWNER, raw)?,
         None => true,
