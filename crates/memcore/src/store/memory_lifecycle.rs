@@ -832,9 +832,8 @@ fn apply_lifecycle_proposal_once(
 
     // ── Stamp proposal applied (CAS inside the same tx) ───────────────────
     let now = lifecycle_now_iso();
-    let expires = lifecycle_iso(
-        chrono::Utc::now() + chrono::Duration::days(LIFECYCLE_TERMINAL_TTL_DAYS),
-    );
+    let expires =
+        lifecycle_iso(chrono::Utc::now() + chrono::Duration::days(LIFECYCLE_TERMINAL_TTL_DAYS));
     proposal["status"] = serde_json::json!("applied");
     proposal["applied_at"] = serde_json::json!(now);
     proposal["expires_at"] = serde_json::json!(expires);
@@ -978,7 +977,12 @@ mod tests {
             ..test_entry()
         };
         let shuffled = MemoryEntry {
-            keywords: vec!["gamma".into(), "alpha".into(), "beta".into(), "alpha".into()],
+            keywords: vec![
+                "gamma".into(),
+                "alpha".into(),
+                "beta".into(),
+                "alpha".into(),
+            ],
             entities: vec!["y".into(), "x".into(), "y".into()],
             ..ordered.clone()
         };
@@ -989,7 +993,12 @@ mod tests {
         );
         // ...but a genuinely different set still must.
         let extra = MemoryEntry {
-            keywords: vec!["alpha".into(), "beta".into(), "gamma".into(), "delta".into()],
+            keywords: vec![
+                "alpha".into(),
+                "beta".into(),
+                "gamma".into(),
+                "delta".into(),
+            ],
             ..ordered.clone()
         };
         assert_ne!(
@@ -1215,13 +1224,8 @@ mod tests {
                 &serde_json::to_string(&proposal).expect("serialize proposal"),
             )
             .expect("persist proposal");
-        review_lifecycle_proposal(
-            store,
-            &proposal_id,
-            LifecycleReviewDecision::Approved,
-            None,
-        )
-        .expect("approve proposal");
+        review_lifecycle_proposal(store, &proposal_id, LifecycleReviewDecision::Approved, None)
+            .expect("approve proposal");
         proposal_id
     }
 
@@ -1336,11 +1340,7 @@ mod tests {
         );
         assert_eq!(
             target.keywords,
-            vec![
-                "zulu".to_string(),
-                "alpha".to_string(),
-                "mike".to_string()
-            ],
+            vec!["zulu".to_string(), "alpha".to_string(), "mike".to_string()],
             "the target's stored order must stay unsorted or this test proves nothing"
         );
         let source = seed(
