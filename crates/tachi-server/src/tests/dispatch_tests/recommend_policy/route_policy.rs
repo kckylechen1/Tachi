@@ -525,8 +525,22 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     // the disagreement is what admits the proposal (`policy.rs:317`). Do NOT
     // "simplify" these to all-success rows: if every policy agrees on one
     // winner, generation emits nothing and the assertions below panic.
-    seed_one("regen-fallback-A1", "opencode_builder", "success", 0.01, 0.80).await;
-    seed_one("regen-fallback-A2", "opencode_builder", "failure", 0.01, 0.20).await;
+    seed_one(
+        "regen-fallback-A1",
+        "opencode_builder",
+        "success",
+        0.01,
+        0.80,
+    )
+    .await;
+    seed_one(
+        "regen-fallback-A2",
+        "opencode_builder",
+        "failure",
+        0.01,
+        0.20,
+    )
+    .await;
     seed_one("regen-fallback-A3", "glm_51_impl", "success", 3.00, 0.98).await;
 
     let mut proposals = task_params("proposals");
