@@ -43,6 +43,7 @@ pub mod privacy;
 pub mod progress;
 pub mod report;
 pub mod runner;
+pub mod selection;
 pub mod source;
 // `storage` is `pub(crate)`, not `pub`: its one entry point takes
 // `&crate::MemoryServer`, which is itself `pub(crate)` — a public function
