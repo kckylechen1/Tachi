@@ -81,6 +81,16 @@ mod action_effect;
 mod agent_eval;
 mod agent_markdown;
 mod agent_registry;
+/// #1382 — server-verified human approver authority for governed apply gates.
+/// The decision logic is `tachi_params::approver_authority` (pure); this
+/// module is its live GitHub probe plus the owner-controlled policy loader.
+///
+/// **NOT WIRED YET.** #1077 owns the governed precedent establishment /
+/// overturn transition that must call `authorize_governed_mutation` at its
+/// mutation choke point and `revalidate_governed_mutation` immediately before
+/// it writes. No such transition exists in this crate today, so this
+/// declaration is the module's only reference: nothing is gated by it yet.
+pub mod approver_authority;
 mod arena_ops;
 mod bootstrap;
 mod build_broker;

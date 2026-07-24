@@ -53,6 +53,30 @@ use self::safe_merge::*;
 use self::ship::*;
 use self::transport::*;
 
+/// #1382: the approver-authority gate (`crate::approver_authority`) needs the
+/// SAME hardened `gh` invocation every other GitHub caller here uses —
+/// `env_clear` plus an allowlisted environment, the Vault-or-env token
+/// injected as `GH_TOKEN`, prompts disabled — rather than a second,
+/// less-guarded command builder of its own. This returns that command with
+/// `api <args...>` already appended, plus the resolved token, which the gate
+/// uses for output redaction and for the receipt's one-way, non-secret
+/// credential fingerprint. The token value never leaves that gate.
+pub(crate) fn gh_api_command(
+    server: &MemoryServer,
+    args: &[&str],
+) -> Result<(Command, String), String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.arg("api");
+    cmd.args(args);
+    Ok((cmd, token))
+}
+
+/// #1382: reuse this module's token/auth-header redaction on any captured
+/// GitHub output the approver gate is about to put into a denial message.
+pub(crate) fn gh_redact(text: &str, token: &str) -> String {
+    sanitize_output(text, token)
+}
+
 pub(crate) use self::ci_watch::{daemon_ci_reader, spawn_ci_watch};
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
 pub(crate) use self::issue_freshness::{
