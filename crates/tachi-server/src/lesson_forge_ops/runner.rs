@@ -618,6 +618,8 @@ where
     let (baseline, baseline_receipts) = run_baseline(digest, ledger, &binding, cold_runner)?;
     let (blinded, key) = blind_case(&binding.source_id, treated, baseline, blind_seed);
     let adjudicated = run_adjudicator(digest, ledger, &binding, &blinded, adjudicator)?;
+    validate_producer_adjudicator_independence(&produced.receipt, &adjudicated.receipt)
+        .map_err(PilotRunError::ReportAccounting)?;
     validate_cold_adjudicator_independence(
         &treated_receipts,
         &baseline_receipts,
@@ -1360,6 +1362,129 @@ mod tests {
         assert_eq!(cold.calls, 300);
         assert_eq!(adjudicator.calls, 50);
         let _ = std::fs::remove_file(progress);
+    }
+
+    #[test]
+    fn live_case_refuses_collapsed_producer_adjudicator_identity() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator {
+            receipt_override: Some(receipt(
+                "adjudicator",
+                "producer-provider",
+                "producer-model",
+            )),
+            ..Adjudicator::default()
+        };
+        let progress = progress_path();
+
+        let result = run_case_for_test(
+            &manifest,
+            &progress,
+            PilotCaseKeyV1 {
+                source_route: PilotSourceRouteV1::Antigravity,
+                source_id: "source-0".to_string(),
+                source_revision: 1,
+            },
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        );
+        let refused = matches!(
+            result,
+            Err(PilotRunError::ReportAccounting(
+                PilotRunReportErrorV1::CollapsedProducerAdjudicatorIdentity
+            ))
+        );
+        let _ = std::fs::remove_file(progress);
+
+        assert!(refused, "live case must loudly reject identity collapse");
+        assert_eq!(producer.calls.get(), 1);
+        assert_eq!(cold.calls, 6);
+        assert_eq!(adjudicator.calls, 1);
+    }
+
+    #[test]
+    fn manifest_stops_spending_after_first_collapsed_producer_identity() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator {
+            receipt_override: Some(receipt(
+                "adjudicator",
+                "producer-provider",
+                "producer-model",
+            )),
+            ..Adjudicator::default()
+        };
+        let progress = progress_path();
+
+        let result = run_manifest_for_test(
+            &manifest,
+            &progress,
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        );
+        let refused = matches!(
+            result,
+            Err(PilotRunError::ReportAccounting(
+                PilotRunReportErrorV1::CollapsedProducerAdjudicatorIdentity
+            ))
+        );
+        let _ = std::fs::remove_file(progress);
+
+        assert!(refused, "manifest must propagate the live identity refusal");
+        assert_eq!(producer.calls.get(), 1, "later producer spend must stop");
+        assert_eq!(cold.calls, 6, "later cold-run spend must stop");
+        assert_eq!(adjudicator.calls, 1, "later adjudicator spend must stop");
+    }
+
+    #[test]
+    fn live_case_accepts_version_only_producer_adjudicator_separation() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator_receipt = receipt("adjudicator", "producer-provider", "producer-model");
+        adjudicator_receipt.identity.effective_version = Some("test-v2".to_string());
+        let mut adjudicator = Adjudicator {
+            receipt_override: Some(adjudicator_receipt),
+            ..Adjudicator::default()
+        };
+        let progress = progress_path();
+
+        let result = run_case_for_test(
+            &manifest,
+            &progress,
+            PilotCaseKeyV1 {
+                source_route: PilotSourceRouteV1::Antigravity,
+                source_id: "source-0".to_string(),
+                source_revision: 1,
+            },
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        );
+        let passed = matches!(result, Ok(case) if matches!(case.outcome, CaseOutcome::Pass));
+        let _ = std::fs::remove_file(progress);
+
+        assert!(
+            passed,
+            "version-only separation is a distinct live identity"
+        );
+        assert_eq!(producer.calls.get(), 1);
+        assert_eq!(cold.calls, 6);
+        assert_eq!(adjudicator.calls, 1);
     }
 
     #[test]
