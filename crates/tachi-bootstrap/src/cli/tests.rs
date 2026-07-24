@@ -26,6 +26,7 @@ fn vault_exec_cli_parses_require_and_trailing_command() {
                 keychain: true,
                 consumer: Some(consumer),
                 require,
+                allow_unauthenticated: false,
                 command,
                 ..
             }
@@ -34,6 +35,35 @@ fn vault_exec_cli_parses_require_and_trailing_command() {
             && command == ["opencode", "run", "--auto"]
     ));
     assert!(Cli::try_parse_from(["tachi", "vault", "exec", "--keychain"]).is_err());
+}
+
+// #1413 concern 4: --allow-unauthenticated is an explicit opt-in to the
+// inherited-environment fail-open path. Default is false (asserted above); the
+// flag must parse to true and stay compatible with --require.
+#[test]
+fn vault_exec_cli_parses_allow_unauthenticated_opt_in() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "exec",
+        "--keychain",
+        "--allow-unauthenticated",
+        "--",
+        "opencode",
+        "run",
+    ])
+    .expect("--allow-unauthenticated should parse");
+
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Vault {
+            action: VaultAction::Exec {
+                allow_unauthenticated: true,
+                command,
+                ..
+            }
+        }) if command == ["opencode", "run"]
+    ));
 }
 
 #[test]

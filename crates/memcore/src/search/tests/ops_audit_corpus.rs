@@ -747,3 +747,30 @@ fn ops_audit_corpus_report() {
         );
     }
 }
+
+/// #1413 concern 3: regression floor for the `hindsight-research-wiki` case
+/// under the FUSED pool (`surface=None`). Unlike the ratchet arm above — which
+/// locks the research note at RANK 1 WITHIN `Surface::Memory` (where the
+/// architecture wikis are excluded) — this guard runs the SAME query on the
+/// fused pool, where the denser Docs architecture wikis compete directly with
+/// the note. It asserts ONLY a hit@10 floor: the note must stay retrievable in
+/// the top-10, with NO rank boost applied. It is a pure regression guard —
+/// surface=None applies no surface predicate, so this exercises pre-existing
+/// fused ranking that is untouched by the graph-expansion cross-surface fix
+/// (which filters only when a surface is explicitly requested).
+#[test]
+fn hindsight_research_note_remains_hit_at_10_under_fused_pool() {
+    let mut conn = setup();
+    seed_corpus(&mut conn);
+
+    let query = "hindsight research evaluation protocol for memory recall quality";
+    let rank = rank_of(&conn, query, "ops-wiki-research-hindsight", None);
+    let ids = returned_ids(&conn, query, None);
+    let top10: Vec<&str> = ids.iter().take(10).map(String::as_str).collect();
+
+    assert!(
+        matches!(rank, Some(r) if r <= 10),
+        "hindsight research note must remain hit@10 under surface=None (fused pool); \
+         got rank={rank:?}; top10={top10:?}"
+    );
+}

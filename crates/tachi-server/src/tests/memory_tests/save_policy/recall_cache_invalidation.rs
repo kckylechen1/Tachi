@@ -16,8 +16,11 @@
 //! repo behavior this suite must not trip over.
 
 use super::*;
+use crate::facade_memory_ops::consolidate_ops::merge_into_for_project;
+use crate::memory_ops::{handle_archive_memory, handle_delete_memory, handle_memory_gc};
 use crate::memory_search_ops::handle_save_memory;
 use crate::test_support::EnvRestore;
+use crate::tool_params::{ArchiveMemoryParams, DeleteMemoryParams};
 use serde_json::Value;
 
 fn save_params(path: &str, text: &str) -> SaveMemoryParams {
@@ -402,5 +405,235 @@ async fn named_project_save_clears_global_recall_cache() {
     assert_eq!(
         entries_after, 0,
         "a named-project save must still clear the GLOBAL recall cache (cross-store invalidation)"
+    );
+}
+
+// ── #1413 concern 1: invalidation after non-save content mutations ─────────
+//
+// `handle_save_memory` (T1–T6 above) already busts the shared recall cache.
+// These tests cover the OTHER content-changing paths cited in #1413 concern 1
+// — delete, archive, gc, and a consolidate lifecycle action — each of which
+// must likewise clear the GLOBAL recall cache only AFTER its store commit
+// returned, never from inside an active store closure (the invalidator
+// re-enters `with_global_store`, which would recurse on / nest the
+// non-reentrant `global_rw_gate`). Every test follows the same discriminating
+// shape: seed a cache row directly, run the mutation, assert the cache is now
+// empty. Pre-fix (no invalidation call in the cited path) the seeded row
+// survives, so `entries == 0` is RED; post-fix it is GREEN.
+
+fn seed_global_recall_cache_row(server: &crate::server_state::MemoryServer, cache_id: &str) {
+    server
+        .with_global_store(|store| {
+            store
+                .recall_cache_store(cache_id, "1413 seed query", "[{\"id\":\"seed\"}]", 1, false)
+                .map_err(|e| e.to_string())
+        })
+        .expect("seed global recall cache row");
+}
+
+fn global_recall_cache_entries(server: &crate::server_state::MemoryServer) -> i64 {
+    server
+        .with_global_store_read(|store| store.recall_cache_stats().map_err(|e| e.to_string()))
+        .expect("global recall cache stats")
+        .entries
+}
+
+async fn save_and_get_id(
+    server: &crate::server_state::MemoryServer,
+    path: &str,
+    text: &str,
+) -> String {
+    let saved = handle_save_memory(server, save_params(path, text))
+        .await
+        .expect("save");
+    let saved_json: Value = serde_json::from_str(&saved).expect("save json");
+    saved_json["id"].as_str().expect("save id").to_string()
+}
+
+// Like `save_and_get_id` but stamps `retention_policy = "ephemeral"`. Needed
+// for lifecycle-merge tests: `is_protected` (consolidate_ops) shields any row
+// whose retention is durable/permanent/pinned from supersede/merge/archive,
+// and `save_params` defaults retention to `durable` (None →
+// `resolve_save_retention_policy` → durable), so a default-saved fixture is
+// refused by `refuse_if_protected`. Ephemeral rows are genuinely non-protected
+// (same retention `/ghost/run` rows get), so this exercises the REAL merge
+// path without weakening production protection (durable/permanent/pinned stay
+// fully shielded).
+async fn save_ephemeral_and_get_id(
+    server: &crate::server_state::MemoryServer,
+    path: &str,
+    text: &str,
+) -> String {
+    let mut params = save_params(path, text);
+    params.retention_policy = Some("ephemeral".to_string());
+    let saved = handle_save_memory(server, params).await.expect("save");
+    let saved_json: Value = serde_json::from_str(&saved).expect("save json");
+    saved_json["id"].as_str().expect("save id").to_string()
+}
+
+// ── D1: delete clears the recall cache after the store commit ──────────────
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn delete_memory_clears_recall_cache_after_commit() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+
+    let server = make_server();
+    let path = format!("/scratch/tachi/1413-delete/{}", uuid::Uuid::new_v4());
+    let id = save_and_get_id(&server, &path, "1413 delete inval probe apples").await;
+
+    seed_global_recall_cache_row(&server, "rc:1413-d1");
+    assert!(
+        global_recall_cache_entries(&server) >= 1,
+        "seed row must be present before delete"
+    );
+
+    let raw = handle_delete_memory(
+        &server,
+        DeleteMemoryParams {
+            id: id.clone(),
+            project: None,
+        },
+    )
+    .await
+    .expect("delete");
+    let deleted_json: Value = serde_json::from_str(&raw).expect("delete json");
+    assert!(
+        deleted_json["deleted"].as_bool().unwrap_or(false),
+        "delete must actually remove the row (else the cache assert is vacuous): {deleted_json:#}"
+    );
+
+    assert_eq!(
+        global_recall_cache_entries(&server),
+        0,
+        "a successful delete must clear the recall cache after its store commit"
+    );
+}
+
+// ── D2: archive clears the recall cache after the store commit ─────────────
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn archive_memory_clears_recall_cache_after_commit() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+
+    let server = make_server();
+    let path = format!("/scratch/tachi/1413-archive/{}", uuid::Uuid::new_v4());
+    let id = save_and_get_id(&server, &path, "1413 archive inval probe bananas").await;
+
+    seed_global_recall_cache_row(&server, "rc:1413-d2");
+    assert!(
+        global_recall_cache_entries(&server) >= 1,
+        "seed row must be present before archive"
+    );
+
+    let raw = handle_archive_memory(
+        &server,
+        ArchiveMemoryParams {
+            id: id.clone(),
+            project: None,
+        },
+    )
+    .await
+    .expect("archive");
+    let archived_json: Value = serde_json::from_str(&raw).expect("archive json");
+    assert!(
+        archived_json["archived"].as_bool().unwrap_or(false),
+        "archive must actually archive the row (else the cache assert is vacuous): {archived_json:#}"
+    );
+
+    assert_eq!(
+        global_recall_cache_entries(&server),
+        0,
+        "a successful archive must clear the recall cache after its store commit"
+    );
+}
+
+// ── D3: gc clears the recall cache after the batch commits ─────────────────
+//
+// `gc_common_store` / `gc_expired_kanban_cards` run inside the gc closures and
+// only borrow a `&mut MemoryStore`, so the bust MUST be the caller's job after
+// those closures return — this test proves it lands there (pre-fix there is no
+// invalidation in `handle_memory_gc`, so the seeded row survives → RED).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn memory_gc_clears_recall_cache_after_commit() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+
+    let server = make_server();
+    // Seed content so gc sweeps a populated store (whether it reclaims this row
+    // is irrelevant to the cache assertion below).
+    let path = format!("/scratch/tachi/1413-gc/{}", uuid::Uuid::new_v4());
+    let _ = save_and_get_id(&server, &path, "1413 gc inval probe cherries").await;
+
+    seed_global_recall_cache_row(&server, "rc:1413-d3");
+    assert!(
+        global_recall_cache_entries(&server) >= 1,
+        "seed row must be present before gc"
+    );
+
+    handle_memory_gc(&server).await.expect("gc");
+
+    assert_eq!(
+        global_recall_cache_entries(&server),
+        0,
+        "gc must clear the recall cache after its batch store commits"
+    );
+}
+
+// ── D4: a consolidate lifecycle action (merge_into) clears the cache ───────
+// Drives `apply_lifecycle_action` via its automated `merge_into_for_project`
+// entry — the SAME choke point the human-reviewed propose/review/apply loop
+// reaches — so the test exercises the real mutation path, not a stand-in. The
+// invalidation must fire AFTER the `with_memory_store` closure returns.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consolidate_lifecycle_clears_recall_cache_after_commit() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+
+    let server = make_server();
+    // Disjoint word sets beyond the shared needle so write-time near-dup
+    // merge (Jaccard) does not collapse A and B into one row before this test
+    // gets to merge them explicitly. Both rows are saved `ephemeral` so they
+    // are NOT protected (durable/permanent/pinned are shielded from merge by
+    // `is_protected`); see `save_ephemeral_and_get_id`.
+    let needle = format!("ConsolidateMergeNeedle{}", uuid::Uuid::new_v4().simple());
+    let path_a = format!("/scratch/tachi/1413-merge/{}/a", uuid::Uuid::new_v4());
+    let path_b = format!("/scratch/tachi/1413-merge/{}/b", uuid::Uuid::new_v4());
+    let id_a =
+        save_ephemeral_and_get_id(&server, &path_a, &format!("{needle} alpha source row")).await;
+    let id_b =
+        save_ephemeral_and_get_id(&server, &path_b, &format!("{needle} bravo survivor row")).await;
+
+    seed_global_recall_cache_row(&server, "rc:1413-d4");
+    assert!(
+        global_recall_cache_entries(&server) >= 1,
+        "seed row must be present before merge"
+    );
+
+    // Merge source (A) into survivor (B): fold keywords/entities, supersede +
+    // archive A. `merge_into_for_project` is the only non-human-reviewed entry
+    // to the lifecycle mutation choke point.
+    let merged = merge_into_for_project(&server, None, &id_a, &id_b).expect("merge_into");
+    assert_eq!(
+        merged["lifecycle_action"].as_str(),
+        Some("merge_into"),
+        "merge must report its action: {merged:#}"
+    );
+
+    assert_eq!(
+        global_recall_cache_entries(&server),
+        0,
+        "a consolidate lifecycle action must clear the recall cache after its store commit"
     );
 }

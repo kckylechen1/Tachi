@@ -146,3 +146,100 @@ fn surface_none_reproduces_the_fused_union_of_memory_and_docs() {
         "expected all 3 seeded rows in the fused pool"
     );
 }
+
+/// #1413 concern 2: graph expansion (hops=1) must not leak cross-surface
+/// neighbors into a surface-scoped result set. A Docs entry and a Memory
+/// entry share the probe term and are linked by an edge; under each surface
+/// scope the in-surface entry is the only ranked seed (top_k=1), so the only
+/// way the out-of-surface neighbor can appear is through graph expansion. The
+/// `surface=None` control proves the edge is wired and expansion runs (both
+/// nodes appear), making the scoped assertions a real red→green
+/// discrimination: pre-fix the cross-surface neighbor leaks; post-fix the
+/// canonical `surface_of` classifier rejects it.
+#[test]
+fn graph_expansion_does_not_leak_cross_surface_neighbors() {
+    let mut conn = setup();
+
+    // Docs node: wiki entry (is_wiki_entry via path + category).
+    let mut docs_node = memory_entry(
+        "graph-iso-docs",
+        &format!("{SHARED_PROBE_TERM} wiki reference page about graph surface isolation"),
+        &[SHARED_PROBE_TERM],
+    );
+    docs_node.path = "/wiki/graph-surface-isolation".to_string();
+    docs_node.category = "wiki".to_string();
+    insert_entry(&mut conn, docs_node);
+
+    // Memory node: research note (not wiki, not guide).
+    let mut mem_node = memory_entry(
+        "graph-iso-mem",
+        &format!("{SHARED_PROBE_TERM} research note about graph surface isolation"),
+        &[SHARED_PROBE_TERM],
+    );
+    mem_node.path = "/notes/research/graph-surface-isolation".to_string();
+    mem_node.category = "decision".to_string();
+    insert_entry(&mut conn, mem_node);
+
+    // Undirected edge linking the two surfaces (graph_expand traverses both
+    // endpoints regardless of direction).
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "graph-iso-docs".to_string(),
+            target_id: "graph-iso-mem".to_string(),
+            relation: "similar_to".to_string(),
+            weight: 1.0,
+            metadata: json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let opts = |surface: Option<Surface>| SearchOptions {
+        top_k: 1,
+        candidates_per_channel: 10,
+        record_access: false,
+        graph_expand_hops: 1,
+        surface,
+        ..Default::default()
+    };
+
+    // Control (surface=None): no surface predicate, so the cross-surface
+    // neighbor IS expanded — both nodes must appear (one seed, one neighbor).
+    let none_results = hybrid_search(&conn, SHARED_PROBE_TERM, &opts(None)).unwrap();
+    let none_ids: HashSet<&str> = none_results.iter().map(|r| r.entry.id.as_str()).collect();
+    assert!(
+        none_ids.contains("graph-iso-docs") && none_ids.contains("graph-iso-mem"),
+        "control (surface=None): cross-surface neighbor must be expanded when no \
+         surface predicate is set; got {none_ids:?}"
+    );
+
+    // Docs scope: only the wiki node ranks as seed; the Memory neighbor reached
+    // by the edge must NOT leak into the Docs-scoped results.
+    let docs_results = hybrid_search(&conn, SHARED_PROBE_TERM, &opts(Some(Surface::Docs))).unwrap();
+    let docs_ids: Vec<&str> = docs_results.iter().map(|r| r.entry.id.as_str()).collect();
+    assert!(
+        docs_ids.contains(&"graph-iso-docs"),
+        "Docs seed must rank under Surface::Docs; got {docs_ids:?}"
+    );
+    assert!(
+        !docs_ids.contains(&"graph-iso-mem"),
+        "Surface::Docs must not leak the Memory neighbor via graph expansion; got {docs_ids:?}"
+    );
+
+    // Memory scope: only the research note ranks as seed; the Docs neighbor
+    // reached by the edge must NOT leak into the Memory-scoped results.
+    let mem_results =
+        hybrid_search(&conn, SHARED_PROBE_TERM, &opts(Some(Surface::Memory))).unwrap();
+    let mem_ids: Vec<&str> = mem_results.iter().map(|r| r.entry.id.as_str()).collect();
+    assert!(
+        mem_ids.contains(&"graph-iso-mem"),
+        "Memory seed must rank under Surface::Memory; got {mem_ids:?}"
+    );
+    assert!(
+        !mem_ids.contains(&"graph-iso-docs"),
+        "Surface::Memory must not leak the Docs neighbor via graph expansion; got {mem_ids:?}"
+    );
+}
