@@ -149,7 +149,7 @@ fn load_route_policy_rule_loadout_classifies_persisted_rules() {
 /// Post-fix green: the schema_version guard refuses the legacy row loudly.
 #[test]
 fn legacy_approved_route_policy_proposal_cannot_be_applied() {
-    let db_path = crate::utils::test_fixtures_path(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "dispatch-legacy-route-apply-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -247,7 +247,7 @@ fn legacy_approved_route_policy_proposal_cannot_be_applied() {
 /// returns Err before `tx.commit()`.
 #[test]
 fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
-    let db_path = crate::utils::test_fixtures_path(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "dispatch-route-tx-rollback-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -404,7 +404,7 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
 /// `stale_state_version` and must reload+retry.
 #[test]
 fn route_policy_review_cas_refuses_on_stale_state_version() {
-    let db_path = crate::utils::test_fixtures_path(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "dispatch-stale-version-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

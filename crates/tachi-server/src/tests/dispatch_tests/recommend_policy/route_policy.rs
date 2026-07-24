@@ -415,7 +415,7 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
 async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     let (server, _temp_home) = make_server_with_temp_home();
 
-    let seed_one = |task_id: &str, profile: &str, outcome: &str, cost: f64, quality: f64| async {
+    let seed_one = |task_id: &str, profile: &str, outcome: &str, cost: f64, quality: f64| async move {
         server
             .tachi_complete(Parameters(TachiCompleteParams {
                 task_id: Some(task_id.to_string()),
