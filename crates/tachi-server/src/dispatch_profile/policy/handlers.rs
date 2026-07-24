@@ -308,8 +308,29 @@ pub(crate) fn handle_route_policy_review(
             .unwrap_or("route_policy");
         if kind == "route_policy" && !is_v2_proposal(&value) {
             return Err(format!(
-                "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed                  identity and cannot be reviewed; regenerate with action='proposals' to mint                  a fresh pending v2 proposal"
+                "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be reviewed; regenerate with action='proposals' to mint a fresh pending v2 proposal"
             ));
+        }
+        // Re-validate the persisted content_digest against the identity_payload
+        // still in the row *before* recording a review decision. Without this,
+        // a proposal that drifted from what was generated (a hand-edit, a
+        // partial write, a regeneration collision) could be approved at review
+        // time and only get caught at apply — this closes that gap so
+        // propose/review/apply drift is refused at the earliest point it can
+        // be detected, not just the last one. Mirrors the same check apply.rs
+        // runs immediately before mutating routing state.
+        if kind == "route_policy" {
+            let stored_digest = value
+                .get("content_digest")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let identity_payload = value.get("identity_payload").cloned().unwrap_or(json!({}));
+            let recomputed = content_digest_hex(&identity_payload);
+            if stored_digest.is_empty() || recomputed != stored_digest {
+                return Err(format!(
+                    "content_digest_mismatch: route policy proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing to review a proposal that drifted from what was generated"
+                ));
+            }
         }
         // Review only permits pending -> approved | rejected. A terminal
         // (rejected/applied) row cannot be resurrected, and an already-approved
@@ -320,7 +341,7 @@ pub(crate) fn handle_route_policy_review(
             .unwrap_or("pending");
         if current_status != "pending" {
             return Err(format!(
-                "route policy proposal {proposal_id} is in terminal state '{current_status}';                  only pending proposals can be reviewed"
+                "route policy proposal {proposal_id} is in terminal state '{current_status}'; only pending proposals can be reviewed"
             ));
         }
         value["status"] = json!(status);
@@ -341,7 +362,7 @@ pub(crate) fn handle_route_policy_review(
                 .map_err(|e| format!("persist route policy review: {e}"))?;
         if !updated {
             return Err(format!(
-                "stale_state_version: route policy proposal {proposal_id} changed before review;                  reload and retry"
+                "stale_state_version: route policy proposal {proposal_id} changed before review; reload and retry"
             ));
         }
         Ok(value)

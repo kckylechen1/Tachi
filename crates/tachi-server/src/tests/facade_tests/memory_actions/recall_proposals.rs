@@ -888,3 +888,346 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
         "the legacy refusal must not have mutated config.env"
     );
 }
+
+/// Read a raw recall-config proposal row (JSON string, state_version) for
+/// direct post-condition assertions the facade response does not surface
+/// (byte-identical row, exact version stability).
+fn read_recall_row(server: &crate::MemoryServer, proposal_id: &str) -> (String, u32) {
+    server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv("recall_config_proposals", proposal_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read recall proposal row")
+        .expect("recall proposal row present")
+}
+
+/// Discrimination: once a recall-config proposal is in a terminal state
+/// (`rejected`), a second review call attempting to move it to `approved`
+/// must be refused, and the refusal must not mutate the row at all — not the
+/// status, not the state_version.
+///
+/// Production path: `handle_recall_config_review` -> `current_status !=
+/// "pending"` guard, which runs before the `set_state_if_version` write.
+/// Pre-fix red (this specific gap, not the guard's existence): the guard
+/// itself was untested — nothing in this file drove a proposal into
+/// `rejected` and then attempted a second review, so a regression that
+/// dropped or weakened the guard would not have been caught here even though
+/// route_policy's equivalent guard has direct test coverage.
+/// Post-fix green: the second review is refused with a terminal-state error
+/// and the stored row (including state_version) is byte-identical before and
+/// after the refused attempt.
+#[tokio::test]
+async fn recall_terminal_state_cannot_be_rereviewed() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_recall_pair(&server, "terminal");
+
+    let metadata = json!({
+        "cases": [
+            {
+                "name": "partial-cleanup",
+                "query": "cleanup preview safe",
+                "expected_id": "recall-terminal-partial-term"
+            }
+        ],
+        "variants": [
+            {
+                "name": "or-fallback-0.6",
+                "recall_config": {
+                    "or_fallback_fts_score_factor": 0.6,
+                    "or_fallback_fts_max_terms": 4
+                }
+            }
+        ]
+    });
+
+    let mut proposals = tachi_memory_params("recall_proposals");
+    proposals.format = Some("json".to_string());
+    proposals.scope = Some("memory".to_string());
+    proposals.top_k = 3;
+    proposals.force = true;
+    proposals.metadata = Some(metadata);
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, proposals)
+        .await
+        .expect("recall proposals");
+    let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
+    let proposal = parsed["proposals"]
+        .as_array()
+        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .expect("proposal");
+    let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
+
+    // Move the proposal to terminal "rejected".
+    let mut reject = tachi_memory_params("review_recall_proposal");
+    reject.proposal_id = Some(proposal_id.clone());
+    reject.review_status = Some("rejected".to_string());
+    let _ = crate::facade_memory_ops::handle_tachi_memory(&server, reject)
+        .await
+        .expect("reject");
+
+    let (before_raw, before_version) = read_recall_row(&server, &proposal_id);
+
+    // Re-review the rejected row: must refuse with a terminal-state error.
+    let mut re_approve = tachi_memory_params("review_recall_proposal");
+    re_approve.proposal_id = Some(proposal_id.clone());
+    re_approve.review_status = Some("approved".to_string());
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, re_approve)
+        .await
+        .expect_err("a rejected recall proposal must not be re-reviewable");
+    assert!(
+        err.contains("terminal state"),
+        "expected a terminal-state refusal, got: {err}"
+    );
+
+    // Post-invariant: the refusal must not have mutated the row at all.
+    let (after_raw, after_version) = read_recall_row(&server, &proposal_id);
+    assert_eq!(
+        before_version, after_version,
+        "a refused re-review must not bump the row's state_version"
+    );
+    assert_eq!(
+        before_raw, after_raw,
+        "a refused re-review must not mutate the stored row"
+    );
+    let after_value: Value = serde_json::from_str(&after_raw).expect("row json");
+    assert_eq!(
+        after_value["status"],
+        json!("rejected"),
+        "status must remain rejected, not silently become approved"
+    );
+}
+
+/// Discrimination: applying an already-`applied` recall-config proposal a
+/// second time must be refused terminally-idempotent — no second file
+/// mutation, no second `applied_at` stamp, no second terminal receipt.
+/// `drive_recall_apply_state_machine`'s `match status` has arms for
+/// `"approved"` (fresh apply) and `"applying"` (crash recovery) only; a row
+/// already at `"applied"` falls into the `other` catch-all and is refused.
+///
+/// Production path: `drive_recall_apply_state_machine` `other => Err(...)`
+/// arm, reached because the first apply's `finalize_recall_apply` already
+/// moved `status` to `"applied"`.
+/// Pre-fix red (this specific gap): nothing in this file drove two applies of
+/// the same proposal back-to-back, so a regression that let a second apply
+/// silently repeat the file write (or re-stamp `applied_at`/`attempt_id`)
+/// would not have been caught even though route_policy's equivalent
+/// double-apply path has direct test coverage.
+/// Post-fix green: the second apply is refused, config.env is byte-identical
+/// before/after the second call, and the row's `applied_at` /
+/// `apply_result.attempt_id` remain the first apply's values.
+#[tokio::test]
+async fn recall_two_applies_yield_one_terminal_receipt() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("parent"))
+        .expect("create config env parent");
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n",
+    )
+    .expect("seed config.env");
+
+    seed_recall_pair(&server, "two-apply");
+
+    let metadata = json!({
+        "cases": [
+            {
+                "name": "partial-cleanup",
+                "query": "cleanup preview safe",
+                "expected_id": "recall-two-apply-partial-term"
+            }
+        ],
+        "variants": [
+            {
+                "name": "or-fallback-0.6",
+                "recall_config": {
+                    "or_fallback_fts_score_factor": 0.6,
+                    "or_fallback_fts_max_terms": 4
+                }
+            }
+        ]
+    });
+
+    let mut proposals = tachi_memory_params("recall_proposals");
+    proposals.format = Some("json".to_string());
+    proposals.scope = Some("memory".to_string());
+    proposals.top_k = 3;
+    proposals.force = true;
+    proposals.metadata = Some(metadata);
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, proposals)
+        .await
+        .expect("recall proposals");
+    let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
+    let proposal = parsed["proposals"]
+        .as_array()
+        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .expect("proposal");
+    let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
+
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let _ = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.format = Some("json".to_string());
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let first_body = crate::facade_memory_ops::handle_tachi_memory(&server, apply.clone())
+        .await
+        .expect("apply #1");
+    let first: Value = serde_json::from_str(&first_body).expect("apply #1 JSON");
+    assert_eq!(first["proposal"]["status"], json!("applied"));
+    let first_applied_at = first["proposal"]["applied_at"]
+        .as_str()
+        .expect("applied_at present")
+        .to_string();
+    let first_attempt_id = first["attempt_id"]
+        .as_str()
+        .expect("attempt_id present")
+        .to_string();
+
+    let config_after_first = std::fs::read_to_string(&config_env_path).expect("read config.env");
+
+    // Second apply of the same (now-applied) proposal must be refused.
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("second apply of an applied proposal must be refused");
+    assert!(
+        err.contains("cannot be applied from status 'applied'"),
+        "expected an 'applied' terminal-status refusal, got: {err}"
+    );
+
+    // Post-invariant: no second file mutation, no second terminal receipt.
+    let config_after_second =
+        std::fs::read_to_string(&config_env_path).expect("read config.env");
+    assert_eq!(
+        config_after_first, config_after_second,
+        "a refused second apply must not mutate config.env again"
+    );
+    let (raw, _version) = read_recall_row(&server, &proposal_id);
+    let row: Value = serde_json::from_str(&raw).expect("row json");
+    assert_eq!(row["status"], json!("applied"));
+    assert_eq!(
+        row["applied_at"].as_str(),
+        Some(first_applied_at.as_str()),
+        "applied_at must remain the first apply's timestamp, not a second stamp"
+    );
+    assert_eq!(
+        row["apply_result"]["attempt_id"].as_str(),
+        Some(first_attempt_id.as_str()),
+        "exactly one terminal receipt: apply_result.attempt_id must still be the first attempt"
+    );
+}
+
+/// Discrimination: a recall-config proposal row whose `identity_payload` was
+/// mutated after review (a hand-edit, a partial write) without recomputing
+/// `content_digest` must refuse to apply with `content_digest_mismatch`,
+/// never silently applying content the human never actually reviewed.
+///
+/// Production path: `drive_recall_apply_state_machine` -> recompute
+/// `content_digest_hex(identity_payload)` and compare against the stored
+/// `content_digest` before touching config.env.
+/// Pre-fix red (this specific gap): the digest-recheck code at apply existed
+/// but had zero test coverage in this file — a regression that dropped the
+/// comparison (or always treated it as a match) would not have been caught.
+/// Post-fix green: the mismatch is refused and config.env is untouched.
+#[tokio::test]
+async fn recall_apply_content_digest_mismatch_refuses() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("parent"))
+        .expect("create config env parent");
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n",
+    )
+    .expect("seed config.env");
+
+    seed_recall_pair(&server, "digest-mismatch");
+
+    let metadata = json!({
+        "cases": [
+            {
+                "name": "partial-cleanup",
+                "query": "cleanup preview safe",
+                "expected_id": "recall-digest-mismatch-partial-term"
+            }
+        ],
+        "variants": [
+            {
+                "name": "or-fallback-0.6",
+                "recall_config": {
+                    "or_fallback_fts_score_factor": 0.6,
+                    "or_fallback_fts_max_terms": 4
+                }
+            }
+        ]
+    });
+
+    let mut proposals = tachi_memory_params("recall_proposals");
+    proposals.format = Some("json".to_string());
+    proposals.scope = Some("memory".to_string());
+    proposals.top_k = 3;
+    proposals.force = true;
+    proposals.metadata = Some(metadata);
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, proposals)
+        .await
+        .expect("recall proposals");
+    let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
+    let proposal = parsed["proposals"]
+        .as_array()
+        .and_then(|items| items.iter().find(|p| p["variant"] == json!("or-fallback-0.6")))
+        .expect("proposal");
+    let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
+
+    // Approve while the row is still clean (digest matches).
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let _ = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve");
+
+    // Tamper the row AFTER review: mutate identity_payload without
+    // recomputing content_digest, simulating a hand-edit / partial write that
+    // landed between review and apply.
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("row");
+            let mut value: Value = serde_json::from_str(&raw).expect("json");
+            value["identity_payload"]["tampered"] = json!(true);
+            let next = serde_json::to_string(&value).expect("serialize");
+            store
+                .set_state("recall_config_proposals", &proposal_id, &next)
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(())
+        })
+        .expect("tamper row");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.format = Some("json".to_string());
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("a tampered identity_payload must refuse to apply");
+    assert!(
+        err.contains("content_digest_mismatch"),
+        "expected content_digest_mismatch refusal, got: {err}"
+    );
+
+    let config_body = std::fs::read_to_string(&config_env_path).expect("read config.env");
+    assert!(
+        config_body.contains("TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1"),
+        "the digest-mismatch refusal must not have mutated config.env"
+    );
+}

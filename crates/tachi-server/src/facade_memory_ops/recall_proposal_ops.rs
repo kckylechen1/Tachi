@@ -99,7 +99,30 @@ pub(crate) fn handle_recall_config_review(
             .unwrap_or(false);
         if !is_v2 {
             return Err(format!(
-                "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed                  identity and cannot be reviewed; regenerate with action='recall_proposals'                  to mint a fresh pending v2 proposal"
+                "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be reviewed; regenerate with action='recall_proposals' to mint a fresh pending v2 proposal"
+            ));
+        }
+        // Re-validate the persisted content_digest against the identity_payload
+        // still in the row *before* recording a review decision. Without this,
+        // a proposal that drifted from what was generated (a hand-edit, a
+        // partial write, a regeneration collision) could be approved at review
+        // time and only get caught at apply — this closes that gap so
+        // propose/review/apply drift is refused at the earliest point it can
+        // be detected, not just the last one. Mirrors the same check
+        // `drive_recall_apply_state_machine` runs immediately before mutating
+        // config.env.
+        let stored_digest = value
+            .get("content_digest")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let identity_payload = value
+            .get("identity_payload")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let recomputed_digest = content_digest_hex(&identity_payload);
+        if stored_digest.is_empty() || recomputed_digest != stored_digest {
+            return Err(format!(
+                "content_digest_mismatch: recall config proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed_digest}; refusing to review a proposal that drifted from what was generated"
             ));
         }
         // Review only permits pending -> approved | rejected. A terminal
@@ -111,7 +134,7 @@ pub(crate) fn handle_recall_config_review(
             .unwrap_or("pending");
         if current_status != "pending" {
             return Err(format!(
-                "recall config proposal {proposal_id} is in terminal state '{current_status}';                  only pending proposals can be reviewed"
+                "recall config proposal {proposal_id} is in terminal state '{current_status}'; only pending proposals can be reviewed"
             ));
         }
         value["status"] = json!(status);
@@ -283,7 +306,7 @@ fn drive_recall_apply_state_machine(
         .unwrap_or(false);
     if !is_v2 {
         return Err(format!(
-            "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity              and cannot be applied; regenerate with action='recall_proposals' to mint a fresh              pending v2 proposal"
+            "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be applied; regenerate with action='recall_proposals' to mint a fresh pending v2 proposal"
         ));
     }
     // Re-validate the persisted content_digest against the identity_payload
@@ -299,7 +322,7 @@ fn drive_recall_apply_state_machine(
     let recomputed_digest = content_digest_hex(&identity_payload);
     if stored_digest.is_empty() || recomputed_digest != stored_digest {
         return Err(format!(
-            "content_digest_mismatch: recall config proposal {proposal_id} stored digest              {stored_digest:?} does not match recomputed {recomputed_digest}; refusing to apply              unreviewed content"
+            "content_digest_mismatch: recall config proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed_digest}; refusing to apply unreviewed content"
         ));
     }
 
@@ -372,7 +395,7 @@ fn drive_recall_apply_state_machine(
                 || receipt_after.is_empty()
             {
                 return Err(format!(
-                    "recall config proposal {proposal_id} applying_receipt is missing                      attempt_id/before_digest/after_digest; refusing to guess — operator must                      reconcile the row"
+                    "recall config proposal {proposal_id} applying_receipt is missing attempt_id/before_digest/after_digest; refusing to guess — operator must reconcile the row"
                 ));
             }
             let observed = compute_recall_digest(config_env_path)?;
@@ -413,12 +436,12 @@ fn drive_recall_apply_state_machine(
                 // touched the recall keys between the receipt and now; refuse
                 // loudly rather than silently clobbering it.
                 Err(format!(
-                    "third_party_drift: recall config proposal {proposal_id} applying_receipt                      observed config.env digest {observed} that matches neither the receipt's                      before_digest nor its after_digest; refusing to finalize — operator must                      reconcile the config file"
+                    "third_party_drift: recall config proposal {proposal_id} applying_receipt observed config.env digest {observed} that matches neither the receipt's before_digest nor its after_digest; refusing to finalize — operator must reconcile the config file"
                 ))
             }
         }
         other => Err(format!(
-            "recall config proposal {proposal_id} cannot be applied from status '{other}';              only approved (or applying for recovery) proposals can be applied"
+            "recall config proposal {proposal_id} cannot be applied from status '{other}'; only approved (or applying for recovery) proposals can be applied"
         )),
     }
 }
@@ -449,7 +472,7 @@ fn stamp_applying_receipt(
             .unwrap_or("pending");
         if current != "approved" {
             return Err(format!(
-                "stale_state_version: recall config proposal {proposal_id} is no longer                  'approved' (now '{current}'); another apply won the race — reload and retry"
+                "stale_state_version: recall config proposal {proposal_id} is no longer 'approved' (now '{current}'); another apply won the race — reload and retry"
             ));
         }
         value["status"] = json!("applying");
@@ -467,7 +490,7 @@ fn stamp_applying_receipt(
             .map_err(|e| format!("persist applying recall config proposal: {e}"))?;
         if !cas_ok {
             return Err(format!(
-                "stale_state_version: recall config proposal {proposal_id} changed before                  applying stamp; reload and retry"
+                "stale_state_version: recall config proposal {proposal_id} changed before applying stamp; reload and retry"
             ));
         }
         Ok(version + 1)
@@ -490,7 +513,7 @@ fn finalize_recall_apply(
     let observed = compute_recall_digest(config_env_path)?;
     if observed != expected_after_digest {
         return Err(format!(
-            "finalize_refused: recall config proposal {proposal_id} observed config.env digest              {observed} does not match expected after_digest {expected_after_digest}; refusing              to mark applied"
+            "finalize_refused: recall config proposal {proposal_id} observed config.env digest {observed} does not match expected after_digest {expected_after_digest}; refusing to mark applied"
         ));
     }
     let applied_at = Utc::now().to_rfc3339();
@@ -509,7 +532,7 @@ fn finalize_recall_apply(
             .unwrap_or("pending");
         if current != "applying" {
             return Err(format!(
-                "stale_state_version: recall config proposal {proposal_id} is no longer                  'applying' (now '{current}'); another finalize won the race — reload"
+                "stale_state_version: recall config proposal {proposal_id} is no longer 'applying' (now '{current}'); another finalize won the race — reload"
             ));
         }
         value["status"] = json!("applied");
@@ -532,7 +555,7 @@ fn finalize_recall_apply(
             .map_err(|e| format!("persist applied recall config proposal: {e}"))?;
         if !cas_ok {
             return Err(format!(
-                "stale_state_version: recall config proposal {proposal_id} changed before                  finalize; reload and retry"
+                "stale_state_version: recall config proposal {proposal_id} changed before finalize; reload and retry"
             ));
         }
         Ok(value)
