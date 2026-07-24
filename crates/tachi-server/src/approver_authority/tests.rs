@@ -147,8 +147,7 @@ fn a_present_but_malformed_value_refuses_instead_of_defaulting() {
         },
     ];
     for inputs in cases {
-        let denial = build_policy(inputs)
-            .expect_err("a malformed configuration value must refuse");
+        let denial = build_policy(inputs).expect_err("a malformed configuration value must refuse");
         assert_eq!(denial.kind(), "policy_unusable");
     }
 }
