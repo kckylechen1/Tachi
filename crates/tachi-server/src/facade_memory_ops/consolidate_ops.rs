@@ -489,7 +489,7 @@ fn apply_lifecycle_action(
     source_id: &str,
     target_id: Option<&str>,
 ) -> Result<Value, String> {
-    match action {
+    let result = match action {
         "supersede" => {
             let target = target_id.ok_or_else(|| {
                 "supersede proposal requires target_id (canonical survivor)".to_string()
@@ -608,7 +608,23 @@ fn apply_lifecycle_action(
         other => Err(format!(
             "unsupported lifecycle_action '{other}'; expected supersede|merge_into|near_dup_merge|archive|promote_distilled"
         )),
-    }
+    }?;
+
+    // #1413 concern 1: every lifecycle arm above mutates memory content
+    // (supersede / merge_into / near_dup_merge / archive / promote_distilled
+    // all change what a subsequent search surfaces), so bust the shared
+    // (global) recall cache once the store commit returned. The invalidator
+    // re-takes the global write gate via `with_global_store`; calling it from
+    // INSIDE any `with_memory_store` closure above would nest that gate inside
+    // the project/named-project gate (or recurse on it when the store resolves
+    // to global), so it must run here — after the closure returned. The
+    // `other => Err(..)` arm `?`-bails before reaching this point, so an
+    // unsupported action never invalidates.
+    let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+        server,
+        "consolidate_lifecycle",
+    );
+    Ok(result)
 }
 
 fn refuse_if_protected(

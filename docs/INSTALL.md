@@ -610,6 +610,36 @@ Safety defaults:
 
 Add `.tachi/env.generated` to `.gitignore`. Keep only `.tachi/vault.env` (vault aliases) in version control.
 
+#### Vault exec CLI (`tachi vault exec`)
+
+Run a child command with Vault-delivered credentials injected into its
+environment. Vault only fills env names the caller did **not** already set
+(the caller's own value always wins), injection diagnostics are name-only,
+and the child's exit code propagates.
+
+```bash
+# Require ZHIPUAI_API_KEY to be resolvable before spawning (fail-loud, no run)
+tachi vault exec --keychain --require ZHIPUAI_API_KEY -- opencode run
+
+# Run with whatever Vault can resolve; no hard requirement
+tachi vault exec --keychain -- cargo test
+```
+
+Safety default (#1413 concern 4): **if the Vault cannot be unlocked or its
+environment cannot be loaded, `vault exec` refuses to spawn the child and
+exits nonzero before exec** — a caller that only checks exit status never
+silently gets a credential-less run. This is a change from the earlier
+fail-open behavior, which ran the child with the inherited environment on
+such a failure.
+
+- `--require NAME,NAME` — comma-separated env names that must be present
+  (from Vault **or** the caller's existing environment) before spawning.
+  `--require` always wins: a required name that cannot be satisfied fails
+  before spawn regardless of the flag below.
+- `--allow-unauthenticated` — opt back in to the inherited-environment path
+  when the Vault is unavailable **and** no `--require` names were set. Use
+  this only when a credential-less run is explicitly acceptable.
+
 #### DLQ and dispatch safety
 
 - **`dlq_list` / `dlq_retry`**: DLQ replay skips mutating tools by default. Only idempotent read/search-style failures are safe to retry automatically.

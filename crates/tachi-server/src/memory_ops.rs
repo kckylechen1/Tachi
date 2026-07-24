@@ -312,6 +312,17 @@ pub(crate) async fn handle_delete_memory(
                 .map_err(|e| format!("Delete failed in project '{}': {}", project_name, e))
         })?;
         if project_deleted {
+            // #1413 concern 1: a delete changes what a subsequent search
+            // surfaces; bust the shared (global) recall cache AFTER the store
+            // commit returned. `invalidate_recall_cache_after_write` re-takes
+            // the global write gate via `with_global_store`; calling it from
+            // inside the `with_named_project_store` closure above would nest
+            // that gate inside the named-project gate (or recurse on it when
+            // the delete targets the global store), so it must run here.
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "delete_memory",
+            );
             return serde_json::to_string(&json!({
                 "deleted": true,
                 "db": "project",
@@ -326,6 +337,14 @@ pub(crate) async fn handle_delete_memory(
                 .delete(&params.id)
                 .map_err(|e| format!("Delete failed in global DB: {}", e))
         })?;
+        if global_deleted {
+            // #1413 concern 1: invalidate after the global store commit
+            // (never inside the closure above — see the note above).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "delete_memory",
+            );
+        }
         return serde_json::to_string(&json!({
             "deleted": global_deleted,
             "db": if global_deleted { "global" } else { "not_found" },
@@ -342,6 +361,12 @@ pub(crate) async fn handle_delete_memory(
                 .map_err(|e| format!("Delete failed: {}", e))
         })?;
         if deleted {
+            // #1413 concern 1: invalidate after the project-store commit
+            // (never inside the `with_project_store` closure above).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "delete_memory",
+            );
             return serde_json::to_string(
                 &json!({ "deleted": true, "db": "project", "id": params.id }),
             )
@@ -354,6 +379,12 @@ pub(crate) async fn handle_delete_memory(
             .delete(&params.id)
             .map_err(|e| format!("Delete failed: {}", e))
     })?;
+    if deleted {
+        // #1413 concern 1: invalidate after the global store commit (never
+        // inside the closure above — it would recurse on `global_rw_gate`).
+        let _ =
+            crate::memory_search_ops::invalidate_recall_cache_after_write(server, "delete_memory");
+    }
 
     serde_json::to_string(&json!({
         "deleted": deleted,
@@ -374,6 +405,15 @@ pub(crate) async fn handle_archive_memory(
                 .map_err(|e| format!("Archive failed in project '{}': {}", project_name, e))
         })?;
         if project_archived {
+            // #1413 concern 1: an archive changes what a subsequent (default
+            // non-archived) search surfaces; bust the shared (global) recall
+            // cache AFTER the store commit returned — never inside the
+            // `with_named_project_store` closure above (the invalidator
+            // re-takes the global write gate via `with_global_store`).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "archive_memory",
+            );
             return serde_json::to_string(&json!({
                 "archived": true,
                 "db": "project",
@@ -388,6 +428,14 @@ pub(crate) async fn handle_archive_memory(
                 .archive_memory(&params.id)
                 .map_err(|e| format!("Archive failed in global DB: {}", e))
         })?;
+        if global_archived {
+            // #1413 concern 1: invalidate after the global store commit
+            // (never inside the closure above).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "archive_memory",
+            );
+        }
         return serde_json::to_string(&json!({
             "archived": global_archived,
             "db": if global_archived { "global" } else { "not_found" },
@@ -404,6 +452,12 @@ pub(crate) async fn handle_archive_memory(
                 .map_err(|e| format!("Archive failed: {}", e))
         })?;
         if archived {
+            // #1413 concern 1: invalidate after the project-store commit
+            // (never inside the `with_project_store` closure above).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "archive_memory",
+            );
             return serde_json::to_string(
                 &json!({ "archived": true, "db": "project", "id": params.id }),
             )
@@ -416,6 +470,12 @@ pub(crate) async fn handle_archive_memory(
             .archive_memory(&params.id)
             .map_err(|e| format!("Archive failed: {}", e))
     })?;
+    if archived {
+        // #1413 concern 1: invalidate after the global store commit (never
+        // inside the closure above — it would recurse on `global_rw_gate`).
+        let _ =
+            crate::memory_search_ops::invalidate_recall_cache_after_write(server, "archive_memory");
+    }
 
     serde_json::to_string(&json!({
         "archived": archived,
@@ -476,10 +536,24 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
         Ok(gc)
     })?;
     results.insert("global".into(), global_gc);
+    // #1413 concern 1: bust the shared (global) recall cache right after the
+    // GLOBAL gc closure returns — never inside it (the invalidator re-takes the
+    // global write gate via `with_global_store`, which would recurse on the
+    // non-reentrant `global_rw_gate`). Invalidating per-closure (not once at
+    // the end) closes the partial-success gap: if the project gc arm below
+    // returns Err, the global content change above is still reflected in the
+    // cache rather than left stale behind a now-aborted batch.
+    let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(server, "memory_gc");
 
     if server.has_project_db() {
         let project_gc = server.with_project_store(|store| gc_common_store(store, "project"))?;
         results.insert("project".into(), project_gc);
+        // #1413 concern 1: bust again after the PROJECT gc closure returns.
+        // Project writes can stale the shared (global) recall cache too (a
+        // project-scoped search caches its rows in the global recall_cache
+        // table, keyed by project), so this closure's commit needs its own
+        // bust — never inside the closure.
+        let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(server, "memory_gc");
     }
 
     serde_json::to_string(&results).map_err(|e| format!("Failed to serialize: {}", e))

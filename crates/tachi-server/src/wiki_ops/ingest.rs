@@ -506,6 +506,17 @@ pub(crate) async fn handle_wiki_ingest(
         }
     }
 
+    // #1413 concern 1: bust the shared (global) recall cache AFTER every
+    // content-changing write in this ingest has committed — the entry upsert
+    // (+ optional supersede/archive of the prior wiki entry) above AND the
+    // related-edge writes in the `update_related` loop just above, since those
+    // edges can surface via graph-expanded searches. This runs only on the
+    // fully-successful path: an edge write failure `return Err(e)`-bails before
+    // reaching here, so failure propagation is retained. The invalidator
+    // re-takes the global write gate via `with_global_store`, so it stays OUT
+    // of every `with_named_project_store` closure above — never inside one.
+    let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(server, "wiki_ingest");
+
     server.enqueue_enrichment(crate::enrichment::build_enrichment_item(
         &entry,
         true,
