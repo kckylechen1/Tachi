@@ -1,5 +1,6 @@
 use super::{LlmClient, ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult};
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 const AUTH_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -102,7 +103,7 @@ impl LlmClient {
     /// for the configured reasoning lane. The request never follows redirects,
     /// retries, rotates keys, invokes fallback, or mutates provider health.
     pub async fn probe_reasoning_auth_no_content(&self) -> ProviderAuthProbeResult {
-        self.probe_reasoning_auth_inner(None).await
+        self.probe_reasoning_auth_inner(None, None).await
     }
 
     #[cfg(test)]
@@ -110,12 +111,24 @@ impl LlmClient {
         &self,
         endpoint: &str,
     ) -> ProviderAuthProbeResult {
-        self.probe_reasoning_auth_inner(Some(endpoint)).await
+        self.probe_reasoning_auth_inner(Some(endpoint), None).await
+    }
+
+    #[cfg(test)]
+    pub(in crate::llm) async fn probe_reasoning_auth_with_direct_endpoint_for_tests(
+        &self,
+        endpoint: &str,
+        host: &str,
+        address: SocketAddr,
+    ) -> ProviderAuthProbeResult {
+        self.probe_reasoning_auth_inner(Some(endpoint), Some((host, address)))
+            .await
     }
 
     async fn probe_reasoning_auth_inner(
         &self,
         endpoint_override: Option<&str>,
+        resolution_override: Option<(&str, SocketAddr)>,
     ) -> ProviderAuthProbeResult {
         let lane = &self.reasoning;
         let target = ProbeTarget::from_base_url(&lane.base_url);
@@ -144,12 +157,20 @@ impl LlmClient {
             return result(ProviderAuthProbeClass::CredentialUnavailable, None, None);
         };
 
-        let Ok(client) = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // SECURITY: this request carries a bearer credential. Reqwest's
+            // `system-proxy` feature otherwise permits HTTP_PROXY,
+            // HTTPS_PROXY, ALL_PROXY, or OS proxy configuration to receive
+            // the request and own DNS/TCP. The documented provider endpoint
+            // must always be contacted directly.
+            .no_proxy()
             .connect_timeout(AUTH_PROBE_CONNECT_TIMEOUT)
-            .timeout(AUTH_PROBE_TIMEOUT)
-            .build()
-        else {
+            .timeout(AUTH_PROBE_TIMEOUT);
+        if let Some((host, address)) = resolution_override {
+            client_builder = client_builder.resolve(host, address);
+        }
+        let Ok(client) = client_builder.build() else {
             return result(ProviderAuthProbeClass::Transient, None, None);
         };
         let endpoint = endpoint_override.unwrap_or(documented_endpoint);

@@ -284,3 +284,58 @@ async fn malformed_success_body_fails_closed_without_body_disclosure() {
     assert!(!safe_json.contains("private source text"), "{safe_json}");
     assert_eq!(observations.lock().expect("observations").len(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn ambient_proxy_cannot_receive_probe_bearer_or_own_transport() {
+    let _env_lock = crate::test_support::global_test_lock().lock();
+    let (intended_server, intended_observations) = start_mock(
+        StatusCode::OK,
+        r#"{"data":[{"id":"deepseek-reasoner"}]}"#,
+        None,
+    )
+    .await;
+    let (proxy_trap, proxy_observations) = start_mock(
+        StatusCode::BAD_GATEWAY,
+        "proxy must not receive request",
+        None,
+    )
+    .await;
+    let intended_url = reqwest::Url::parse(&intended_server).expect("intended mock URL");
+    let intended_address = std::net::SocketAddr::from((
+        std::net::Ipv4Addr::LOCALHOST,
+        intended_url.port().expect("intended mock port"),
+    ));
+    let endpoint = format!("http://auth-probe.test:{}/models", intended_address.port());
+    let client = client(lane(
+        "https://api.deepseek.com/chat/completions",
+        "deepseek-reasoner",
+    ));
+    let _proxy_env = [
+        EnvRestore::set("HTTP_PROXY", &proxy_trap),
+        EnvRestore::set("HTTPS_PROXY", &proxy_trap),
+        EnvRestore::set("ALL_PROXY", &proxy_trap),
+        EnvRestore::set("http_proxy", &proxy_trap),
+        EnvRestore::set("https_proxy", &proxy_trap),
+        EnvRestore::set("all_proxy", &proxy_trap),
+        EnvRestore::unset("NO_PROXY"),
+        EnvRestore::unset("no_proxy"),
+    ];
+
+    let result = client
+        .probe_reasoning_auth_with_direct_endpoint_for_tests(
+            &endpoint,
+            "auth-probe.test",
+            intended_address,
+        )
+        .await;
+
+    assert!(
+        proxy_observations.lock().expect("proxy trap").is_empty(),
+        "credential-bearing probe must bypass every ambient proxy"
+    );
+    assert_eq!(result.auth_class, ProviderAuthProbeClass::AuthOk);
+    assert_eq!(
+        *intended_observations.lock().expect("intended"),
+        vec![(Method::GET, "/models".to_string(), 0, true)]
+    );
+}

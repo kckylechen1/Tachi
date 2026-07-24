@@ -25,26 +25,29 @@ const PR_FIELDS: &str =
 #[command(about = "Run the read-only #1059 exact-20 GitHub corpus pilot")]
 struct Args {
     /// Owner-approved manifest, committed in this repository.
-    #[arg(long)]
-    manifest: PathBuf,
+    #[arg(long, required_unless_present = "auth_clearance_probe")]
+    manifest: Option<PathBuf>,
     /// JSON PilotReport output. The runner writes no GitHub or database state.
-    #[arg(long)]
-    report: PathBuf,
+    #[arg(long, required_unless_present = "auth_clearance_probe")]
+    report: Option<PathBuf>,
     /// Committed preview receipt whose immutable snapshot hashes are checked
     /// against every live GitHub read before a model can be invoked. During
     /// --rebaseline it is protected from output aliasing but never read.
-    #[arg(long)]
-    baseline_report: PathBuf,
+    #[arg(long, required_unless_present = "auth_clearance_probe")]
+    baseline_report: Option<PathBuf>,
     /// Owner-approved SHA-256 of the exact baseline report bytes.
-    #[arg(long, required_unless_present = "rebaseline")]
+    #[arg(
+        long,
+        required_unless_present_any = ["rebaseline", "auth_clearance_probe"]
+    )]
     baseline_sha256: Option<String>,
     /// Durable, atomically replaced partial-spend checkpoint. Required with
     /// --execute; a dry run never creates it.
     #[arg(long)]
     checkpoint: Option<PathBuf>,
     /// Immutable capture time recorded on every adapter receipt.
-    #[arg(long)]
-    captured_at: String,
+    #[arg(long, required_unless_present = "auth_clearance_probe")]
+    captured_at: Option<String>,
     /// Explicitly permit the bounded, real-model phase after a fresh cold
     /// review. Omission is a no-spend dry run that still validates manifest and
     /// live immutable provenance drift.
@@ -460,9 +463,17 @@ fn existing_paths_share_inode(_left: &Path, _right: &Path) -> Result<bool, Strin
 }
 
 fn refuse_baseline_report_alias(args: &Args) -> Result<(), String> {
-    let baseline = normalized_path_for_comparison(&args.baseline_report)?;
-    let report = normalized_path_for_comparison(&args.report)?;
-    if baseline == report || existing_paths_share_inode(&args.baseline_report, &args.report)? {
+    let baseline_report = args
+        .baseline_report
+        .as_deref()
+        .ok_or_else(|| "--baseline-report is required for pilot modes".to_string())?;
+    let report = args
+        .report
+        .as_deref()
+        .ok_or_else(|| "--report is required for pilot modes".to_string())?;
+    let baseline = normalized_path_for_comparison(baseline_report)?;
+    let normalized_report = normalized_path_for_comparison(report)?;
+    if baseline == normalized_report || existing_paths_share_inode(baseline_report, report)? {
         return Err("--baseline-report and --report must resolve to distinct paths".to_string());
     }
     Ok(())
@@ -470,18 +481,33 @@ fn refuse_baseline_report_alias(args: &Args) -> Result<(), String> {
 
 async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
     refuse_baseline_report_alias(&args)?;
-    let input = std::fs::read(&args.manifest)
-        .map_err(|error| format!("read manifest {}: {error}", args.manifest.display()))?;
+    let manifest = args
+        .manifest
+        .as_deref()
+        .ok_or_else(|| "--manifest is required for pilot modes".to_string())?;
+    let report_path = args
+        .report
+        .as_deref()
+        .ok_or_else(|| "--report is required for pilot modes".to_string())?;
+    let baseline_report = args
+        .baseline_report
+        .as_deref()
+        .ok_or_else(|| "--baseline-report is required for pilot modes".to_string())?;
+    let captured_at = args
+        .captured_at
+        .as_deref()
+        .ok_or_else(|| "--captured-at is required for pilot modes".to_string())?;
+    let input = std::fs::read(manifest)
+        .map_err(|error| format!("read manifest {}: {error}", manifest.display()))?;
     if args.rebaseline {
-        let report =
-            rebaseline_owner_approved_corpus_pilot(&input, &GhCliReader, &args.captured_at)?;
-        write_report(&args.report, &report)?;
+        let report = rebaseline_owner_approved_corpus_pilot(&input, &GhCliReader, captured_at)?;
+        write_report(report_path, &report)?;
         return Ok((report, false));
     }
-    let baseline_bytes = std::fs::read(&args.baseline_report).map_err(|error| {
+    let baseline_bytes = std::fs::read(baseline_report).map_err(|error| {
         format!(
             "read baseline report {}: {error}",
-            args.baseline_report.display()
+            baseline_report.display()
         )
     })?;
     let baseline_sha256 = args
@@ -497,7 +523,7 @@ async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
             run_owner_approved_corpus_pilot(
                 &input,
                 &GhCliReader,
-                &args.captured_at,
+                captured_at,
                 &baseline_bytes,
                 baseline_sha256,
                 &checkpoint_store,
@@ -512,14 +538,14 @@ async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
             dry_run_owner_approved_corpus_pilot(
                 &input,
                 &GhCliReader,
-                &args.captured_at,
+                captured_at,
                 &baseline_bytes,
                 baseline_sha256,
             )?,
             false,
         )
     };
-    write_report(&args.report, &report)?;
+    write_report(report_path, &report)?;
     Ok((report, executed))
 }
 
@@ -573,23 +599,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auth_clearance_probe_cli_shape_is_accepted_without_execution() {
-        let parsed = Args::try_parse_from([
-            "github-corpus-pilot",
-            "--auth-clearance-probe",
-            "--manifest",
-            "must-not-be-read.json",
-            "--report",
-            "must-not-be-written.json",
-            "--baseline-report",
-            "must-not-be-read-baseline.json",
-            "--baseline-sha256",
-            "not-read",
-            "--captured-at",
-            "not-read",
-        ]);
+    fn auth_clearance_probe_requires_no_corpus_arguments() {
+        let parsed = Args::try_parse_from(["github-corpus-pilot", "--auth-clearance-probe"]);
         assert!(parsed.is_ok(), "{parsed:?}");
         assert!(parsed.expect("accepted probe CLI").auth_clearance_probe);
+    }
+
+    #[test]
+    fn normal_pilot_still_requires_each_corpus_argument() {
+        let complete = [
+            "github-corpus-pilot",
+            "--manifest",
+            "manifest.json",
+            "--report",
+            "report.json",
+            "--baseline-report",
+            "baseline.json",
+            "--baseline-sha256",
+            "owner-approved-digest",
+            "--captured-at",
+            "2026-07-24T00:00:00Z",
+        ];
+        assert!(Args::try_parse_from(complete).is_ok());
+
+        for required in [
+            "--manifest",
+            "--report",
+            "--baseline-report",
+            "--baseline-sha256",
+            "--captured-at",
+        ] {
+            let mut incomplete = complete.to_vec();
+            let position = incomplete
+                .iter()
+                .position(|argument| *argument == required)
+                .expect("required argument in complete shape");
+            incomplete.drain(position..=position + 1);
+            let error = Args::try_parse_from(incomplete)
+                .expect_err("normal pilot mode must require every corpus input");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "missing {required}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -598,12 +651,12 @@ mod tests {
         let manifest = root.path().join("wrong-manifest.json");
         std::fs::write(&manifest, b"{}").expect("write wrong manifest");
         let error = run(Args {
-            manifest,
-            report: root.path().join("new-baseline.json"),
-            baseline_report: root.path().join("old-baseline-must-not-be-read.json"),
+            manifest: Some(manifest),
+            report: Some(root.path().join("new-baseline.json")),
+            baseline_report: Some(root.path().join("old-baseline-must-not-be-read.json")),
             baseline_sha256: None,
             checkpoint: None,
-            captured_at: "2026-07-24T04:56:05Z".to_string(),
+            captured_at: Some("2026-07-24T04:56:05Z".to_string()),
             execute: false,
             rebaseline: true,
             auth_clearance_probe: false,
@@ -619,12 +672,12 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(root.path().join("nested")).expect("create nested directory");
         let error = run(Args {
-            manifest: root.path().join("manifest-must-not-be-read.json"),
-            report: root.path().join("result.json"),
-            baseline_report: root.path().join("./nested/../result.json"),
+            manifest: Some(root.path().join("manifest-must-not-be-read.json")),
+            report: Some(root.path().join("result.json")),
+            baseline_report: Some(root.path().join("./nested/../result.json")),
             baseline_sha256: Some("not-read".to_string()),
             checkpoint: None,
-            captured_at: "2026-07-24T00:00:00Z".to_string(),
+            captured_at: Some("2026-07-24T00:00:00Z".to_string()),
             execute: false,
             rebaseline: false,
             auth_clearance_probe: false,
@@ -648,12 +701,12 @@ mod tests {
         symlink(real.join("subdir"), root.path().join("link")).expect("create directory symlink");
 
         let error = run(Args {
-            manifest: root.path().join("manifest-must-not-be-read.json"),
-            report,
-            baseline_report: root.path().join("link/../result.json"),
+            manifest: Some(root.path().join("manifest-must-not-be-read.json")),
+            report: Some(report),
+            baseline_report: Some(root.path().join("link/../result.json")),
             baseline_sha256: Some("not-read".to_string()),
             checkpoint: None,
-            captured_at: "2026-07-24T00:00:00Z".to_string(),
+            captured_at: Some("2026-07-24T00:00:00Z".to_string()),
             execute: false,
             rebaseline: false,
             auth_clearance_probe: false,
@@ -704,12 +757,12 @@ mod tests {
         std::fs::hard_link(&baseline, &report).expect("create hard link");
 
         let error = run(Args {
-            manifest: root.path().join("manifest-must-not-be-read.json"),
-            report,
-            baseline_report: baseline,
+            manifest: Some(root.path().join("manifest-must-not-be-read.json")),
+            report: Some(report),
+            baseline_report: Some(baseline),
             baseline_sha256: Some("not-read".to_string()),
             checkpoint: None,
-            captured_at: "2026-07-24T00:00:00Z".to_string(),
+            captured_at: Some("2026-07-24T00:00:00Z".to_string()),
             execute: false,
             rebaseline: false,
             auth_clearance_probe: false,
