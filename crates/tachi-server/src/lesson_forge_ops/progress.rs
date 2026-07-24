@@ -468,10 +468,10 @@ fn paths_alias(left: &Path, right: &Path) -> bool {
     {
         use std::os::unix::fs::MetadataExt;
 
-        return std::fs::metadata(left)
+        std::fs::metadata(left)
             .ok()
             .zip(std::fs::metadata(right).ok())
-            .is_some_and(|(left, right)| left.dev() == right.dev() && left.ino() == right.ino());
+            .is_some_and(|(left, right)| left.dev() == right.dev() && left.ino() == right.ino())
     }
     #[cfg(not(unix))]
     {
