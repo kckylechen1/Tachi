@@ -1263,3 +1263,126 @@ async fn recall_apply_content_digest_mismatch_refuses() {
         "the digest-mismatch refusal must not have mutated config.env"
     );
 }
+
+/// Discrimination: the top-level `config_env` field on a recall-config
+/// proposal row is a DISPLAY copy, not the trust boundary. `content_digest`
+/// only binds `identity_payload` (see `recall_config_v2_identity_payload`),
+/// so a row whose top-level `config_env` was mutated *without* touching
+/// `identity_payload`/`content_digest` still passes the digest check.
+///
+/// Production path: `drive_recall_apply_state_machine` -> `parse_config_env_patch`
+/// reads `identity_payload.apply_payload.config_env` (the digest-bound
+/// copy), never `proposal.config_env` (the unbound display copy) — see
+/// `content_digest_hex`/digest check immediately above the call site.
+/// Pre-fix red (cross-vendor review, #1424/#1425): tampering ONLY the
+/// top-level `config_env` field (leaving `identity_payload`/`content_digest`
+/// byte-for-byte untouched) passed the digest check AND wrote the
+/// attacker's values to config.env — the human's review of the original
+/// value covered nothing the apply path actually consumed.
+/// Post-fix green: apply SUCCEEDS (the digest still matches; nothing in the
+/// trust boundary was mutated) but config.env is written with the
+/// ORIGINAL reviewed value, never the attacker's tampered top-level value —
+/// the tamper has zero effect by construction, not by an extra check.
+#[tokio::test]
+async fn recall_apply_ignores_tampered_unbound_top_level_config_env() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("parent"))
+        .expect("create config env parent");
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n",
+    )
+    .expect("seed config.env");
+
+    seed_recall_pair(&server, "unbound-tamper");
+
+    let metadata = json!({
+        "cases": [
+            {
+                "name": "partial-cleanup",
+                "query": "cleanup preview safe",
+                "expected_id": "recall-unbound-tamper-partial-term"
+            }
+        ],
+        "variants": [
+            {
+                "name": "or-fallback-0.6",
+                "recall_config": {
+                    "or_fallback_fts_score_factor": 0.6,
+                    "or_fallback_fts_max_terms": 4
+                }
+            }
+        ]
+    });
+
+    let mut proposals = tachi_memory_params("recall_proposals");
+    proposals.format = Some("json".to_string());
+    proposals.scope = Some("memory".to_string());
+    proposals.top_k = 3;
+    proposals.force = true;
+    proposals.metadata = Some(metadata);
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, proposals)
+        .await
+        .expect("recall proposals");
+    let parsed: Value = serde_json::from_str(&body).expect("proposal JSON");
+    let proposal = parsed["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p["variant"] == json!("or-fallback-0.6"))
+        })
+        .expect("proposal");
+    let proposal_id = proposal["proposal_id"].as_str().expect("id").to_string();
+
+    // Approve while the row is still clean (digest matches).
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let _ = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve");
+
+    // Tamper ONLY the unbound top-level `config_env` display field —
+    // identity_payload / content_digest are left byte-for-byte untouched, so
+    // the digest check at apply must still pass.
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("row");
+            let mut value: Value = serde_json::from_str(&raw).expect("json");
+            value["config_env"]["TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR"] = json!("9.9");
+            let next = serde_json::to_string(&value).expect("serialize");
+            store
+                .set_state("recall_config_proposals", &proposal_id, &next)
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(())
+        })
+        .expect("tamper unbound top-level config_env");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.format = Some("json".to_string());
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let apply_body = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("apply must succeed: identity_payload/content_digest were untouched");
+    let apply_json: Value = serde_json::from_str(&apply_body).expect("apply JSON");
+    assert_eq!(apply_json["status"], json!("completed"));
+
+    let config_body = std::fs::read_to_string(&config_env_path).expect("read config.env");
+    assert!(
+        config_body.contains("TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6"),
+        "config.env must carry the ORIGINAL reviewed value (0.6), not the tampered \
+         unbound top-level value (9.9); the trust boundary is identity_payload, not \
+         the display copy: {config_body}"
+    );
+    assert!(
+        !config_body.contains("9.9"),
+        "the tampered unbound top-level config_env value must never reach config.env: {config_body}"
+    );
+}

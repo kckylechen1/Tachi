@@ -326,7 +326,14 @@ fn drive_recall_apply_state_machine(
         ));
     }
 
-    let patch = parse_config_env_patch(&proposal)?;
+    // Consume the BOUND copy (identity_payload.apply_payload.config_env),
+    // never the unbound top-level `proposal.config_env` display field. The
+    // digest check above only proves `identity_payload` is internally
+    // consistent with `content_digest`; it says nothing about whether the
+    // top-level `config_env` field (which the reviewer's UI/response shows)
+    // still matches it. Reading the bound copy here makes that question moot
+    // by construction — there is no second copy in the trust path to drift.
+    let patch = parse_config_env_patch(&identity_payload)?;
     if patch.is_empty() {
         return Err(format!(
             "recall config proposal {proposal_id} has no TACHI_RECALL_* config_env values"
@@ -932,11 +939,19 @@ fn digest_of_pairs(pairs: &[(String, String)]) -> String {
     hex_lower(&hasher.finalize())
 }
 
-fn parse_config_env_patch(proposal: &Value) -> Result<BTreeMap<String, String>, String> {
-    let config_env = proposal
-        .get("config_env")
+// Reads the BOUND apply payload (`identity_payload.apply_payload.config_env`),
+// not the unbound top-level `proposal.config_env` display field. Callers must
+// pass the `identity_payload` sub-value (already digest-validated by the
+// caller), not the whole proposal — see the call site in
+// `drive_recall_apply_state_machine` for why.
+fn parse_config_env_patch(identity_payload: &Value) -> Result<BTreeMap<String, String>, String> {
+    let config_env = identity_payload
+        .get("apply_payload")
+        .and_then(|apply_payload| apply_payload.get("config_env"))
         .and_then(Value::as_object)
-        .ok_or_else(|| "recall config proposal missing config_env".to_string())?;
+        .ok_or_else(|| {
+            "recall config proposal identity_payload missing apply_payload.config_env".to_string()
+        })?;
     let mut out = BTreeMap::new();
     for (key, value) in config_env {
         if !key.starts_with("TACHI_RECALL_") {

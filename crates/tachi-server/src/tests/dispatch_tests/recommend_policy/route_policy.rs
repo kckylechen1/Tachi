@@ -767,3 +767,163 @@ async fn route_two_applies_yield_one_terminal_receipt() {
     let matching = rules.iter().filter(|row| row.key == proposal_id).count();
     assert_eq!(matching, 1, "exactly one rule row for the applied proposal");
 }
+
+/// Discrimination: the top-level `policy_rule` (and `evidence`) fields on a
+/// route-policy proposal row are DISPLAY copies, not the trust boundary.
+/// `content_digest` only binds `identity_payload` (see
+/// `route_policy_v2_identity_payload`), so a row whose top-level
+/// `policy_rule` was mutated *without* touching
+/// `identity_payload`/`content_digest` still passes the digest check.
+/// `routing.rs`'s live consumer (`build_route_policy_rule_loadout`, run on
+/// every routing decision) reads `policy_rule` from the top level of
+/// whatever is persisted in `ROUTE_POLICY_RULE_NS` — so if apply persisted
+/// the tampered top-level field verbatim, a review of the ORIGINAL
+/// `prefer_profile` would silently route to the ATTACKER's profile instead.
+///
+/// Production path: `handle_route_policy_apply` -> after the content_digest
+/// check passes, `value["policy_rule"]`/`value["evidence"]` are overwritten
+/// with the digest-validated `identity_payload.apply_payload` /
+/// `identity_payload.evidence_review` copies immediately before the row is
+/// persisted to `DISPATCH_POLICY_PROPOSAL_NS` and `ROUTE_POLICY_RULE_NS`.
+/// Pre-fix red (cross-vendor review, #1424/#1425): tampering ONLY the
+/// top-level `policy_rule.prefer_profile` (leaving
+/// `identity_payload`/`content_digest` byte-for-byte untouched) passed the
+/// digest check AND was persisted verbatim into `ROUTE_POLICY_RULE_NS`,
+/// where every subsequent routing decision would read the attacker's
+/// profile.
+/// Post-fix green: apply SUCCEEDS (the digest still matches; nothing in the
+/// trust boundary was mutated) but the row persisted in
+/// `ROUTE_POLICY_RULE_NS` carries the ORIGINAL reviewed `prefer_profile`,
+/// never the attacker's tampered top-level value.
+#[tokio::test]
+async fn route_apply_ignores_tampered_unbound_top_level_policy_rule() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    for (task_id, profile, outcome, cost, quality) in [
+        ("unbound-tamper-1", "opencode_builder", "success", 0.01, 0.80),
+        ("unbound-tamper-2", "opencode_builder", "failure", 0.01, 0.20),
+        ("unbound-tamper-3", "glm_51_impl", "success", 2.00, 0.98),
+    ] {
+        server
+            .tachi_complete(Parameters(TachiCompleteParams {
+                task_id: Some(task_id.to_string()),
+                task: "route policy unbound-copy tamper fixture".to_string(),
+                agent: "custom".to_string(),
+                outcome: outcome.to_string(),
+                task_type: Some("fix_request".to_string()),
+                profile: Some(profile.to_string()),
+                risk: Some("medium".to_string()),
+                duration_ms: Some(100_000),
+                skills_used: vec!["skill:superpowers-executing-plans".to_string()],
+                cost_tokens: Some(1000),
+                cost_usd: Some(cost),
+                quality_score: Some(quality),
+                notes: None,
+                trajectory: None,
+                diff: Some("diff --git a/x b/x".to_string()),
+                worktree: None,
+                subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
+                dispatch_id: None,
+                flow_id: Some("flow-unbound-tamper".to_string()),
+                issue_ref: Some("kckylechen1/tachi#194".to_string()),
+                pr_ref: None,
+                evidence_refs: vec!["crates/tachi-server/src/dispatch_profile.rs".to_string()],
+                tests_run: vec!["cargo test".to_string()],
+                diff_present: Some(true),
+                scope: Some("project".to_string()),
+                project: None,
+                format: None,
+                signatures: Vec::new(),
+                rulings: Vec::new(),
+                adjudication: None,
+                eval_run_ids: Vec::new(),
+            }))
+            .await
+            .expect("seed eval row");
+    }
+
+    let mut proposals = task_params("proposals");
+    proposals.limit = Some(50);
+    let raw = server
+        .tachi_task(Parameters(proposals))
+        .await
+        .expect("proposals");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
+    let first = parsed["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|proposal| proposal["kind"] == json!("route_policy"))
+        })
+        .expect("at least one route_policy proposal");
+    let proposal_id = first["proposal_id"].as_str().expect("id").to_string();
+    let original_prefer_profile = first["policy_rule"]["prefer_profile"]
+        .as_str()
+        .expect("original prefer_profile")
+        .to_string();
+
+    let mut approve = task_params("review_proposal");
+    approve.proposal_id = Some(proposal_id.clone());
+    approve.review_status = Some("approved".to_string());
+    let _ = server
+        .tachi_task(Parameters(approve))
+        .await
+        .expect("approve");
+
+    // Tamper ONLY the unbound top-level `policy_rule.prefer_profile` field —
+    // identity_payload / content_digest are left byte-for-byte untouched, so
+    // the digest check at apply must still pass.
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("row");
+            let mut value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+            value["policy_rule"]["prefer_profile"] = json!("attacker_controlled_profile");
+            let next = serde_json::to_string(&value).expect("serialize");
+            store
+                .set_state(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id, &next)
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(())
+        })
+        .expect("tamper unbound top-level policy_rule");
+
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let applied_raw = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect("apply must succeed: identity_payload/content_digest were untouched");
+    let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply JSON");
+    assert_eq!(applied["applied"], json!(true));
+
+    // The row actually persisted into ROUTE_POLICY_RULE_NS — what every
+    // subsequent routing decision reads — must carry the ORIGINAL bound
+    // prefer_profile, never the attacker's tampered top-level value.
+    let rule_row = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::ROUTE_POLICY_RULE_NS, &proposal_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("load rule row")
+        .expect("rule row exists");
+    let rule_value: serde_json::Value =
+        serde_json::from_str(&rule_row.0).expect("rule row json");
+    assert_eq!(
+        rule_value["policy_rule"]["prefer_profile"],
+        json!(original_prefer_profile),
+        "ROUTE_POLICY_RULE_NS must persist the ORIGINAL bound prefer_profile, not the \
+         attacker's tampered top-level value: {rule_value}"
+    );
+    assert_ne!(
+        rule_value["policy_rule"]["prefer_profile"],
+        json!("attacker_controlled_profile"),
+        "the tampered unbound top-level policy_rule value must never reach the persisted \
+         rule row that routing decisions consume: {rule_value}"
+    );
+}

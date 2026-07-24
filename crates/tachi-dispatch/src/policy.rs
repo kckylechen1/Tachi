@@ -64,11 +64,14 @@ pub fn route_policy_v2_identity_payload(
     policy_version: &str,
     target: &str,
 ) -> Value {
-    let mut map = BTreeMap::new();
-    map.insert("policy_version", json!(policy_version));
-    map.insert("target", json!(target));
-    map.insert("apply_payload", canonical_json(apply_payload));
-    map.insert("evidence_review", canonical_json(evidence_review));
+    let mut map: BTreeMap<String, Value> = BTreeMap::new();
+    map.insert("policy_version".to_string(), json!(policy_version));
+    map.insert("target".to_string(), json!(target));
+    map.insert("apply_payload".to_string(), canonical_json(apply_payload));
+    map.insert(
+        "evidence_review".to_string(),
+        canonical_json(evidence_review),
+    );
     Value::Object(map.into_iter().collect())
 }
 
@@ -86,14 +89,17 @@ pub fn recall_config_v2_identity_payload(
     policy_version: &str,
     target: &str,
 ) -> Value {
-    let mut map = BTreeMap::new();
-    map.insert("policy_version", json!(policy_version));
-    map.insert("target", json!(target));
+    let mut map: BTreeMap<String, Value> = BTreeMap::new();
+    map.insert("policy_version".to_string(), json!(policy_version));
+    map.insert("target".to_string(), json!(target));
     map.insert(
-        "apply_payload",
+        "apply_payload".to_string(),
         json!({ "config_env": canonical_json(config_env) }),
     );
-    map.insert("evidence_review", canonical_json(evidence_review));
+    map.insert(
+        "evidence_review".to_string(),
+        canonical_json(evidence_review),
+    );
     Value::Object(map.into_iter().collect())
 }
 

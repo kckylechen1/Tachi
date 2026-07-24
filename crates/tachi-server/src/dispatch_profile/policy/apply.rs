@@ -68,6 +68,30 @@ pub(crate) fn handle_route_policy_apply(
                         "content_digest_mismatch: route policy proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing to apply unreviewed content"
                     ));
                 }
+                // Overwrite the top-level `policy_rule` / `evidence` fields
+                // with the digest-validated `identity_payload` copies
+                // immediately before persisting. `routing.rs`'s live
+                // consumer (`build_route_policy_rule_loadout`, run on every
+                // routing decision, unmodified by this PR and also reading
+                // legacy pre-v2 rows already applied before this change)
+                // reads `policy_rule` and `evidence` from the top level, NOT
+                // from `identity_payload` — so it cannot be repointed at the
+                // bound copy without breaking those pre-existing legacy
+                // rows. The content_digest check above only proves
+                // `identity_payload` is internally self-consistent; it says
+                // nothing about whether `policy_rule`/`evidence` (which a
+                // reviewer's UI/response shows) still match it. Forcing them
+                // to the bound copy here — the moment content lands in
+                // `ROUTE_POLICY_RULE_NS`/`DISPATCH_POLICY_PROPOSAL_NS` — closes
+                // that gap by construction for every row this apply path
+                // writes, without touching the external consumer or its
+                // legacy rows.
+                if let Some(bound_apply_payload) = identity_payload.get("apply_payload") {
+                    value["policy_rule"] = bound_apply_payload.clone();
+                }
+                if let Some(bound_evidence) = identity_payload.get("evidence_review") {
+                    value["evidence"] = bound_evidence.clone();
+                }
 
                 value["status"] = json!("applied");
                 value["applied_at"] = json!(applied_at);
