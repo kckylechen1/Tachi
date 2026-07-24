@@ -411,6 +411,46 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
 /// Post-fix green: changing the fallback/evidence rotates the SHA-256 id,
 /// and the regenerate path finds no prior row at the new id, so the new
 /// proposal starts pending.
+///
+/// ── Admission conditions for a `route_policy` proposal (read before editing
+/// the seeds below; getting them wrong yields ZERO proposals and an
+/// "at least one route_policy proposal" panic that looks like a product bug) ──
+///
+/// There is NO sample-count threshold on proposal *generation*. The only
+/// admission rule is in `build_route_policy_proposals`
+/// (`crates/tachi-dispatch/src/policy.rs:312-319`): for each variant policy
+/// (`cost_sensitive`, `quality_first` — `handlers.rs:138-142`) and each of its
+/// route choices, the task_type must also appear in the `current` policy's
+/// choices AND the variant's winning profile must DIFFER from the current
+/// policy's winning profile. Same winner => `continue` => no proposal. So the
+/// seeds must make a variant policy DISAGREE with `current`; seeding "a
+/// baseline profile plus a cheaper one" is not enough if `current` already
+/// ranks the cheaper one first.
+///
+/// Row admission into the simulation (`simulate_route_policy`,
+/// `crates/tachi-dispatch/src/routing.rs:820-836`): scope must be `leader`
+/// (always true for a `tachi_complete` leader row — `eval.rs:391-392`), and the
+/// profile must resolve to a canonical `DISPATCH_PROFILES` name (aliases are
+/// canonicalized in `route_performance_rows`, `routing.rs:178-206`, which is
+/// why `glm_51_impl` shows up as `glm_impl`).
+///
+/// Ranking (`route_policy_score`, `routing.rs:893-946`) is a weighted sum over
+/// success/quality/verification/cost/latency/failure — `cost_usd`,
+/// `quality_score` and `duration_ms` all reach it from `tachi_complete`
+/// (`complete_ops/eval_record.rs:168-183` -> `agent_eval/live.rs:56-59` ->
+/// `eval.rs` matrix). The "low sample count" string the sibling
+/// `route_simulate` test asserts is an advisory caveat only
+/// (`routing.rs:1054-1056`), NOT a gate. The one real sample threshold,
+/// `MIN_ROUTE_POLICY_RULE_SAMPLES` (=2), gates *applying an approved rule* at
+/// recommend time (`routing.rs:711-715`), not proposal generation.
+///
+/// Scope of what this end-to-end test can prove: `evidence` embeds the current
+/// choice and the row count (`policy.rs:332-339`), so a fallback flip ALWAYS
+/// drags the evidence with it — no live seeding can change the fallback while
+/// holding evidence fixed. The isolated properties are pinned at unit level in
+/// `tachi-dispatch` (`route_policy_identity_payload_rotates_when_fallback_changes`,
+/// `policy.rs:1147`, and `..._when_evidence_changes`, `policy.rs:1215`); this
+/// test pins the end-to-end conjunction plus the observable fallback flip.
 #[tokio::test]
 async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     let (server, _temp_home) = make_server_with_temp_home();
@@ -467,25 +507,27 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         }
     };
 
-    // Phase 1: seed evidence where `opencode_builder` is the cheaper choice
-    // for fix_request and `claude_plan` is the current/baseline.
-    seed_one("regen-fallback-A1", "claude_plan", "success", 0.50, 0.85).await;
-    seed_one(
-        "regen-fallback-A2",
-        "opencode_builder",
-        "success",
-        0.05,
-        0.80,
-    )
-    .await;
-    seed_one(
-        "regen-fallback-A3",
-        "opencode_builder",
-        "success",
-        0.05,
-        0.80,
-    )
-    .await;
+    // Phase A seeds — the same shape the sibling tests in this file
+    // (`..._proposals_require_review_before_apply`,
+    // `route_terminal_state_cannot_be_rereviewed`, ...) already use to get a
+    // route_policy proposal: a cheap+flaky profile plus an expensive+excellent
+    // one, so the `current` policy and the `cost_sensitive` variant pick
+    // DIFFERENT winners for fix_request. The expensive profile's cost is 3.00
+    // rather than the siblings' 2.00 purely to widen the phase-B margin below.
+    //
+    // Scores per `route_policy_score` (`routing.rs:893-946`), all rows at
+    // duration 100_000ms (= 1.667 latency-minutes) and verification present:
+    //   opencode_builder (2 samples, success_rate 0.50, quality 0.50,
+    //     failure_rate 0.50, cost 0.01):  current 33.7 | cost_sensitive 24.7
+    //   glm_impl (1 sample, success 1.00, quality 0.98, cost 3.00):
+    //     current 55.8 | cost_sensitive -37.7
+    // => current picks glm_impl, cost_sensitive picks opencode_builder, and
+    // the disagreement is what admits the proposal (`policy.rs:317`). Do NOT
+    // "simplify" these to all-success rows: if every policy agrees on one
+    // winner, generation emits nothing and the assertions below panic.
+    seed_one("regen-fallback-A1", "opencode_builder", "success", 0.01, 0.80).await;
+    seed_one("regen-fallback-A2", "opencode_builder", "failure", 0.01, 0.20).await;
+    seed_one("regen-fallback-A3", "glm_51_impl", "success", 3.00, 0.98).await;
 
     let mut proposals = task_params("proposals");
     proposals.limit = Some(50);
@@ -509,6 +551,21 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     );
     assert_eq!(first["status"], json!("pending"));
     assert_eq!(first["schema_version"], json!(2));
+    // Pin the construction itself, not just its shape: the phase-A proposal is
+    // the cost_sensitive variant proposing opencode_builder while `current`
+    // still routes fix_request to glm_impl. If this ever fails, the seeds no
+    // longer produce the intended disagreement and every later assertion in
+    // this test is measuring something else.
+    assert_eq!(
+        first["policy_rule"]["fallback_to_current_profile"],
+        json!("glm_impl"),
+        "phase-A fallback must be the current-policy winner: {first:#}"
+    );
+    assert_eq!(
+        first["policy_rule"]["prefer_profile"],
+        json!("opencode_builder"),
+        "phase-A proposal must be the cost_sensitive challenger: {first:#}"
+    );
 
     // Approve the v1-id-rotation proposal so we can prove the regenerated
     // proposal under a different id does NOT inherit this approval.
@@ -520,12 +577,18 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         .await
         .expect("review A");
 
-    // Phase 2: shift the current/baseline profile for fix_request from
-    // `claude_plan` to `glm_51_impl`. This changes the apply payload's
-    // `fallback_to_current_profile`, which is bound to the v2 identity.
-    seed_one("regen-fallback-B1", "glm_51_impl", "success", 0.40, 0.92).await;
-    seed_one("regen-fallback-B2", "glm_51_impl", "success", 0.40, 0.92).await;
-    seed_one("regen-fallback-B3", "glm_51_impl", "success", 0.40, 0.92).await;
+    // Phase B: flip the CURRENT-policy winner for fix_request from `glm_impl`
+    // to `claude_plan`, which is exactly what the apply payload's
+    // `fallback_to_current_profile` records. `claude_plan` is seeded cheaper
+    // and near-as-good as glm_impl, so it wins `current`
+    // (45*1 + 25*0.95 + 18 - 10*1.55 - 1.667 = 69.6 vs glm_impl 55.8), while
+    // staying far too expensive for `cost_sensitive`
+    // (45 + 15 + 10*0.95 - 35*1.55 - 2.5 = 12.8 vs opencode_builder 24.7).
+    // So cost_sensitive still challenges with opencode_builder and the
+    // regenerated proposal carries a DIFFERENT fallback than phase A.
+    seed_one("regen-fallback-B1", "claude_plan", "success", 1.55, 0.95).await;
+    seed_one("regen-fallback-B2", "claude_plan", "success", 1.55, 0.95).await;
+    seed_one("regen-fallback-B3", "claude_plan", "success", 1.55, 0.95).await;
 
     let mut proposals_b = task_params("proposals");
     proposals_b.limit = Some(50);
@@ -553,7 +616,8 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         .iter()
         .find(|proposal| proposal["proposal_id"].as_str() != Some(first_id.as_str()));
     let new = any_new_id.expect(
-        "expected at least one phase-B proposal with a new v2 id after the fallback flipped;          if every proposal kept the same id, the identity is not bound to fallback_to_current_profile",
+        "expected at least one phase-B proposal with a new v2 id after the fallback flipped; \
+         if every proposal kept the same id, the identity is not bound to the apply payload",
     );
     let new_id = new["proposal_id"].as_str().expect("id").to_string();
     assert_ne!(new_id, first_id, "id must rotate when fallback changes");
@@ -563,6 +627,19 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         "the rotated-id proposal must NOT inherit the prior approval"
     );
     assert_eq!(new["schema_version"], json!(2));
+    // The rotation is observably driven by the fallback flip, not merely by
+    // "some field somewhere changed": the regenerated proposal records the NEW
+    // current-policy winner (`claude_plan`) where phase A recorded `glm_impl`.
+    assert_eq!(
+        new["policy_rule"]["fallback_to_current_profile"],
+        json!("claude_plan"),
+        "phase-B fallback must be the new current-policy winner: {new:#}"
+    );
+    assert_ne!(
+        new["policy_rule"]["fallback_to_current_profile"],
+        first["policy_rule"]["fallback_to_current_profile"],
+        "the fallback the two proposals bind must actually differ"
+    );
 }
 
 /// Discrimination: once a route-policy proposal is in a terminal state
