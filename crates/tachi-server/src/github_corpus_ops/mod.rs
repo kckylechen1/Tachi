@@ -27,6 +27,7 @@
 
 pub mod adapt;
 pub mod fixtures;
+pub mod live_pilot;
 pub mod parse;
 pub mod pilot;
 pub mod reader;

@@ -140,6 +140,10 @@ path = "src/lib.rs"
 name = "tachi-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "github-corpus-pilot"
+path = "src/bin/github_corpus_pilot.rs"
+
 # Install/PATH compatibility alias for the MemCore/Tachi brand rename
 # (#912 / #890). Compiles the SAME `src/main.rs`, so with default flags
 # `cargo test` / `cargo nextest run` / `--all-targets` / `cargo bench` would

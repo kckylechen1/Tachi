@@ -121,7 +121,7 @@ impl super::super::LlmClient {
                 }
             }
         }
-        let (text, truncated) = self
+        let outcome = self
             .call_lane_llm(
                 ChatLane::Reasoning,
                 system,
@@ -132,9 +132,9 @@ impl super::super::LlmClient {
             )
             .await?;
         Ok(ReasoningOutcome {
-            text,
+            text: outcome.text,
             used_fallback: true,
-            truncated,
+            truncated: outcome.truncated,
         })
     }
 

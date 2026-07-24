@@ -214,6 +214,16 @@ fn parse_reviews(result: &Value) -> Result<Vec<PrReviewV1>, ParseError> {
             submitted_at,
         });
     }
+    // GitHub exposes reviews as a collection. The timestamp carries temporal
+    // meaning; transport order does not. Preserve duplicates and sort by the
+    // complete semantic row so equivalent API permutations hash identically.
+    out.sort_by(|left, right| {
+        (&left.submitted_at, &left.author, &left.state).cmp(&(
+            &right.submitted_at,
+            &right.author,
+            &right.state,
+        ))
+    });
     Ok(out)
 }
 
@@ -224,7 +234,7 @@ fn parse_checks(result: &Value) -> Vec<PrCheckV1> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    items
+    let mut checks = items
         .iter()
         .map(|c| {
             let name = c
@@ -249,7 +259,17 @@ fn parse_checks(result: &Value) -> Vec<PrCheckV1> {
                 status,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Status checks are a current-state collection. Preserve duplicate rows,
+    // but remove API transport order from the snapshot identity.
+    checks.sort_by(|left, right| {
+        (&left.name, &left.status, &left.conclusion).cmp(&(
+            &right.name,
+            &right.status,
+            &right.conclusion,
+        ))
+    });
+    checks
 }
 
 /// Assemble a [`CaseCorpusBundle`] from already-fetched issue/PR JSON plus
@@ -263,7 +283,11 @@ pub fn assemble_case_bundle(
     events: Vec<ProvenanceEventV1>,
     captured_at: &str,
 ) -> Result<CaseCorpusBundle, ParseError> {
-    let issue = parse_issue_snapshot_from_gh_json(repo, issue_number, issue_json);
+    let mut issue = parse_issue_snapshot_from_gh_json(repo, issue_number, issue_json);
+    // Labels are an unordered GitHub set. Keep multiplicity intact while
+    // making the typed snapshot and its hash independent of API order.
+    issue.labels.sort();
+    issue.issue_snapshot_hash = issue.compute_snapshot_hash().unwrap_or_default();
     let pull_request = match pr {
         Some((n, json)) => Some(parse_pr_snapshot_from_gh_json(repo, n, json)?),
         None => None,

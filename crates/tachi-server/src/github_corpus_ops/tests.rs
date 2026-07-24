@@ -487,6 +487,143 @@ fn same_content_different_crawl_time_yields_identical_candidate_id() {
     );
 }
 
+#[test]
+fn unordered_api_collections_are_permutation_stable_but_comments_remain_ordered() {
+    let manifest = frozen_manifest();
+    let case_id = chain_case_id();
+    let mut issue_json = sample_issue_json(42, "CLOSED", "Body", "2026-07-13T03:00:00Z");
+    issue_json["labels"] = serde_json::json!([
+        {"name": "priority:p1"},
+        {"name": "type:bug"}
+    ]);
+    issue_json["comments"] = serde_json::json!([
+        {
+            "id": "comment-1",
+            "body": "Spec-Ref: owner/repo:docs/a.md@commit/blob#a",
+            "updatedAt": "2026-07-13T01:00:00Z",
+            "author": {"login": "owner"}
+        },
+        {
+            "id": "comment-2",
+            "body": "Spec-Ref: owner/repo:docs/b.md@commit/blob#b",
+            "updatedAt": "2026-07-13T02:00:00Z",
+            "author": {"login": "owner"}
+        }
+    ]);
+    let mut pr_json = sample_pr_json(77, "MERGED", true, "2026-07-13T03:00:00Z");
+    pr_json["reviews"] = serde_json::json!([
+        {
+            "author": {"login": "bob"},
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-07-13T02:00:00Z"
+        },
+        {
+            "author": {"login": "alice"},
+            "state": "APPROVED",
+            "submittedAt": "2026-07-13T01:00:00Z"
+        }
+    ]);
+    pr_json["statusCheckRollup"] = serde_json::json!([
+        {"name": "lint", "conclusion": "SUCCESS", "status": "COMPLETED"},
+        {"name": "test", "conclusion": "SUCCESS", "status": "COMPLETED"}
+    ]);
+
+    let assemble = |issue: &serde_json::Value, pr: &serde_json::Value| {
+        assemble_case_bundle(
+            &case_id,
+            "owner/repo",
+            42,
+            issue,
+            Some((77, pr)),
+            vec![],
+            "2026-07-13T04:00:00Z",
+        )
+        .expect("assemble")
+    };
+    let base = assemble(&issue_json, &pr_json);
+    let base_candidate = adapt_corpus_case("proj", &manifest, &base, None, None)
+        .expect("adapt base")
+        .candidate;
+
+    let mut labels_permuted = issue_json.clone();
+    labels_permuted["labels"].as_array_mut().unwrap().reverse();
+    let labels = assemble(&labels_permuted, &pr_json);
+    assert_eq!(base.issue.labels, labels.issue.labels);
+    assert_eq!(
+        base.issue.issue_snapshot_hash,
+        labels.issue.issue_snapshot_hash
+    );
+    assert_eq!(
+        base_candidate.candidate_id,
+        adapt_corpus_case("proj", &manifest, &labels, None, None)
+            .expect("adapt labels")
+            .candidate
+            .candidate_id
+    );
+
+    let mut reviews_permuted = pr_json.clone();
+    reviews_permuted["reviews"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    let reviews = assemble(&issue_json, &reviews_permuted);
+    assert_eq!(
+        base.pull_request.as_ref().unwrap().reviews,
+        reviews.pull_request.as_ref().unwrap().reviews
+    );
+    assert_eq!(
+        base.pull_request.as_ref().unwrap().pr_snapshot_hash,
+        reviews.pull_request.as_ref().unwrap().pr_snapshot_hash
+    );
+    assert_eq!(
+        base_candidate.candidate_id,
+        adapt_corpus_case("proj", &manifest, &reviews, None, None)
+            .expect("adapt reviews")
+            .candidate
+            .candidate_id
+    );
+
+    let mut checks_permuted = pr_json.clone();
+    checks_permuted["statusCheckRollup"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    let checks = assemble(&issue_json, &checks_permuted);
+    assert_eq!(
+        base.pull_request.as_ref().unwrap().checks,
+        checks.pull_request.as_ref().unwrap().checks
+    );
+    assert_eq!(
+        base.pull_request.as_ref().unwrap().pr_snapshot_hash,
+        checks.pull_request.as_ref().unwrap().pr_snapshot_hash
+    );
+    assert_eq!(
+        base_candidate.candidate_id,
+        adapt_corpus_case("proj", &manifest, &checks, None, None)
+            .expect("adapt checks")
+            .candidate
+            .candidate_id
+    );
+
+    let mut comments_reordered = issue_json.clone();
+    comments_reordered["comments"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    let comments = assemble(&comments_reordered, &pr_json);
+    assert_ne!(
+        base.issue.issue_snapshot_hash, comments.issue.issue_snapshot_hash,
+        "comment revision sequence is semantically ordered"
+    );
+    assert_ne!(
+        base_candidate.candidate_id,
+        adapt_corpus_case("proj", &manifest, &comments, None, None)
+            .expect("adapt comments")
+            .candidate
+            .candidate_id
+    );
+}
+
 /// target_ref collision: two event chains that differ ONLY in one hop's
 /// `target_ref` (same kind, revision_hash, snapshots, crawl-time) must yield
 /// distinct candidate_ids. Before the fix, target_ref was omitted from the

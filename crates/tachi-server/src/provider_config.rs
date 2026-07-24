@@ -76,7 +76,7 @@ fn resolve_vault_pools(
     fallback
 }
 
-fn default_global_db_path() -> std::path::PathBuf {
+pub(crate) fn default_global_db_path() -> std::path::PathBuf {
     crate::status_ops::resolve_app_home()
         .join("global")
         .join(memcore::MEMORY_DB_FILENAME)

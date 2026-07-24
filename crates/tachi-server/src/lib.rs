@@ -228,5 +228,15 @@ pub fn ensure_tls_provider() {
     tachi_llm::install_tls_provider();
 }
 
+/// Resolve the existing Tachi provider runtime for a server-owned operator
+/// binary. Credential reads and injection remain inside `provider_config`; the
+/// public result reveals only whether one or more provider entries materialized.
+pub fn resolve_standalone_tachi_model_client() -> Result<(tachi_llm::LlmClient, bool), String> {
+    let global_db = provider_config::default_global_db_path();
+    let llm = tachi_llm::LlmClient::new_with_vault_db(Some(&global_db))?;
+    let materialized = provider_config::materialize_standalone(&llm, &global_db)?;
+    Ok((llm, materialized.loaded > 0))
+}
+
 #[cfg(test)]
 mod tests;
