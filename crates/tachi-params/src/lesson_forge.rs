@@ -294,7 +294,6 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: vec!["backup-provider".to_string()],
             degraded: false,
-            ..Default::default()
         };
         assert_eq!(lesson_identity_status(Some(&receipt)), "preview_only");
         assert!(!receipt.has_known_identity());
@@ -309,7 +308,6 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: true,
-            ..Default::default()
         };
         assert_eq!(lesson_identity_status(Some(&receipt)), "preview_only");
     }
@@ -323,7 +321,6 @@ mod tests {
             effective_version: None,
             fallback_chain: Vec::new(),
             degraded: false,
-            ..Default::default()
         };
         assert_eq!(lesson_identity_status(Some(&receipt)), "preview_only");
         assert!(!receipt.has_known_identity());
@@ -338,7 +335,6 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
-            ..Default::default()
         };
         assert_eq!(lesson_identity_status(Some(&receipt)), "known");
         assert!(receipt.has_known_identity());
