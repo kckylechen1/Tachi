@@ -9,10 +9,11 @@ use clap::Parser;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tachi_server::github_corpus_ops::live_pilot::{
-    dry_run_owner_approved_corpus_pilot, run_owner_approved_corpus_pilot,
-    CorpusPilotCheckpointStore, CorpusPilotCheckpointV1, CorpusPilotModelClient,
-    CorpusPilotModelCompletionV1, CorpusPilotModelRequestV1, CorpusPilotModelResolver,
-    CorpusPilotReportV1, ProviderResolutionReceiptV1, ResolvedCorpusPilotModelV1,
+    dry_run_owner_approved_corpus_pilot, rebaseline_owner_approved_corpus_pilot,
+    run_owner_approved_corpus_pilot, CorpusPilotCheckpointStore, CorpusPilotCheckpointV1,
+    CorpusPilotModelClient, CorpusPilotModelCompletionV1, CorpusPilotModelRequestV1,
+    CorpusPilotModelResolver, CorpusPilotReportV1, ProviderResolutionReceiptV1,
+    ResolvedCorpusPilotModelV1,
 };
 use tachi_server::github_corpus_ops::GithubCorpusReader;
 
@@ -30,12 +31,13 @@ struct Args {
     #[arg(long)]
     report: PathBuf,
     /// Committed preview receipt whose immutable snapshot hashes are checked
-    /// against every live GitHub read before a model can be invoked.
+    /// against every live GitHub read before a model can be invoked. During
+    /// --rebaseline it is protected from output aliasing but never read.
     #[arg(long)]
     baseline_report: PathBuf,
     /// Owner-approved SHA-256 of the exact baseline report bytes.
-    #[arg(long)]
-    baseline_sha256: String,
+    #[arg(long, required_unless_present = "rebaseline")]
+    baseline_sha256: Option<String>,
     /// Durable, atomically replaced partial-spend checkpoint. Required with
     /// --execute; a dry run never creates it.
     #[arg(long)]
@@ -48,6 +50,11 @@ struct Args {
     /// live immutable provenance drift.
     #[arg(long)]
     execute: bool,
+    /// Recompute the preview-only provenance baseline from the exact manifest
+    /// and live read-only GitHub metadata. Never reads the old baseline or
+    /// constructs a model resolver. Output must be a distinct temporary path.
+    #[arg(long, conflicts_with = "execute")]
+    rebaseline: bool,
 }
 
 struct GhCliReader;
@@ -407,12 +414,22 @@ async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
     refuse_baseline_report_alias(&args)?;
     let input = std::fs::read(&args.manifest)
         .map_err(|error| format!("read manifest {}: {error}", args.manifest.display()))?;
+    if args.rebaseline {
+        let report =
+            rebaseline_owner_approved_corpus_pilot(&input, &GhCliReader, &args.captured_at)?;
+        write_report(&args.report, &report)?;
+        return Ok((report, false));
+    }
     let baseline_bytes = std::fs::read(&args.baseline_report).map_err(|error| {
         format!(
             "read baseline report {}: {error}",
             args.baseline_report.display()
         )
     })?;
+    let baseline_sha256 = args
+        .baseline_sha256
+        .as_deref()
+        .ok_or_else(|| "--baseline-sha256 is required unless --rebaseline is set".to_string())?;
     let (report, executed) = if args.execute {
         let checkpoint = args
             .checkpoint
@@ -424,7 +441,7 @@ async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
                 &GhCliReader,
                 &args.captured_at,
                 &baseline_bytes,
-                &args.baseline_sha256,
+                baseline_sha256,
                 &checkpoint_store,
                 &TachiModelResolver,
             )
@@ -439,7 +456,7 @@ async fn run(args: Args) -> Result<(CorpusPilotReportV1, bool), String> {
                 &GhCliReader,
                 &args.captured_at,
                 &baseline_bytes,
-                &args.baseline_sha256,
+                baseline_sha256,
             )?,
             false,
         )
@@ -474,6 +491,27 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn rebaseline_skips_old_baseline_bytes_and_pins_manifest_before_github() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let manifest = root.path().join("wrong-manifest.json");
+        std::fs::write(&manifest, b"{}").expect("write wrong manifest");
+        let error = run(Args {
+            manifest,
+            report: root.path().join("new-baseline.json"),
+            baseline_report: root.path().join("old-baseline-must-not-be-read.json"),
+            baseline_sha256: None,
+            checkpoint: None,
+            captured_at: "2026-07-24T04:56:05Z".to_string(),
+            execute: false,
+            rebaseline: true,
+        })
+        .await
+        .expect_err("wrong manifest must stop rebaseline before GitHub reads");
+        assert!(error.contains("manifest digest mismatch"), "{error}");
+        assert!(!error.contains("read baseline report"), "{error}");
+    }
+
+    #[tokio::test]
     async fn report_alias_is_refused_before_any_input_read() {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(root.path().join("nested")).expect("create nested directory");
@@ -481,10 +519,11 @@ mod tests {
             manifest: root.path().join("manifest-must-not-be-read.json"),
             report: root.path().join("result.json"),
             baseline_report: root.path().join("./nested/../result.json"),
-            baseline_sha256: "not-read".to_string(),
+            baseline_sha256: Some("not-read".to_string()),
             checkpoint: None,
             captured_at: "2026-07-24T00:00:00Z".to_string(),
             execute: false,
+            rebaseline: false,
         })
         .await
         .expect_err("report output must not alias the immutable baseline");
@@ -508,10 +547,11 @@ mod tests {
             manifest: root.path().join("manifest-must-not-be-read.json"),
             report,
             baseline_report: root.path().join("link/../result.json"),
-            baseline_sha256: "not-read".to_string(),
+            baseline_sha256: Some("not-read".to_string()),
             checkpoint: None,
             captured_at: "2026-07-24T00:00:00Z".to_string(),
             execute: false,
+            rebaseline: false,
         })
         .await
         .expect_err("symlink/.. alias must not overwrite the baseline");
@@ -562,10 +602,11 @@ mod tests {
             manifest: root.path().join("manifest-must-not-be-read.json"),
             report,
             baseline_report: baseline,
-            baseline_sha256: "not-read".to_string(),
+            baseline_sha256: Some("not-read".to_string()),
             checkpoint: None,
             captured_at: "2026-07-24T00:00:00Z".to_string(),
             execute: false,
+            rebaseline: false,
         })
         .await
         .expect_err("hard-link alias must not overwrite the baseline");

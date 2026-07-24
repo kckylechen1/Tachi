@@ -1,6 +1,6 @@
 # #1059 exact-20 read-only adapter PilotReport
 
-Captured at: `2026-07-23T17:42:43Z`
+Captured at: `2026-07-24T04:56:05Z`
 
 Frozen owner manifest: [1059-exact20-manifest.json](1059-exact20-manifest.json)
 Manifest SHA-256: `224858da1443006fe9bdc84ce10aea84a2ccf2cec3da8aa2d8d041dc4df3fbe8`
@@ -23,20 +23,28 @@ or credential read.
   coverage also counts the PR title/body. It is a behavior-test handoff, not a
   silently waived gate.
 - Cost and latency: no model invocation, so per-case `cost_usd` is absent with
-  `not_applicable_no_model_invocation`; total adapter/read latency was
-  36,980 ms.
-- Engine receipt: read-only Vault status reported an available provider cache,
-  but no effective provider/model/version was observed in this run. The report
-  therefore carries an explicit degraded receipt instead of deriving identity
-  from cache presence.
+  `not_applicable_no_model_invocation`; total in-process adapter latency was
+  2 ms after the read-only metadata fetches completed.
+- Engine receipt: no provider, Vault, Keychain, or model resolver path was
+  entered. Effective provider/model/version remain explicitly unknown and the
+  report carries a degraded preview-only receipt.
+- Current provenance drift from the prior owner baseline was limited to issue
+  snapshot hashes for `gh-1379-1397` and `gh-1278-1390`. All 20 PR snapshot
+  hashes, merge SHAs, case IDs, and manifest order remained unchanged.
 
 The machine-readable per-case fields — candidate yield, source coverage,
 cost/latency, selected-comment revision receipts, effective engine receipt,
 and behavior-test handoff — are in the owner-approved
-[legacy preview baseline artifact](1059-exact20-pilot-report.json). Execution
-preflight reads only its immutable provenance fields through the narrow legacy
+[no-spend baseline artifact](1059-exact20-pilot-report.json). Execution
+preflight reads only its immutable provenance fields through the narrow
 compatibility type; it is not an output destination. New executions emit the
-current expanded report schema to a distinct result path.
+current report schema to a distinct result path.
+
+Baseline SHA-256 changed from
+`3bbb067f90c57009eeb45e9129becf7bf28062a718735686f088761e68e2765e` to
+`df262db0eeb65e60491c61bce2c271a6553dff99656ea78f992aee2edafd9a33`.
+The manifest SHA-256 remains
+`224858da1443006fe9bdc84ce10aea84a2ccf2cec3da8aa2d8d041dc4df3fbe8`.
 
 ## Scope constraints retained in the receipt
 
@@ -54,7 +62,7 @@ CARGO_TARGET_DIR=/private/tmp/sigil-target-1059-cde718ec \
   cargo run -p tachi-server --bin github-corpus-pilot -- \
   --manifest docs/engineering/receipts/1059-exact20-manifest.json \
   --baseline-report docs/engineering/receipts/1059-exact20-pilot-report.json \
-  --baseline-sha256 3bbb067f90c57009eeb45e9129becf7bf28062a718735686f088761e68e2765e \
+  --baseline-sha256 df262db0eeb65e60491c61bce2c271a6553dff99656ea78f992aee2edafd9a33 \
   --report /private/tmp/1059-exact20-phase3-report.json \
-  --captured-at 2026-07-23T17:42:43Z
+  --captured-at 2026-07-24T04:56:05Z
 ```

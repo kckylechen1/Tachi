@@ -1,7 +1,8 @@
 {
   "schema_version": "github_corpus_exact20_report_v1",
   "manifest_sha256": "224858da1443006fe9bdc84ce10aea84a2ccf2cec3da8aa2d8d041dc4df3fbe8",
-  "captured_at": "2026-07-23T17:42:43Z",
+  "baseline_sha256": null,
+  "captured_at": "2026-07-24T04:56:05Z",
   "disposition": "partial_preview_only",
   "engine_receipt": {
     "requested_role": "github_corpus_adapter",
@@ -11,12 +12,14 @@
     "degraded": true
   },
   "provider_resolution": {
-    "vault_status_checked": true,
-    "provider_cache_loaded": true,
-    "identity_proof": "Vault status can attest cache readiness only; this read-only adapter made no model invocation, so effective provider/model/version remain unproven"
+    "vault_status_checked": false,
+    "provider_cache_loaded": null,
+    "identity_proof": "github_corpus_adapter made no model invocation; effective provider/model/version are unproven"
   },
+  "model_invocations": 0,
+  "completed_cases": 0,
   "candidates_emitted": 20,
-  "total_latency_ms": 36980,
+  "total_latency_ms": 2,
   "cases": [
     {
       "case_id": "gh-1379-1397",
@@ -24,16 +27,23 @@
       "pr_ref": "kckylechen1/tachi#1397",
       "expected_merge_sha": "5251c6710cfb0f2b0a4be96606f11f2fb23b8605",
       "observed_merge_sha": "5251c6710cfb0f2b0a4be96606f11f2fb23b8605",
-      "issue_snapshot_hash": "a91dd3d1b74b7d7166cf879cdd5a5a75f45daafd2e54ad887c967c9b7b64362b",
+      "issue_snapshot_hash": "9c9d81b31c78f75c85d2b7adf761a5fd53d1efd732e0fb51da69a8c7610a6cab",
       "pr_snapshot_hash": "cc71b425b9db9454326a2d110b5d483062650343715edc08edfe53bea55ed522",
       "selected_comment_revisions": [],
       "source_coverage": {
         "source_bytes": 4498,
         "covered_bytes": 2483
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
-        "candidate_id": "12d163be3c5150a4",
+        "candidate_id": "3bde874ac6245725",
         "candidate_status": "pending",
         "identity_status": "preview_only",
         "evidence_ref_count": 5,
@@ -41,7 +51,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1875,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -61,6 +71,13 @@
         "source_bytes": 4942,
         "covered_bytes": 2236
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "c019071aea9f513c",
@@ -71,7 +88,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 2148,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -91,6 +108,13 @@
         "source_bytes": 2730,
         "covered_bytes": 1268
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "6eb3680daa3a5ddf",
@@ -101,7 +125,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 2235,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -123,6 +147,13 @@
         "source_bytes": 6922,
         "covered_bytes": 4580
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "04eac28d844c540e",
@@ -133,7 +164,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1598,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -155,6 +186,13 @@
         "source_bytes": 2285,
         "covered_bytes": 981
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "1f9044ec5b075d7c",
@@ -165,7 +203,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 2080,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -185,6 +223,13 @@
         "source_bytes": 2662,
         "covered_bytes": 1913
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "194e4e6c3e3d51c0",
@@ -195,7 +240,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1760,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -215,6 +260,13 @@
         "source_bytes": 3170,
         "covered_bytes": 1234
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "b043910d20075c32",
@@ -225,7 +277,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1618,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -245,6 +297,13 @@
         "source_bytes": 4046,
         "covered_bytes": 3264
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "c195441835c65502",
@@ -255,7 +314,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 2300,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -275,6 +334,13 @@
         "source_bytes": 3485,
         "covered_bytes": 2141
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "b46207890d7c59a2",
@@ -285,7 +351,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1759,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -305,6 +371,13 @@
         "source_bytes": 3711,
         "covered_bytes": 2347
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "9103bba3baf4563c",
@@ -315,7 +388,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 2880,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -335,6 +408,13 @@
         "source_bytes": 3483,
         "covered_bytes": 1719
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "86fe7779382355f9",
@@ -345,7 +425,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1535,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -365,6 +445,13 @@
         "source_bytes": 3281,
         "covered_bytes": 1744
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "1ab52339bea05010",
@@ -375,7 +462,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1501,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -395,6 +482,13 @@
         "source_bytes": 2780,
         "covered_bytes": 1766
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "a681b34583395cff",
@@ -405,7 +499,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1628,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -425,6 +519,13 @@
         "source_bytes": 5006,
         "covered_bytes": 2609
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "e4802d3642255773",
@@ -435,7 +536,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1610,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -448,16 +549,23 @@
       "pr_ref": "kckylechen1/tachi#1390",
       "expected_merge_sha": "471751ee155f5eb8ed355551799e6d7b1e024eca",
       "observed_merge_sha": "471751ee155f5eb8ed355551799e6d7b1e024eca",
-      "issue_snapshot_hash": "77999247bbb1f2871a360bb930365b8e0f8895b1269d7884ef22445c44c046e6",
+      "issue_snapshot_hash": "d674072e268a64c97c20b5bbd531138965d4b676ac1fa7e833d830e96f2a4a08",
       "pr_snapshot_hash": "3c934490ae8193036eef1a1bc40db0d8fa31368634560ab07e75c039cf358192",
       "selected_comment_revisions": [],
       "source_coverage": {
         "source_bytes": 3569,
         "covered_bytes": 1654
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
-        "candidate_id": "1c142e9f70545ff7",
+        "candidate_id": "59c2237bd6bb53bb",
         "candidate_status": "pending",
         "identity_status": "preview_only",
         "evidence_ref_count": 5,
@@ -465,7 +573,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1640,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -487,6 +595,13 @@
         "source_bytes": 5987,
         "covered_bytes": 3463
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "d95af18e8ea759f1",
@@ -497,7 +612,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1768,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -517,6 +632,13 @@
         "source_bytes": 6709,
         "covered_bytes": 3503
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "4692885aa5445041",
@@ -527,7 +649,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1676,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -547,6 +669,13 @@
         "source_bytes": 1862,
         "covered_bytes": 991
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "e14bd68b47e053c2",
@@ -557,7 +686,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 2108,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -577,6 +706,13 @@
         "source_bytes": 2654,
         "covered_bytes": 1691
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "cd6b9d63f0915305",
@@ -587,7 +723,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1648,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },
@@ -607,6 +743,13 @@
         "source_bytes": 7619,
         "covered_bytes": 3945
       },
+      "engine_receipt": {
+        "requested_role": "github_corpus_adapter",
+        "fallback_chain": [
+          "effective provider/model/version unavailable: no model invocation in the read-only adapter run"
+        ],
+        "degraded": true
+      },
       "candidate_yield": {
         "emitted": true,
         "candidate_id": "f213bdb63bfb542a",
@@ -617,7 +760,7 @@
         "overturn_appended": false
       },
       "cost_latency": {
-        "latency_ms": 1602,
+        "latency_ms": 0,
         "cost_usd": null,
         "cost_status": "not_applicable_no_model_invocation"
       },

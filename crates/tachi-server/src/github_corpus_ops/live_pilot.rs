@@ -29,7 +29,7 @@ pub const OWNER_APPROVED_EXACT20_MANIFEST_SHA256: &str =
 /// SHA-256 of the exact preview report bytes ratified for phase-3 preflight.
 /// Rebaselining is an explicit owner action that updates this pin.
 pub const OWNER_APPROVED_EXACT20_BASELINE_SHA256: &str =
-    "3bbb067f90c57009eeb45e9129becf7bf28062a718735686f088761e68e2765e";
+    "df262db0eeb65e60491c61bce2c271a6553dff99656ea78f992aee2edafd9a33";
 pub const CHECKPOINT_SCHEMA_VERSION: &str = "github_corpus_exact20_checkpoint_v1";
 
 /// Owner-approved row metadata that is intentionally outside CorpusCaseV1.
@@ -679,6 +679,28 @@ pub fn run_corpus_pilot(
 ) -> Result<CorpusPilotReportV1, String> {
     let prepared = prepare_corpus_pilot(input_bytes, reader, captured_at, None, None)?;
     run_preview_prepared(prepared, captured_at, engine_receipt, provider_resolution)
+}
+
+/// Owner-authorized no-spend rebaseline path. It binds the byte-exact manifest
+/// before reading GitHub and has no model resolver parameter by construction.
+pub fn rebaseline_owner_approved_corpus_pilot(
+    input_bytes: &[u8],
+    reader: &dyn GithubCorpusReader,
+    captured_at: &str,
+) -> Result<CorpusPilotReportV1, String> {
+    let manifest_sha256 = sha256_hex(input_bytes);
+    if manifest_sha256 != OWNER_APPROVED_EXACT20_MANIFEST_SHA256 {
+        return Err(format!(
+            "refusing rebaseline: manifest digest mismatch (expected owner-approved {OWNER_APPROVED_EXACT20_MANIFEST_SHA256})"
+        ));
+    }
+    run_corpus_pilot(
+        input_bytes,
+        reader,
+        captured_at,
+        preview_only_engine_receipt(),
+        ProviderResolutionReceiptV1::unknown_without_engine_invocation(),
+    )
 }
 
 fn run_preview_prepared(
@@ -2438,7 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_baseline_is_compatible_and_reproduction_output_is_distinct() {
+    fn pinned_baseline_is_compatible_and_reproduction_output_is_distinct() {
         let receipt = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/engineering/receipts/1059-exact20-pilot-report.md"
@@ -2456,11 +2478,11 @@ mod tests {
             OWNER_APPROVED_EXACT20_BASELINE_SHA256
         );
         let baseline: CorpusPilotProvenanceBaselineV1 =
-            serde_json::from_slice(baseline_bytes).expect("legacy preview baseline must parse");
+            serde_json::from_slice(baseline_bytes).expect("pinned preview baseline must parse");
         let input: CorpusPilotInputV1 =
             serde_json::from_slice(manifest_bytes).expect("committed manifest must parse");
         validate_provenance_baseline(&input, &sha256_hex(manifest_bytes), &baseline)
-            .expect("legacy baseline provenance remains compatible");
+            .expect("pinned baseline provenance remains compatible");
 
         let reproduce = receipt
             .split_once("## Reproduce")
