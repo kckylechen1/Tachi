@@ -532,7 +532,9 @@ async fn call_reasoning_llm_provider_only_is_pure_http_no_cli_ceremony_needed() 
                     "prompt_tokens": 1,
                     "completion_tokens": 1,
                     "total_tokens": 2
-                }
+                },
+                "model": "provider-returned-model",
+                "system_fingerprint": "provider-returned-version"
             }))
         }),
     );
@@ -579,12 +581,27 @@ async fn call_reasoning_llm_provider_only_is_pure_http_no_cli_ceremony_needed() 
         }],
     );
 
-    let text = client
-        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+    let outcome = client
+        .call_reasoning_llm_provider_only_with_receipt("system", "user", None, 0.0, 16)
         .await
         .expect("provider-only call should succeed from the mock lane alone");
 
-    assert_eq!(text, "provider-only answer");
+    assert_eq!(outcome.text, "provider-only answer");
+    assert_eq!(
+        outcome.receipt.effective_model.as_deref(),
+        Some("provider-returned-model"),
+        "the receipt must use the model actually returned by the provider"
+    );
+    assert_eq!(
+        outcome.receipt.effective_version.as_deref(),
+        Some("provider-returned-version"),
+        "a missing provider fingerprint must stay unknown rather than be invented"
+    );
+    assert_eq!(outcome.receipt.total_tokens, Some(2));
+    assert!(
+        !outcome.receipt.degraded && outcome.receipt.fallback_chain.is_empty(),
+        "the primary mock tier must not be misreported as a fallback"
+    );
 
     server_task.abort();
 }

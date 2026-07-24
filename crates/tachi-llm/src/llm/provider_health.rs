@@ -20,12 +20,12 @@ pub use self::config::{LaneFallbackConfig, ProviderRuntimeConfig};
 pub(super) use self::state::{
     ProviderHealthPersistState, ProviderHealthReloadState, ProviderHealthSnapshot, ProviderState,
 };
-pub use self::types::ChatLaneConfig;
 pub use self::types::ProviderSecret;
 pub(super) use self::types::{
     ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, KeyAvailability,
     KeyRetryStatus, SelectedProviderSecret,
 };
+pub use self::types::{ChatLaneConfig, ProviderInvocationOutcome, ProviderInvocationReceipt};
 pub use self::types::{
     LaneOutageStatus, ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus,
 };

@@ -13,6 +13,32 @@ pub struct ProviderSecret {
     pub value: String,
 }
 
+/// Public-safe receipt for one successful provider HTTP completion. It names
+/// the endpoint and provider-reported identity, but deliberately never carries
+/// a secret value, request body, or response body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInvocationReceipt {
+    pub effective_provider: String,
+    pub effective_model: Option<String>,
+    pub effective_version: Option<String>,
+    pub fallback_chain: Vec<String>,
+    pub degraded: bool,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub latency_ms: u128,
+}
+
+/// Completion text plus its public-safe execution receipt. Consumers that
+/// persist a report must deliberately retain only the receipt when the text is
+/// not itself an approved output surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInvocationOutcome {
+    pub text: String,
+    pub truncated: bool,
+    pub receipt: ProviderInvocationReceipt,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderKeyCooldownStatus {
     pub key_id: String,

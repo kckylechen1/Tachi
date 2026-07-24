@@ -6,7 +6,10 @@ use reqwest::{
 use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
-use super::super::provider_health::{ChatLane, ChatLaneConfig, SelectedProviderSecret};
+use super::super::provider_health::{
+    ChatLane, ChatLaneConfig, ProviderInvocationOutcome, ProviderInvocationReceipt,
+    SelectedProviderSecret,
+};
 
 #[derive(Clone, Copy)]
 struct ChatUsageTokens {
@@ -62,7 +65,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|(text, _truncated)| text)
+        .map(|outcome| outcome.text)
     }
 
     /// Foundry batch distill and single-group fallback when
@@ -84,7 +87,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|(text, _truncated)| text)
+        .map(|outcome| outcome.text)
     }
 
     /// Reasoning-lane HTTP call with **no** Claude-CLI-first behavior — a
@@ -113,7 +116,30 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|(text, _truncated)| text)
+        .map(|outcome| outcome.text)
+    }
+
+    /// Provider-only reasoning call with a public-safe, effective-engine
+    /// receipt. Unlike `call_reasoning_llm_with_receipt`, this never tries the
+    /// Claude CLI, so the returned provider identity belongs to the actual HTTP
+    /// provider that generated the text.
+    pub async fn call_reasoning_llm_provider_only_with_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<ProviderInvocationOutcome, String> {
+        self.call_lane_llm(
+            ChatLane::Reasoning,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
     }
 
     pub async fn call_summary_llm(
@@ -133,7 +159,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|(text, _truncated)| text)
+        .map(|outcome| outcome.text)
     }
 
     /// Returns `(text, truncated)` — `truncated` is `true` when the
@@ -161,7 +187,7 @@ impl super::super::LlmClient {
         model_override: Option<&str>,
         temperature: f32,
         max_tokens: u32,
-    ) -> Result<(String, bool), String> {
+    ) -> Result<ProviderInvocationOutcome, String> {
         let primary_cfg = self.lane(lane).clone();
         let primary_breaker_key = format!("chat:{}", lane.as_str());
 
@@ -204,8 +230,15 @@ impl super::super::LlmClient {
                 )
                 .await
             {
-                Ok(result) => {
+                Ok(mut result) => {
                     self.lane_outage.record_chain_success(lane.as_str());
+                    if tier_index > 0 {
+                        result.receipt.degraded = true;
+                        result.receipt.fallback_chain.push(format!(
+                            "{} lane used provider fallback tier {tier_index}",
+                            lane.as_str()
+                        ));
+                    }
                     return Ok(result);
                 }
                 Err(e) => last_err = e,
@@ -243,7 +276,7 @@ impl super::super::LlmClient {
         model_override: Option<&str>,
         temperature: f32,
         max_tokens: u32,
-    ) -> Result<(String, bool), String> {
+    ) -> Result<ProviderInvocationOutcome, String> {
         let model = model_override.unwrap_or(&cfg.model);
 
         let mut body = serde_json::json!({
@@ -441,18 +474,43 @@ impl super::super::LlmClient {
             if let Some(text) = content {
                 self.mark_secret_success(&selected);
                 self.circuit_breakers.record_success(breaker_key);
+                let usage = parse_usage_tokens(json.get("usage"));
                 self.record_successful_llm_usage(
                     lane,
                     model,
                     &cfg.base_url,
                     &selected,
-                    parse_usage_tokens(json.get("usage")),
+                    usage,
                     max_tokens,
                     user.chars().count(),
                     text.chars().count(),
                     attempt_started.elapsed(),
                 );
-                return Ok((text, finish_reason == "length"));
+                return Ok(ProviderInvocationOutcome {
+                    text,
+                    truncated: finish_reason == "length",
+                    receipt: ProviderInvocationReceipt {
+                        effective_provider: provider_host(&cfg.base_url),
+                        effective_model: json
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string),
+                        effective_version: json
+                            .get("system_fingerprint")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string),
+                        fallback_chain: Vec::new(),
+                        degraded: false,
+                        prompt_tokens: usage.prompt_tokens,
+                        completion_tokens: usage.completion_tokens,
+                        total_tokens: usage.total_tokens,
+                        latency_ms: attempt_started.elapsed().as_millis(),
+                    },
+                });
             }
 
             // Content was empty — build diagnostic info

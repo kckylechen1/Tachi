@@ -17,7 +17,10 @@ mod rerank;
 pub use chat_lanes::ReasoningOutcome;
 pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
 pub use provider_health::ProviderSecret;
-pub use provider_health::{ChatLaneConfig, LaneFallbackConfig, ProviderRuntimeConfig};
+pub use provider_health::{
+    ChatLaneConfig, LaneFallbackConfig, ProviderInvocationOutcome, ProviderInvocationReceipt,
+    ProviderRuntimeConfig,
+};
 use provider_health::{
     ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState, ProviderState,
 };

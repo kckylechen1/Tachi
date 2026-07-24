@@ -11,8 +11,9 @@ mod runtime_files;
 mod test_support;
 
 pub use llm::{
-    LlmClient, ProviderSecret, ReasoningOutcome, RerankConfig, RerankProviderKind,
-    RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
+    LlmClient, ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderSecret,
+    ReasoningOutcome, RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV,
+    RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
 pub use provider_materialization::{
     group_api_key_values_by_configured_rotations, materialize_provider_secrets, MaterializeReport,
