@@ -850,10 +850,10 @@ fn new_checkpoint(preflight: &CorpusPilotPreflightV1) -> CorpusPilotCheckpointV1
     }
 }
 
-fn validate_checkpoint(
-    checkpoint: &CorpusPilotCheckpointV1,
+fn reconcile_checkpoint(
+    checkpoint: &mut CorpusPilotCheckpointV1,
     preflight: &CorpusPilotPreflightV1,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if checkpoint.schema_version != CHECKPOINT_SCHEMA_VERSION
         || checkpoint.manifest_sha256 != preflight.prepared.manifest_sha256
         || checkpoint.baseline_sha256 != preflight.baseline_sha256
@@ -863,10 +863,11 @@ fn validate_checkpoint(
             "checkpoint does not match the immutable manifest and baseline binding".to_string(),
         );
     }
+    let mut changed = false;
     for prepared_case in &preflight.prepared.cases {
         let Some(saved) = checkpoint
             .cases
-            .iter()
+            .iter_mut()
             .find(|saved| saved.case_id == prepared_case.owner_case.case_id)
         else {
             return Err("checkpoint omits an owner-approved case".to_string());
@@ -876,28 +877,55 @@ fn validate_checkpoint(
             &checkpoint.baseline_sha256,
             &saved.case_id,
         );
-        let completion_valid = saved
-            .fully_attested_completion_attempt
-            .is_none_or(|completed| {
-                saved.attempts.iter().any(|attempt| {
-                    attempt.attempt == completed
-                        && matches!(
-                            attempt.outcome.as_ref(),
-                            Some(CorpusPilotCheckpointOutcomeV1::Candidate {
-                                fully_attested: true,
-                                ..
-                            })
-                        )
-                })
-            });
         if saved.checkpoint_key != expected_key
             || saved.preflight != checkpoint_preflight(prepared_case)
-            || !completion_valid
         {
-            return Err("checkpoint case binding or completion receipt is invalid".to_string());
+            return Err("checkpoint case binding is invalid".to_string());
+        }
+
+        let saved_case_id = saved.case_id.clone();
+        let saved_preflight = saved.preflight.clone();
+        for attempt in &mut saved.attempts {
+            if let Some(CorpusPilotCheckpointOutcomeV1::Candidate {
+                fully_attested,
+                report,
+                candidate,
+            }) = attempt.outcome.as_mut()
+            {
+                if !checkpoint_candidate_matches_case(
+                    &saved_case_id,
+                    &saved_preflight,
+                    report,
+                    candidate,
+                ) {
+                    return Err(
+                        "checkpoint candidate does not match its immutable case binding"
+                            .to_string(),
+                    );
+                }
+                let derived = checkpoint_candidate_is_fully_attested(report, candidate);
+                if *fully_attested != derived {
+                    *fully_attested = derived;
+                    changed = true;
+                }
+            }
+        }
+        let derived_completion = saved.attempts.iter().rev().find_map(|attempt| {
+            matches!(
+                attempt.outcome.as_ref(),
+                Some(CorpusPilotCheckpointOutcomeV1::Candidate {
+                    fully_attested: true,
+                    ..
+                })
+            )
+            .then_some(attempt.attempt)
+        });
+        if saved.fully_attested_completion_attempt != derived_completion {
+            saved.fully_attested_completion_attempt = derived_completion;
+            changed = true;
         }
     }
-    Ok(())
+    Ok(changed)
 }
 
 fn actual_cost_is_attested(cost: &CaseLatencyCostV1) -> bool {
@@ -915,6 +943,41 @@ fn actual_cost_is_attested(cost: &CaseLatencyCostV1) -> bool {
             .cost_version
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn checkpoint_candidate_matches_case(
+    checkpoint_case_id: &str,
+    checkpoint_preflight: &CorpusPilotCheckpointPreflightV1,
+    report: &CorpusPilotCaseReportV1,
+    candidate: &LessonCandidateV1,
+) -> bool {
+    report.case_id == checkpoint_case_id
+        && candidate.source_row_id == checkpoint_case_id
+        && report.expected_merge_sha == checkpoint_preflight.expected_merge_sha
+        && report.observed_merge_sha == checkpoint_preflight.observed_merge_sha
+        && report.issue_snapshot_hash == checkpoint_preflight.issue_snapshot_hash
+        && report.pr_snapshot_hash == checkpoint_preflight.pr_snapshot_hash
+        && report.candidate_yield.candidate_id == candidate.candidate_id
+}
+
+fn checkpoint_candidate_is_fully_attested(
+    report: &CorpusPilotCaseReportV1,
+    candidate: &LessonCandidateV1,
+) -> bool {
+    let exact_full_coverage = candidate.coverage.source_bytes > 0
+        && candidate.coverage.covered_bytes == candidate.coverage.source_bytes
+        && report.source_coverage == Some(candidate.coverage);
+    report.failure_class.is_none()
+        && report.candidate_yield.emitted
+        && report.candidate_yield.candidate_status == "pending"
+        && report.candidate_yield.identity_status == "known"
+        && candidate.candidate_status == tachi_params::LessonCandidateStatusV1::Pending
+        && candidate.cites_source_refs()
+        && !candidate.claims_establishment()
+        && exact_full_coverage
+        && report.engine_receipt.has_known_identity()
+        && candidate.engine_receipt.as_ref() == Some(&report.engine_receipt)
+        && actual_cost_is_attested(&report.cost_latency)
 }
 
 fn failure_report_case(
@@ -998,8 +1061,10 @@ async fn execute_preflighted_corpus_pilot(
     resolver: &dyn CorpusPilotModelResolver,
 ) -> Result<CorpusPilotExecutionV1, String> {
     let mut checkpoint = match checkpoint_store.load()? {
-        Some(checkpoint) => {
-            validate_checkpoint(&checkpoint, &preflight)?;
+        Some(mut checkpoint) => {
+            if reconcile_checkpoint(&mut checkpoint, &preflight)? {
+                checkpoint_store.save_atomic(&checkpoint)?;
+            }
             checkpoint
         }
         None => {
@@ -1013,10 +1078,7 @@ async fn execute_preflighted_corpus_pilot(
     let started = Instant::now();
 
     for (index, prepared_case) in preflight.prepared.cases.iter().enumerate() {
-        if checkpoint.cases[index]
-            .fully_attested_completion_attempt
-            .is_some()
-        {
+        if latest_candidate_attempt(&checkpoint.cases[index]).is_some() {
             continue;
         }
 
@@ -1113,9 +1175,6 @@ async fn execute_preflighted_corpus_pilot(
             cost_basis: completion.cost_basis,
             cost_version: completion.cost_version,
         };
-        let fully_attested = engine_receipt.has_known_identity()
-            && result.candidate.coverage.is_full()
-            && actual_cost_is_attested(&cost_latency);
         let candidate = result.candidate.clone();
         let report = report_case(
             &prepared_case.owner_case,
@@ -1123,6 +1182,7 @@ async fn execute_preflighted_corpus_pilot(
             engine_receipt,
             cost_latency,
         );
+        let fully_attested = checkpoint_candidate_is_fully_attested(&report, &candidate);
         checkpoint.cases[index].attempts[attempt - 1].outcome =
             Some(CorpusPilotCheckpointOutcomeV1::Candidate {
                 fully_attested,
@@ -1950,5 +2010,139 @@ mod tests {
             .expect_err("completion/failure receipt checkpoint failure must be loud");
             assert_eq!(receipt_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn successful_unattested_checkpoint_is_terminal_without_respend() {
+        let input = input_bytes(MERGE_SHA);
+        let reader = fixture_reader(false);
+        let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
+        let store = MemoryCheckpointStore::default();
+        let first_model = SyntheticModel {
+            known_identity: true,
+            full_coverage: true,
+            actual_cost: false,
+            ..Default::default()
+        };
+        let first_calls = first_model.calls.clone();
+        let first_resolver = SyntheticResolver::new(first_model);
+
+        let first = run_fixture_with(&input, &reader, &baseline_bytes, &store, &first_resolver)
+            .await
+            .expect("successful provider candidates persist without actual cost");
+        assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 20);
+        assert_eq!(first.report.completed_cases, 0);
+        assert_eq!(first.report.disposition, "partial_preview_only");
+
+        let resume_model = SyntheticModel {
+            known_identity: true,
+            full_coverage: true,
+            actual_cost: true,
+            ..Default::default()
+        };
+        let resume_calls = resume_model.calls.clone();
+        let resume_resolver = SyntheticResolver::new(resume_model);
+        let resumed = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resume_resolver)
+            .await
+            .expect("resume reuses successful unattested receipts without spending");
+
+        assert_eq!(resume_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            resume_resolver
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "terminal successful candidates must not resolve or construct a model on resume"
+        );
+        assert_eq!(resumed.report.completed_cases, 0);
+        assert_eq!(resumed.report.disposition, "partial_preview_only");
+        assert!(store
+            .snapshot()
+            .cases
+            .iter()
+            .all(|case| case.attempts.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn forged_checkpoint_attestation_is_recomputed_and_cannot_complete() {
+        let input = input_bytes(MERGE_SHA);
+        let reader = fixture_reader(false);
+        let baseline_bytes = baseline_bytes_for_fixture(&input, &reader);
+        let store = MemoryCheckpointStore::default();
+        let initial_model = SyntheticModel {
+            known_identity: true,
+            full_coverage: true,
+            actual_cost: true,
+            ..Default::default()
+        };
+        let initial_resolver = SyntheticResolver::new(initial_model);
+        let initial = run_fixture_with(&input, &reader, &baseline_bytes, &store, &initial_resolver)
+            .await
+            .expect("fixture creates an initially complete checkpoint");
+        assert_eq!(initial.report.disposition, "complete");
+
+        {
+            let mut saved = store.checkpoint.lock().expect("checkpoint lock");
+            let forged_case = &mut saved.as_mut().expect("checkpoint saved").cases[0];
+            forged_case.fully_attested_completion_attempt = Some(1);
+            let Some(CorpusPilotCheckpointOutcomeV1::Candidate {
+                fully_attested,
+                report,
+                candidate,
+            }) = forged_case.attempts[0].outcome.as_mut()
+            else {
+                panic!("fixture attempt must contain a candidate");
+            };
+            *fully_attested = true;
+            report.cost_latency.cost_usd = None;
+            report.cost_latency.cost_status = "provider_price_not_reported".to_string();
+            report.cost_latency.cost_basis = None;
+            report.cost_latency.cost_version = None;
+            report.engine_receipt = preview_only_engine_receipt();
+            report.source_coverage = Some(LessonCoverageV1 {
+                source_bytes: candidate.coverage.source_bytes,
+                covered_bytes: 0,
+            });
+            candidate.engine_receipt = None;
+            candidate.coverage.covered_bytes = 0;
+        }
+
+        let resume_model = SyntheticModel::default();
+        let resume_calls = resume_model.calls.clone();
+        let resume_resolver = SyntheticResolver::new(resume_model);
+        let resumed = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resume_resolver)
+            .await
+            .expect("forged attestation is safely downgraded");
+
+        assert_eq!(resume_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(resumed.report.completed_cases, 19);
+        assert_eq!(resumed.report.disposition, "partial_preview_only");
+        let reconciled = store.snapshot();
+        assert_eq!(reconciled.cases[0].fully_attested_completion_attempt, None);
+        assert!(matches!(
+            reconciled.cases[0].attempts[0].outcome.as_ref(),
+            Some(CorpusPilotCheckpointOutcomeV1::Candidate {
+                fully_attested: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn documented_reproduction_command_includes_pinned_baseline_arguments() {
+        let receipt = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/engineering/receipts/1059-exact20-pilot-report.md"
+        ));
+        let reproduce = receipt
+            .split_once("## Reproduce")
+            .map(|(_, section)| section)
+            .expect("receipt must have a reproduce section");
+        assert!(reproduce.contains(
+            "--baseline-report docs/engineering/receipts/1059-exact20-pilot-report.json"
+        ));
+        assert!(reproduce.contains(&format!(
+            "--baseline-sha256 {OWNER_APPROVED_EXACT20_BASELINE_SHA256}"
+        )));
     }
 }

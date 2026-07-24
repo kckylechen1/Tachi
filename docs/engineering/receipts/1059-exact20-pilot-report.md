@@ -50,6 +50,8 @@ and behavior-test handoff — are in
 CARGO_TARGET_DIR=/private/tmp/sigil-target-1059-cde718ec \
   cargo run -p tachi-server --bin github-corpus-pilot -- \
   --manifest docs/engineering/receipts/1059-exact20-manifest.json \
+  --baseline-report docs/engineering/receipts/1059-exact20-pilot-report.json \
+  --baseline-sha256 3bbb067f90c57009eeb45e9129becf7bf28062a718735686f088761e68e2765e \
   --report docs/engineering/receipts/1059-exact20-pilot-report.json \
   --captured-at 2026-07-23T17:42:43Z
 ```
