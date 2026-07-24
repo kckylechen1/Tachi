@@ -557,7 +557,7 @@ mod tests {
             source_revision: 1,
             content_sha256: format!("{index:064x}"),
             capture_timestamp: "2026-07-24T00:00:00Z".to_string(),
-            kind: if index % 2 == 0 {
+            kind: if index.is_multiple_of(2) {
                 PilotRowKindV1::Narrative
             } else {
                 PilotRowKindV1::StructuredControl
