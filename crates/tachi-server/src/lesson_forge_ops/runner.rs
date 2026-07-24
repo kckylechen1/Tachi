@@ -222,6 +222,7 @@ pub struct PilotRunCallReportV1 {
 pub enum PilotRunReportErrorV1 {
     WrongCaseCount { expected: usize, actual: usize },
     WrongCompletedCallCount { expected: usize, actual: usize },
+    CollapsedColdAdjudicatorIdentity,
     DuplicateCallKey,
     UnexpectedOrMissingCall,
     IncompleteAccounting,
@@ -237,6 +238,10 @@ impl std::fmt::Display for PilotRunReportErrorV1 {
             Self::WrongCompletedCallCount { expected, actual } => write!(
                 f,
                 "pilot run report requires {expected} completed calls, got {actual}"
+            ),
+            Self::CollapsedColdAdjudicatorIdentity => write!(
+                f,
+                "pilot run report contains a cold-run engine identity collapsed into the adjudicator"
             ),
             Self::DuplicateCallKey => write!(f, "pilot run report has a duplicate call key"),
             Self::UnexpectedOrMissingCall => write!(
@@ -306,6 +311,13 @@ impl PilotRunReportV1 {
                 actual: self.completed_calls.len(),
             });
         }
+        for case in &self.cases {
+            validate_cold_adjudicator_independence(
+                &case.treated_receipts,
+                &case.baseline_receipts,
+                &case.adjudicator_receipt,
+            )?;
+        }
         let mut seen = std::collections::HashSet::new();
         if self
             .completed_calls
@@ -339,6 +351,35 @@ impl PilotRunReportV1 {
         }
         Ok(())
     }
+}
+
+fn validate_cold_adjudicator_independence(
+    treated: &[PilotEngineReceiptV1; 3],
+    baseline: &[PilotEngineReceiptV1; 3],
+    adjudicator: &PilotEngineReceiptV1,
+) -> Result<(), PilotRunReportErrorV1> {
+    if treated
+        .iter()
+        .chain(baseline.iter())
+        .all(|cold| effective_engine_identities_are_independent(cold, adjudicator))
+    {
+        Ok(())
+    } else {
+        Err(PilotRunReportErrorV1::CollapsedColdAdjudicatorIdentity)
+    }
+}
+
+fn effective_engine_identities_are_independent(
+    cold: &PilotEngineReceiptV1,
+    adjudicator: &PilotEngineReceiptV1,
+) -> bool {
+    let cold = &cold.identity;
+    let adjudicator = &adjudicator.identity;
+    cold.has_known_identity()
+        && adjudicator.has_known_identity()
+        && (cold.effective_provider != adjudicator.effective_provider
+            || cold.effective_model != adjudicator.effective_model
+            || cold.effective_version != adjudicator.effective_version)
 }
 
 fn expected_call_reports(
@@ -572,6 +613,12 @@ where
     let (baseline, baseline_receipts) = run_baseline(digest, ledger, &binding, cold_runner)?;
     let (blinded, key) = blind_case(&binding.source_id, treated, baseline, blind_seed);
     let adjudicated = run_adjudicator(digest, ledger, &binding, &blinded, adjudicator)?;
+    validate_cold_adjudicator_independence(
+        &treated_receipts,
+        &baseline_receipts,
+        &adjudicated.receipt,
+    )
+    .map_err(PilotRunError::ReportAccounting)?;
     let (treated, baseline) = unblind_scores(&key, adjudicated.scores)
         .map_err(|err| PilotRunError::Unblind(format!("{err:?}")))?;
     let outcome = evaluate_case(&super::discrimination::CaseInput {
@@ -1142,6 +1189,7 @@ mod tests {
         fail_once_at: Option<(String, usize)>,
         failed_once: bool,
         receipt_override: Option<PilotEngineReceiptV1>,
+        baseline_receipt_overrides: BTreeMap<usize, PilotEngineReceiptV1>,
     }
 
     impl Default for Cold {
@@ -1151,6 +1199,7 @@ mod tests {
                 fail_once_at: None,
                 failed_once: false,
                 receipt_override: None,
+                baseline_receipt_overrides: BTreeMap::new(),
             }
         }
     }
@@ -1207,8 +1256,10 @@ mod tests {
             Ok(ColdRunResultV1 {
                 text: "baseline synthetic result".to_string(),
                 receipt: self
-                    .receipt_override
-                    .clone()
+                    .baseline_receipt_overrides
+                    .get(&_invocation)
+                    .cloned()
+                    .or_else(|| self.receipt_override.clone())
                     .unwrap_or_else(|| receipt("cold", "cold-provider", "cold-model")),
             })
         }
@@ -1304,6 +1355,143 @@ mod tests {
         assert_eq!(cold.calls, 300);
         assert_eq!(adjudicator.calls, 50);
         let _ = std::fs::remove_file(progress);
+    }
+
+    #[test]
+    fn complete_flow_refuses_all_cold_calls_collapsed_into_the_adjudicator_engine() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = Producer::default();
+        let mut cold = Cold {
+            receipt_override: Some(receipt("cold", "adjudicator-provider", "adjudicator-model")),
+            ..Cold::default()
+        };
+        let mut adjudicator = Adjudicator::default();
+        let progress = progress_path();
+
+        let result = run_manifest_for_test(
+            &manifest,
+            &progress,
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        );
+        let refused = matches!(
+            result,
+            Err(PilotRunError::ReportAccounting(
+                PilotRunReportErrorV1::CollapsedColdAdjudicatorIdentity
+            ))
+        );
+        let _ = std::fs::remove_file(progress);
+
+        assert!(
+            refused,
+            "collapsed cold/adjudicator identities must not complete"
+        );
+    }
+
+    #[test]
+    fn complete_flow_refuses_one_collapsed_cold_identity_among_distinct_receipts() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = Producer::default();
+        let mut cold = Cold {
+            baseline_receipt_overrides: BTreeMap::from([(
+                1,
+                receipt("cold", "adjudicator-provider", "adjudicator-model"),
+            )]),
+            ..Cold::default()
+        };
+        let mut adjudicator = Adjudicator::default();
+        let progress = progress_path();
+
+        let result = run_manifest_for_test(
+            &manifest,
+            &progress,
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        );
+        let refused = matches!(
+            result,
+            Err(PilotRunError::ReportAccounting(
+                PilotRunReportErrorV1::CollapsedColdAdjudicatorIdentity
+            ))
+        );
+        let _ = std::fs::remove_file(progress);
+
+        assert!(
+            refused,
+            "one collapsed cold identity must fail the whole report"
+        );
+    }
+
+    #[test]
+    fn authoritative_report_validation_refuses_collapsed_cold_identity() {
+        let rows = rows();
+        let manifest = freeze_pilot_manifest(rows.clone()).unwrap();
+        let resolver = Resolver::from_rows(&rows);
+        let mut producer = Producer::default();
+        let mut cold = Cold::default();
+        let mut adjudicator = Adjudicator::default();
+        let progress = progress_path();
+        let mut report = run_manifest_for_test(
+            &manifest,
+            &progress,
+            &resolver,
+            &mut producer,
+            &mut cold,
+            &mut adjudicator,
+        )
+        .unwrap();
+        for case in &mut report.cases {
+            case.treated_receipts[0] = case.adjudicator_receipt.clone();
+        }
+        report.completed_calls = expected_call_reports(&report.manifest_digest, &report.cases);
+
+        let result = report.validate_complete_accounting();
+        let _ = std::fs::remove_file(progress);
+
+        assert_eq!(
+            result,
+            Err(PilotRunReportErrorV1::CollapsedColdAdjudicatorIdentity),
+            "authoritative completion must reject identity collapse"
+        );
+    }
+
+    #[test]
+    fn cold_adjudicator_independence_uses_complete_effective_identity() {
+        let adjudicator = receipt("adjudicator", "adjudicator-provider", "adjudicator-model");
+        let collapsed = receipt("cold", "adjudicator-provider", "adjudicator-model");
+        assert!(!effective_engine_identities_are_independent(
+            &collapsed,
+            &adjudicator
+        ));
+
+        let mut version_distinct = collapsed.clone();
+        version_distinct.identity.effective_version = Some("test-v2".to_string());
+        assert!(effective_engine_identities_are_independent(
+            &version_distinct,
+            &adjudicator
+        ));
+
+        let mut fallback = receipt("cold", "cold-provider", "cold-model");
+        fallback.identity.fallback_chain = vec!["backup".to_string()];
+        assert!(!effective_engine_identities_are_independent(
+            &fallback,
+            &adjudicator
+        ));
+
+        let mut degraded = receipt("cold", "cold-provider", "cold-model");
+        degraded.identity.degraded = true;
+        assert!(!effective_engine_identities_are_independent(
+            &degraded,
+            &adjudicator
+        ));
     }
 
     #[test]
