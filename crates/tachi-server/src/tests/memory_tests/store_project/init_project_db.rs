@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn tachi_init_project_db_creates_expected_path() {
-    let server = make_server();
-    let root = crate::utils::test_fixture_path(format!("tachi-project-db-{}", uuid::Uuid::new_v4()));
+    let (server, temp_home) = make_server_with_temp_home();
+    let root = temp_home.temp_home.join("Project DB Repo");
     std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
 
     let response = server
@@ -22,6 +22,16 @@ async fn tachi_init_project_db_creates_expected_path() {
     assert_eq!(json["created"], json!(true));
     assert_eq!(json["db_path"], json!(db_path.display().to_string()));
     assert!(db_path.exists(), "project db should be created on disk");
+    let project = json["project"]
+        .as_str()
+        .expect("canonical project identity");
+    let alias = crate::path_utils::plan_c_global_db_path(project);
+    assert!(
+        alias.starts_with(temp_home.temp_home.join(".tachi/projects")),
+        "Plan C alias must stay inside the temporary TACHI_HOME: {}",
+        alias.display()
+    );
+    assert!(alias.is_symlink(), "Plan C alias should be created");
 
     let response_second = server
         .tachi_init_project_db(Parameters(InitProjectDbParams {
@@ -33,8 +43,6 @@ async fn tachi_init_project_db_creates_expected_path() {
     let json_second: serde_json::Value = serde_json::from_str(&response_second)
         .expect("second tachi_init_project_db response should be JSON");
     assert_eq!(json_second["created"], json!(false));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -69,8 +77,8 @@ async fn custom_db_relpath_reopens_from_manifest_without_alias() {
 
 #[tokio::test]
 async fn tachi_init_project_db_activates_project_store_and_read_pool() {
-    let server = make_server();
-    let root = crate::utils::test_fixture_path(format!("tachi-project-runtime-{}", uuid::Uuid::new_v4()));
+    let (server, temp_home) = make_server_with_temp_home();
+    let root = temp_home.temp_home.join("Project Runtime Repo");
     std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
 
     assert_eq!(server.project_db_path_buf(), None);
@@ -85,6 +93,16 @@ async fn tachi_init_project_db_activates_project_store_and_read_pool() {
     let json: serde_json::Value =
         serde_json::from_str(&response).expect("tachi_init_project_db response should be JSON");
     assert_eq!(json["active"], json!(true));
+    let project = json["project"]
+        .as_str()
+        .expect("canonical project identity");
+    let alias = crate::path_utils::plan_c_global_db_path(project);
+    assert!(
+        alias.starts_with(temp_home.temp_home.join(".tachi/projects")),
+        "Plan C alias must stay inside the temporary TACHI_HOME: {}",
+        alias.display()
+    );
+    assert!(alias.is_symlink(), "Plan C alias should be created");
 
     let db_path =
         crate::path_utils::resolve_project_db_path(&root, std::path::Path::new(".tachi/memory.db"))
@@ -110,8 +128,6 @@ async fn tachi_init_project_db_activates_project_store_and_read_pool() {
         found.expect("project entry exists").id,
         "activated-project-read-visible"
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -186,7 +202,8 @@ async fn tachi_init_project_db_requires_project_root_explicitly() {
 #[tokio::test]
 async fn tachi_init_project_db_rejects_path_traversal() {
     let server = make_server();
-    let root = crate::utils::test_fixture_path(format!("tachi-project-escape-{}", uuid::Uuid::new_v4()));
+    let root =
+        crate::utils::test_fixture_path(format!("tachi-project-escape-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
 
     let err = server
