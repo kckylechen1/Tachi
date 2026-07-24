@@ -384,7 +384,8 @@ impl super::super::LlmClient {
                 return Err(last_err);
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
-                if status.as_u16() == 403 && is_retriable_billing_failure(&resp_text) {
+                let failure_class = chat_auth_failure_class(&resp_text);
+                if status.as_u16() == 403 && failure_class == "billing_or_quota" {
                     self.mark_secret_exhausted(
                         &selected,
                         Some(&chat_auth_failure_reason(status.as_u16(), &resp_text)),
@@ -396,7 +397,7 @@ impl super::super::LlmClient {
                     );
                 }
                 last_err = format!(
-                    "API error {status}: {}",
+                    "API error {status}: class={failure_class}; {}",
                     redact_provider_response(&resp_text)
                 );
                 // #1197 BUG-1 fix (codex review): marking *this* key
@@ -641,15 +642,19 @@ fn is_retriable_billing_failure(resp_text: &str) -> bool {
 }
 
 fn chat_auth_failure_reason(status: u16, resp_text: &str) -> String {
-    let class = if is_retriable_billing_failure(resp_text) {
-        "billing_or_quota"
-    } else {
-        "authentication_or_authorization"
-    };
+    let class = chat_auth_failure_class(resp_text);
     format!(
         "Chat auth failure {status}: class={class}; {}",
         redact_provider_response(resp_text)
     )
+}
+
+fn chat_auth_failure_class(resp_text: &str) -> &'static str {
+    if is_retriable_billing_failure(resp_text) {
+        "billing_or_quota"
+    } else {
+        "authentication_or_authorization"
+    }
 }
 
 /// First boundary for an untrusted provider response body. Callers may inspect

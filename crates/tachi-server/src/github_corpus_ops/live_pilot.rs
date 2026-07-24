@@ -210,8 +210,8 @@ pub enum CorpusPilotCheckpointOutcomeV1 {
     },
     Candidate {
         fully_attested: bool,
-        report: CorpusPilotCaseReportV1,
-        candidate: LessonCandidateV1,
+        report: Box<CorpusPilotCaseReportV1>,
+        candidate: Box<LessonCandidateV1>,
     },
 }
 
@@ -808,9 +808,7 @@ fn checkpoint_key(manifest_sha256: &str, baseline_sha256: &str, case_id: &str) -
     sha256_hex(format!("{manifest_sha256}:{baseline_sha256}:{case_id}").as_bytes())
 }
 
-fn checkpoint_preflight(
-    prepared_case: &PreparedCorpusCaseV1,
-) -> CorpusPilotCheckpointPreflightV1 {
+fn checkpoint_preflight(prepared_case: &PreparedCorpusCaseV1) -> CorpusPilotCheckpointPreflightV1 {
     let pull_request = prepared_case
         .bundle
         .pull_request
@@ -1128,8 +1126,8 @@ async fn execute_preflighted_corpus_pilot(
         checkpoint.cases[index].attempts[attempt - 1].outcome =
             Some(CorpusPilotCheckpointOutcomeV1::Candidate {
                 fully_attested,
-                report,
-                candidate,
+                report: Box::new(report),
+                candidate: Box::new(candidate),
             });
         if fully_attested {
             checkpoint.cases[index].fully_attested_completion_attempt = Some(attempt);
@@ -1148,8 +1146,8 @@ async fn execute_preflighted_corpus_pilot(
             Some(CorpusPilotCheckpointOutcomeV1::Candidate {
                 report, candidate, ..
             }) => {
-                reports.push(report.clone());
-                candidates.push(candidate.clone());
+                reports.push(report.as_ref().clone());
+                candidates.push(candidate.as_ref().clone());
             }
             _ => {
                 let (failure_class, latency_ms) = checkpoint_case
@@ -1494,10 +1492,7 @@ mod tests {
         }
     }
 
-    fn baseline_bytes_for_fixture(
-        input: &[u8],
-        reader: &FixtureCorpusReader,
-    ) -> Vec<u8> {
+    fn baseline_bytes_for_fixture(input: &[u8], reader: &FixtureCorpusReader) -> Vec<u8> {
         serde_json::to_vec(&baseline_for_fixture(input, reader)).expect("serialize baseline")
     }
 
@@ -1705,15 +1700,9 @@ mod tests {
         let resolver = SyntheticResolver::new(model);
         let store = MemoryCheckpointStore::default();
 
-        let execution = run_fixture_with(
-            &input,
-            &reader,
-            &baseline_bytes,
-            &store,
-            &resolver,
-        )
-        .await
-        .expect("fully attested synthetic model run");
+        let execution = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resolver)
+            .await
+            .expect("fully attested synthetic model run");
 
         reader.assert_no_mutations();
         assert_eq!(execution.report.model_invocations, CORPUS_PILOT_SIZE);
@@ -1751,15 +1740,9 @@ mod tests {
         let resolver = SyntheticResolver::new(model);
         let store = MemoryCheckpointStore::default();
 
-        let execution = run_fixture_with(
-            &input,
-            &reader,
-            &baseline_bytes,
-            &store,
-            &resolver,
-        )
-        .await
-        .expect("synthetic unknown-identity run");
+        let execution = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resolver)
+            .await
+            .expect("synthetic unknown-identity run");
 
         assert_eq!(execution.report.model_invocations, CORPUS_PILOT_SIZE);
         assert_eq!(execution.report.completed_cases, 0);
@@ -1790,15 +1773,9 @@ mod tests {
                 ..Default::default()
             });
             let store = MemoryCheckpointStore::default();
-            let execution = run_fixture_with(
-                &input,
-                &reader,
-                &baseline_bytes,
-                &store,
-                &resolver,
-            )
-            .await
-            .expect("synthetic coverage/cost matrix run");
+            let execution = run_fixture_with(&input, &reader, &baseline_bytes, &store, &resolver)
+                .await
+                .expect("synthetic coverage/cost matrix run");
 
             assert_eq!(
                 execution.report.completed_cases,
@@ -1836,15 +1813,9 @@ mod tests {
         };
         let first_calls = first_model.calls.clone();
         let first_resolver = SyntheticResolver::new(first_model);
-        let first = run_fixture_with(
-            &input,
-            &reader,
-            &baseline_bytes,
-            &store,
-            &first_resolver,
-        )
-        .await
-        .expect("case twenty failure must still return a partial report");
+        let first = run_fixture_with(&input, &reader, &baseline_bytes, &store, &first_resolver)
+            .await
+            .expect("case twenty failure must still return a partial report");
         assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 20);
         assert_eq!(first.report.completed_cases, 19);
         assert_eq!(first.report.cases.len(), CORPUS_PILOT_SIZE);
@@ -1876,15 +1847,9 @@ mod tests {
         };
         let retry_calls = retry_model.calls.clone();
         let retry_resolver = SyntheticResolver::new(retry_model);
-        let retry = run_fixture_with(
-            &input,
-            &reader,
-            &baseline_bytes,
-            &store,
-            &retry_resolver,
-        )
-        .await
-        .expect("restart completes only the unfinished case");
+        let retry = run_fixture_with(&input, &reader, &baseline_bytes, &store, &retry_resolver)
+            .await
+            .expect("restart completes only the unfinished case");
         assert_eq!(retry_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(retry.report.completed_cases, CORPUS_PILOT_SIZE);
         assert_eq!(retry.report.candidates_emitted, CORPUS_PILOT_SIZE);
@@ -1922,15 +1887,9 @@ mod tests {
             .baseline_sha256 = "mismatched-ledger-binding".to_string();
         let mismatch_model = SyntheticModel::default();
         let mismatch_resolver = SyntheticResolver::new(mismatch_model);
-        let err = run_fixture_with(
-            &input,
-            &reader,
-            &baseline_bytes,
-            &store,
-            &mismatch_resolver,
-        )
-        .await
-        .expect_err("mismatched ledger must be rejected");
+        let err = run_fixture_with(&input, &reader, &baseline_bytes, &store, &mismatch_resolver)
+            .await
+            .expect_err("mismatched ledger must be rejected");
         assert!(err.contains("checkpoint does not match"), "{err}");
         assert_eq!(
             mismatch_resolver

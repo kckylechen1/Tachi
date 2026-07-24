@@ -668,6 +668,7 @@ async fn chat_lane_marks_insufficient_balance_as_exhausted() {
         .await
         .expect_err("insufficient balance should still fail this call");
     assert!(err.contains("class=billing_or_quota"), "got: {err}");
+    assert!(err.contains("provider response redacted"), "got: {err}");
     assert!(!err.contains("balance is insufficient"), "got: {err}");
 
     let status = client
