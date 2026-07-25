@@ -81,11 +81,36 @@ fn json_search_params(query: &str) -> SearchMemoryParams {
 }
 
 async fn search_rows(server: &crate::server_state::MemoryServer, query: &str) -> Vec<Value> {
+    search_rows_with_params(server, json_search_params(query)).await
+}
+
+async fn search_rows_with_params(
+    server: &crate::server_state::MemoryServer,
+    params: SearchMemoryParams,
+) -> Vec<Value> {
     let response = server
-        .search_memory(Parameters(json_search_params(query)))
+        .search_memory(Parameters(params))
         .await
         .expect("search_memory");
     serde_json::from_str(&response).expect("search_memory json rows")
+}
+
+async fn wait_for_cache_hit(server: &crate::server_state::MemoryServer, previous_hits: i64) {
+    for _ in 0..50 {
+        let hits = server
+            .with_global_store_read(|store| {
+                store
+                    .recall_cache_stats()
+                    .map_err(|error| error.to_string())
+            })
+            .expect("cache stats")
+            .total_hits;
+        if hits > previous_hits {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("unchanged search did not record a recall-cache hit");
 }
 
 // ── T1: cache masking — pre-fix must be RED ────────────────────────────────
@@ -271,6 +296,7 @@ async fn exact_duplicate_save_does_not_bust_the_recall_cache() {
             store
                 .recall_cache_store(
                     "rc:t4-probe",
+                    "test-generation",
                     "t4 probe query",
                     "[{\"id\":\"seed\"}]",
                     1,
@@ -364,6 +390,7 @@ async fn named_project_save_clears_global_recall_cache() {
             store
                 .recall_cache_store(
                     "rc:t6-probe",
+                    "test-generation",
                     "t6 probe query",
                     "[{\"id\":\"seed\"}]",
                     1,
@@ -425,7 +452,14 @@ fn seed_global_recall_cache_row(server: &crate::server_state::MemoryServer, cach
     server
         .with_global_store(|store| {
             store
-                .recall_cache_store(cache_id, "1413 seed query", "[{\"id\":\"seed\"}]", 1, false)
+                .recall_cache_store(
+                    cache_id,
+                    "test-generation",
+                    "1413 seed query",
+                    "[{\"id\":\"seed\"}]",
+                    1,
+                    false,
+                )
                 .map_err(|e| e.to_string())
         })
         .expect("seed global recall cache row");
@@ -683,11 +717,20 @@ async fn raw_memcore_write_in_one_server_invalidates_another_servers_warm_cache(
         cache_entries_before_raw_write > 0,
         "the reader search must populate the shared recall cache before the raw write"
     );
+    let hits_before_unchanged = reader
+        .with_global_store_read(|store| {
+            store
+                .recall_cache_stats()
+                .map_err(|error| error.to_string())
+        })
+        .expect("cache stats before unchanged query")
+        .total_hits;
     let unchanged = search_rows(&reader, &needle).await;
     assert!(
         unchanged.iter().any(|row| row["id"] == first_id),
         "the unchanged database must keep serving its warm cache entry: {unchanged:#?}"
     );
+    wait_for_cache_hit(&reader, hits_before_unchanged).await;
 
     let mut raw_entry = writer
         .with_global_store_read(|store| {
@@ -788,5 +831,156 @@ async fn missing_generation_trigger_bypasses_a_warm_cache_instead_of_serving_sta
     assert!(
         refreshed.iter().any(|row| row["id"] == second_id),
         "an invalid generation contract must bypass the warm cache, not hide the new row: {refreshed:#?}"
+    );
+}
+
+#[tokio::test]
+async fn graph_edge_write_in_one_server_invalidates_another_servers_warm_expansion() {
+    let (writer, _temp_home) = make_server_with_temp_home();
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
+        .expect("independent reader server");
+    let needle = format!("GraphGenerationNeedle{}", uuid::Uuid::new_v4().simple());
+    let source = handle_save_memory(
+        &writer,
+        save_params(
+            "/scratch/cache-generation/graph-source",
+            &format!("{needle} graph expansion source"),
+        ),
+    )
+    .await
+    .expect("save graph source");
+    let source_id = serde_json::from_str::<Value>(&source).expect("source json")["id"]
+        .as_str()
+        .expect("source id")
+        .to_string();
+    let target = handle_save_memory(
+        &writer,
+        save_params(
+            "/scratch/cache-generation/graph-target",
+            "Graph target only reachable through a newly committed edge",
+        ),
+    )
+    .await
+    .expect("save graph target");
+    let target_id = serde_json::from_str::<Value>(&target).expect("target json")["id"]
+        .as_str()
+        .expect("target id")
+        .to_string();
+
+    let mut graph_search = json_search_params(&needle);
+    graph_search.graph_expand_hops = 1;
+    let warmed = search_rows_with_params(&reader, graph_search.clone()).await;
+    assert!(warmed.iter().any(|row| row["id"] == source_id));
+    assert!(!warmed.iter().any(|row| row["id"] == target_id));
+    let cache_entries = global_recall_cache_entries(&reader);
+    assert!(cache_entries > 0, "graph search must warm the cache");
+
+    writer
+        .with_global_store(|store| {
+            store
+                .add_edge(&memcore::MemoryEdge {
+                    source_id: source_id.clone(),
+                    target_id: target_id.clone(),
+                    relation: "references".to_string(),
+                    weight: 1.0,
+                    metadata: serde_json::json!({}),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_to: None,
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("raw graph edge write");
+
+    assert_eq!(
+        global_recall_cache_entries(&reader),
+        cache_entries,
+        "edge trigger proof must not rely on manual cache eviction"
+    );
+    let refreshed = search_rows_with_params(&reader, graph_search).await;
+    assert!(
+        refreshed.iter().any(|row| row["id"] == target_id),
+        "graph generation change must expose the newly reachable row: {refreshed:#?}"
+    );
+}
+
+#[tokio::test]
+async fn fts_backfill_in_one_server_invalidates_another_servers_warm_lexical_cache() {
+    let (writer, _temp_home) = make_server_with_temp_home();
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
+        .expect("independent reader server");
+    let needle = format!("FtsRepairGenerationNeedle{}", uuid::Uuid::new_v4().simple());
+    let first = handle_save_memory(
+        &writer,
+        save_params(
+            "/scratch/cache-generation/fts-first",
+            &format!("{needle} indexed row"),
+        ),
+    )
+    .await
+    .expect("save indexed row");
+    let first_id = serde_json::from_str::<Value>(&first).expect("first json")["id"]
+        .as_str()
+        .expect("first id")
+        .to_string();
+    let mut missing_projection = writer
+        .with_global_store_read(|store| {
+            store
+                .get(&first_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "indexed row disappeared".to_string())
+        })
+        .expect("load row template");
+    let repaired_id = format!("fts-repair-{}", uuid::Uuid::new_v4());
+    missing_projection.id = repaired_id.clone();
+    missing_projection.path = "/scratch/cache-generation/fts-repaired".to_string();
+    missing_projection.text = format!("{needle} row absent from both FTS projections");
+    missing_projection.summary = missing_projection.text.clone();
+    writer
+        .with_global_store(|store| {
+            store
+                .upsert(&missing_projection)
+                .map_err(|error| error.to_string())?;
+            store
+                .connection()
+                .execute("DELETE FROM memories_fts WHERE id = ?1", [&repaired_id])
+                .map_err(|error| error.to_string())?;
+            store
+                .connection()
+                .execute(
+                    "DELETE FROM memories_symbolic_fts WHERE id = ?1",
+                    [&repaired_id],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .expect("seed missing projection row");
+
+    let warmed = search_rows(&reader, &needle).await;
+    assert!(warmed.iter().any(|row| row["id"] == first_id));
+    assert!(!warmed.iter().any(|row| row["id"] == repaired_id));
+    let cache_entries = global_recall_cache_entries(&reader);
+    assert!(cache_entries > 0, "lexical search must warm the cache");
+
+    let inserted = writer
+        .with_global_store(|store| {
+            store
+                .backfill_fts_missing()
+                .map_err(|error| error.to_string())
+        })
+        .expect("production FTS backfill");
+    assert!(inserted > 0, "repair must mutate the FTS projection");
+    assert_eq!(
+        global_recall_cache_entries(&reader),
+        cache_entries,
+        "FTS generation proof must not rely on manual cache eviction"
+    );
+
+    let refreshed = search_rows(&reader, &needle).await;
+    assert!(
+        refreshed.iter().any(|row| row["id"] == repaired_id),
+        "FTS-only repair must invalidate the warm cross-store result: {refreshed:#?}"
     );
 }

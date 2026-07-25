@@ -37,6 +37,14 @@ pub(super) fn migrate_v22_memories_symbolic_fts(conn: &Connection) -> Result<usi
 /// (`tachi-server::repair::fts`) so the trigram projection gets the same
 /// full-rebuild coverage as `memories_fts` (#1335 oracle).
 pub fn rebuild_memories_symbolic_fts(conn: &Connection) -> Result<usize, MemoryError> {
+    let Some(inserted) = rebuild_memories_symbolic_fts_rows(conn)? else {
+        return Ok(0);
+    };
+    crate::db::bump_search_generation(conn)?;
+    Ok(inserted)
+}
+
+fn rebuild_memories_symbolic_fts_rows(conn: &Connection) -> Result<Option<usize>, MemoryError> {
     let present: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
@@ -45,7 +53,7 @@ pub fn rebuild_memories_symbolic_fts(conn: &Connection) -> Result<usize, MemoryE
         )
         .unwrap_or(false);
     if !present {
-        return Ok(0);
+        return Ok(None);
     }
     conn.execute("DELETE FROM memories_symbolic_fts", [])?;
     let inserted = conn.execute(
@@ -53,7 +61,7 @@ pub fn rebuild_memories_symbolic_fts(conn: &Connection) -> Result<usize, MemoryE
            SELECT id, path, summary, text, keywords, entities, topic FROM memories"#,
         [],
     )?;
-    Ok(inserted)
+    Ok(Some(inserted))
 }
 
 #[cfg(test)]
@@ -87,7 +95,8 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(migrate_v22_memories_symbolic_fts(&conn).unwrap(), 1);
+        conn.execute_batch(MEMORIES_SYMBOLIC_FTS_DDL).unwrap();
+        assert_eq!(rebuild_memories_symbolic_fts_rows(&conn).unwrap(), Some(1));
         let path: String = conn
             .query_row(
                 "SELECT path FROM memories_symbolic_fts WHERE id = 'a'",
@@ -97,13 +106,13 @@ mod tests {
             .unwrap();
         assert_eq!(path, "/handoff/unknown");
         // Idempotent CREATE + rebuild.
-        assert_eq!(migrate_v22_memories_symbolic_fts(&conn).unwrap(), 1);
+        assert_eq!(rebuild_memories_symbolic_fts_rows(&conn).unwrap(), Some(1));
     }
 
     #[test]
     fn rebuild_refreshes_stale_path_after_legacy_rewrite() {
         let conn = open_minimal();
-        migrate_v22_memories_symbolic_fts(&conn).unwrap();
+        conn.execute_batch(MEMORIES_SYMBOLIC_FTS_DDL).unwrap();
         conn.execute(
             "INSERT INTO memories (id, path, summary, text, keywords, entities, topic)
              VALUES ('h', '/handoff', 's', 'handoffuniqueterm body', '[]', '[]', 't')",
@@ -132,7 +141,7 @@ mod tests {
             .unwrap();
         assert_eq!(stale, "/handoff");
 
-        rebuild_memories_symbolic_fts(&conn).unwrap();
+        rebuild_memories_symbolic_fts_rows(&conn).unwrap();
         let fresh: String = conn
             .query_row(
                 "SELECT path FROM memories_symbolic_fts WHERE id = 'h'",

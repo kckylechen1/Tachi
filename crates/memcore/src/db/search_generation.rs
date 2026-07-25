@@ -14,6 +14,9 @@ const GENERATION_MAX: i64 = i64::MAX;
 const INSERT_TRIGGER: &str = "memory_search_generation_after_insert";
 const UPDATE_TRIGGER: &str = "memory_search_generation_after_update";
 const DELETE_TRIGGER: &str = "memory_search_generation_after_delete";
+const EDGE_INSERT_TRIGGER: &str = "memory_edge_search_generation_after_insert";
+const EDGE_UPDATE_TRIGGER: &str = "memory_edge_search_generation_after_update";
+const EDGE_DELETE_TRIGGER: &str = "memory_edge_search_generation_after_delete";
 const SEARCH_AFFECTING_UPDATE_COLUMNS: &str = "path, summary, text, importance, timestamp, valid_from, valid_until, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, revision, metadata, superseded_by, idless_identity, retention_policy, domain, tier";
 
 const GENERATION_SCHEMA_SQL: &str = r#"
@@ -58,6 +61,42 @@ const GENERATION_SCHEMA_SQL: &str = r#"
         END;
         UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
     END;
+
+    CREATE TRIGGER IF NOT EXISTS memory_edge_search_generation_after_insert
+    AFTER INSERT ON memory_edges
+    BEGIN
+        SELECT CASE
+            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1
+                THEN RAISE(ABORT, 'memory search generation row missing')
+            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807
+                THEN RAISE(ABORT, 'memory search generation exhausted')
+        END;
+        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memory_edge_search_generation_after_update
+    AFTER UPDATE ON memory_edges
+    BEGIN
+        SELECT CASE
+            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1
+                THEN RAISE(ABORT, 'memory search generation row missing')
+            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807
+                THEN RAISE(ABORT, 'memory search generation exhausted')
+        END;
+        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memory_edge_search_generation_after_delete
+    AFTER DELETE ON memory_edges
+    BEGIN
+        SELECT CASE
+            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1
+                THEN RAISE(ABORT, 'memory search generation row missing')
+            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807
+                THEN RAISE(ABORT, 'memory search generation exhausted')
+        END;
+        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
+    END;
 "#;
 
 /// Create the generation table and its mutation triggers, then reject any
@@ -78,42 +117,100 @@ pub fn search_generation(conn: &Connection) -> Result<i64, MemoryError> {
     validate_search_generation_schema(conn)
 }
 
-fn validate_search_generation_schema(conn: &Connection) -> Result<i64, MemoryError> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_search_generation WHERE id = 1",
-        [],
-        |row| row.get(0),
+/// Advance the authoritative generation for a search projection that SQLite
+/// cannot trigger directly (FTS/vec virtual tables). Callers must invoke this
+/// on the same connection/transaction as the projection mutation; rollback
+/// then rolls back both changes together.
+pub fn bump_search_generation(conn: &Connection) -> Result<i64, MemoryError> {
+    let generation = validate_search_generation_schema(conn)?;
+    if generation == GENERATION_MAX {
+        return Err(MemoryError::InvalidArg(
+            "memory search generation exhausted".to_string(),
+        ));
+    }
+    let changed = conn.execute(
+        "UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1 AND generation < ?1",
+        [GENERATION_MAX],
     )?;
+    if changed != 1 {
+        return Err(MemoryError::InvalidArg(
+            "memory search generation row missing or exhausted".to_string(),
+        ));
+    }
+    Ok(generation + 1)
+}
+
+fn validate_search_generation_schema(conn: &Connection) -> Result<i64, MemoryError> {
+    let snapshot = conn
+        .query_row(
+            "SELECT generation,
+                    (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?2),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?3),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?4),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?5),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?6)
+             FROM memory_search_generation
+             WHERE id = 1
+             LIMIT 1",
+            params![
+                INSERT_TRIGGER,
+                UPDATE_TRIGGER,
+                DELETE_TRIGGER,
+                EDGE_INSERT_TRIGGER,
+                EDGE_UPDATE_TRIGGER,
+                EDGE_DELETE_TRIGGER,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    [
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ],
+                ))
+            },
+        )
+        .optional()?;
+    let Some((generation, count, trigger_sql)) = snapshot else {
+        return Err(MemoryError::InvalidArg(
+            "memory search generation row id=1 is missing".to_string(),
+        ));
+    };
     if count != 1 {
         return Err(MemoryError::InvalidArg(format!(
             "memory search generation must contain exactly one id=1 row, found {count}"
         )));
     }
 
-    let generation: i64 = conn.query_row(
-        "SELECT generation FROM memory_search_generation WHERE id = 1",
-        [],
-        |row| row.get(0),
-    )?;
     if !(0..=GENERATION_MAX).contains(&generation) {
         return Err(MemoryError::InvalidArg(format!(
             "memory search generation is out of range: {generation}"
         )));
     }
 
-    for trigger in [INSERT_TRIGGER, UPDATE_TRIGGER, DELETE_TRIGGER] {
-        let sql = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
-                params![trigger],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or_else(|| {
-                MemoryError::InvalidArg(format!(
-                    "memory search generation trigger '{trigger}' is missing; recall cache is unsafe"
-                ))
-            })?;
+    for (trigger, sql) in [
+        INSERT_TRIGGER,
+        UPDATE_TRIGGER,
+        DELETE_TRIGGER,
+        EDGE_INSERT_TRIGGER,
+        EDGE_UPDATE_TRIGGER,
+        EDGE_DELETE_TRIGGER,
+    ]
+    .into_iter()
+    .zip(trigger_sql)
+    {
+        let sql = sql.ok_or_else(|| {
+            MemoryError::InvalidArg(format!(
+                "memory search generation trigger '{trigger}' is missing; recall cache is unsafe"
+            ))
+        })?;
         if !normalizes_to_expected_trigger(trigger, &sql) {
             return Err(MemoryError::InvalidArg(format!(
                 "memory search generation trigger '{trigger}' drifted; recall cache is unsafe"
@@ -126,20 +223,24 @@ fn validate_search_generation_schema(conn: &Connection) -> Result<i64, MemoryErr
 
 fn normalizes_to_expected_trigger(name: &str, actual: &str) -> bool {
     let expected = match name {
-        INSERT_TRIGGER => trigger_sql(INSERT_TRIGGER, "INSERT"),
+        INSERT_TRIGGER => trigger_sql(INSERT_TRIGGER, "INSERT", "memories"),
         UPDATE_TRIGGER => trigger_sql(
             UPDATE_TRIGGER,
             &format!("UPDATE OF {SEARCH_AFFECTING_UPDATE_COLUMNS}"),
+            "memories",
         ),
-        DELETE_TRIGGER => trigger_sql(DELETE_TRIGGER, "DELETE"),
+        DELETE_TRIGGER => trigger_sql(DELETE_TRIGGER, "DELETE", "memories"),
+        EDGE_INSERT_TRIGGER => trigger_sql(EDGE_INSERT_TRIGGER, "INSERT", "memory_edges"),
+        EDGE_UPDATE_TRIGGER => trigger_sql(EDGE_UPDATE_TRIGGER, "UPDATE", "memory_edges"),
+        EDGE_DELETE_TRIGGER => trigger_sql(EDGE_DELETE_TRIGGER, "DELETE", "memory_edges"),
         _ => return false,
     };
     normalize_sql(actual) == normalize_sql(&expected)
 }
 
-fn trigger_sql(name: &str, operation: &str) -> String {
+fn trigger_sql(name: &str, operation: &str, table: &str) -> String {
     format!(
-        "CREATE TRIGGER {name} AFTER {operation} ON memories BEGIN \
+        "CREATE TRIGGER {name} AFTER {operation} ON {table} BEGIN \
          SELECT CASE WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1 \
          THEN RAISE(ABORT, 'memory search generation row missing') \
          WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807 \

@@ -170,6 +170,7 @@ impl RepairRule for FtsRebuild {
         if r.findings.is_empty() {
             return Ok(r);
         }
+        let symbolic_fts_present = symbolic_fts_state(ctx)?.1.is_some();
         // Drop + recreate atomically so a crash cannot leave the DB without FTS.
         //
         // We must defensively drop the FTS5 shadow tables as well: a previous
@@ -198,6 +199,11 @@ impl RepairRule for FtsRebuild {
         // `memories_fts` — same transaction, same crash-safety guarantee
         // (#1335 oracle: repair rebuild previously only covered memories_fts).
         memcore::db::migrations::rebuild_memories_symbolic_fts(&tx)?;
+        if !symbolic_fts_present {
+            // Legacy DBs without the symbolic projection still changed the
+            // primary FTS projection and therefore need one atomic bump.
+            memcore::db::bump_search_generation(&tx)?;
+        }
         tx.commit()?;
         let (mem, fts_opt) = fts_state(ctx)?;
         if fts_opt != Some(mem) {

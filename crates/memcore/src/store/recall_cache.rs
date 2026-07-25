@@ -27,6 +27,7 @@ impl MemoryStore {
     pub fn recall_cache_store(
         &self,
         cache_id: &str,
+        generation_fingerprint: &str,
         query: &str,
         rows_json: &str,
         result_count: i64,
@@ -35,6 +36,7 @@ impl MemoryStore {
         db::recall_cache_put(
             &self.conn,
             cache_id,
+            generation_fingerprint,
             query,
             rows_json,
             result_count,

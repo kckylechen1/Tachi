@@ -1206,3 +1206,46 @@ fn init_schema_only_carries_all_evolutionary_indexes() {
         );
     }
 }
+
+#[test]
+fn legacy_recall_cache_rows_migrate_to_a_nonmatching_generation_fingerprint() {
+    crate::db::enable_simple_auto_extension().expect("register simple tokenizer");
+    crate::db::register_sqlite_vec();
+    let conn = Connection::open_in_memory().expect("open legacy database");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE recall_cache (
+            cache_id TEXT PRIMARY KEY,
+            query TEXT NOT NULL DEFAULT '',
+            rows_json TEXT NOT NULL DEFAULT '[]',
+            result_count INTEGER NOT NULL DEFAULT 0,
+            reranked INTEGER NOT NULL DEFAULT 0,
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO recall_cache (
+            cache_id, query, rows_json, result_count, created_at, updated_at
+        ) VALUES (
+            'legacy-cache', 'stale query', '[{"id":"stale"}]', 1,
+            '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z'
+        );
+        "#,
+    )
+    .expect("create legacy recall cache");
+
+    crate::db::init_schema(&conn).expect("migrate legacy recall cache");
+    crate::db::init_schema(&conn).expect("migration must be idempotent");
+
+    let fingerprint: String = conn
+        .query_row(
+            "SELECT generation_fingerprint FROM recall_cache WHERE cache_id = 'legacy-cache'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migrated generation fingerprint");
+    assert_eq!(
+        fingerprint, "",
+        "legacy cache rows must never inherit the current generation as if fresh"
+    );
+}

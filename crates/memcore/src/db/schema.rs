@@ -139,6 +139,16 @@ fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::BASE_SCHEMA_SQL)?;
 
+    // Legacy recall-cache rows predate database-authoritative generation
+    // snapshots. The empty default is intentionally non-matching, so the first
+    // read after migration recomputes instead of presenting an old row as clean.
+    ensure_column(
+        conn,
+        "recall_cache",
+        "generation_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+
     // Forward-compatible migrations for existing DB files created before
     // archived/created_at/updated_at columns existed.
     ensure_column(conn, "memories", "archived", "INTEGER NOT NULL DEFAULT 0")?;
@@ -292,6 +302,11 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // Relocate legacy location before enum rebuild copies rows without that column.
     let _ = crate::db::migrations::migrate_v9_relocate_and_drop_location(conn)?;
 
+    // Install the authority before any projection-only drift repair. File-backed
+    // opens run this whole block inside BEGIN IMMEDIATE, so repaired FTS rows and
+    // the bump commit together. A later memories-table rebuild may drop these
+    // triggers; the second ensure below reinstalls and validates them.
+    crate::db::search_generation::ensure_search_generation_schema(conn)?;
     ensure_fts_backfilled(conn)?;
 
     migrate_enum_constraints(conn)?;
@@ -950,12 +965,12 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         return Ok(());
     }
 
-    conn.execute(
+    let mut projection_changes = conn.execute(
         "DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)",
         [],
     )?;
 
-    conn.execute(
+    projection_changes += conn.execute(
         r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
            SELECT
              m.id,
@@ -981,17 +996,21 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         )
         .unwrap_or(false);
     if symbolic_fts_present {
-        conn.execute(
+        projection_changes += conn.execute(
             "DELETE FROM memories_symbolic_fts WHERE id NOT IN (SELECT id FROM memories)",
             [],
         )?;
-        conn.execute(
+        projection_changes += conn.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT m.id, m.path, m.summary, m.text, m.keywords, m.entities, m.topic
                FROM memories m
                WHERE NOT EXISTS (SELECT 1 FROM memories_symbolic_fts f WHERE f.id = m.id)"#,
             [],
         )?;
+    }
+
+    if projection_changes > 0 {
+        crate::db::search_generation::bump_search_generation(conn)?;
     }
 
     Ok(())

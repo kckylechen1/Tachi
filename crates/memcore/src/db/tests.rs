@@ -41,6 +41,7 @@ mod gc_candidates_ops;
 mod graph;
 mod read_ops;
 mod sandbox_ops;
+mod search_generation;
 mod search_ops;
 mod stats_ops;
 mod surface_ops;

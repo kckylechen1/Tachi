@@ -299,7 +299,8 @@ impl MemoryStore {
     /// Backfill FTS index for entries missing from memories_fts.
     /// Returns the number of rows inserted.
     pub fn backfill_fts_missing(&mut self) -> Result<usize, MemoryError> {
-        let inserted = self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let inserted = tx.execute(
             r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
                SELECT
                  id, path, summary, text,
@@ -309,21 +310,25 @@ impl MemoryStore {
                WHERE id NOT IN (SELECT id FROM memories_fts)"#,
             [],
         )?;
-        let _ = self.conn.execute(
+        let symbolic_inserted = tx.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT id, path, summary, text, keywords, entities, topic
                FROM memories
                WHERE id NOT IN (SELECT id FROM memories_symbolic_fts)"#,
             [],
         )?;
+        if inserted + symbolic_inserted > 0 {
+            crate::db::bump_search_generation(&tx)?;
+        }
+        tx.commit()?;
         Ok(inserted)
     }
 
     /// Full FTS rebuild. Use this when the FTS table is stale or corrupted.
     pub fn rebuild_fts_full(&mut self) -> Result<usize, MemoryError> {
-        self.conn
-            .execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
-        self.conn.execute_batch(
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
+        tx.execute_batch(
             r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                    id UNINDEXED,
                    path,
@@ -334,7 +339,7 @@ impl MemoryStore {
                    tokenize = 'simple'
                );"#,
         )?;
-        let inserted = self.conn.execute(
+        let inserted = tx.execute(
             r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
                SELECT
                  id, path, summary, text,
@@ -343,9 +348,8 @@ impl MemoryStore {
                FROM memories"#,
             [],
         )?;
-        self.conn
-            .execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")?;
-        self.conn.execute_batch(
+        tx.execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")?;
+        tx.execute_batch(
             r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_symbolic_fts USING fts5(
                    id,
                    path,
@@ -357,12 +361,14 @@ impl MemoryStore {
                    tokenize = 'trigram case_sensitive 0'
                );"#,
         )?;
-        let _ = self.conn.execute(
+        let _ = tx.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT id, path, summary, text, keywords, entities, topic
                FROM memories"#,
             [],
         )?;
+        crate::db::bump_search_generation(&tx)?;
+        tx.commit()?;
         Ok(inserted)
     }
 

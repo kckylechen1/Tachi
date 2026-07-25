@@ -4,6 +4,9 @@ use crate::memory_search_ops::search_helpers::{
 use crate::tool_params::SearchMemoryParams;
 use crate::utils::{parse_env_bool, stable_hash};
 use crate::MemoryServer;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
@@ -21,33 +24,146 @@ pub(super) fn recall_cache_read_enabled() -> bool {
     parse_env_bool("TACHI_ENABLE_RECALL_CACHE").unwrap_or(false)
 }
 
-/// Snapshot every DB that the real search routing will read. The cache key
-/// carries these persisted generations, so a committed write from another
-/// process naturally selects a new key even when no caller manually evicts the
-/// global cache table. Any unknown, legacy, read-only, or trigger-drifted DB
-/// disables caching for this query rather than serving a stale result.
-///
-/// This deliberately mirrors the target-selection branches in `rows.rs`; each
-/// target is read exactly once through its normal read-store path. The labels
-/// are stable routing identities, while the generation is the authoritative
-/// freshness value in that physical DB.
-pub(super) fn recall_cache_generation_fingerprint(
+#[derive(Debug, Clone)]
+pub(super) enum SearchDatabaseTarget {
+    Global(PathBuf),
+    BoundProject(PathBuf),
+    NamedProject { name: String, path: PathBuf },
+}
+
+impl SearchDatabaseTarget {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Global(path) | Self::BoundProject(path) | Self::NamedProject { path, .. } => path,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Global(_) => "global".to_string(),
+            Self::BoundProject(_) => "bound-project".to_string(),
+            Self::NamedProject { name, .. } => format!("named-project:{name}"),
+        }
+    }
+
+    fn read_generation(&self, server: &MemoryServer) -> Result<i64, String> {
+        match self {
+            Self::Global(_) => server.with_global_store_read(|store| {
+                store.search_generation().map_err(|error| error.to_string())
+            }),
+            Self::BoundProject(_) => server.with_project_store_read(|store| {
+                store.search_generation().map_err(|error| error.to_string())
+            }),
+            Self::NamedProject { name, .. } => server
+                .with_named_project_store_read(name, |store| {
+                    store.search_generation().map_err(|error| error.to_string())
+                }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct DatabaseFileIdentity {
+    canonical_path: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl DatabaseFileIdentity {
+    fn resolve(path: &Path) -> Result<Self, String> {
+        let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+            format!(
+                "database identity cannot canonicalize {}: {error}",
+                path.display()
+            )
+        })?;
+        let metadata = std::fs::metadata(&canonical_path).map_err(|error| {
+            format!(
+                "database identity cannot stat {}: {error}",
+                canonical_path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "database identity is not a regular file: {}",
+                canonical_path.display()
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(Self {
+                canonical_path,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self { canonical_path })
+        }
+    }
+
+    fn physical_key(&self) -> String {
+        #[cfg(unix)]
+        {
+            format!("unix:{}:{}", self.device, self.inode)
+        }
+        #[cfg(not(unix))]
+        {
+            format!(
+                "path:{}",
+                stable_hash(&self.canonical_path.to_string_lossy())
+            )
+        }
+    }
+}
+
+pub(super) fn unique_database_targets(
+    targets: Vec<SearchDatabaseTarget>,
+) -> Result<Vec<(SearchDatabaseTarget, DatabaseFileIdentity)>, String> {
+    let mut by_physical_key: HashMap<String, PathBuf> = HashMap::new();
+    let mut unique = Vec::new();
+    for target in targets {
+        let identity = DatabaseFileIdentity::resolve(target.path())?;
+        let physical_key = identity.physical_key();
+        if let Some(first_path) = by_physical_key.get(&physical_key) {
+            if first_path != &identity.canonical_path {
+                return Err(format!(
+                    "database identity is a hard-link alias between {} and {}; SQLite WAL sidecars are path-bound, so recall cache is bypassed",
+                    first_path.display(),
+                    identity.canonical_path.display()
+                ));
+            }
+            continue;
+        }
+        by_physical_key.insert(physical_key, identity.canonical_path.clone());
+        unique.push((target, identity));
+    }
+    Ok(unique)
+}
+
+fn search_database_targets(
     server: &MemoryServer,
     params: &SearchMemoryParams,
     project_only: bool,
-) -> Result<String, String> {
-    let mut generations = Vec::new();
-    let mut record_generation = |label: String, generation: i64| {
-        if !generations.iter().any(|(known, _)| known == &label) {
-            generations.push((label, generation));
-        }
+) -> Result<Vec<SearchDatabaseTarget>, String> {
+    let mut targets = Vec::new();
+    let global = || SearchDatabaseTarget::Global(server.global_db_path_buf());
+    let bound = || {
+        server
+            .project_db_path_buf()
+            .map(SearchDatabaseTarget::BoundProject)
     };
-
-    macro_rules! read_generation {
-        ($label:expr, $read:expr) => {
-            record_generation($label, $read?);
-        };
-    }
+    let named = |name: &str| -> Result<SearchDatabaseTarget, String> {
+        Ok(SearchDatabaseTarget::NamedProject {
+            name: name.to_string(),
+            path: MemoryServer::resolve_named_project_db_path(name)?,
+        })
+    };
 
     let wiki_path_prefix = params
         .path_prefix
@@ -56,20 +172,10 @@ pub(super) fn recall_cache_generation_fingerprint(
     let mut searched_named = false;
     if let Some(project_name) = params.project.as_deref() {
         if named_project_db_exists(project_name) {
-            read_generation!(
-                format!("named-project:{project_name}"),
-                server.with_named_project_store_read(project_name, |store| {
-                    store.search_generation().map_err(|error| error.to_string())
-                })
-            );
+            targets.push(named(project_name)?);
             searched_named = true;
             if !project_only {
-                read_generation!(
-                    "global".to_string(),
-                    server.with_global_store_read(|store| {
-                        store.search_generation().map_err(|error| error.to_string())
-                    })
-                );
+                targets.push(global());
             }
         } else if !project_only {
             return Err(format!(
@@ -80,12 +186,7 @@ pub(super) fn recall_cache_generation_fingerprint(
 
     let mut searched_default_wiki = false;
     if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
-        read_generation!(
-            "named-project:wiki".to_string(),
-            server.with_named_project_store_read("wiki", |store| {
-                store.search_generation().map_err(|error| error.to_string())
-            })
-        );
+        targets.push(named("wiki")?);
         searched_default_wiki = true;
     }
 
@@ -96,44 +197,22 @@ pub(super) fn recall_cache_generation_fingerprint(
                 if named_project_db_exists(project_name)
                     && (project_name != "wiki" || !searched_default_wiki)
                 {
-                    let workspace_path = server.project_db_path_buf();
-                    let named_path = MemoryServer::resolve_named_project_db_path(project_name).ok();
-                    let skip_workspace = workspace_path
+                    let named_target = named(project_name)?;
+                    let skip_workspace = server
+                        .project_db_path_buf()
                         .as_deref()
-                        .zip(named_path.as_deref())
-                        .map(|(workspace, named)| workspace == named)
-                        .unwrap_or(false);
-                    if !skip_workspace && server.has_project_db() {
-                        read_generation!(
-                            "bound-project".to_string(),
-                            server.with_project_store_read(|store| {
-                                store.search_generation().map_err(|error| error.to_string())
-                            })
-                        );
+                        .is_some_and(|workspace| workspace == named_target.path());
+                    if !skip_workspace {
+                        if let Some(bound) = bound() {
+                            targets.push(bound);
+                        }
                     }
-                    if named_path.is_some() {
-                        read_generation!(
-                            format!("named-project:{project_name}"),
-                            server.with_named_project_store_read(project_name, |store| {
-                                store.search_generation().map_err(|error| error.to_string())
-                            })
-                        );
-                    }
-                } else if server.has_project_db() {
-                    read_generation!(
-                        "bound-project".to_string(),
-                        server.with_project_store_read(|store| {
-                            store.search_generation().map_err(|error| error.to_string())
-                        })
-                    );
+                    targets.push(named_target);
+                } else if let Some(bound) = bound() {
+                    targets.push(bound);
                 }
-            } else if server.has_project_db() {
-                read_generation!(
-                    "bound-project".to_string(),
-                    server.with_project_store_read(|store| {
-                        store.search_generation().map_err(|error| error.to_string())
-                    })
-                );
+            } else if let Some(bound) = bound() {
+                targets.push(bound);
             }
         } else {
             let routing_config = server.routing_config().get();
@@ -143,46 +222,70 @@ pub(super) fn recall_cache_generation_fingerprint(
                 params.domain.as_deref(),
                 &routing_config,
             );
-            let inferred_db_path = inferred_project
-                .as_deref()
-                .and_then(|name| MemoryServer::resolve_named_project_db_path(name).ok());
-            let skip_workspace = inferred_db_path.is_some()
-                && server.project_db_path_buf().as_ref() == inferred_db_path.as_ref();
+            let inferred_target = inferred_project.as_deref().map(named).transpose()?;
+            let skip_workspace = inferred_target.as_ref().is_some_and(|inferred| {
+                server.project_db_path_buf().as_deref() == Some(inferred.path())
+            });
 
-            read_generation!(
-                "global".to_string(),
-                server.with_global_store_read(|store| {
-                    store.search_generation().map_err(|error| error.to_string())
-                })
-            );
-            if let Some(project_name) = inferred_project.as_deref() {
-                if project_name != "wiki" || !searched_default_wiki {
-                    read_generation!(
-                        format!("named-project:{project_name}"),
-                        server.with_named_project_store_read(project_name, |store| {
-                            store.search_generation().map_err(|error| error.to_string())
-                        })
-                    );
+            targets.push(global());
+            if let Some(inferred_target) = inferred_target {
+                if inferred_project.as_deref() != Some("wiki") || !searched_default_wiki {
+                    targets.push(inferred_target);
                 }
-            } else if server.has_project_db() && !skip_workspace {
-                read_generation!(
-                    "bound-project".to_string(),
-                    server.with_project_store_read(|store| {
-                        store.search_generation().map_err(|error| error.to_string())
-                    })
-                );
+            } else if !skip_workspace {
+                if let Some(bound) = bound() {
+                    targets.push(bound);
+                }
             }
         }
     }
 
-    if generations.is_empty() {
+    if targets.is_empty() {
         return Err("search selected no database for cache generation validation".to_string());
     }
-    Ok(generations
+    Ok(targets)
+}
+
+#[derive(Serialize)]
+struct DatabaseGeneration {
+    identity: String,
+    generation: i64,
+}
+
+#[derive(Serialize)]
+struct GenerationFingerprint {
+    version: u8,
+    databases: Vec<DatabaseGeneration>,
+}
+
+/// Snapshot every physical DB that the real search routing will read. Target
+/// paths are canonicalized and deduplicated before reads, so aliases cannot
+/// cause duplicate work or inconsistent labels. A hard-link alias is rejected:
+/// SQLite derives WAL sidecars from the opened path, so two names for one inode
+/// are not a cache-safe database identity.
+pub(super) fn recall_cache_generation_fingerprint(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+    project_only: bool,
+) -> Result<String, String> {
+    let targets = unique_database_targets(search_database_targets(server, params, project_only)?)?;
+    let databases = targets
         .into_iter()
-        .map(|(label, generation)| format!("{label}={generation}"))
-        .collect::<Vec<_>>()
-        .join(","))
+        .map(|(target, identity)| {
+            target
+                .read_generation(server)
+                .map(|generation| DatabaseGeneration {
+                    identity: identity.physical_key(),
+                    generation,
+                })
+                .map_err(|error| format!("{} generation read failed: {error}", target.label()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_string(&GenerationFingerprint {
+        version: 1,
+        databases,
+    })
+    .map_err(|error| format!("serialize generation fingerprint: {error}"))
 }
 
 // ─── Optional local eviction fast path ────────────────────────────────────
@@ -237,6 +340,7 @@ pub(super) fn recall_cache_write_through(
     server: &MemoryServer,
     epoch_at_read: u64,
     cache_id: &str,
+    generation_fingerprint: &str,
     query: &str,
     rows_json: &str,
     result_count: i64,
@@ -247,7 +351,14 @@ pub(super) fn recall_cache_write_through(
             return Ok(false);
         }
         store
-            .recall_cache_store(cache_id, query, rows_json, result_count, reranked)
+            .recall_cache_store(
+                cache_id,
+                generation_fingerprint,
+                query,
+                rows_json,
+                result_count,
+                reranked,
+            )
             .map_err(|e| e.to_string())?;
         Ok(true)
     })
@@ -312,38 +423,105 @@ pub(super) fn recall_cache_ttl_secs() -> i64 {
         .unwrap_or(900)
 }
 
-fn normalize_cache_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+fn require_finite_f64(field: &str, value: f64) -> Result<(), String> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(format!("search cache field '{field}' must be finite"))
+    }
 }
 
-/// Build the opaque recall-cache key from every `SearchMemoryParams` field that
-/// changes which rows are returned. Keep this in sync with the read-side
-/// filters below — a result-affecting field missing here would let one query
-/// serve another's cached rows. `enable_rerank` is deliberately excluded so the
-/// background rerank job can upgrade the same entry in place; rerank intent is
-/// reconciled against the stored `reranked` flag at read time.
+fn validate_cache_request_floats(params: &SearchMemoryParams) -> Result<(), String> {
+    if let Some(query_vec) = &params.query_vec {
+        for (index, value) in query_vec.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(format!(
+                    "search cache field 'query_vec[{index}]' must be finite"
+                ));
+            }
+        }
+    }
+    if let Some(value) = params.mmr_threshold {
+        require_finite_f64("mmr_threshold", value)?;
+    }
+    if let Some(weights) = &params.weights {
+        require_finite_f64("weights.semantic", weights.semantic)?;
+        require_finite_f64("weights.fts", weights.fts)?;
+        require_finite_f64("weights.symbolic", weights.symbolic)?;
+        require_finite_f64("weights.decay", weights.decay)?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct RecallCacheRequest<'a> {
+    version: u8,
+    query: &'a str,
+    query_vec: &'a Option<Vec<f32>>,
+    top_k_requested: usize,
+    top_k_effective: usize,
+    path_prefix: &'a Option<String>,
+    include_training: bool,
+    include_archived: bool,
+    candidates_per_channel: usize,
+    mmr_threshold: Option<f64>,
+    graph_expand_hops: u32,
+    graph_relation_filter: &'a Option<String>,
+    weights: &'a Option<crate::tool_params::HybridWeightsParam>,
+    context_symbols: &'a [String],
+    agent_role: &'a Option<String>,
+    project: &'a Option<String>,
+    domain: &'a Option<String>,
+    file_context: &'a Option<String>,
+    error_context: &'a Option<String>,
+    enable_rerank: bool,
+    as_of: &'a Option<String>,
+    include_metadata: bool,
+    format: &'a Option<String>,
+    project_only: bool,
+    pipeline_enabled: bool,
+}
+
+/// Build the opaque recall-cache key from deterministic structured
+/// serialization of every request/handler option that can change rows or their
+/// representation. `Option` values remain JSON null versus a concrete value,
+/// and numeric zero remains zero, so absent/empty/zero cannot collapse through
+/// delimiter tricks or ad-hoc defaults.
 pub(super) fn recall_cache_key(
     params: &SearchMemoryParams,
     top_k: usize,
     project_only: bool,
-    generation_fingerprint: &str,
-) -> String {
-    let seed = format!(
-        "rcv2|{q}|{proj}|{prefix}|{domain}|{top_k}|{po}|{tr}|{ar}|{meta}|{role}|{generation_fingerprint}",
-        q = normalize_cache_query(&params.query),
-        proj = params.project.as_deref().unwrap_or(""),
-        prefix = params.path_prefix.as_deref().unwrap_or(""),
-        domain = params.domain.as_deref().unwrap_or(""),
-        top_k = top_k,
-        po = project_only as u8,
-        tr = params.include_training as u8,
-        ar = params.include_archived as u8,
-        meta = params.include_metadata as u8,
-        role = params.agent_role.as_deref().unwrap_or(""),
-    );
-    format!("rc:{}", stable_hash(&seed))
+    pipeline_enabled: bool,
+) -> Result<String, String> {
+    validate_cache_request_floats(params)?;
+    let request = RecallCacheRequest {
+        version: 3,
+        query: &params.query,
+        query_vec: &params.query_vec,
+        top_k_requested: params.top_k,
+        top_k_effective: top_k,
+        path_prefix: &params.path_prefix,
+        include_training: params.include_training,
+        include_archived: params.include_archived,
+        candidates_per_channel: params.candidates_per_channel,
+        mmr_threshold: params.mmr_threshold,
+        graph_expand_hops: params.graph_expand_hops,
+        graph_relation_filter: &params.graph_relation_filter,
+        weights: &params.weights,
+        context_symbols: &params.context_symbols,
+        agent_role: &params.agent_role,
+        project: &params.project,
+        domain: &params.domain,
+        file_context: &params.file_context,
+        error_context: &params.error_context,
+        enable_rerank: params.enable_rerank,
+        as_of: &params.as_of,
+        include_metadata: params.include_metadata,
+        format: &params.format,
+        project_only,
+        pipeline_enabled,
+    };
+    let serialized = serde_json::to_string(&request)
+        .map_err(|error| format!("serialize recall cache request: {error}"))?;
+    Ok(format!("rc:{}", stable_hash(&serialized)))
 }

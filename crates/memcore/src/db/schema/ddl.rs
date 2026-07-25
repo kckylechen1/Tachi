@@ -458,6 +458,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- `updated_at`, checked at read time.
         CREATE TABLE IF NOT EXISTS recall_cache (
             cache_id      TEXT PRIMARY KEY,
+            generation_fingerprint TEXT NOT NULL DEFAULT '',
             query         TEXT NOT NULL DEFAULT '',
             rows_json     TEXT NOT NULL DEFAULT '[]',
             result_count  INTEGER NOT NULL DEFAULT 0,

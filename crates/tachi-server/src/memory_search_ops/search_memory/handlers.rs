@@ -62,20 +62,12 @@ pub(crate) async fn handle_search_memory_with_access(
         && !sandboxed_search
         && !memcore::should_skip_query(&params.query);
     let cache_key = if cache_eligible {
-        match recall_cache_generation_fingerprint(server, &params, project_only) {
-            Ok(generation_fingerprint) => Some(recall_cache_key(
-                &params,
-                top_k,
-                project_only,
-                &generation_fingerprint,
-            )),
-            Err(error) => {
-                tracing::warn!(
-                    "[recall_cache] bypassing cache because authoritative generation validation failed: {error}"
-                );
-                None
-            }
-        }
+        Some(recall_cache_key(
+            &params,
+            top_k,
+            project_only,
+            server.pipeline_enabled,
+        )?)
     } else {
         None
     };
@@ -91,30 +83,56 @@ pub(crate) async fn handle_search_memory_with_access(
     // cross-process safety boundary this in-memory counter relies on.
     let epoch_at_read = recall_cache_epoch();
 
+    // Lookup precedes the one authoritative generation read per unique DB. A
+    // writer that commits between lookup and validation is therefore observed
+    // by validation; a writer that commits afterward is ordered after this
+    // read. Misses retain that single snapshot for write-through. This is safe:
+    // any later commit advances SQLite past the stored value, so the next
+    // lookup rejects the row even if this search raced the writer.
+    let mut cache_write_context = None;
     if let Some(ref key) = cache_key {
         let ttl = recall_cache_ttl_secs();
-        if let Ok(Some(hit)) = server.with_global_store_read(|store| {
+        let lookup = server.with_global_store_read(|store| {
             store
                 .recall_cache_lookup(key, ttl)
                 .map_err(|e| e.to_string())
-        }) {
-            // If the caller asked for a reranked ordering but the cache only
-            // holds the hybrid one, fall through and do the real work.
-            if !params.enable_rerank || hit.reranked {
-                let server_clone = (*server).clone();
-                let key_clone = key.clone();
-                std::mem::drop(tokio::task::spawn_blocking(move || {
-                    let _ = server_clone.with_global_store(|store| {
-                        store
-                            .recall_cache_record_hit(&key_clone)
-                            .map_err(|e| e.to_string())
-                    });
-                }));
-                return render_search_response(
-                    &params.query,
-                    params.format.as_deref(),
-                    hit.rows_json,
-                );
+        });
+        match lookup {
+            Ok(hit) => match recall_cache_generation_fingerprint(server, &params, project_only) {
+                Ok(current_generation) => {
+                    if let Some(hit) = hit {
+                        // The generation comparison runs after lookup, closing
+                        // the cross-process stale-hit window. Rerank remains an
+                        // additional defensive check for legacy cache rows.
+                        if hit.generation_fingerprint == current_generation
+                            && (!params.enable_rerank || hit.reranked)
+                        {
+                            let server_clone = (*server).clone();
+                            let key_clone = key.clone();
+                            std::mem::drop(tokio::task::spawn_blocking(move || {
+                                let _ = server_clone.with_global_store(|store| {
+                                    store
+                                        .recall_cache_record_hit(&key_clone)
+                                        .map_err(|e| e.to_string())
+                                });
+                            }));
+                            return render_search_response(
+                                &params.query,
+                                params.format.as_deref(),
+                                hit.rows_json,
+                            );
+                        }
+                    }
+                    cache_write_context = Some((key.clone(), current_generation));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "[recall_cache] bypassing cache because authoritative generation validation failed: {error}"
+                    );
+                }
+            },
+            Err(error) => {
+                tracing::warn!("[recall_cache] lookup failed; bypassing cache: {error}");
             }
         }
     }
@@ -149,22 +167,29 @@ pub(crate) async fn handle_search_memory_with_access(
     // can never interleave; checking outside the lock and only writing
     // inside it would reopen the exact race this guard exists to close.
     // Discarding is always safe: the next miss just recomputes fresh.
-    if let Some(key) = cache_key {
+    if let Some((key, generation_before_search)) = cache_write_context {
         if !rows.is_empty() {
             let wrote = recall_cache_write_through(
                 server,
                 epoch_at_read,
                 &key,
+                &generation_before_search,
                 &params.query,
                 &serialized,
                 rows.len() as i64,
                 params.enable_rerank,
             );
-            if matches!(wrote, Ok(false)) {
-                tracing::debug!(
-                    "[recall_cache] discarding stale write-through for {key} — \
-                     epoch advanced (concurrent invalidation) between read and write"
-                );
+            match wrote {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!(
+                        "[recall_cache] discarding stale write-through for {key} — \
+                         epoch advanced (concurrent invalidation) between read and write"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!("[recall_cache] write-through failed for {key}: {error}");
+                }
             }
         }
     }

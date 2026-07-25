@@ -3,7 +3,7 @@ use serde_json::json;
 use super::cache::{
     invalidate_recall_cache_after_write, recall_cache_epoch, recall_cache_generation_fingerprint,
     recall_cache_key as build_recall_cache_key, recall_cache_write_through,
-    recall_cache_write_through_is_safe,
+    recall_cache_write_through_is_safe, unique_database_targets, SearchDatabaseTarget,
 };
 use super::filters::project_scope_allows_memory_with_config;
 use crate::memory_search_ops::routing_config::RoutingConfig;
@@ -70,7 +70,7 @@ fn params(query: &str) -> SearchMemoryParams {
 }
 
 fn recall_cache_key(params: &SearchMemoryParams, top_k: usize, project_only: bool) -> String {
-    build_recall_cache_key(params, top_k, project_only, "global=0")
+    build_recall_cache_key(params, top_k, project_only, false).expect("cache request key")
 }
 
 fn domain_pack_routing_config() -> RoutingConfig {
@@ -121,10 +121,10 @@ fn context_symbols_are_deduped_and_not_repeated_when_query_already_mentions_them
 }
 
 #[test]
-fn recall_cache_key_is_stable_and_normalizes_query() {
+fn recall_cache_key_is_stable_and_preserves_exact_request_values() {
     let a = recall_cache_key(&params("Hello   World"), 5, false);
     let b = recall_cache_key(&params("hello world"), 5, false);
-    assert_eq!(a, b, "case + collapsed whitespace map to the same key");
+    assert_ne!(a, b, "distinct query bytes must not collapse");
     assert_eq!(
         a,
         recall_cache_key(&params("Hello   World"), 5, false),
@@ -136,72 +136,169 @@ fn recall_cache_key_is_stable_and_normalizes_query() {
 fn recall_cache_key_separates_result_affecting_fields() {
     let base = params("same query");
     let base_key = recall_cache_key(&base, 5, false);
+    let mut variants = Vec::new();
 
+    let mut changed = base.clone();
+    changed.query = "other query".into();
+    variants.push(("query", changed));
+    let mut changed = base.clone();
+    changed.query_vec = Some(vec![0.25]);
+    variants.push(("query_vec", changed));
+    let mut changed = base.clone();
+    changed.top_k = 0;
+    variants.push(("top_k_requested_zero", changed));
+    let mut changed = base.clone();
+    changed.path_prefix = Some(String::new());
+    variants.push(("path_prefix_absent_vs_empty", changed));
+    let mut changed = base.clone();
+    changed.include_training = true;
+    variants.push(("include_training", changed));
+    let mut changed = base.clone();
+    changed.include_archived = true;
+    variants.push(("include_archived", changed));
+    let mut changed = base.clone();
+    changed.candidates_per_channel = 0;
+    variants.push(("candidates_per_channel_zero", changed));
+    let mut changed = base.clone();
+    changed.mmr_threshold = Some(0.0);
+    variants.push(("mmr_threshold_absent_vs_zero", changed));
+    let mut changed = base.clone();
+    changed.graph_expand_hops = 1;
+    variants.push(("graph_expand_hops", changed));
+    let mut changed = base.clone();
+    changed.graph_relation_filter = Some(String::new());
+    variants.push(("graph_relation_filter_absent_vs_empty", changed));
+    let mut changed = base.clone();
+    changed.weights = Some(crate::tool_params::HybridWeightsParam {
+        semantic: 0.0,
+        fts: 0.0,
+        symbolic: 0.0,
+        decay: 0.0,
+        use_rrf: false,
+    });
+    variants.push(("weights_absent_vs_zero", changed));
+    for (field, weights) in [
+        (
+            "weights_semantic",
+            crate::tool_params::HybridWeightsParam {
+                semantic: 0.41,
+                fts: 0.3,
+                symbolic: 0.2,
+                decay: 0.1,
+                use_rrf: false,
+            },
+        ),
+        (
+            "weights_fts",
+            crate::tool_params::HybridWeightsParam {
+                semantic: 0.4,
+                fts: 0.31,
+                symbolic: 0.2,
+                decay: 0.1,
+                use_rrf: false,
+            },
+        ),
+        (
+            "weights_symbolic",
+            crate::tool_params::HybridWeightsParam {
+                semantic: 0.4,
+                fts: 0.3,
+                symbolic: 0.21,
+                decay: 0.1,
+                use_rrf: false,
+            },
+        ),
+        (
+            "weights_decay",
+            crate::tool_params::HybridWeightsParam {
+                semantic: 0.4,
+                fts: 0.3,
+                symbolic: 0.2,
+                decay: 0.11,
+                use_rrf: false,
+            },
+        ),
+        (
+            "weights_use_rrf",
+            crate::tool_params::HybridWeightsParam {
+                semantic: 0.4,
+                fts: 0.3,
+                symbolic: 0.2,
+                decay: 0.1,
+                use_rrf: true,
+            },
+        ),
+    ] {
+        let mut changed = base.clone();
+        changed.weights = Some(weights);
+        variants.push((field, changed));
+    }
+    let mut changed = base.clone();
+    changed.context_symbols = vec!["Symbol".into()];
+    variants.push(("context_symbols", changed));
+    let mut changed = base.clone();
+    changed.agent_role = Some(String::new());
+    variants.push(("agent_role_absent_vs_empty", changed));
+    let mut changed = base.clone();
+    changed.project = None;
+    variants.push(("project", changed));
+    let mut changed = base.clone();
+    changed.domain = Some(String::new());
+    variants.push(("domain_absent_vs_empty", changed));
+    let mut changed = base.clone();
+    changed.file_context = Some(String::new());
+    variants.push(("file_context_absent_vs_empty", changed));
+    let mut changed = base.clone();
+    changed.error_context = Some(String::new());
+    variants.push(("error_context_absent_vs_empty", changed));
+    let mut changed = base.clone();
+    changed.enable_rerank = true;
+    variants.push(("enable_rerank", changed));
+    let mut changed = base.clone();
+    changed.as_of = Some(String::new());
+    variants.push(("as_of_absent_vs_empty", changed));
+    let mut changed = base.clone();
+    changed.include_metadata = true;
+    variants.push(("include_metadata", changed));
+    let mut changed = base.clone();
+    changed.format = Some(String::new());
+    variants.push(("format_absent_vs_empty", changed));
+
+    for (field, changed) in variants {
+        assert_ne!(base_key, recall_cache_key(&changed, 5, false), "{field}");
+    }
     assert_ne!(
         base_key,
-        recall_cache_key(&params("other query"), 5, false),
-        "query"
+        recall_cache_key(&base, 6, false),
+        "top_k_effective"
     );
-    assert_ne!(base_key, recall_cache_key(&base, 6, false), "top_k");
     assert_ne!(base_key, recall_cache_key(&base, 5, true), "project_only");
-
-    let mut p = base.clone();
-    p.path_prefix = Some("/wiki".into());
-    assert_ne!(base_key, recall_cache_key(&p, 5, false), "path_prefix");
-
-    let mut p = base.clone();
-    p.project = Some("other".into());
-    assert_ne!(base_key, recall_cache_key(&p, 5, false), "project");
-
-    let mut p = base.clone();
-    p.domain = Some("domain_pack".into());
-    assert_ne!(base_key, recall_cache_key(&p, 5, false), "domain");
-
-    let mut p = base.clone();
-    p.agent_role = Some("reader".into());
-    assert_ne!(base_key, recall_cache_key(&p, 5, false), "agent_role");
-
-    let mut p = base.clone();
-    p.include_metadata = true;
-    assert_ne!(base_key, recall_cache_key(&p, 5, false), "include_metadata");
-
-    let mut p = base.clone();
-    p.include_training = true;
-    assert_ne!(base_key, recall_cache_key(&p, 5, false), "include_training");
-
-    let mut p = base.clone();
-    p.include_archived = true;
-    assert_ne!(base_key, recall_cache_key(&p, 5, false), "include_archived");
-}
-
-#[test]
-fn recall_cache_key_ignores_rerank_intent() {
-    // enable_rerank is intentionally NOT part of the key — the background
-    // rerank job upgrades the same entry, and rerank intent is reconciled
-    // against the stored `reranked` flag at read time.
-    let mut a = params("q");
-    a.enable_rerank = false;
-    let mut b = params("q");
-    b.enable_rerank = true;
-    assert_eq!(
-        recall_cache_key(&a, 5, false),
-        recall_cache_key(&b, 5, false)
+    assert_ne!(
+        base_key,
+        build_recall_cache_key(&base, 5, false, true).expect("pipeline key"),
+        "pipeline_enabled"
     );
 }
 
 #[test]
-fn recall_cache_key_separates_authoritative_database_generations() {
-    let params = params("same query");
-    assert_ne!(
-        build_recall_cache_key(&params, 5, false, "global=8,project=2"),
-        build_recall_cache_key(&params, 5, false, "global=9,project=2"),
-        "a committed global mutation must select a new cache key"
-    );
-    assert_ne!(
-        build_recall_cache_key(&params, 5, false, "global=8,project=2"),
-        build_recall_cache_key(&params, 5, false, "global=8,project=3"),
-        "a committed project mutation must select a new cache key"
-    );
+fn recall_cache_key_rejects_non_finite_floats() {
+    let mut invalid = params("q");
+    invalid.mmr_threshold = Some(f64::NAN);
+    assert!(build_recall_cache_key(&invalid, 5, false, false).is_err());
+
+    let mut invalid = params("q");
+    invalid.query_vec = Some(vec![f32::INFINITY]);
+    assert!(build_recall_cache_key(&invalid, 5, false, false).is_err());
+
+    let mut invalid = params("q");
+    invalid.weights = Some(crate::tool_params::HybridWeightsParam {
+        semantic: 0.4,
+        fts: 0.3,
+        symbolic: f64::NEG_INFINITY,
+        decay: 0.1,
+        use_rrf: false,
+    });
+    assert!(build_recall_cache_key(&invalid, 5, false, false).is_err());
 }
 
 #[test]
@@ -211,7 +308,12 @@ fn initialized_store_exposes_a_cache_safe_authoritative_generation() {
     search.project = None;
     let generation = recall_cache_generation_fingerprint(&server, &search, false)
         .expect("freshly initialized store must be cache-safe");
-    assert_eq!(generation, "global=0");
+    let generation: serde_json::Value =
+        serde_json::from_str(&generation).expect("fingerprint json");
+    assert_eq!(generation["databases"].as_array().map(Vec::len), Some(1));
+    assert!(generation["databases"][0]["generation"]
+        .as_i64()
+        .is_some_and(|value| value >= 0));
 }
 
 #[test]
@@ -228,7 +330,59 @@ fn cache_generation_fingerprint_includes_global_and_bound_project_stores() {
     let generation = recall_cache_generation_fingerprint(&server, &search, false)
         .expect("both selected stores must expose a cache-safe generation");
 
-    assert_eq!(generation, "global=0,bound-project=0");
+    let generation: serde_json::Value =
+        serde_json::from_str(&generation).expect("fingerprint json");
+    assert_eq!(generation["databases"].as_array().map(Vec::len), Some(2));
+    assert!(generation["databases"]
+        .as_array()
+        .expect("databases")
+        .iter()
+        .all(|db| db["generation"].as_i64().is_some_and(|value| value >= 0)));
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_generation_fingerprint_dedupes_symlink_aliases() {
+    let temp = tempfile::tempdir().expect("temporary database directory");
+    let global = temp.path().join("global.sqlite");
+    let _seed = crate::MemoryServer::new(global.clone(), None).expect("seed database");
+    let alias = temp.path().join("project-alias.sqlite");
+    std::os::unix::fs::symlink(&global, &alias).expect("database symlink");
+    let server = crate::MemoryServer::new(global, Some(alias)).expect("aliased server");
+    let mut search = params("cache generation probe");
+    search.project = None;
+
+    let generation = recall_cache_generation_fingerprint(&server, &search, false)
+        .expect("symlink alias must be cache-safe");
+    let generation: serde_json::Value =
+        serde_json::from_str(&generation).expect("fingerprint json");
+
+    assert_eq!(
+        generation["databases"].as_array().map(Vec::len),
+        Some(1),
+        "one physical database must produce one generation read"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_generation_fingerprint_refuses_hard_link_aliases() {
+    let temp = tempfile::tempdir().expect("temporary database directory");
+    let global = temp.path().join("global.sqlite");
+    let _seed = crate::MemoryServer::new(global.clone(), None).expect("seed database");
+    let alias = temp.path().join("project-hard-link.sqlite");
+    std::fs::hard_link(&global, &alias).expect("database hard link");
+
+    let error = unique_database_targets(vec![
+        SearchDatabaseTarget::Global(global),
+        SearchDatabaseTarget::BoundProject(alias),
+    ])
+    .expect_err("hard-link aliases must bypass recall cache validation");
+
+    assert!(
+        error.contains("hard-link alias") && error.contains("recall cache is bypassed"),
+        "unexpected hard-link safety error: {error}"
+    );
 }
 
 #[test]
@@ -438,6 +592,7 @@ fn locked_write_through_rejects_a_write_snapshotted_before_invalidation_complete
         &server,
         epoch_at_read,
         "rc:t8-locked-probe",
+        "test-generation",
         "t8 locked probe query",
         "[{\"id\":\"stale-should-not-land\"}]",
         1,
