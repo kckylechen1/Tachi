@@ -165,6 +165,25 @@ impl MemoryStore {
     /// for legacy/foreign/possibly-corrupt files, by design (see that
     /// module's doc comment).
     pub fn open_read_only(db_path: &str) -> Result<Self, MemoryError> {
+        Self::open_read_only_inner(db_path, false)
+    }
+
+    /// Open an existing DB read-only while tolerating a stamped older schema.
+    ///
+    /// This is intentionally narrower than an ordinary compatibility open:
+    /// the SQLite handle remains `SQLITE_OPEN_READ_ONLY`, no schema init or
+    /// migration authority is granted, and a current-schema DB still requires
+    /// the full canonical persistent-trigger inventory. It exists for dry-run
+    /// operators that need to inspect a structurally valid pre-v23 DB without
+    /// mutating its stamp or requiring migration approval.
+    pub fn open_read_only_existing_schema_compat(db_path: &str) -> Result<Self, MemoryError> {
+        Self::open_read_only_inner(db_path, true)
+    }
+
+    fn open_read_only_inner(
+        db_path: &str,
+        allow_stamped_older_schema: bool,
+    ) -> Result<Self, MemoryError> {
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
@@ -173,17 +192,24 @@ impl MemoryStore {
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored_schema_version = db::migrations::read_schema_version(&conn)?;
-        if (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version) {
+        let is_stamped_older_schema =
+            (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version);
+        if is_stamped_older_schema {
             // Older legitimate DBs may lack guards, but an unexpected or
             // spoofed trigger is unsafe at every version and must remain loud.
             db::validate_persistent_trigger_inventory(&conn, false)?;
+        } else {
+            // Current DBs must retain every canonical guard; compatibility is
+            // only for an older stamp, never a way to accept a damaged v23 DB.
+            db::validate_persistent_trigger_inventory(&conn, true)?;
         }
-        db::migrations::check_db_open_context_gate(
-            &conn,
-            std::path::Path::new(db_path),
-            &DbOpenContext::open_existing_deny(),
-        )?;
-        db::validate_persistent_trigger_inventory(&conn, true)?;
+        if !allow_stamped_older_schema || !is_stamped_older_schema {
+            db::migrations::check_db_open_context_gate(
+                &conn,
+                std::path::Path::new(db_path),
+                &DbOpenContext::open_existing_deny(),
+            )?;
+        }
         let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
         Ok(Self {
             conn,
@@ -337,6 +363,81 @@ impl MemoryStore {
 mod exact_dedupe_open_tests {
     use super::*;
 
+    fn test_memory_entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/test/read-only-compat".to_string(),
+            summary: String::new(),
+            text: "read-only compatibility fixture".to_string(),
+            importance: 0.5,
+            timestamp: "2026-07-26T00:00:00Z".to_string(),
+            valid_from: "2026-07-26T00:00:00Z".to_string(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: "test".to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    #[test]
+    fn read_only_existing_schema_compat_opens_stamped_older_without_write_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamped-older.db");
+        drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+        let offline = Connection::open(&path).unwrap();
+        offline
+            .execute_batch(
+                "DROP TRIGGER memories_reserved_refs_insert_guard;
+                 DROP TRIGGER memories_reserved_refs_update_guard;
+                 DELETE FROM hard_state
+                  WHERE namespace = 'migrations'
+                    AND key = 'v23_reserved_reference_guards';
+                 PRAGMA user_version = 22;",
+            )
+            .unwrap();
+        drop(offline);
+
+        let mut store = MemoryStore::open_read_only_existing_schema_compat(&path.to_string_lossy())
+            .expect("stamped older DB must be inspectable without migration authority");
+        assert_eq!(
+            db::migrations::read_schema_version(store.connection()).unwrap(),
+            22,
+            "compatibility open must not rewrite the older stamp"
+        );
+
+        let error = store
+            .upsert(&test_memory_entry("read-only-write-attempt"))
+            .expect_err("compatibility open must remain read-only");
+        assert!(
+            error.to_string().to_ascii_lowercase().contains("readonly"),
+            "unexpected read-only write refusal: {error}"
+        );
+
+        let offline = Connection::open(&path).unwrap();
+        assert_eq!(
+            db::migrations::read_schema_version(&offline).unwrap(),
+            22,
+            "rejected write must leave the older stamp unchanged"
+        );
+    }
+
     #[test]
     fn existing_read_write_does_not_recreate_missing_memories_vec() {
         let dir = tempfile::tempdir().unwrap();
@@ -366,9 +467,13 @@ mod exact_dedupe_open_tests {
     #[test]
     fn existing_opens_refuse_missing_reserved_reference_guards_before_repair() {
         type StoreOpener = fn(&str) -> Result<MemoryStore, MemoryError>;
-        let openers: [(&str, StoreOpener); 2] = [
+        let openers: [(&str, StoreOpener); 3] = [
             ("ordinary", MemoryStore::open),
             ("maintenance", MemoryStore::open_existing_read_write),
+            (
+                "read-only-existing-schema-compat",
+                MemoryStore::open_read_only_existing_schema_compat,
+            ),
         ];
 
         for (label, open) in openers {
@@ -534,16 +639,27 @@ mod exact_dedupe_open_tests {
             offline.execute_batch(trigger_sql).unwrap();
             drop(offline);
 
-            let error = match MemoryStore::open(&path.to_string_lossy()) {
-                Ok(_) => panic!("persistent trigger {label} was exposed on reopen"),
-                Err(error) => error,
-            };
-            assert!(
-                error
-                    .to_string()
-                    .contains("unsafe persistent trigger inventory"),
-                "unexpected {label} refusal: {error}"
-            );
+            for (opener_label, open) in [
+                (
+                    "ordinary",
+                    MemoryStore::open as fn(&str) -> Result<MemoryStore, MemoryError>,
+                ),
+                (
+                    "read-only-existing-schema-compat",
+                    MemoryStore::open_read_only_existing_schema_compat,
+                ),
+            ] {
+                let error = match open(&path.to_string_lossy()) {
+                    Ok(_) => panic!("persistent trigger {label} was exposed by {opener_label}"),
+                    Err(error) => error,
+                };
+                assert!(
+                    error
+                        .to_string()
+                        .contains("unsafe persistent trigger inventory"),
+                    "unexpected {label}/{opener_label} refusal: {error}"
+                );
+            }
         }
     }
 
