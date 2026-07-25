@@ -1,5 +1,140 @@
 use super::*;
 
+fn dlq_capture_refusal_events(server: &crate::MemoryServer) -> Vec<memcore::TachiEventRecord> {
+    server
+        .with_global_store(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    event_type: Some("dlq_capture_refused".to_string()),
+                    limit: 100,
+                    ..memcore::TachiEventQuery::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("query DLQ refusal lifecycle events")
+}
+
+#[tokio::test]
+async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
+    let server = make_server();
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+
+    let cap = HubCapability {
+        id: "mcp:remote".to_string(),
+        cap_type: "mcp".to_string(),
+        name: "remote".to_string(),
+        version: 1,
+        description: "DLQ call_tool refusal test capability".to_string(),
+        definition: r#"{"transport":"stdio","command":"ignored"}"#.to_string(),
+        enabled: false,
+        review_status: "pending".to_string(),
+        health_status: "unknown".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "direct".to_string(),
+        uses: 0,
+        successes: 0,
+        failures: 0,
+        avg_rating: 0.0,
+        last_used: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&cap)
+                .map_err(|error| format!("register failed: {error}"))
+        })
+        .expect("register refusal test capability");
+    crate::utils::lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools").insert(
+        "remote".to_string(),
+        vec![
+            make_test_tool("unclassified"),
+            make_test_tool("tachi_memory"),
+        ],
+    );
+    crate::utils::lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools").insert(
+        "newly_registered_mutation".to_string(),
+        "skill:test".to_string(),
+    );
+
+    let cases = [
+        (
+            "newly_registered_mutation",
+            None,
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "Skill 'skill:test' not found in Hub",
+            None,
+        ),
+        (
+            "remote__unclassified",
+            None,
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "MCP server 'mcp:remote' is not callable",
+            None,
+        ),
+        (
+            "remote__tachi_memory",
+            Some(serde_json::Map::from_iter([(
+                "action".to_string(),
+                json!("save"),
+            )])),
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "MCP server 'mcp:remote' is not callable",
+            Some("save"),
+        ),
+    ];
+
+    for (tool_name, arguments, expected_code, expected_message, expected_action) in cases {
+        let err = call_tool_on_server(server.clone(), tool_name, arguments)
+            .await
+            .expect_err("injected production-boundary call must fail");
+        assert_eq!(err.code, expected_code, "original error code changed");
+        assert!(
+            err.message.contains(expected_message),
+            "original error message changed for {tool_name}: {}",
+            err.message
+        );
+        assert_eq!(
+            err.data, None,
+            "durable refusal signaling must not rewrite the original error data"
+        );
+        assert!(
+            server.dead_letters_lock().is_empty(),
+            "refused {tool_name} failure must not be enqueued"
+        );
+
+        let matching: Vec<_> = dlq_capture_refusal_events(&server)
+            .into_iter()
+            .filter(|event| event.payload["tool_name"] == tool_name)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "{tool_name} must emit exactly one dlq_capture_refused signal"
+        );
+        assert_eq!(
+            matching[0].payload["action"].as_str(),
+            expected_action,
+            "refusal signal must preserve the routed action"
+        );
+        assert_eq!(
+            matching[0].payload["reason"],
+            "default_deny_no_explicit_safe_replay_authority"
+        );
+    }
+
+    let safe_args = serde_json::Map::from_iter([("action".to_string(), json!("metrics"))]);
+    assert!(
+        crate::shared_defs::should_enqueue_dlq("tachi_event", Some(&safe_args), false),
+        "known safe read admission must remain unchanged"
+    );
+}
+
 #[tokio::test]
 async fn retry_dispatch_rejects_unclassified_proxy_before_gateway_mode() {
     let server = make_server();

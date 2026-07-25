@@ -10,6 +10,7 @@ use crate::shared_defs::{
 };
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
+use memcore::{AuthorityLevel, EffectScope, TachiEventRecord};
 use rmcp::model::{InitializeRequestParams, InitializeResult, ServerCapabilities, ServerInfo};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
@@ -44,6 +45,82 @@ fn tool_action_denied_result(
     rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(format!(
         "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action for this profile, or call tachi_tools() to inspect the active surface."
     ))])
+}
+
+fn dlq_capture_refusal_reason(tool_name: &str, is_native: bool) -> &'static str {
+    if tool_name.starts_with("dlq_")
+        || tool_name.starts_with("ghost_")
+        || tool_name == "get_pipeline_status"
+    {
+        "excluded_control_or_status_route"
+    } else if is_native {
+        "native_route_not_generic_dlq_replayable"
+    } else {
+        "default_deny_no_explicit_safe_replay_authority"
+    }
+}
+
+fn record_dlq_capture_refused(
+    server: &MemoryServer,
+    tool_name: &str,
+    action: Option<&str>,
+    reason: &str,
+    is_native: bool,
+    error_category: &str,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let event = TachiEventRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        source_repo: "tachi".to_string(),
+        adapter: "server_handler.call_tool".to_string(),
+        project: project.unwrap_or_default().to_string(),
+        domain: "dlq".to_string(),
+        session_id: server.rate_limit_session_id(),
+        actor: "tachi-server".to_string(),
+        event_type: "dlq_capture_refused".to_string(),
+        authority: AuthorityLevel::ReviewSignalOnly,
+        effects: vec![EffectScope::None],
+        projection_hints: Vec::new(),
+        payload: serde_json::json!({
+            "tool_name": tool_name,
+            "action": action,
+            "reason": reason,
+            "is_native": is_native,
+            "error_category": error_category,
+            "dlq_enqueued": false,
+        }),
+        provenance: serde_json::json!({
+            "source": "server_handler.call_tool",
+            "decision": "should_enqueue_dlq_refused",
+        }),
+        created_at: Utc::now().to_rfc3339(),
+    };
+
+    server.with_global_store(|store| {
+        store
+            .insert_tachi_event(&event)
+            .map_err(|error| format!("insert dlq_capture_refused event: {error}"))
+    })
+}
+
+fn attach_dlq_capture_refusal_fallback(
+    error: &mut rmcp::ErrorData,
+    tool_name: &str,
+    action: Option<&str>,
+    reason: &str,
+    persistence_error: &str,
+) {
+    let original_error_data = error.data.take();
+    error.data = Some(serde_json::json!({
+        "original_error_data": original_error_data,
+        "lifecycle_signal": {
+            "event_type": "dlq_capture_refused",
+            "tool_name": tool_name,
+            "action": action,
+            "reason": reason,
+            "persistence_error": persistence_error,
+        }
+    }));
 }
 
 pub(crate) fn split_proxy_tool_name<'a>(
@@ -896,7 +973,7 @@ impl ServerHandler for MemoryServer {
             let tool_name_owned = name.to_string();
             let tool_args_for_dlq = params.arguments.clone();
 
-            let result = {
+            let mut result = {
                 // 1. Native tools first (highest priority)
                 if self.tool_router.has_route(name) {
                     let context =
@@ -964,6 +1041,28 @@ impl ServerHandler for MemoryServer {
                     {
                         let mut dlq = self.dead_letters_lock();
                         push_dead_letter_with_limits(&mut dlq, dl, Utc::now());
+                    }
+                } else {
+                    let error_category = categorize_error(&err.to_string());
+                    let reason = dlq_capture_refusal_reason(&tool_name_owned, is_native);
+                    if let Err(signal_error) = record_dlq_capture_refused(
+                        self,
+                        &tool_name_owned,
+                        action_arg.as_deref(),
+                        reason,
+                        is_native,
+                        &error_category,
+                        bound_project.as_deref(),
+                    ) {
+                        if let Err(error) = &mut result {
+                            attach_dlq_capture_refusal_fallback(
+                                error,
+                                &tool_name_owned,
+                                action_arg.as_deref(),
+                                reason,
+                                &signal_error,
+                            );
+                        }
                     }
                 }
             }
