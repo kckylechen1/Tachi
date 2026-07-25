@@ -58,6 +58,8 @@ impl MemoryStore {
         increment: f64,
         reinforced_at: &str,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         self.conn.execute(
             r#"UPDATE memories
                SET metadata = json_set(

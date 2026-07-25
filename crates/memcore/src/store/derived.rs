@@ -15,6 +15,8 @@ impl MemoryStore {
         scope: &str,
         metadata: &serde_json::Value,
     ) -> Result<String, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::save_derived(
             &self.conn, text, path, summary, importance, source, scope, metadata,
         )
@@ -33,6 +35,8 @@ impl MemoryStore {
         scope: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::save_derived_with_id(
             &self.conn, id, text, path, summary, importance, source, scope, metadata,
         )

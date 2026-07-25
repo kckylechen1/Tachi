@@ -129,6 +129,8 @@ impl MemoryStore {
     /// kind/key mismatch at an existing id. Returns the anchor's
     /// deterministic id.
     pub fn ensure_anchor(&self, kind: AnchorKind, key: &str) -> Result<String, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::ensure_anchor(&self.conn, kind, key)
     }
 }

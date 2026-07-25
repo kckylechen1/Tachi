@@ -102,6 +102,7 @@ impl MemoryStore {
         let schema_result = db::init_schema_with_label_mut(&mut conn, db_label, &p, ctx);
         drop(migration_authorization);
         let _ = schema_result?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
@@ -138,6 +139,7 @@ impl MemoryStore {
         let conn = db::open_read_only(db_path)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
@@ -180,6 +182,7 @@ impl MemoryStore {
             ))
         })?;
         db::install_reserved_reference_guard(&conn)?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         // Registration above makes vec0 available to this connection, but a
         // maintenance open must not create its virtual table. Preparing a
         // read-only query proves the already-existing table and module are
@@ -208,6 +211,7 @@ impl MemoryStore {
         let schema_result = db::init_schema(&conn);
         drop(migration_authorization);
         schema_result?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
@@ -242,7 +246,9 @@ impl MemoryStore {
     pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
         self.validate_write_path(entry)?;
         let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("upsert", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::upsert(&mut self.conn, entry, self.vec_available)
         })
     }
@@ -255,7 +261,9 @@ impl MemoryStore {
     ) -> Result<db::InsertMemoryResult, MemoryError> {
         self.validate_write_path(entry)?;
         let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("insert_if_absent", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::insert_if_absent(&mut self.conn, entry, self.vec_available)
         })
     }
@@ -269,7 +277,9 @@ impl MemoryStore {
     ) -> Result<db::IdlessUpsertResult, MemoryError> {
         self.validate_write_path(entry)?;
         let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("upsert_idless", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::upsert_idless(&mut self.conn, entry, self.vec_available, identity)
         })
     }
@@ -328,14 +338,16 @@ mod exact_dedupe_open_tests {
                 &[reference],
             )
             .unwrap();
-        store
-            .connection()
+        drop(store);
+
+        let offline = Connection::open(&path).unwrap();
+        offline
             .execute_batch(
                 "DROP TRIGGER memories_reserved_refs_insert_guard;
                  DROP TRIGGER memories_reserved_refs_update_guard;",
             )
             .unwrap();
-        drop(store);
+        drop(offline);
 
         let maintenance = MemoryStore::open_existing_read_write(&path.to_string_lossy()).unwrap();
         let erase = maintenance.connection().execute(

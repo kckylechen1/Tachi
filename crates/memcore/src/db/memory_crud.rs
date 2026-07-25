@@ -1366,7 +1366,7 @@ mod reserved_reference_tests {
     }
 
     #[test]
-    fn raw_db_upsert_strips_hostile_reserved_metadata() {
+    fn raw_db_upsert_is_not_an_authorized_channel() {
         let (_dir, mut store) = open_store();
         let hostile = entry(
             "raw-hostile",
@@ -1379,10 +1379,12 @@ mod reserved_reference_tests {
             }),
         );
         let vec_available = store.vec_available;
-        super::upsert(store.connection_mut(), &hostile, vec_available).unwrap();
-        let stored = store.get(&hostile.id).unwrap().unwrap();
-        assert!(stored.metadata.get("evidence_refs_v1").is_none());
-        assert!(stored.metadata.get("source_refs").is_none());
+        let result = super::upsert(store.connection_mut(), &hostile, vec_available);
+        assert!(
+            result.is_err(),
+            "raw DB upsert bypassed the scoped MemoryStore write channel"
+        );
+        assert!(store.get(&hostile.id).unwrap().is_none());
     }
 
     #[test]
@@ -1405,24 +1407,28 @@ mod reserved_reference_tests {
             params![clean.id],
         );
         assert!(erase.is_err(), "raw store connection erased reserved refs");
-        store
-            .connection()
-            .execute(
-                "UPDATE memories
-                 SET metadata = json_set(metadata, '$.ordinary_patch', 1)
-                 WHERE id = ?1",
-                params![clean.id],
-            )
-            .expect("unrelated raw metadata patch preserves reserved refs");
+        let ordinary_patch = store.connection().execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.ordinary_patch', 1)
+             WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(
+            ordinary_patch.is_err(),
+            "raw store connection mutated the protected metadata column"
+        );
 
         let raw = crate::db::open_raw(&path).unwrap();
-        raw.execute(
+        let raw_ordinary_patch = raw.execute(
             "UPDATE memories
              SET metadata = json_set(metadata, '$.raw_ordinary_patch', 1)
              WHERE id = ?1",
             params![clean.id],
-        )
-        .expect("open_raw unrelated metadata patch preserves reserved refs");
+        );
+        assert!(
+            raw_ordinary_patch.is_err(),
+            "open_raw mutated the protected metadata column"
+        );
         let forge = raw.execute(
             "UPDATE memories
              SET metadata = json_set(metadata, '$.evidence_refs_v1', json('[{\"ref\":\"#999\"}]'))
@@ -1433,8 +1439,127 @@ mod reserved_reference_tests {
 
         let stored = store.get(&clean.id).unwrap().unwrap();
         assert_eq!(refs(&stored), vec!["#100"]);
-        assert_eq!(stored.metadata["ordinary_patch"], json!(1));
-        assert_eq!(stored.metadata["raw_ordinary_patch"], json!(1));
+        assert!(stored.metadata.get("ordinary_patch").is_none());
+        assert!(stored.metadata.get("raw_ordinary_patch").is_none());
+    }
+
+    #[test]
+    fn raw_connection_cannot_disable_reserved_reference_guards() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let mut store = crate::MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let clean = entry("raw-guard-ddl", json!({ "kept": true }));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .unwrap();
+
+        let drop_guard = store
+            .connection_mut()
+            .execute_batch("DROP TRIGGER memories_reserved_refs_update_guard");
+        let overwrite_after_drop = store.connection().execute(
+            "UPDATE memories SET metadata = '{}' WHERE id = ?1",
+            params![clean.id],
+        );
+        let after_drop = store.get(&clean.id).unwrap().unwrap();
+        assert!(
+            drop_guard.is_err(),
+            "raw handle dropped the guard and bypassed it: overwrite={overwrite_after_drop:?}, refs={:?}",
+            refs(&after_drop)
+        );
+        assert!(
+            overwrite_after_drop.is_err(),
+            "raw overwrite succeeded after rejected DROP"
+        );
+        assert_eq!(refs(&after_drop), vec!["#100"]);
+
+        let replacement = store.connection().execute_batch(
+            "CREATE TEMP TRIGGER memories_reserved_refs_update_guard
+             BEFORE UPDATE OF metadata ON main.memories
+             BEGIN SELECT 1; END;",
+        );
+        assert!(
+            replacement.is_err(),
+            "raw handle created a replacement guard trigger"
+        );
+
+        store
+            .connection()
+            .create_scalar_function(
+                "tachi_reserved_reference_write_enabled",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| Ok(1_i64),
+            )
+            .expect("hostile function replacement demonstrates independent authorizer guard");
+        let spoofed_overwrite = store.connection().execute(
+            "UPDATE memories SET metadata = '{}' WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(
+            spoofed_overwrite.is_err(),
+            "spoofed authorization function enabled raw metadata overwrite"
+        );
+
+        assert!(
+            store
+                .connection()
+                .execute_batch("ATTACH DATABASE ':memory:' AS bypass")
+                .is_err(),
+            "raw handle attached an unguarded schema"
+        );
+        assert!(
+            store
+                .connection()
+                .execute_batch("PRAGMA writable_schema = ON")
+                .is_err(),
+            "raw handle enabled writable_schema"
+        );
+
+        store
+            .connection()
+            .execute_batch(
+                "CREATE TABLE raw_guard_probe(value INTEGER NOT NULL);
+                 INSERT INTO raw_guard_probe(value) VALUES (1);
+                 UPDATE raw_guard_probe SET value = 2;",
+            )
+            .expect("ordinary non-memory SQL remains available");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET text = 'ordinary update' WHERE id = ?1",
+                params![clean.id],
+            )
+            .expect("ordinary non-protected memory column remains writable");
+
+        let raw = crate::db::open_raw(&path).unwrap();
+        raw.execute_batch(
+            "CREATE TABLE open_raw_probe(value INTEGER NOT NULL);
+             INSERT INTO open_raw_probe(value) VALUES (1);
+             UPDATE open_raw_probe SET value = 2;",
+        )
+        .expect("open_raw ordinary non-memory SQL remains available");
+        assert!(
+            raw.execute_batch("DROP TRIGGER memories_reserved_refs_update_guard")
+                .is_err(),
+            "open_raw dropped the canonical guard"
+        );
+        assert!(
+            raw.execute(
+                "UPDATE memories SET metadata = '{}' WHERE id = ?1",
+                params![clean.id],
+            )
+            .is_err(),
+            "open_raw overwrote protected metadata"
+        );
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(stored.text, "ordinary update");
+        assert_eq!(refs(&stored), vec!["#100"]);
     }
 
     #[test]

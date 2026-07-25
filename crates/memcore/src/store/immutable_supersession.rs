@@ -46,6 +46,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
 
     /// Persist an entry inside the replacement transaction.
     pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::upsert_within_tx(&self.tx, entry, self.vec_available, None).map(|_| ())
     }
 
@@ -98,6 +100,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         scope: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::save_derived_with_id(
             &self.tx, id, text, path, summary, importance, source, scope, metadata,
         )

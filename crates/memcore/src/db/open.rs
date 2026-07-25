@@ -1,5 +1,6 @@
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -49,6 +50,98 @@ pub(crate) fn register_reserved_reference_write_guard(
         move |_| Ok(i64::from(function_flag.load(Ordering::SeqCst))),
     )?;
     Ok(flag)
+}
+
+fn sqlite_identifier_eq(raw: *const c_char, expected: &[u8]) -> bool {
+    if raw.is_null() {
+        return false;
+    }
+    // SQLite owns these NUL-terminated strings for the duration of the call.
+    unsafe { CStr::from_ptr(raw) }
+        .to_bytes()
+        .eq_ignore_ascii_case(expected)
+}
+
+fn protected_reference_trigger(raw: *const c_char) -> bool {
+    sqlite_identifier_eq(raw, b"memories_reserved_refs_insert_guard")
+        || sqlite_identifier_eq(raw, b"memories_reserved_refs_update_guard")
+}
+
+unsafe extern "C" fn reserved_reference_authorizer(
+    state: *mut c_void,
+    action: c_int,
+    arg1: *const c_char,
+    arg2: *const c_char,
+    _database: *const c_char,
+    _accessor: *const c_char,
+) -> c_int {
+    let authorized = if state.is_null() {
+        false
+    } else {
+        // MemoryStore owns this AtomicBool for longer than its Connection. Raw
+        // fixture handles pass null and therefore remain permanently denied.
+        unsafe { &*state.cast::<AtomicBool>() }.load(Ordering::SeqCst)
+    };
+    if authorized {
+        return rusqlite::ffi::SQLITE_OK;
+    }
+
+    let trigger_ddl = matches!(
+        action,
+        rusqlite::ffi::SQLITE_CREATE_TRIGGER
+            | rusqlite::ffi::SQLITE_CREATE_TEMP_TRIGGER
+            | rusqlite::ffi::SQLITE_DROP_TRIGGER
+            | rusqlite::ffi::SQLITE_DROP_TEMP_TRIGGER
+    ) && protected_reference_trigger(arg1);
+    let protected_memory_write = (action == rusqlite::ffi::SQLITE_INSERT
+        && sqlite_identifier_eq(arg1, b"memories"))
+        || (action == rusqlite::ffi::SQLITE_UPDATE
+            && sqlite_identifier_eq(arg1, b"memories")
+            && sqlite_identifier_eq(arg2, b"metadata"));
+    let protected_memory_schema = (action == rusqlite::ffi::SQLITE_DROP_TABLE
+        && sqlite_identifier_eq(arg1, b"memories"))
+        || (action == rusqlite::ffi::SQLITE_ALTER_TABLE && sqlite_identifier_eq(arg2, b"memories"));
+    let unsafe_pragma =
+        action == rusqlite::ffi::SQLITE_PRAGMA && sqlite_identifier_eq(arg1, b"writable_schema");
+    let attached_schema = matches!(
+        action,
+        rusqlite::ffi::SQLITE_ATTACH | rusqlite::ffi::SQLITE_DETACH
+    );
+
+    if trigger_ddl
+        || protected_memory_write
+        || protected_memory_schema
+        || unsafe_pragma
+        || attached_schema
+    {
+        rusqlite::ffi::SQLITE_DENY
+    } else {
+        rusqlite::ffi::SQLITE_OK
+    }
+}
+
+pub(crate) fn install_reserved_reference_authorizer(
+    conn: &Connection,
+    authorization: Option<&ReservedReferenceWriteFlag>,
+) -> rusqlite::Result<()> {
+    let state = authorization
+        .map(|flag| Arc::as_ptr(flag).cast_mut().cast::<c_void>())
+        .unwrap_or(std::ptr::null_mut());
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_set_authorizer(
+            conn.handle(),
+            Some(reserved_reference_authorizer),
+            state,
+        )
+    };
+    if result == rusqlite::ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(result),
+            Some("install reserved-reference connection authorizer".to_string()),
+        ))
+    }
 }
 
 pub(crate) fn ensure_reserved_reference_write_guard(conn: &Connection) -> Result<(), MemoryError> {

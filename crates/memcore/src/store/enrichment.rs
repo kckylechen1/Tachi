@@ -57,7 +57,9 @@ impl MemoryStore {
         };
 
         let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("update_with_revision", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::update_with_revision(
                 &mut self.conn,
                 id,
@@ -108,17 +110,23 @@ impl MemoryStore {
         stage: &str,
         error: &str,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::record_enrichment_failure(&self.conn, id, stage, error)
     }
 
     /// Set write-side keyword enrichment status (`enriched`/`pending`/`skipped`/`failed`).
     pub fn set_keyword_enrichment_status(&self, id: &str, status: &str) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::set_keyword_enrichment_status(&self.conn, id, status)
     }
 
     /// Stamp `keywords_status=pending` only when current status is absent or already
     /// pending — never overwrite a terminal status (`enriched`/`skipped`/`failed`).
     pub fn set_keyword_enrichment_pending_if_unset(&self, id: &str) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::set_keyword_enrichment_pending_if_unset(&self.conn, id)
     }
 
@@ -137,6 +145,8 @@ impl MemoryStore {
         let now = now_utc_iso();
         let max_attempts = ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS;
         let limit = limit.min(256) as i64;
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let tx = self.conn.transaction()?;
 
         let rows = {

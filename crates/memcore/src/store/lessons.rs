@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use rusqlite::TransactionBehavior;
 use serde_json::json;
 
-use crate::{error::MemoryError, MemoryStore};
+use crate::{db, error::MemoryError, MemoryStore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LessonDedupUpdate {
@@ -71,6 +71,8 @@ impl MemoryStore {
             return Ok(None);
         }
 
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

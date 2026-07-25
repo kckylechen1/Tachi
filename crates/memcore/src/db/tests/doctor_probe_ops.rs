@@ -18,10 +18,12 @@ fn table_exists_true_for_present_table_false_for_missing() {
 fn table_exists_propagates_a_real_query_error_not_false() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("locked.db");
-    let locker = open_raw(&path).unwrap();
-    locker
-        .execute_batch("CREATE TABLE memories (id TEXT);")
+    let seed = Connection::open(&path).unwrap();
+    seed.execute_batch("CREATE TABLE memories (id TEXT);")
         .unwrap();
+    drop(seed);
+
+    let locker = open_raw(&path).unwrap();
 
     // Open the reader BEFORE taking the EXCLUSIVE lock: connection open runs
     // the auto-extension load, which itself needs a read of the database — if
