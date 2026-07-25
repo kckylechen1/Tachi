@@ -37,8 +37,9 @@ impl MemoryServer {
     /// caller, the same silent-cross-project-fallback disease class #1120
     /// exists to close. Named-project routing (`with_named_project_store*` /
     /// `resolve_named_project_db_path`) opens by path per call and does not
-    /// depend on that slot at all — `with_path_store` below is enough to force
-    /// the DB file (and its schema) into existence.
+    /// depend on that slot at all. Fresh DBs are initialized through the
+    /// reversible precommit below; preexisting DBs retain `with_path_store`
+    /// so the server's configured migration authority remains authoritative.
     pub(crate) fn resolve_or_register_workspace_root(
         &self,
         raw_root: &str,
@@ -99,23 +100,29 @@ impl MemoryServer {
         // absence. A successful lookup must resolve to this exact repo-local
         // DB; ambiguity, manifest failure, or a same-name standalone store is
         // an error, never a reason to create/open another DB.
-        if preflight_project_identity(&db_path, &git_root, &project_name)? {
+        let already_resolved = preflight_project_identity(&db_path, &git_root, &project_name)?;
+        let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+        if !already_resolved {
+            if let Err(error) = precommit.reserve_db() {
+                return Err(precommit.abort(error));
+            }
+        }
+        if let Err(error) = precommit.ensure_alias(&git_root, &project_name) {
+            return Err(precommit.abort(error));
+        }
+        if already_resolved {
+            precommit.commit();
             return Ok(project_name);
         }
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "create project db parent directory at {}: {e}",
-                    parent.display()
-                )
-            })?;
+        let open_result = if precommit.created_db {
+            precommit.open_db()
+        } else {
+            self.with_path_store(&db_path, |_store| Ok(()))
+                .map_err(|error| format!("initialize project DB at {}: {error}", db_path.display()))
+        };
+        if let Err(error) = open_result {
+            return Err(precommit.abort(error));
         }
-        // Force the DB file (and its schema) into existence via the same
-        // per-path attach cache every named-project call goes through — see
-        // the doc comment above for why this, and not `activate_project_db`.
-        self.with_path_store(&db_path, |_store| Ok(()))
-            .map_err(|e| format!("initialize project db at {}: {e}", db_path.display()))?;
-
         // Primary registration: write a manifest entry so
         // `resolve_named_project_db_path` can find this DB by name
         // independent of the Plan C symlink below — the manifest-recorded
@@ -125,53 +132,19 @@ impl MemoryServer {
         // finding [2], #1207: `ensure_plan_c_symlink` is a no-op `Skipped` on
         // non-Unix hosts, so a project registered only via the symlink could
         // never be reopened there).
-        register_repo_local_manifest_entry(&db_path, &project_name)?;
-
-        // Secondary/legacy addressing: the `~/.tachi/projects/<name>/`
-        // symlink alias. `ensure_plan_c_symlink` is a no-op `Skipped` on
-        // non-Unix hosts (see its own cfg-gated definitions in
-        // `path_utils/symlink.rs`) — safe to call unconditionally here,
-        // unlike `handle_tachi_init_project_db` below, which surfaces the
-        // platform split in its caller-facing note.
-        match crate::path_utils::ensure_plan_c_symlink(&db_path, &git_root) {
-            crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                return Err(format!(
-                    "Plan C alias symlink failed at {} for project '{}': {}; refusing auto-registration success",
-                    path.display(),
-                    project_name,
-                    error
-                ));
-            }
-            crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                return Err(issue.warning_message());
-            }
-            crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
-                return Err(issue.warning_message());
-            }
-            // Exhaustive on purpose (no `_` catch-all): a future new
-            // `PlanCLinkOutcome` variant must force a deliberate decision
-            // here about whether it needs its own warning, not silently fall
-            // into "nothing to log" the way a wildcard arm would.
-            crate::path_utils::PlanCLinkOutcome::AlreadyLinked
-            | crate::path_utils::PlanCLinkOutcome::Created(_)
-            | crate::path_utils::PlanCLinkOutcome::Skipped(_) => {}
+        let registration = register_repo_local_manifest_entry_then(&db_path, &project_name, || {
+            Self::resolve_named_project_db_path(&project_name).map_err(|err| {
+                format!(
+                    "project db was created at {} but is not resolvable by its derived name \
+                         '{project_name}': {err}",
+                    db_path.display()
+                )
+            })
+        });
+        if let Err(error) = registration {
+            return Err(precommit.abort(error));
         }
-
-        // The whole point of auto-registration is a project name the caller
-        // can immediately reopen (review finding [2], #1207: "initialization
-        // returns a project name that cannot be reopened" is a bug). Verify
-        // reachability through the exact resolver every subsequent
-        // named-project call uses, and fail loudly instead of returning a
-        // name that silently cannot be reopened (e.g. the manifest write
-        // above also failed for some reason on top of a non-Unix/no-symlink
-        // host).
-        Self::resolve_named_project_db_path(&project_name).map_err(|err| {
-            format!(
-                "project db was created at {} but is not resolvable by its derived name \
-                 '{project_name}': {err}",
-                db_path.display()
-            )
-        })?;
+        precommit.commit();
 
         // Loud by design (#1120): first-contact auto-registration is a
         // meaningful state change (a new DB file on disk) and must be visible
@@ -217,6 +190,53 @@ pub(crate) fn register_repo_local_manifest_entry(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     with_manifest_registration_file_lock(&manifest_path, || {
         register_repo_local_manifest_entry_locked(db_path, project_name, &manifest_path)
+    })
+}
+
+fn register_repo_local_manifest_entry_then<T>(
+    db_path: &std::path::Path,
+    project_name: &str,
+    after_registration: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
+    let _process_guard = manifest_registration_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    with_manifest_registration_file_lock(&manifest_path, || {
+        let preimage = match std::fs::read(&manifest_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "read manifest preimage {}: {error}",
+                    manifest_path.display()
+                ));
+            }
+        };
+        register_repo_local_manifest_entry_locked(db_path, project_name, &manifest_path)?;
+        match after_registration() {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let rollback = match preimage {
+                    Some(bytes) => {
+                        crate::utils::write_owner_only_file_atomic(&manifest_path, &bytes)
+                            .map_err(|rollback| rollback.to_string())
+                    }
+                    None => match std::fs::remove_file(&manifest_path) {
+                        Ok(()) => Ok(()),
+                        Err(rollback) if rollback.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(rollback) => Err(rollback.to_string()),
+                    },
+                };
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(format!(
+                        "{error}; manifest rollback at {} also failed: {rollback}",
+                        manifest_path.display()
+                    )),
+                }
+            }
+        }
     })
 }
 
@@ -316,6 +336,249 @@ fn register_repo_local_manifest_entry_locked(
     manifest
         .save(manifest_path)
         .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()))
+}
+
+struct ProjectDbPrecommit {
+    db_path: PathBuf,
+    created_db: bool,
+    created_alias: Option<PathBuf>,
+    created_dirs: Vec<PathBuf>,
+    db_artifacts_preexisting: Vec<(PathBuf, bool)>,
+    finished: bool,
+}
+
+impl ProjectDbPrecommit {
+    fn new(db_path: PathBuf) -> Self {
+        let db_artifacts_preexisting = sqlite_owned_paths(&db_path)
+            .into_iter()
+            .map(|path| {
+                let exists = std::fs::symlink_metadata(&path).is_ok();
+                (path, exists)
+            })
+            .collect();
+        Self {
+            db_path,
+            created_db: false,
+            created_alias: None,
+            created_dirs: Vec::new(),
+            db_artifacts_preexisting,
+            finished: false,
+        }
+    }
+
+    fn ensure_alias(
+        &mut self,
+        project_root: &std::path::Path,
+        project_name: &str,
+    ) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            let alias = crate::path_utils::plan_c_alias_db_for_root(project_root)
+                .map_err(|error| format!("resolve Plan C alias for '{project_name}': {error}"))?;
+            let parent = alias.parent().ok_or_else(|| {
+                format!("Plan C alias {} has no parent directory", alias.display())
+            })?;
+            create_directories_tracked(parent, &mut self.created_dirs).map_err(|error| {
+                format!(
+                    "create Plan C alias parent directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        match crate::path_utils::ensure_plan_c_symlink(&self.db_path, project_root) {
+            crate::path_utils::PlanCLinkOutcome::Created(path) => {
+                self.created_alias = Some(path);
+                Ok(())
+            }
+            crate::path_utils::PlanCLinkOutcome::AlreadyLinked
+            | crate::path_utils::PlanCLinkOutcome::Skipped(_) => Ok(()),
+            crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
+                Err(issue.warning_message())
+            }
+            crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
+                Err(issue.warning_message())
+            }
+            crate::path_utils::PlanCLinkOutcome::Failed { path, error } => Err(format!(
+                "Plan C alias symlink failed at {} for project '{}': {}; refusing initialization success",
+                path.display(),
+                project_name,
+                error
+            )),
+        }
+    }
+
+    fn reserve_db(&mut self) -> Result<(), String> {
+        let parent = self.db_path.parent().ok_or_else(|| {
+            format!(
+                "project DB path {} has no parent directory",
+                self.db_path.display()
+            )
+        })?;
+        create_directories_tracked(parent, &mut self.created_dirs).map_err(|error| {
+            format!(
+                "create project DB parent directory {}: {error}",
+                parent.display()
+            )
+        })?;
+
+        if !self.db_path.exists() {
+            std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&self.db_path)
+                .map_err(|error| {
+                    format!(
+                        "atomically reserve project DB at {}: {error}",
+                        self.db_path.display()
+                    )
+                })?;
+            self.created_db = true;
+        }
+
+        Ok(())
+    }
+
+    fn open_db(&self) -> Result<(), String> {
+        let db_path = self
+            .db_path
+            .to_str()
+            .ok_or_else(|| format!("project DB path is not UTF-8: {}", self.db_path.display()))?;
+        drop(memcore::MemoryStore::open(db_path).map_err(|error| {
+            format!(
+                "initialize project DB at {}: {error}",
+                self.db_path.display()
+            )
+        })?);
+        Ok(())
+    }
+
+    fn commit(mut self) {
+        self.finished = true;
+    }
+
+    fn abort(mut self, error: String) -> String {
+        let rollback_errors = self.rollback();
+        self.finished = true;
+        if rollback_errors.is_empty() {
+            error
+        } else {
+            format!(
+                "{error}; rollback also reported: {}",
+                rollback_errors.join("; ")
+            )
+        }
+    }
+
+    fn rollback(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Some(alias) = self.created_alias.take() {
+            match std::fs::read_link(&alias) {
+                Ok(target) if target == self.db_path => {
+                    if let Err(error) = std::fs::remove_file(&alias) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            errors
+                                .push(format!("remove created alias {}: {error}", alias.display()));
+                        }
+                    }
+                }
+                Ok(target) => errors.push(format!(
+                    "created alias {} changed target to {}; left untouched",
+                    alias.display(),
+                    target.display()
+                )),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => errors.push(format!(
+                    "inspect created alias {} before rollback: {error}",
+                    alias.display()
+                )),
+            }
+        }
+
+        if self.created_db {
+            for (path, preexisting) in &self.db_artifacts_preexisting {
+                if *preexisting {
+                    continue;
+                }
+                if let Err(error) = std::fs::remove_file(path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        errors.push(format!(
+                            "remove created DB artifact {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            self.created_db = false;
+        }
+
+        for path in self.created_dirs.drain(..).rev() {
+            if let Err(error) = std::fs::remove_dir(&path) {
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) {
+                    errors.push(format!(
+                        "remove created directory {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        errors
+    }
+}
+
+impl Drop for ProjectDbPrecommit {
+    fn drop(&mut self) {
+        if !self.finished {
+            for error in self.rollback() {
+                eprintln!("[project-db] rollback failure: {error}");
+            }
+        }
+    }
+}
+
+fn create_directories_tracked(
+    path: &std::path::Path,
+    created: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        create_directories_tracked(parent, created)?;
+    }
+    match std::fs::create_dir(path) {
+        Ok(()) => {
+            created.push(path.to_path_buf());
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn sqlite_owned_paths(db_path: &std::path::Path) -> Vec<PathBuf> {
+    let mut wal = db_path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = db_path.as_os_str().to_os_string();
+    shm.push("-shm");
+    let mut journal = db_path.as_os_str().to_os_string();
+    journal.push("-journal");
+    let mut marker = db_path.as_os_str().to_os_string();
+    marker.push(".migration-marker");
+    let mut paths = vec![
+        PathBuf::from(wal),
+        PathBuf::from(shm),
+        PathBuf::from(journal),
+        PathBuf::from(marker),
+        db_path.to_path_buf(),
+    ];
+    if db_path.file_name().and_then(|name| name.to_str()) == Some(memcore::MEMORY_DB_FILENAME) {
+        paths.push(db_path.with_file_name(memcore::LEGACY_MEMORY_DB_FILENAME));
+    }
+    paths
 }
 
 /// Prove that every existing identity source for `project_name` points to the
@@ -420,54 +683,33 @@ pub(crate) async fn handle_tachi_init_project_db(
     let db_path = crate::path_utils::resolve_project_db_path(&project_root, &rel)?;
     let existed = db_path.exists();
     preflight_project_identity(&db_path, &project_root, &project_name)?;
-    if let Some(parent) = db_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("create project db dir: {e}"))?;
+    let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+    if let Err(error) = precommit.reserve_db() {
+        return Err(precommit.abort(error));
     }
-
-    // Hot-activate the project DB on the running server (no restart needed)
-    let was_new_activation = server.activate_project_db(db_path.clone())?;
-
-    register_repo_local_manifest_entry(&db_path, &project_name)?;
-
-    let mut plan_c_note: Option<String> = None;
-    if let Some(safe_name) = crate::path_utils::plan_c_dir_name_from_root(&project_root) {
-        let global_link = crate::path_utils::plan_c_global_db_path(&safe_name);
-        #[cfg(unix)]
-        {
-            match crate::path_utils::ensure_plan_c_symlink(&db_path, &project_root) {
-                crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                    return Err(issue.warning_message());
-                }
-                crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
-                    return Err(issue.warning_message());
-                }
-                crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                    return Err(format!(
-                        "Plan C global symlink failed at {}: {}; refusing initialized success",
-                        path.display(),
-                        error
-                    ));
-                }
-                _ => {
-                    plan_c_note = Some(format!(
-                        "Global symlink: {} -> {}",
-                        global_link.display(),
-                        db_path.display()
-                    ));
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = safe_name;
-            plan_c_note = Some(
-                "Plan C global symlink skipped on non-Unix hosts; use db_path directly."
-                    .to_string(),
-            );
-        }
+    if let Err(error) = precommit.ensure_alias(&project_root, &project_name) {
+        return Err(precommit.abort(error));
     }
+    // Manifest registration remains rollback-capable until hot activation
+    // succeeds. Activation is the final project-state mutation.
+    let activation = register_repo_local_manifest_entry_then(&db_path, &project_name, || {
+        server.activate_project_db(db_path.clone())
+    });
+    let was_new_activation = match activation {
+        Ok(value) => value,
+        Err(error) => return Err(precommit.abort(error)),
+    };
+    precommit.commit();
+
+    let plan_c_note = if cfg!(unix) {
+        Some(format!(
+            "Global symlink: {} -> {}",
+            crate::path_utils::plan_c_global_db_path(&project_name).display(),
+            db_path.display()
+        ))
+    } else {
+        Some("Plan C global symlink skipped on non-Unix hosts; use db_path directly.".to_string())
+    };
 
     let activation_note = if was_new_activation {
         "Project DB is now active on this server instance. No restart needed."
@@ -486,7 +728,7 @@ pub(crate) async fn handle_tachi_init_project_db(
         | crate::path_utils::PlanCAliasInspection::MatchingSymlink
         | crate::path_utils::PlanCAliasInspection::Integrity(_) => None,
     };
-    serde_json::to_string(&json!({
+    Ok(serde_json::to_string(&json!({
         "initialized": true,
         "created": !existed,
         "active": true,
@@ -498,7 +740,7 @@ pub(crate) async fn handle_tachi_init_project_db(
         "plan_c_split_brain": plan_c_split_brain,
         "note": note,
     }))
-    .map_err(|e| format!("serialize: {e}"))
+    .expect("serializing a serde_json::Value cannot fail"))
 }
 
 #[cfg(test)]
@@ -529,6 +771,16 @@ mod resolve_or_register_workspace_root_tests {
         MemoryServer::new(global_db, None).expect("construct isolated server")
     }
 
+    #[cfg(unix)]
+    fn install_permission_denied_symlink_hook() -> crate::path_utils::PlanCSymlinkHookGuard {
+        crate::path_utils::install_plan_c_symlink_hook_for_test(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected Plan C symlink permission denial",
+            ))
+        })
+    }
+
     #[test]
     fn rejects_relative_path() {
         with_test_home(|root| {
@@ -555,6 +807,125 @@ mod resolve_or_register_workspace_root_tests {
                 err.contains("does not exist"),
                 "expected a does-not-exist error, got: {err}"
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_auto_permission_failure_leaves_no_project_state() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Auto-Permission-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let _hook = install_permission_denied_symlink_hook();
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("symlink permission failure must refuse auto-registration");
+
+            assert!(error.contains("permission denial"), "{error}");
+            assert!(!db_path.exists(), "failed precommit must remove its DB");
+            assert!(
+                !repo.join(".tachi").exists(),
+                "failed precommit must remove its DB parent"
+            );
+            assert!(
+                !manifest.exists(),
+                "failed precommit must not leave a manifest"
+            );
+            assert_eq!(server.project_db_path_buf(), None);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_auto_eexist_wrong_target_is_rollback_safe_and_retry_refuses() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Auto-Wrong-Target-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let user_target = root.join("user-owned.db");
+            std::fs::write(&user_target, b"user-owned").expect("user target");
+            let hook_target = user_target.clone();
+            let _hook = crate::path_utils::install_plan_c_symlink_hook_for_test(move |alias| {
+                std::os::unix::fs::symlink(&hook_target, alias)
+            });
+
+            let first = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("racing wrong-target alias must refuse auto-registration");
+            assert!(first.contains("Plan C alias integrity failure"), "{first}");
+            assert!(!db_path.exists(), "failed precommit must remove its DB");
+            assert!(!repo.join(".tachi").exists(), "DB parent must not remain");
+            assert!(!manifest.exists(), "manifest must not remain");
+            assert_eq!(std::fs::read(&user_target).unwrap(), b"user-owned");
+            drop(_hook);
+
+            let retry = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("persistent wrong-target alias must refuse retry");
+            assert!(retry.contains("Plan C alias integrity failure"), "{retry}");
+            assert!(!db_path.exists());
+            assert!(!manifest.exists());
+            assert_eq!(std::fs::read(&user_target).unwrap(), b"user-owned");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_auto_accepts_matching_concurrent_symlink() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Auto-Matching-Race-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let hook_db = db_path.clone();
+            let _hook = crate::path_utils::install_plan_c_symlink_hook_for_test(move |alias| {
+                std::os::unix::fs::symlink(&hook_db, alias)
+            });
+
+            let project = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("matching concurrent alias must be accepted");
+
+            assert!(db_path.exists());
+            assert!(crate::path_utils::plan_c_global_db_path(&project).is_symlink());
+            assert!(crate::path_utils::tachi_home()
+                .join("manifest.json")
+                .exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_auto_already_resolved_still_requires_alias_confirmation() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Auto-Resolved-Alias-Gate-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let project = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("initial registration");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let alias = crate::path_utils::plan_c_global_db_path(&project);
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let db_before = std::fs::read(&db_path).expect("DB preimage");
+            let manifest_before = std::fs::read(&manifest).expect("manifest preimage");
+            std::fs::remove_file(&alias).expect("remove alias to exercise recreation gate");
+            let _hook = install_permission_denied_symlink_hook();
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("resolved project must not bypass alias confirmation");
+
+            assert!(error.contains("permission denial"), "{error}");
+            assert_eq!(std::fs::read(&db_path).unwrap(), db_before);
+            assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+            assert!(!alias.exists());
         });
     }
 
@@ -909,12 +1280,18 @@ mod resolve_or_register_workspace_root_tests {
             let server = make_server(root);
             let repo = root.join("Ambiguous-Alias-Repo");
             std::fs::create_dir_all(repo.join(".git")).expect("repo");
-            let current = crate::path_utils::plan_c_dir_name_from_root(&repo)
-                .expect("current identity");
+            let current =
+                crate::path_utils::plan_c_dir_name_from_root(&repo).expect("current identity");
             let previous = crate::path_utils::plan_c_previous_dir_name_from_root(&repo)
                 .expect("previous identity");
-            assert_ne!(current, previous, "fixture needs distinct alias generations");
-            for (name, contents) in [(&current, b"current".as_slice()), (&previous, b"previous".as_slice())] {
+            assert_ne!(
+                current, previous,
+                "fixture needs distinct alias generations"
+            );
+            for (name, contents) in [
+                (&current, b"current".as_slice()),
+                (&previous, b"previous".as_slice()),
+            ] {
                 let alias = crate::path_utils::plan_c_global_db_path(name);
                 std::fs::create_dir_all(alias.parent().unwrap()).expect("alias parent");
                 std::fs::write(alias, contents).expect("divergent alias DB");

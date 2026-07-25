@@ -21,6 +21,8 @@ pub(crate) use named::{list_named_projects, named_project_for_db_path, named_pro
 pub(crate) use symlink::{
     ensure_plan_c_symlink, inspect_plan_c_alias, inspect_plan_c_alias_for_local_db,
 };
+#[cfg(all(test, unix))]
+pub(crate) use symlink::{install_plan_c_symlink_hook_for_test, PlanCSymlinkHookGuard};
 pub(crate) use types::{
     PlanCAliasInspection, PlanCAliasIntegrity, PlanCLinkOutcome, PlanCSplitBrain,
 };

@@ -3,22 +3,26 @@ use super::alias::{
 };
 use super::home::tachi_home;
 use super::types::{
-    active_memory_count, canonical_paths_equal, file_len, same_file_identity,
-    PlanCAliasInspection, PlanCAliasIntegrity, PlanCLinkOutcome, PlanCSplitBrain,
+    active_memory_count, canonical_paths_equal, file_len, same_file_identity, PlanCAliasInspection,
+    PlanCAliasIntegrity, PlanCLinkOutcome, PlanCSplitBrain,
 };
 use std::path::Path;
 
 /// Global Plan C symlink for a repo-local project DB (Unix only).
 #[cfg(unix)]
 pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> PlanCLinkOutcome {
-    ensure_plan_c_symlink_with_hook(local_db, project_root, |_| {})
+    ensure_plan_c_symlink_with_hook(local_db, project_root, |_path| {
+        #[cfg(test)]
+        run_plan_c_symlink_hook_for_test(_path)?;
+        Ok(())
+    })
 }
 
 #[cfg(unix)]
 fn ensure_plan_c_symlink_with_hook(
     local_db: &Path,
     project_root: &Path,
-    before_symlink: impl FnOnce(&Path),
+    before_symlink: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> PlanCLinkOutcome {
     let projects_root = tachi_home().join("projects");
     if local_db.starts_with(&projects_root) {
@@ -49,8 +53,9 @@ fn ensure_plan_c_symlink_with_hook(
             error: format!("failed to create Plan C project directory: {error}"),
         };
     }
-    before_symlink(&global_link);
-    if let Err(error) = std::os::unix::fs::symlink(local_db, &global_link) {
+    let symlink_result = before_symlink(&global_link)
+        .and_then(|()| std::os::unix::fs::symlink(local_db, &global_link));
+    if let Err(error) = symlink_result {
         tracing::warn!(error = %error, path = %global_link.display(), "Failed to create Plan C symlink; re-inspecting alias state");
         return match inspect_plan_c_alias(local_db, project_root) {
             PlanCAliasInspection::MatchingSymlink => PlanCLinkOutcome::AlreadyLinked,
@@ -73,7 +78,54 @@ pub(super) fn ensure_plan_c_symlink_with_test_hook(
     project_root: &Path,
     before_symlink: impl FnOnce(&Path),
 ) -> PlanCLinkOutcome {
-    ensure_plan_c_symlink_with_hook(local_db, project_root, before_symlink)
+    ensure_plan_c_symlink_with_hook(local_db, project_root, |path| {
+        before_symlink(path);
+        Ok(())
+    })
+}
+
+#[cfg(all(test, unix))]
+type PlanCSymlinkHook = Box<dyn FnOnce(&Path) -> std::io::Result<()>>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static PLAN_C_SYMLINK_HOOK: std::cell::RefCell<Option<PlanCSymlinkHook>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(all(test, unix))]
+fn run_plan_c_symlink_hook_for_test(path: &Path) -> std::io::Result<()> {
+    let hook = PLAN_C_SYMLINK_HOOK.with(|slot| slot.borrow_mut().take());
+    match hook {
+        Some(hook) => hook(path),
+        None => Ok(()),
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) struct PlanCSymlinkHookGuard;
+
+#[cfg(all(test, unix))]
+impl Drop for PlanCSymlinkHookGuard {
+    fn drop(&mut self) {
+        PLAN_C_SYMLINK_HOOK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn install_plan_c_symlink_hook_for_test(
+    hook: impl FnOnce(&Path) -> std::io::Result<()> + 'static,
+) -> PlanCSymlinkHookGuard {
+    PLAN_C_SYMLINK_HOOK.with(|slot| {
+        let previous = slot.borrow_mut().replace(Box::new(hook));
+        assert!(
+            previous.is_none(),
+            "Plan C symlink test hook already installed"
+        );
+    });
+    PlanCSymlinkHookGuard
 }
 
 #[cfg(not(unix))]
@@ -88,10 +140,7 @@ pub(crate) fn inspect_plan_c_alias_for_local_db(local_db: &Path) -> PlanCAliasIn
     inspect_plan_c_alias(local_db, &project_root)
 }
 
-pub(crate) fn inspect_plan_c_alias(
-    local_db: &Path,
-    project_root: &Path,
-) -> PlanCAliasInspection {
+pub(crate) fn inspect_plan_c_alias(local_db: &Path, project_root: &Path) -> PlanCAliasInspection {
     let projects_root = tachi_home().join("projects");
     if local_db.starts_with(&projects_root) {
         return PlanCAliasInspection::Absent;
@@ -122,13 +171,11 @@ pub(crate) fn inspect_plan_c_alias(
         let target = match std::fs::read_link(&alias_db) {
             Ok(target) => target,
             Err(error) => {
-                return PlanCAliasInspection::Integrity(
-                    PlanCAliasIntegrity::SymlinkUnresolvable {
-                        alias_db,
-                        expected_db: local_db.to_path_buf(),
-                        error: error.to_string(),
-                    },
-                );
+                return PlanCAliasInspection::Integrity(PlanCAliasIntegrity::SymlinkUnresolvable {
+                    alias_db,
+                    expected_db: local_db.to_path_buf(),
+                    error: error.to_string(),
+                });
             }
         };
         if target == local_db || canonical_paths_equal(&alias_db, local_db) {
@@ -137,13 +184,11 @@ pub(crate) fn inspect_plan_c_alias(
         let actual_db = match std::fs::canonicalize(&alias_db) {
             Ok(path) => path,
             Err(error) => {
-                return PlanCAliasInspection::Integrity(
-                    PlanCAliasIntegrity::SymlinkUnresolvable {
-                        alias_db,
-                        expected_db: local_db.to_path_buf(),
-                        error: error.to_string(),
-                    },
-                );
+                return PlanCAliasInspection::Integrity(PlanCAliasIntegrity::SymlinkUnresolvable {
+                    alias_db,
+                    expected_db: local_db.to_path_buf(),
+                    error: error.to_string(),
+                });
             }
         };
         return PlanCAliasInspection::Integrity(PlanCAliasIntegrity::WrongTarget {
