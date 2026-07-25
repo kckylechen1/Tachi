@@ -116,6 +116,15 @@ pub(crate) struct TestServer {
     db_path: std::path::PathBuf,
 }
 
+impl TestServer {
+    pub(crate) fn replace_llm(&mut self, llm: tachi_llm::LlmClient) {
+        self.server
+            .as_mut()
+            .expect("TestServer used after its inner server was taken")
+            .llm = std::sync::Arc::new(llm);
+    }
+}
+
 impl std::ops::Deref for TestServer {
     type Target = MemoryServer;
     fn deref(&self) -> &Self::Target {

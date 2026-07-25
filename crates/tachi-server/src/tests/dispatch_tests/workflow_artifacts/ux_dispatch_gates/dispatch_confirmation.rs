@@ -11,6 +11,7 @@ async fn tachi_task_dispatch_requires_leader_confirmation_for_blocked_issue_flow
     let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
     let server = make_server();
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
     let flow_id = "flow_20260614T000001Z_blocked_dispatch_gate";
     let issue = crate::task_lifecycle::IssueSnapshot {
         repo: "kckylechen1/tachi".to_string(),
