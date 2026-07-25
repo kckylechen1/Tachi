@@ -351,10 +351,11 @@ fn read_run(
         Err(err) => return RunOutcome::ClaimsUnavailable(err),
     };
     let status = match crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id) {
-        Some(value) => RunSourceOutcome::Ok(value),
-        None => RunSourceOutcome::Unavailable(format!(
+        Ok(Some(value)) => RunSourceOutcome::Ok(value),
+        Ok(None) => RunSourceOutcome::Unavailable(format!(
             "run_dir/status.json not found for dispatch_id {dispatch_id}"
         )),
+        Err(error) => RunSourceOutcome::Unavailable(error),
     };
     let recent_events = match &status {
         RunSourceOutcome::Ok(value) => read_recent_progress_events(value),

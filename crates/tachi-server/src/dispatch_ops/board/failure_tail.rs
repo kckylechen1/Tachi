@@ -1,5 +1,3 @@
-use std::io::ErrorKind;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// tachi#1173 item 7: bounded, ANSI-free tail of a dispatch's terminal
@@ -13,15 +11,23 @@ use std::path::Path;
 /// `<run_dir>/result.md` when no such line/field exists. Returns `None` when
 /// neither source is available.
 const FAILURE_TAIL_MAX_BYTES: usize = 2048;
-const FAILURE_TAIL_SOURCE_READ_MAX_BYTES: u64 = 16 * 1024;
+const FAILURE_PROGRESS_MAX_BYTES: usize = 1024 * 1024;
+const FAILURE_RESULT_MAX_BYTES: usize = 1024 * 1024;
 
-pub(crate) fn read_failure_tail(run_dir: &Path) -> Result<Option<String>, String> {
-    let raw = match read_progress_output_tail(run_dir)? {
-        Some(raw) => raw,
-        None => match read_bounded_tail(&run_dir.join("result.md"))? {
-            Some(raw) => raw,
-            None => return Ok(None),
-        },
+pub(crate) fn read_failure_tail(
+    runs_root: &Path,
+    run_dir: &Path,
+) -> Result<Option<String>, String> {
+    let raw = match read_progress_output_tail(runs_root, run_dir)? {
+        Some(raw) => Some(raw),
+        None => crate::dispatch_ops::read_text_file_within(
+            runs_root,
+            &run_dir.join("result.md"),
+            FAILURE_RESULT_MAX_BYTES,
+        )?,
+    };
+    let Some(raw) = raw else {
+        return Ok(None);
     };
     let stripped = strip_ansi_escapes(&raw);
     Ok(Some(tail_at_char_boundary(
@@ -30,8 +36,13 @@ pub(crate) fn read_failure_tail(run_dir: &Path) -> Result<Option<String>, String
     )))
 }
 
-fn read_progress_output_tail(run_dir: &Path) -> Result<Option<String>, String> {
-    let Some(content) = read_bounded_tail(&run_dir.join("progress.jsonl"))? else {
+fn read_progress_output_tail(runs_root: &Path, run_dir: &Path) -> Result<Option<String>, String> {
+    let Some(content) = crate::dispatch_ops::read_text_file_within(
+        runs_root,
+        &run_dir.join("progress.jsonl"),
+        FAILURE_PROGRESS_MAX_BYTES,
+    )?
+    else {
         return Ok(None);
     };
     Ok(content.lines().rev().find_map(|line| {
@@ -42,33 +53,6 @@ fn read_progress_output_tail(run_dir: &Path) -> Result<Option<String>, String> {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     }))
-}
-
-fn read_bounded_tail(path: &Path) -> Result<Option<String>, String> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("inspect failure tail {}: {error}", path.display())),
-    };
-    if !metadata.file_type().is_file() {
-        return Err(format!(
-            "refuse non-regular failure tail {}",
-            path.display()
-        ));
-    }
-
-    let mut file = std::fs::File::open(path)
-        .map_err(|error| format!("open failure tail {}: {error}", path.display()))?;
-    let start = metadata
-        .len()
-        .saturating_sub(FAILURE_TAIL_SOURCE_READ_MAX_BYTES);
-    file.seek(SeekFrom::Start(start))
-        .map_err(|error| format!("seek failure tail {}: {error}", path.display()))?;
-    let mut raw = Vec::new();
-    file.take(FAILURE_TAIL_SOURCE_READ_MAX_BYTES)
-        .read_to_end(&mut raw)
-        .map_err(|error| format!("read failure tail {}: {error}", path.display()))?;
-    Ok(Some(String::from_utf8_lossy(&raw).into_owned()))
 }
 
 /// Returns the last `max_bytes` bytes of `s`, backed off to the nearest char
@@ -212,8 +196,8 @@ mod tests {
         .expect("write progress.jsonl");
         std::fs::write(run_dir.join("result.md"), "should not be used").expect("write result.md");
 
-        let tail = read_failure_tail(run_dir)
-            .expect("read failure tail")
+        let tail = read_failure_tail(run_dir, run_dir)
+            .expect("failure-tail read")
             .expect("failure tail");
         assert_eq!(tail, "FAILED: exit 1");
         assert!(!tail.contains('\u{1b}'));
@@ -229,79 +213,15 @@ mod tests {
         )
         .expect("write result.md");
 
-        let tail = read_failure_tail(run_dir)
-            .expect("read failure tail")
+        let tail = read_failure_tail(run_dir, run_dir)
+            .expect("failure-tail read")
             .expect("failure tail");
         assert!(tail.contains("FAILED: no output_tail"));
     }
 
     #[test]
-    fn read_failure_tail_reads_the_end_of_an_oversized_result_file() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let run_dir = tmp.path();
-        std::fs::write(
-            run_dir.join("result.md"),
-            format!("{}\nFAILED: final bounded tail", "prefix ".repeat(4_000)),
-        )
-        .expect("write oversized result.md");
-
-        let tail = read_failure_tail(run_dir)
-            .expect("read failure tail")
-            .expect("failure tail");
-        assert!(tail.contains("FAILED: final bounded tail"));
-        assert!(tail.len() <= FAILURE_TAIL_MAX_BYTES);
-    }
-
-    #[test]
-    fn read_failure_tail_keeps_terminal_text_when_tail_seek_splits_utf8_prefix() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let run_dir = tmp.path();
-        let suffix = "\nFAILED: valid terminal tail after multibyte prefix";
-        let mut content = format!("{}{}", "测".repeat(6_000), suffix);
-        while content.is_char_boundary(
-            content
-                .len()
-                .saturating_sub(FAILURE_TAIL_SOURCE_READ_MAX_BYTES as usize),
-        ) {
-            content.insert(0, 'x');
-        }
-        let start = content.len() - FAILURE_TAIL_SOURCE_READ_MAX_BYTES as usize;
-        assert!(
-            !content.is_char_boundary(start),
-            "fixture must force the bounded seek into a UTF-8 continuation byte"
-        );
-        std::fs::write(run_dir.join("result.md"), content).expect("write multibyte result.md");
-
-        let tail = read_failure_tail(run_dir)
-            .expect("read failure tail")
-            .expect("failure tail");
-        assert!(
-            tail.contains("FAILED: valid terminal tail after multibyte prefix"),
-            "a split prefix must not discard the valid terminal tail: {tail:?}"
-        );
-    }
-
-    #[test]
     fn read_failure_tail_none_when_nothing_present() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(read_failure_tail(tmp.path())
-            .expect("missing tails are not an error")
-            .is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn read_failure_tail_surfaces_symlinked_progress_file() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let outside = tmp.path().join("outside-progress.jsonl");
-        std::fs::write(&outside, "{}\n").expect("write outside progress");
-        std::os::unix::fs::symlink(&outside, tmp.path().join("progress.jsonl"))
-            .expect("symlink progress");
-
-        let error = read_failure_tail(tmp.path()).expect_err("symlinked progress must fail loudly");
-        assert!(
-            error.contains("refuse non-regular failure tail"),
-            "unexpected symlink error: {error}"
-        );
+        assert!(read_failure_tail(tmp.path(), tmp.path()).unwrap().is_none());
     }
 }

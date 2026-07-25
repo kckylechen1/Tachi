@@ -19,6 +19,8 @@ use tachi_dispatch::{
 };
 use tokio::process::Command;
 
+const WATCHDOG_STATUS_MAX_BYTES: usize = 1024 * 1024;
+
 pub(super) enum DispatchExecution {
     Subprocess(Command),
     NativeAcp(NativeAcpRunSpec),
@@ -497,8 +499,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // so complete/watchdog can still evaluate the #878-A predicate after exit.
         let status_path = workspace_dir_for_spawn.join("status.json");
         let (prev_status, final_status_read_error) =
-            match crate::dispatch_ops::read_text_file_within(&workspace_dir_for_spawn, &status_path)
-            {
+            match crate::dispatch_ops::read_text_file_within(
+                &workspace_dir_for_spawn,
+                &status_path,
+                WATCHDOG_STATUS_MAX_BYTES,
+            ) {
                 Ok(Some(raw)) => match serde_json::from_str::<Value>(&raw) {
                     Ok(status) => (Some(status), None),
                     Err(error) => (
@@ -779,8 +784,11 @@ fn terminal_status_state(
 fn resolved_completion_terminal_state(
     run_dir: &std::path::Path,
 ) -> Result<Option<&'static str>, String> {
-    let Some(raw_status) =
-        crate::dispatch_ops::read_text_file_within(run_dir, &run_dir.join("status.json"))?
+    let Some(raw_status) = crate::dispatch_ops::read_text_file_within(
+        run_dir,
+        &run_dir.join("status.json"),
+        WATCHDOG_STATUS_MAX_BYTES,
+    )?
     else {
         return Ok(None);
     };

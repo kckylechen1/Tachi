@@ -1,6 +1,6 @@
-use super::runs::read_bounded_json_file;
 use serde_json::{json, Value};
-use std::io::ErrorKind;
+
+const BOARD_FLOW_STATUS_MAX_BYTES: usize = 1024 * 1024;
 
 pub(super) struct FlowDispatchIds {
     pub(super) ids: Vec<String>,
@@ -19,18 +19,26 @@ pub(super) fn flow_dispatch_ids(
     }
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id)?;
     let status_path = run_dir.join("status.json");
-    match std::fs::symlink_metadata(&status_path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "inspect flow status {}: {error}",
-                status_path.display()
-            ));
-        }
-    }
-    let status = read_bounded_json_file(&status_path)
-        .map_err(|error| format!("read flow status {}: {error}", status_path.display()))?;
+    let runs_root = run_dir.parent().ok_or_else(|| {
+        format!(
+            "flow run directory {} has no containment root",
+            run_dir.display()
+        )
+    })?;
+    let Some(status_raw) = crate::dispatch_ops::read_text_file_within(
+        runs_root,
+        &status_path,
+        BOARD_FLOW_STATUS_MAX_BYTES,
+    )?
+    else {
+        return Ok(None);
+    };
+    let status: Value = serde_json::from_str(&status_raw).map_err(|error| {
+        format!(
+            "flow status artifact {} is not valid JSON: {error}",
+            status_path.display()
+        )
+    })?;
     let dispatch_ids = status
         .get("dispatch_ids")
         .and_then(Value::as_array)

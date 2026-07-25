@@ -11,6 +11,8 @@ use super::eval_record::{build_complete_eval_record, CompleteEvalRecord};
 use super::kanban::read_kanban_snapshot;
 use super::lessons::run_lesson_post_complete_hook;
 
+const COMPLETION_RECEIPT_STATUS_MAX_BYTES: usize = 1024 * 1024;
+
 /// The #878-A completion-predicate verdict, resolved ONCE per completion so the
 /// canonical outcome row and the kanban row agree on the same machine verdict
 /// (#773 Layer-2 ②). `verdict_tag` is the short predicate tag
@@ -23,6 +25,13 @@ struct CompletionVerdict {
     new_state: &'static str,
     reviewed_flag: bool,
     override_reason: Option<String>,
+}
+
+fn ensure_completion_artifact_read_support(dispatch_id: Option<&str>) -> Result<(), String> {
+    if dispatch_id.is_some_and(|dispatch_id| !dispatch_id.trim().is_empty()) {
+        crate::dispatch_ops::ensure_descriptor_reads_supported()?;
+    }
+    Ok(())
 }
 
 /// Persist the resolved close in the dispatch's own run receipt before
@@ -78,13 +87,17 @@ fn persist_resolved_completion_receipt_at(
     reviewed: bool,
 ) -> Result<(), String> {
     let status_path = run_dir.join("status.json");
-    let mut status = match crate::dispatch_ops::read_text_file_within(run_dir, &status_path)
-        .map_err(|error| {
-            format!(
-                "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+    let mut status = match crate::dispatch_ops::read_text_file_within(
+        run_dir,
+        &status_path,
+        COMPLETION_RECEIPT_STATUS_MAX_BYTES,
+    )
+    .map_err(|error| {
+        format!(
+            "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
                  {error}"
-            )
-        })? {
+        )
+    })? {
         Some(raw) => serde_json::from_str(&raw).map_err(|error| {
             format!(
                 "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
@@ -149,6 +162,24 @@ pub(crate) async fn handle_tachi_complete(
     //     marker, instead.
     project_explicit: bool,
 ) -> Result<String, String> {
+    // Dispatched completion reads its artifact contract. This is deliberately
+    // the first executable action so an unsupported platform refuses before
+    // eval/outcome/claim/receipt/kanban/continuity state can be mutated.
+    ensure_completion_artifact_read_support(params.dispatch_id.as_deref())?;
+    let resolved_flow_id = params
+        .dispatch_id
+        .as_deref()
+        .filter(|dispatch_id| !dispatch_id.is_empty())
+        .map(|dispatch_id| {
+            super::flow_link::resolve_flow_id_for_dispatch(
+                server,
+                dispatch_id,
+                params.flow_id.as_deref(),
+            )
+        })
+        .transpose()?
+        .flatten();
+
     let now = Utc::now();
     let date = now.format("%Y-%m-%d").to_string();
     let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -640,14 +671,7 @@ pub(crate) async fn handle_tachi_complete(
             .dispatch_id
             .as_deref()
             .filter(|dispatch_id| !dispatch_id.is_empty());
-        let flow_id = dispatch_id.and_then(|dispatch_id| {
-            super::flow_link::resolve_flow_id_for_dispatch(
-                server,
-                dispatch_id,
-                params.flow_id.as_deref(),
-            )
-        });
-        match (flow_id.as_deref(), dispatch_id) {
+        match (resolved_flow_id.as_deref(), dispatch_id) {
             (Some(flow_id), Some(dispatch_id)) => {
                 let completion_payload = json!({
                     "task_id": task_id.clone(),
@@ -791,6 +815,21 @@ pub(crate) async fn handle_tachi_complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_without_dispatch_id_does_not_require_descriptor_platform_support() {
+        ensure_completion_artifact_read_support(None).expect("manual completion has no run read");
+        ensure_completion_artifact_read_support(Some("   "))
+            .expect("blank dispatch id has no run read");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn dispatched_completion_refuses_before_handler_mutations_on_unsupported_platform() {
+        let error = ensure_completion_artifact_read_support(Some("dispatch-123"))
+            .expect_err("dispatched completion must require descriptor reads");
+        assert!(error.contains("unavailable on this platform"), "{error}");
+    }
 
     /// The receipt is the only source the watchdog can trust when the kanban
     /// projection disappears. A write failure therefore has to escape as an

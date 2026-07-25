@@ -85,3 +85,43 @@ async fn board_surfaces_dispatch_run_ledger() {
     );
     let _ = std::fs::remove_dir_all(&run_dir);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn board_loudly_refuses_outward_status_symlink() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let dispatch_id = format!(
+        "99991231T235959Z-status-symlink-{}",
+        uuid::Uuid::new_v4().as_simple()
+    );
+    let run_dir = temp_home.temp_home.join(".tachi/runs").join(&dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("create run ledger fixture");
+    let outside = tempfile::tempdir().expect("outside target");
+    let outside_status = outside.path().join("status.json");
+    std::fs::write(
+        &outside_status,
+        serde_json::json!({
+            "dispatch_id": dispatch_id,
+            "state": "TASK_STATE_COMPLETED",
+            "updated_at": "9999-12-31T23:59:59Z",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside_status, run_dir.join("status.json")).unwrap();
+
+    let error = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(20),
+            project: None,
+            flow_id: None,
+            verbose: Some(true),
+        },
+    )
+    .await
+    .expect_err("board status symlink refusal must reach the caller");
+    assert!(error.contains("refusing descriptor-bound read"), "{error}");
+}

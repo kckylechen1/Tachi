@@ -21,6 +21,9 @@ use std::path::{Component, Path, PathBuf};
 use crate::tool_params::CompletionPredicate;
 use serde_json::Value;
 
+const COMPLETION_STATUS_MAX_BYTES: usize = 1024 * 1024;
+const COMPLETION_RESULT_MAX_BYTES: usize = 1024 * 1024;
+
 /// Verdict of evaluating a (possibly absent) completion predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PredicateVerdict {
@@ -183,7 +186,11 @@ pub(crate) fn resolve_completion_predicate_context(
         )
     })?;
     let status_path = run_dir.join("status.json");
-    let status_raw = match crate::dispatch_ops::read_text_file_within(&runs_dir, &status_path)? {
+    let status_raw = match crate::dispatch_ops::read_text_file_within(
+        &runs_dir,
+        &status_path,
+        COMPLETION_STATUS_MAX_BYTES,
+    )? {
         Some(raw) => raw,
         None => return Ok((Some(run_dir), None, None)),
     };
@@ -221,6 +228,7 @@ pub(crate) fn evaluate_completion_predicate_for_dispatch(
         Some(run_dir) => crate::dispatch_ops::read_text_file_within(
             &home.join("runs"),
             &run_dir.join("result.md"),
+            COMPLETION_RESULT_MAX_BYTES,
         )?
         .unwrap_or_else(|| fallback_output.to_string()),
         None => fallback_output.to_string(),

@@ -7,7 +7,7 @@ use crate::dispatch_ops::probe_harness_server_status;
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::io::{ErrorKind, Read};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const BOARD_RUN_DIRECTORY_ENTRY_INSPECTION_HARD_MAX: usize = 256;
 pub(super) const BOARD_RUN_DIRECTORY_CANDIDATE_HARD_MAX: usize =
     BOARD_RUN_DIRECTORY_ENTRY_INSPECTION_HARD_MAX - 1;
-pub(super) const BOARD_RUN_STATUS_JSON_MAX_BYTES: u64 = 128 * 1024;
+pub(super) const BOARD_RUN_STATUS_JSON_MAX_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Default)]
 pub(super) struct RunTaskScan {
@@ -49,66 +49,16 @@ impl RunTaskScan {
 #[cfg(test)]
 static RUN_DIRECTORY_ENTRY_VISITS: AtomicUsize = AtomicUsize::new(0);
 
-pub(super) fn read_bounded_json_file(path: &Path) -> Result<Value, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("inspect {}: {error}", path.display()))?;
-    if !metadata.file_type().is_file() {
-        return Err(format!("refuse non-regular JSON file {}", path.display()));
-    }
-    if metadata.len() > BOARD_RUN_STATUS_JSON_MAX_BYTES {
-        return Err(format!(
-            "refuse oversized JSON file {} ({} bytes exceeds {} byte limit)",
-            path.display(),
-            metadata.len(),
-            BOARD_RUN_STATUS_JSON_MAX_BYTES,
-        ));
-    }
-
-    let mut raw = String::new();
-    std::fs::File::open(path)
-        .map_err(|error| format!("open {}: {error}", path.display()))?
-        .take(BOARD_RUN_STATUS_JSON_MAX_BYTES.saturating_add(1))
-        .read_to_string(&mut raw)
-        .map_err(|error| format!("read {}: {error}", path.display()))?;
-    if raw.len() as u64 > BOARD_RUN_STATUS_JSON_MAX_BYTES {
-        return Err(format!(
-            "refuse oversized JSON file {} (read exceeds {} byte limit)",
-            path.display(),
-            BOARD_RUN_STATUS_JSON_MAX_BYTES,
-        ));
-    }
-    serde_json::from_str(&raw).map_err(|error| format!("parse {}: {error}", path.display()))
-}
-
-fn result_written_for_run(run_dir: &Path) -> Result<bool, String> {
-    match std::fs::symlink_metadata(run_dir.join("result.md")) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
-        Ok(_) => Err(format!(
-            "refuse non-regular result marker {}",
-            run_dir.join("result.md").display()
-        )),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!(
-            "inspect result marker {}: {error}",
-            run_dir.join("result.md").display()
-        )),
-    }
-}
-
-fn status_updated_at(status: &Value, status_path: &Path) -> Result<Option<String>, String> {
+fn status_updated_at(
+    status: &Value,
+    status_modified: Option<std::time::SystemTime>,
+) -> Option<String> {
     if let Some(updated_at) = status.get("updated_at").and_then(Value::as_str) {
-        return Ok(Some(updated_at.to_string()));
+        return Some(updated_at.to_string());
     }
-    let metadata = std::fs::metadata(status_path).map_err(|error| {
-        format!(
-            "inspect status timestamp {}: {error}",
-            status_path.display()
-        )
-    })?;
-    let modified = metadata
-        .modified()
-        .map_err(|error| format!("read status timestamp {}: {error}", status_path.display()))?;
-    Ok(Some(chrono::DateTime::<Utc>::from(modified).to_rfc3339()))
+    status_modified
+        .map(chrono::DateTime::<Utc>::from)
+        .map(|dt| dt.to_rfc3339())
 }
 
 struct RunStateFields {
@@ -120,20 +70,19 @@ struct RunStateFields {
 }
 
 fn run_state_fields(
-    run_dir: &Path,
-    status_path: &Path,
     status: &Value,
+    result_written: bool,
+    status_modified: Option<std::time::SystemTime>,
     now: chrono::DateTime<Utc>,
-) -> Result<RunStateFields, String> {
-    let result_written = result_written_for_run(run_dir)?;
-    let updated_at_dt = parse_status_updated_at(status, status_path);
+) -> RunStateFields {
+    let updated_at_dt = parse_status_updated_at(status, status_modified);
     let abandoned = is_abandoned_working_run(status, result_written, updated_at_dt, now);
     let state = if abandoned {
         "TASK_STATE_FAILED"
     } else {
         status_state(status, result_written)
     };
-    let updated_at = status_updated_at(status, status_path)?;
+    let updated_at = status_updated_at(status, status_modified);
     let stale_reason = if abandoned {
         Some(format!(
             "run ledger stayed WORKING for more than {}s without terminal status or exit_code",
@@ -142,13 +91,13 @@ fn run_state_fields(
     } else {
         None
     };
-    Ok(RunStateFields {
+    RunStateFields {
         result_written,
         abandoned,
         state,
         updated_at,
         stale_reason,
-    })
+    }
 }
 
 pub(super) fn dispatch_timestamp_key(name: &std::ffi::OsStr) -> Option<String> {
@@ -272,14 +221,38 @@ pub(super) fn collect_run_tasks_from_dir(
         }
         let run_dir = entry.path();
         let status_path = run_dir.join("status.json");
-        let status = match read_bounded_json_file(&status_path) {
-            Ok(status) => status,
+        let status_read = match crate::dispatch_ops::read_text_file_within_with_metadata(
+            &runs_dir,
+            &status_path,
+            BOARD_RUN_STATUS_JSON_MAX_BYTES,
+        ) {
+            Ok(Some(status_read)) => status_read,
+            Ok(None) => {
+                invalid_entries += 1;
+                tracing::warn!(
+                    run_dir = %run_dir.display(),
+                    "board skipped run without status.json"
+                );
+                continue;
+            }
             Err(error) => {
                 invalid_entries += 1;
                 tracing::warn!(
                     run_dir = %run_dir.display(),
                     error = %error,
                     "board skipped invalid run status"
+                );
+                continue;
+            }
+        };
+        let status: Value = match serde_json::from_str(&status_read.text) {
+            Ok(status) => status,
+            Err(error) => {
+                invalid_entries += 1;
+                tracing::warn!(
+                    run_dir = %run_dir.display(),
+                    error = %error,
+                    "board skipped malformed run status"
                 );
                 continue;
             }
@@ -302,8 +275,11 @@ pub(super) fn collect_run_tasks_from_dir(
             );
             continue;
         };
-        let fields = match run_state_fields(&run_dir, &status_path, &status, now) {
-            Ok(fields) => fields,
+        let result_written = match crate::dispatch_ops::regular_file_len_within(
+            &runs_dir,
+            &run_dir.join("result.md"),
+        ) {
+            Ok(result) => result.is_some(),
             Err(error) => {
                 invalid_entries += 1;
                 tracing::warn!(
@@ -314,6 +290,7 @@ pub(super) fn collect_run_tasks_from_dir(
                 continue;
             }
         };
+        let fields = run_state_fields(&status, result_written, status_read.modified, now);
         let closure_kind = status.get("closure_kind").and_then(Value::as_str);
         if !state_matches_filter_with_closure_kind(state_filter, fields.state, closure_kind) {
             continue;
@@ -325,6 +302,7 @@ pub(super) fn collect_run_tasks_from_dir(
             "closure_kind": status.get("closure_kind").cloned().unwrap_or(serde_json::Value::Null),
             "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
             "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
+            "flow_id": status.get("flow_id").cloned().unwrap_or(serde_json::Value::Null),
             "updated_at": fields.updated_at,
             "run_dir": run_dir.to_string_lossy(),
             "result_written": fields.result_written,
@@ -381,44 +359,28 @@ pub(super) fn collect_run_task_by_id(
         return Err("invalid dispatch_id for run status lookup".to_string());
     }
     let run_dir = runs_dir.join(dispatch_id);
-    let run_metadata = match std::fs::symlink_metadata(&run_dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "inspect run directory {}: {error}",
-                run_dir.display()
-            ));
-        }
-    };
-    if run_metadata.file_type().is_symlink() || !run_metadata.file_type().is_dir() {
-        return Err(format!(
-            "refuse non-directory run status path {}",
-            run_dir.display()
-        ));
-    }
-    if !crate::dispatch_ops::canonical_dir_is_within(&run_dir, runs_dir) {
-        return Err(format!(
-            "refuse run status path outside ledger {}",
-            run_dir.display()
-        ));
-    }
-    collect_run_task_from_dir(&run_dir)
+    collect_run_task_from_dir(runs_dir, &run_dir)
 }
 
-fn collect_run_task_from_dir(run_dir: &Path) -> Result<Option<serde_json::Value>, String> {
+fn collect_run_task_from_dir(
+    runs_dir: &Path,
+    run_dir: &Path,
+) -> Result<Option<serde_json::Value>, String> {
     let status_path = run_dir.join("status.json");
-    match std::fs::symlink_metadata(&status_path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "inspect run status {}: {error}",
-                status_path.display()
-            ));
-        }
-    }
-    let status = read_bounded_json_file(&status_path)?;
+    let Some(status_read) = crate::dispatch_ops::read_text_file_within_with_metadata(
+        runs_dir,
+        &status_path,
+        BOARD_RUN_STATUS_JSON_MAX_BYTES,
+    )?
+    else {
+        return Ok(None);
+    };
+    let status: Value = serde_json::from_str(&status_read.text).map_err(|error| {
+        format!(
+            "dispatch status artifact {} is not valid JSON: {error}",
+            status_path.display()
+        )
+    })?;
     let dispatch_id = status
         .get("dispatch_id")
         .and_then(|v| v.as_str())
@@ -430,7 +392,10 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Result<Option<serde_json::Value>
                 .map(str::to_string)
         })
         .ok_or_else(|| format!("run status {} has no dispatch id", status_path.display()))?;
-    let fields = run_state_fields(run_dir, &status_path, &status, Utc::now())?;
+    let result_written =
+        crate::dispatch_ops::regular_file_len_within(runs_dir, &run_dir.join("result.md"))?
+            .is_some();
+    let fields = run_state_fields(&status, result_written, status_read.modified, Utc::now());
     Ok(Some(json!({
         "dispatch_id": dispatch_id,
         "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
@@ -438,6 +403,7 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Result<Option<serde_json::Value>
         "closure_kind": status.get("closure_kind").cloned().unwrap_or(serde_json::Value::Null),
         "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
         "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
+        "flow_id": status.get("flow_id").cloned().unwrap_or(serde_json::Value::Null),
         "updated_at": fields.updated_at,
         "run_dir": run_dir.to_string_lossy(),
         "result_written": fields.result_written,

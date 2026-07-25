@@ -24,6 +24,7 @@ use std::io::Read;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 /// Every real dispatch id minted by `dispatch::dedupe::new_dispatch_id` is a
 /// single path component drawn from `[A-Za-z0-9_-]`
@@ -52,6 +53,16 @@ pub(crate) fn canonical_dir_is_within(candidate_dir: &Path, root_dir: &Path) -> 
     canonical_candidate.starts_with(&canonical_root)
 }
 
+#[cfg(unix)]
+pub(crate) fn ensure_descriptor_reads_supported() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn ensure_descriptor_reads_supported() -> Result<(), String> {
+    Err("descriptor-bound O_NOFOLLOW reads are unavailable on this platform".to_string())
+}
+
 /// Open a regular file beneath `root_dir` without following any path component
 /// during the descriptor walk, then read from that same final descriptor.
 ///
@@ -64,6 +75,7 @@ fn open_regular_file_within(
     root_dir: &Path,
     candidate: &Path,
 ) -> Result<Option<std::fs::File>, String> {
+    ensure_descriptor_reads_supported()?;
     let canonical_root = root_dir.canonicalize().map_err(|error| {
         format!(
             "refusing descriptor-bound read: containment root {} cannot be resolved: {error}",
@@ -116,21 +128,70 @@ fn open_regular_file_within(
     Ok(Some(file))
 }
 
-pub(crate) fn read_text_file_within(
+pub(crate) struct DescriptorTextRead {
+    pub(crate) text: String,
+    pub(crate) modified: Option<SystemTime>,
+}
+
+pub(crate) fn read_text_file_within_with_metadata(
     root_dir: &Path,
     candidate: &Path,
-) -> Result<Option<String>, String> {
+    max_bytes: usize,
+) -> Result<Option<DescriptorTextRead>, String> {
     let Some(mut file) = open_regular_file_within(root_dir, candidate)? else {
         return Ok(None);
     };
-    let mut raw = String::new();
-    file.read_to_string(&mut raw).map_err(|error| {
+    let metadata = file.metadata().map_err(|error| {
         format!(
-            "refusing descriptor-bound text read of {}: {error}",
+            "refusing descriptor-bound metadata read of {}: {error}",
             candidate.display()
         )
     })?;
-    Ok(Some(raw))
+    if metadata.len() > max_bytes as u64 {
+        return Err(format!(
+            "refusing descriptor-bound text read of {}: {} bytes exceeds named limit of {max_bytes} bytes",
+            candidate.display(),
+            metadata.len()
+        ));
+    }
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| "descriptor text-read limit cannot be usize::MAX".to_string())?;
+    let mut raw = Vec::with_capacity(read_limit.min(8 * 1024));
+    file.by_ref()
+        .take(read_limit as u64)
+        .read_to_end(&mut raw)
+        .map_err(|error| {
+            format!(
+                "refusing descriptor-bound text read of {}: {error}",
+                candidate.display()
+            )
+        })?;
+    if raw.len() > max_bytes {
+        return Err(format!(
+            "refusing descriptor-bound text read of {}: file grew beyond named limit of {max_bytes} bytes while reading",
+            candidate.display()
+        ));
+    }
+    let text = String::from_utf8(raw).map_err(|error| {
+        format!(
+            "refusing descriptor-bound text read of {}: content is not valid UTF-8: {error}",
+            candidate.display()
+        )
+    })?;
+    Ok(Some(DescriptorTextRead {
+        text,
+        modified: metadata.modified().ok(),
+    }))
+}
+
+pub(crate) fn read_text_file_within(
+    root_dir: &Path,
+    candidate: &Path,
+    max_bytes: usize,
+) -> Result<Option<String>, String> {
+    read_text_file_within_with_metadata(root_dir, candidate, max_bytes)
+        .map(|read| read.map(|read| read.text))
 }
 
 pub(crate) fn regular_file_len_within(
@@ -286,6 +347,9 @@ fn run_secure_read_hook(_stage: SecureReadHookStage, _target: &Path) {}
 mod tests {
     use super::*;
 
+    const TEST_DESCRIPTOR_TEXT_MAX_BYTES: usize = 64;
+    const INVALID_UTF8_TEST_MAX_BYTES: usize = 2;
+
     #[test]
     fn is_valid_dispatch_id_accepts_normal_shapes() {
         for ok in [
@@ -316,15 +380,23 @@ mod tests {
             .expect("in-root alias");
 
         assert_eq!(
-            read_text_file_within(root.path(), &root.path().join("nested/result.md"))
-                .expect("ordinary read")
-                .as_deref(),
+            read_text_file_within(
+                root.path(),
+                &root.path().join("nested/result.md"),
+                TEST_DESCRIPTOR_TEXT_MAX_BYTES,
+            )
+            .expect("ordinary read")
+            .as_deref(),
             Some("inside bytes")
         );
         assert_eq!(
-            read_text_file_within(root.path(), &root.path().join("allowed-link/result.md"))
-                .expect("allowed in-root alias")
-                .as_deref(),
+            read_text_file_within(
+                root.path(),
+                &root.path().join("allowed-link/result.md"),
+                TEST_DESCRIPTOR_TEXT_MAX_BYTES,
+            )
+            .expect("allowed in-root alias")
+            .as_deref(),
             Some("inside bytes")
         );
     }
@@ -349,7 +421,7 @@ mod tests {
             },
         );
 
-        let error = read_text_file_within(root.path(), &candidate)
+        let error = read_text_file_within(root.path(), &candidate, TEST_DESCRIPTOR_TEXT_MAX_BYTES)
             .expect_err("pre-open swap must be refused");
         assert!(error.contains("refusing descriptor-bound read"), "{error}");
     }
@@ -374,10 +446,50 @@ mod tests {
             },
         );
 
-        let raw = read_text_file_within(root.path(), &candidate)
+        let raw = read_text_file_within(root.path(), &candidate, TEST_DESCRIPTOR_TEXT_MAX_BYTES)
             .expect("descriptor read")
             .expect("present");
         assert_eq!(raw, "inside bytes");
         assert_ne!(raw, "outside bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_text_read_accepts_exact_limit_and_refuses_one_byte_over() {
+        const EXACT_LIMIT_BYTES: usize = 8;
+
+        let root = tempfile::tempdir().expect("root");
+        let candidate = root.path().join("bounded.txt");
+        std::fs::write(&candidate, b"12345678").unwrap();
+        assert_eq!(
+            read_text_file_within(root.path(), &candidate, EXACT_LIMIT_BYTES)
+                .expect("exact-boundary read")
+                .as_deref(),
+            Some("12345678")
+        );
+
+        std::fs::write(&candidate, b"123456789").unwrap();
+        let error = read_text_file_within(root.path(), &candidate, EXACT_LIMIT_BYTES)
+            .expect_err("one byte over the named limit must be loud");
+        assert!(error.contains("9 bytes"), "{error}");
+        assert!(error.contains("limit of 8 bytes"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_text_read_loudly_preserves_utf8_requirement() {
+        let root = tempfile::tempdir().expect("root");
+        let candidate = root.path().join("invalid-utf8.txt");
+        std::fs::write(&candidate, [0xff, 0xfe]).unwrap();
+
+        let error = read_text_file_within(root.path(), &candidate, INVALID_UTF8_TEST_MAX_BYTES)
+            .expect_err("invalid UTF-8 must remain a loud read failure");
+        assert!(error.contains("not valid UTF-8"), "{error}");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn descriptor_read_support_is_loudly_unavailable() {
+        assert!(ensure_descriptor_reads_supported().is_err());
     }
 }

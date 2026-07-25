@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::Value;
-use std::path::Path;
+use std::time::SystemTime;
 
 const RUN_STALE_FALLBACK_SECS: i64 = 30 * 60;
 const RUN_STALE_GRACE_SECS: i64 = 60;
@@ -100,18 +100,16 @@ pub(super) fn stale_after_secs(status: &Value) -> i64 {
         .unwrap_or(RUN_STALE_FALLBACK_SECS)
 }
 
-pub(super) fn parse_status_updated_at(status: &Value, status_path: &Path) -> Option<DateTime<Utc>> {
+pub(super) fn parse_status_updated_at(
+    status: &Value,
+    status_modified: Option<SystemTime>,
+) -> Option<DateTime<Utc>> {
     status
         .get("updated_at")
         .and_then(Value::as_str)
         .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
         .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|| {
-            std::fs::metadata(status_path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(DateTime::<Utc>::from)
-        })
+        .or_else(|| status_modified.map(DateTime::<Utc>::from))
 }
 
 fn is_unresolved_exit(status: &Value) -> bool {

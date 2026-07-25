@@ -180,6 +180,7 @@ pub(crate) async fn handle_tachi_board(
     });
     let kanban_count = tasks.len();
     let runs_dir = runs_dir_for_server(server);
+    let failure_tail_runs_dir = runs_dir.clone();
     let mut flow_run_count = 0usize;
     let mut flow_fetch_truncated = false;
     if let Some(flow_id) = flow_filter.as_deref() {
@@ -359,7 +360,7 @@ pub(crate) async fn handle_tachi_board(
                 .and_then(|value| value.as_str())
                 .map(PathBuf::from)
             {
-                Some(run_dir) => super::read_failure_tail(&run_dir)?,
+                Some(run_dir) => super::read_failure_tail(&failure_tail_runs_dir, &run_dir)?,
                 None => None,
             }
         } else {

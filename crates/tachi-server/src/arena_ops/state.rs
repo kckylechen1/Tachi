@@ -2,6 +2,9 @@ use chrono::Utc;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
+const ARENA_LINKED_STATUS_MAX_BYTES: usize = 1024 * 1024;
+pub(super) const ARENA_LINKED_RESULT_MAX_BYTES: usize = 1024 * 1024;
+
 fn current_git_root() -> Option<PathBuf> {
     std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -217,7 +220,11 @@ fn read_linked_dispatch_status(
     };
     let runs_root = tachi_home().join("runs");
     let status_path = run_dir.join("status.json");
-    let Some(status_raw) = crate::dispatch_ops::read_text_file_within(&runs_root, &status_path)?
+    let Some(status_raw) = crate::dispatch_ops::read_text_file_within(
+        &runs_root,
+        &status_path,
+        ARENA_LINKED_STATUS_MAX_BYTES,
+    )?
     else {
         return Ok(None);
     };
@@ -260,8 +267,11 @@ pub(super) fn read_linked_dispatch_result(
         return Ok(None);
     };
     let result_path = run_dir.join("result.md");
-    let Some(raw) =
-        crate::dispatch_ops::read_text_file_within(&tachi_home().join("runs"), &result_path)?
+    let Some(raw) = crate::dispatch_ops::read_text_file_within(
+        &tachi_home().join("runs"),
+        &result_path,
+        ARENA_LINKED_RESULT_MAX_BYTES,
+    )?
     else {
         return Ok(None);
     };

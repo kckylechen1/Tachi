@@ -40,7 +40,8 @@ pub(crate) use prompt::seat_card::{
 // `tools::dispatch_complete_defaults`, and `predicate` -- see `path_gate` for
 // the full call-site inventory this closes.
 pub(crate) use path_gate::{
-    canonical_dir_is_within, is_valid_dispatch_id, read_text_file_within, regular_file_len_within,
+    canonical_dir_is_within, ensure_descriptor_reads_supported, is_valid_dispatch_id,
+    read_text_file_within, read_text_file_within_with_metadata, regular_file_len_within,
 };
 #[cfg(test)]
 pub(crate) use path_gate::{install_secure_read_hook, SecureReadHookStage};
