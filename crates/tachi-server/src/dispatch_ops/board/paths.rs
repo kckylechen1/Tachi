@@ -1,7 +1,7 @@
 use crate::MemoryServer;
 use std::path::PathBuf;
 
-pub(super) fn runs_dir_for_server(server: &MemoryServer) -> PathBuf {
+pub(crate) fn runs_dir_for_server(server: &MemoryServer) -> PathBuf {
     let global_db = server.global_db_path_buf();
     if global_db
         .file_name()

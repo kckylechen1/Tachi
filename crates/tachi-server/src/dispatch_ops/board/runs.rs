@@ -634,7 +634,7 @@ mod tests {
         let error = collect_run_task_by_id(&runs_dir, dispatch_id)
             .expect_err("symlinked status must be a loud error");
         assert!(
-            error.contains("refuse non-regular JSON file"),
+            error.contains("refusing descriptor-bound read"),
             "unexpected symlink error: {error}"
         );
     }
@@ -655,7 +655,7 @@ mod tests {
         let error = collect_run_task_by_id(&runs_dir, dispatch_id)
             .expect_err("oversized status must be a loud error");
         assert!(
-            error.contains("refuse oversized JSON file"),
+            error.contains("exceeds named limit"),
             "unexpected oversized status error: {error}"
         );
     }
@@ -686,7 +686,7 @@ mod tests {
         let error = collect_run_task_by_id(&runs_dir, dispatch_id)
             .expect_err("symlinked result marker must be a loud error");
         assert!(
-            error.contains("refuse non-regular result marker"),
+            error.contains("refusing descriptor-bound read"),
             "unexpected result marker error: {error}"
         );
     }
