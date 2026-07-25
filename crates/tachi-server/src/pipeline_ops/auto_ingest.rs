@@ -16,9 +16,12 @@ use super::ingest::handle_ingest_source;
 
 const AUTO_INGEST_JOB_WORKER: &str = "auto_ingest_job";
 const AUTO_INGEST_CLAIM_WORKER: &str = "auto_ingest_job_claim";
+const AUTO_INGEST_DEAD_LETTER_WORKER: &str = "auto_ingest_job_dead_letter";
 const AUTO_INGEST_JOB_LABEL: &str = "auto_ingest_job";
 const AUTO_INGEST_REPLAY_BATCH_SIZE: usize = 16;
 const AUTO_INGEST_REPLAY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const AUTO_INGEST_FORENSIC_PAYLOAD_MAX_BYTES: usize = 4096;
+const AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES: usize = 512;
 
 pub(crate) struct StagedAutoIngest {
     job_hash: String,
@@ -247,6 +250,9 @@ pub(crate) fn stage_auto_ingest_from_mcp(
                      SELECT 1 FROM audit_log \
                      WHERE server_id = 'ingest' AND tool_name = ?4 \
                        AND args_hash IN (?5, ?1) AND success = 1 \
+                 ) AND NOT EXISTS ( \
+                     SELECT 1 FROM processed_events \
+                     WHERE event_hash = ?1 AND worker = ?6 \
                  ) \
                  ON CONFLICT(event_hash, worker) DO UPDATE SET event_id = excluded.event_id",
                 rusqlite::params![
@@ -255,6 +261,7 @@ pub(crate) fn stage_auto_ingest_from_mcp(
                     AUTO_INGEST_JOB_WORKER,
                     AUTO_INGEST_JOB_LABEL,
                     audit_key,
+                    AUTO_INGEST_DEAD_LETTER_WORKER,
                 ],
             )
             .map_err(|error| format!("stage durable auto-ingest job: {error}"))
@@ -297,19 +304,57 @@ pub(crate) async fn run_staged_auto_ingest(
         claim,
     );
 
-    let outcome: Result<String, String> = async {
-        let persisted_payload = server.with_global_store_read(|store| {
-            store
-                .connection()
-                .query_row(
-                    "SELECT event_id FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
-                    rusqlite::params![staged.job_hash, AUTO_INGEST_JOB_WORKER],
-                    |row| row.get::<_, String>(0),
+    let persisted_payload = match server.with_global_store_read(|store| {
+        store
+            .connection()
+            .query_row(
+                "SELECT event_id FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+                rusqlite::params![staged.job_hash, AUTO_INGEST_JOB_WORKER],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| format!("load durable auto-ingest job: {error}"))
+    }) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Err(lease
+                .fail(
+                    AUTO_INGEST_JOB_LABEL,
+                    &audit_key,
+                    "auto_ingest_replay_failed",
+                    error,
                 )
-                .map_err(|error| format!("load durable auto-ingest job: {error}"))
-        })?;
-        let params: IngestSourceParams = serde_json::from_str(&persisted_payload)
-            .map_err(|error| format!("decode durable auto-ingest job: {error}"))?;
+                .await);
+        }
+    };
+    let params: IngestSourceParams = match serde_json::from_str(&persisted_payload) {
+        Ok(params) => params,
+        Err(decode_error) => {
+            let decode_error = format!("decode durable auto-ingest job: {decode_error}");
+            let quarantine = quarantine_malformed_auto_ingest(
+                &lease,
+                &staged.job_hash,
+                &persisted_payload,
+                &decode_error,
+            )
+            .await;
+            return match quarantine {
+                Ok(()) => {
+                    lease.finish().await?;
+                    Ok(None)
+                }
+                Err(error) => Err(lease
+                    .fail(
+                        AUTO_INGEST_JOB_LABEL,
+                        &audit_key,
+                        "auto_ingest_quarantine_failed",
+                        error,
+                    )
+                    .await),
+            };
+        }
+    };
+
+    let outcome: Result<String, String> = async {
         let content = params.content.trim();
         let source_label = params
             .source
@@ -378,6 +423,74 @@ pub(crate) async fn run_staged_auto_ingest(
             )
             .await),
     }
+}
+
+async fn quarantine_malformed_auto_ingest(
+    lease: &RetryableIngestLease,
+    job_hash: &str,
+    payload: &str,
+    decode_error: &str,
+) -> Result<(), String> {
+    let (payload, payload_truncated) =
+        bounded_utf8(payload, AUTO_INGEST_FORENSIC_PAYLOAD_MAX_BYTES);
+    let (decode_error, decode_error_truncated) =
+        bounded_utf8(decode_error, AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES);
+    let forensic = serde_json::to_string(&json!({
+        "classification": "auto_ingest_malformed_payload",
+        "original_payload": payload,
+        "payload_truncated": payload_truncated,
+        "decode_error": decode_error,
+        "decode_error_truncated": decode_error_truncated,
+    }))
+    .map_err(|error| format!("serialize auto-ingest quarantine forensics: {error}"))?;
+    lease
+        .write_owned(|store| {
+            let quarantined = store
+                .connection()
+                .execute(
+                    "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                     SELECT event_hash, ?1, ?2, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     FROM processed_events WHERE event_hash = ?3 AND worker = ?4 \
+                     ON CONFLICT(event_hash, worker) DO UPDATE SET \
+                         event_id = excluded.event_id, created_at = excluded.created_at",
+                    rusqlite::params![
+                        forensic,
+                        AUTO_INGEST_DEAD_LETTER_WORKER,
+                        job_hash,
+                        AUTO_INGEST_JOB_WORKER,
+                    ],
+                )
+                .map_err(|error| format!("quarantine malformed auto-ingest payload: {error}"))?;
+            if quarantined != 1 {
+                return Err(
+                    "malformed auto-ingest payload disappeared before quarantine".to_string(),
+                );
+            }
+            let removed = store
+                .connection()
+                .execute(
+                    "DELETE FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+                    rusqlite::params![job_hash, AUTO_INGEST_JOB_WORKER],
+                )
+                .map_err(|error| format!("retire malformed auto-ingest payload: {error}"))?;
+            if removed == 1 {
+                Ok(())
+            } else {
+                Err("malformed auto-ingest payload was not retired from pending work".to_string())
+            }
+        })
+        .await
+}
+
+fn bounded_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
 }
 
 fn pending_auto_ingest_jobs(server: &MemoryServer) -> Result<Vec<StagedAutoIngest>, String> {

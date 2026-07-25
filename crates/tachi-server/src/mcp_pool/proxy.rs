@@ -15,7 +15,7 @@ fn return_with_background_auto_ingest(
     tool_name: &str,
     definition: &serde_json::Value,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
-    result: rmcp::model::CallToolResult,
+    mut result: rmcp::model::CallToolResult,
 ) -> rmcp::model::CallToolResult {
     if result.is_error.unwrap_or(false) {
         return result;
@@ -51,6 +51,7 @@ fn return_with_background_auto_ingest(
             dead_letters.retain(|entry| entry.id != failure_id);
             push_dead_letter_with_limits(&mut dead_letters, dead_letter, now);
             drop(dead_letters);
+            attach_auto_ingest_persistence_warning(&mut result, &error);
             tracing::warn!(
                 error = %error,
                 capability_id,
@@ -77,6 +78,43 @@ fn return_with_background_auto_ingest(
     });
     drop(task);
     result
+}
+
+fn attach_auto_ingest_persistence_warning(result: &mut rmcp::model::CallToolResult, reason: &str) {
+    const MAX_REASON_BYTES: usize = 512;
+    let reason = bounded_utf8(reason, MAX_REASON_BYTES).0;
+    let warning = json!({
+        "code": "auto_ingest_not_persisted",
+        "reason": reason,
+    });
+    let meta = result.meta.get_or_insert_with(rmcp::model::Meta::new);
+    let warnings = meta
+        .0
+        .entry("warnings".to_string())
+        .or_insert_with(|| json!([]));
+    if !warnings.is_array() {
+        let existing = std::mem::replace(warnings, json!([]));
+        warnings
+            .as_array_mut()
+            .expect("warnings was replaced with an array")
+            .push(existing);
+    }
+    let warnings = warnings
+        .as_array_mut()
+        .expect("warnings metadata is an array");
+    warnings.retain(|entry| entry.get("code") != Some(&json!("auto_ingest_not_persisted")));
+    warnings.push(warning);
+}
+
+fn bounded_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
 }
 
 impl MemoryServer {
@@ -648,11 +686,21 @@ mod auto_ingest_response_tests {
             result,
         );
 
+        let returned_json = serde_json::to_value(&returned).expect("serialize returned MCP result");
+        assert_eq!(returned_json["content"], original["content"]);
         assert_eq!(
-            serde_json::to_value(&returned).expect("serialize returned MCP result"),
-            original,
-            "staging failure must preserve the successful MCP response"
+            returned_json["structuredContent"],
+            original["structuredContent"]
         );
+        assert_eq!(returned_json["isError"], original["isError"]);
+        let warnings = returned_json["_meta"]["warnings"]
+            .as_array()
+            .expect("structured auto-ingest persistence warning");
+        assert_eq!(warnings.len(), 1, "exactly one persistence warning");
+        assert_eq!(warnings[0]["code"], "auto_ingest_not_persisted");
+        assert!(warnings[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("injected auto-ingest stage failure")));
         let status: serde_json::Value = serde_json::from_str(
             &crate::pipeline_ops::handle_get_pipeline_status(&server)
                 .await
@@ -667,5 +715,19 @@ mod auto_ingest_response_tests {
         let failure = dead_letters.front().expect("structured staging failure");
         assert_eq!(failure.tool_name, "mcp_auto_ingest:stage-failure-tool");
         assert!(failure.error.contains("injected auto-ingest stage failure"));
+        let durable_rows = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events \
+                         WHERE worker IN ('auto_ingest_job', 'auto_ingest_job_claim')",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count auto-ingest durable rows after staging failure");
+        assert_eq!(durable_rows, 0, "staging failure must not fake durability");
     }
 }

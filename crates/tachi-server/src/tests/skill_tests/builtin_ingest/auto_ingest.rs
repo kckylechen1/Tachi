@@ -194,3 +194,151 @@ async fn production_runtime_replays_staged_auto_ingest_exactly_once_after_restar
     );
     assert_eq!(terminal_claims, 1, "completed lease row remains terminal");
 }
+
+#[tokio::test]
+async fn malformed_oldest_batch_is_quarantined_without_starving_valid_job() {
+    let server = make_server();
+    let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": "valid job behind malformed replay rows"}],
+        "isError": false
+    }))
+    .expect("build valid staged result");
+    let definition = json!({
+        "auto_ingest": true,
+        "ingest_scope": "global",
+        "ingest_domain": "general",
+        "ingest_path_prefix": "/wiki/general/auto-ingest-after-quarantine"
+    });
+    crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        &server,
+        "mcp:quarantine-reader",
+        "read",
+        &definition,
+        None,
+        &result,
+    )
+    .expect("stage valid seventeenth job")
+    .expect("valid auto-ingest job is staged");
+    server
+        .with_global_store(|store| {
+            for index in 0..16 {
+                let malformed = if index == 0 {
+                    "x".repeat(12_000)
+                } else {
+                    format!("{{malformed-{index}")
+                };
+                store
+                    .connection()
+                    .execute(
+                        "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                         VALUES (?1, ?2, 'auto_ingest_job', '2000-01-01T00:00:00.000Z')",
+                        rusqlite::params![format!("malformed-auto-ingest-{index:02}"), malformed],
+                    )
+                    .map_err(|error| format!("seed malformed auto-ingest row {index}: {error}"))?;
+            }
+            Ok(())
+        })
+        .expect("seed malformed oldest replay batch");
+
+    let first_cycle = crate::pipeline_ops::replay_pending_auto_ingest_once(&server)
+        .await
+        .expect("malformed rows are terminally quarantined");
+    assert_eq!(
+        first_cycle, 0,
+        "first bounded cycle contains only malformed rows"
+    );
+    let (pending_after_first, quarantined) = server
+        .with_global_store_read(|store| {
+            let pending = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM processed_events WHERE worker = 'auto_ingest_job'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let mut statement = store
+                .connection()
+                .prepare(
+                    "SELECT event_id FROM processed_events \
+                     WHERE worker = 'auto_ingest_job_dead_letter' ORDER BY event_hash",
+                )
+                .map_err(|error| error.to_string())?;
+            let quarantined = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            Ok((pending, quarantined))
+        })
+        .expect("read first quarantine cycle state");
+    assert_eq!(
+        pending_after_first, 1,
+        "valid seventeenth row remains pending"
+    );
+    assert_eq!(
+        quarantined.len(),
+        16,
+        "all malformed rows leave pending enumeration"
+    );
+    for forensic_json in &quarantined {
+        let forensic: Value =
+            serde_json::from_str(forensic_json).expect("quarantine forensic JSON");
+        assert_eq!(forensic["classification"], "auto_ingest_malformed_payload");
+        assert!(forensic["original_payload"].as_str().unwrap().len() <= 4096);
+        assert!(forensic["decode_error"].as_str().unwrap().len() <= 512);
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(&quarantined[0]).unwrap()["payload_truncated"],
+        true,
+        "oversized malformed payload is explicitly bounded"
+    );
+
+    let second_cycle = crate::pipeline_ops::replay_pending_auto_ingest_once(&server)
+        .await
+        .expect("next bounded cycle reaches valid job");
+    assert_eq!(
+        second_cycle, 1,
+        "valid job progresses after quarantine batch"
+    );
+    let third_cycle = crate::pipeline_ops::replay_pending_auto_ingest_once(&server)
+        .await
+        .expect("terminal quarantine rows are not retried");
+    assert_eq!(third_cycle, 0, "no quarantined row re-enters replay");
+
+    let (memories, pending, quarantine_count) = server
+        .with_global_store_read(|store| {
+            let memories = store
+                .list_by_path("/wiki/general/auto-ingest-after-quarantine", 10, false)
+                .map_err(|error| error.to_string())?;
+            let pending = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM processed_events WHERE worker = 'auto_ingest_job'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let quarantine_count = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM processed_events \
+                     WHERE worker = 'auto_ingest_job_dead_letter'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((memories, pending, quarantine_count))
+        })
+        .expect("read final quarantine replay state");
+    assert_eq!(
+        memories.len(),
+        1,
+        "valid logical memory is written exactly once"
+    );
+    assert_eq!(pending, 0);
+    assert_eq!(
+        quarantine_count, 16,
+        "quarantine remains terminal and stable"
+    );
+}
