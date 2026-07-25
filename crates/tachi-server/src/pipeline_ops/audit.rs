@@ -732,72 +732,7 @@ where
         return Err("ingest claim ownership was lost before stable row write".to_string());
     }
 
-    store
-        .connection()
-        .execute_batch(
-            "DROP TRIGGER IF EXISTS temp.ingest_stable_owner_fence; \
-             DROP TABLE IF EXISTS temp.ingest_owner_fence_context; \
-             CREATE TEMP TABLE ingest_owner_fence_context ( \
-                 event_hash TEXT NOT NULL, worker TEXT NOT NULL, owner_token TEXT NOT NULL \
-             );",
-        )
-        .map_err(|error| format!("prepare stable row write owner fence: {error}"))?;
-    store
-        .connection()
-        .execute(
-            "INSERT INTO temp.ingest_owner_fence_context \
-             (event_hash, worker, owner_token) VALUES (?1, ?2, ?3)",
-            rusqlite::params![event_hash, worker, claim.owner_token],
-        )
-        .map_err(|error| format!("bind stable row write owner fence: {error}"))?;
-    if let Err(error) = store.connection().execute_batch(
-        "CREATE TEMP TRIGGER ingest_stable_owner_fence \
-         BEFORE INSERT ON main.memories \
-         WHEN NOT EXISTS ( \
-             SELECT 1 FROM main.processed_events AS p \
-             JOIN temp.ingest_owner_fence_context AS c \
-               ON p.event_hash = c.event_hash AND p.worker = c.worker \
-              AND p.event_id = c.owner_token \
-         ) \
-         BEGIN \
-             SELECT RAISE(ABORT, 'ingest claim ownership lost before stable row write'); \
-         END;",
-    ) {
-        let cleanup_error = cleanup_stable_owner_fence(store).err();
-        return Err(match cleanup_error {
-            Some(cleanup_error) => {
-                format!("install stable row write owner fence: {error}; {cleanup_error}")
-            }
-            None => format!("install stable row write owner fence: {error}"),
-        });
-    }
-
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(store)));
-    let cleanup = cleanup_stable_owner_fence(store);
-    match outcome {
-        Ok(Ok(value)) => {
-            cleanup?;
-            Ok(value)
-        }
-        Ok(Err(error)) => match cleanup {
-            Ok(()) => Err(error),
-            Err(cleanup_error) => Err(format!("{error}; {cleanup_error}")),
-        },
-        Err(panic) => {
-            let _ = cleanup;
-            std::panic::resume_unwind(panic)
-        }
-    }
-}
-
-fn cleanup_stable_owner_fence(store: &mut MemoryStore) -> Result<(), String> {
-    store
-        .connection()
-        .execute_batch(
-            "DROP TRIGGER IF EXISTS temp.ingest_stable_owner_fence; \
-             DROP TABLE IF EXISTS temp.ingest_owner_fence_context;",
-        )
-        .map_err(|error| format!("cleanup stable row write owner fence: {error}"))
+    store.with_ingest_stable_owner_fence(event_hash, worker, &claim.owner_token, action)
 }
 
 fn rollback_owner_fence(store: &mut MemoryStore, error: String) -> String {
@@ -842,6 +777,15 @@ pub(crate) fn release_retryable_ingest_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_offline_global_fixture_connection<T>(
+        server: &MemoryServer,
+        action: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, String> {
+        let connection = rusqlite::Connection::open(server.global_db_path_buf())
+            .map_err(|error| format!("open offline pipeline audit fixture: {error}"))?;
+        action(&connection).map_err(|error| format!("run offline pipeline audit fixture: {error}"))
+    }
 
     fn graph_entry(id: &str, text: &str) -> memcore::MemoryEntry {
         memcore::MemoryEntry {
@@ -1094,9 +1038,36 @@ mod tests {
                 .write_idempotent(move |store| {
                     started_tx.send(()).expect("signal stalled row write");
                     resume_rx.recv().expect("resume stalled row write");
+                    let first_error = store
+                        .insert_if_absent(&entry)
+                        .expect_err("stale owner insert must hit the owner fence");
+                    assert!(
+                        first_error
+                            .to_string()
+                            .contains("ingest claim ownership lost before stable row write"),
+                        "stale owner insert failed for the wrong reason: {first_error}"
+                    );
+
+                    let tamper_error = store
+                        .connection()
+                        .execute(
+                            "UPDATE temp.ingest_owner_fence_context \
+                             SET owner_token = 'owner-b'",
+                            [],
+                        )
+                        .expect_err("raw context tamper must be denied");
+                    assert!(
+                        matches!(
+                            &tamper_error,
+                            rusqlite::Error::SqliteFailure(error, _)
+                                if error.extended_code == rusqlite::ffi::SQLITE_AUTH
+                        ),
+                        "raw context tamper did not return SQLITE_AUTH: {tamper_error:?}"
+                    );
+
                     store
                         .insert_if_absent(&entry)
-                        .map_err(|error| format!("stale row insert: {error}"))
+                        .map_err(|error| format!("stale row insert after denied tamper: {error}"))
                 })
                 .await;
             (write, lease_a)
@@ -1144,6 +1115,10 @@ mod tests {
         resume_tx.send(()).expect("resume A after takeover");
         let (stale_write, lease_a) = owner_a.await.expect("join stalled owner A");
         let stale_error = stale_write.expect_err("stale A must not commit after B takeover");
+        assert!(
+            stale_error.contains("ingest claim ownership lost before stable row write"),
+            "post-tamper stale insert failed for the wrong reason: {stale_error}"
+        );
         let _ = lease_a
             .fail(
                 "ingest_source",
@@ -1487,29 +1462,27 @@ mod tests {
                 std::time::Duration::from_secs(1),
             );
         tokio::task::yield_now().await;
-        server
-            .with_global_store(|store| {
-                store
-                    .connection()
-                    .execute_batch(
-                        "CREATE TRIGGER fail_ingest_heartbeat \
-                         BEFORE UPDATE OF created_at ON processed_events \
-                         WHEN OLD.event_hash = 'heartbeat-loss-event' \
-                         BEGIN SELECT RAISE(FAIL, 'injected heartbeat failure'); END;",
-                    )
-                    .map_err(|error| format!("install heartbeat fault: {error}"))
-            })
-            .expect("install heartbeat fault");
+        with_offline_global_fixture_connection(&server, |connection| {
+            connection.execute_batch(
+                "CREATE TRIGGER fail_ingest_heartbeat \
+                 BEFORE UPDATE OF created_at ON processed_events \
+                 WHEN OLD.event_hash = 'heartbeat-loss-event' \
+                 BEGIN SELECT RAISE(FAIL, 'injected heartbeat failure'); END;",
+            )
+        })
+        .map_err(|error| format!("install heartbeat fault: {error}"))
+        .expect("install heartbeat fault");
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         refresh_completed
             .await
             .expect("injected heartbeat failure reaches terminal refresh");
+        with_offline_global_fixture_connection(&server, |connection| {
+            connection.execute_batch("DROP TRIGGER fail_ingest_heartbeat;")
+        })
+        .map_err(|error| format!("remove heartbeat fault: {error}"))
+        .expect("remove heartbeat fault");
         server
             .with_global_store(|store| {
-                store
-                    .connection()
-                    .execute_batch("DROP TRIGGER fail_ingest_heartbeat;")
-                    .map_err(|error| format!("remove heartbeat fault: {error}"))?;
                 store
                     .connection()
                     .execute(
@@ -1583,20 +1556,17 @@ mod tests {
             .await
             .expect("current owner completes");
 
-        server
-            .with_global_store(|store| {
-                store
-                    .connection()
-                    .execute_batch(
-                        "CREATE TABLE heartbeat_after_join_marker (seen INTEGER NOT NULL); \
-                         CREATE TRIGGER mark_heartbeat_after_join \
-                         AFTER UPDATE OF created_at ON processed_events \
-                         WHEN OLD.event_hash = 'heartbeat-loss-event' \
-                         BEGIN INSERT INTO heartbeat_after_join_marker VALUES (1); END;",
-                    )
-                    .map_err(|error| format!("install post-join heartbeat marker: {error}"))
-            })
-            .expect("install post-join heartbeat marker");
+        with_offline_global_fixture_connection(&server, |connection| {
+            connection.execute_batch(
+                "CREATE TABLE heartbeat_after_join_marker (seen INTEGER NOT NULL); \
+                 CREATE TRIGGER mark_heartbeat_after_join \
+                 AFTER UPDATE OF created_at ON processed_events \
+                 WHEN OLD.event_hash = 'heartbeat-loss-event' \
+                 BEGIN INSERT INTO heartbeat_after_join_marker VALUES (1); END;",
+            )
+        })
+        .map_err(|error| format!("install post-join heartbeat marker: {error}"))
+        .expect("install post-join heartbeat marker");
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
 

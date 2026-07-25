@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::error::MemoryError;
+use crate::MemoryStore;
 
 const BUSY_TIMEOUT_MS: u64 = 5_000;
 const LOCK_RETRY_ATTEMPTS: usize = 6;
@@ -30,6 +31,8 @@ pub(crate) struct ConnectionAuthorizationState {
     typed_dml: AtomicBool,
     schema_migration: AtomicBool,
     planner_maintenance: AtomicBool,
+    ingest_owner_fence: AtomicBool,
+    ingest_owner_fence_active: AtomicBool,
 }
 
 pub(crate) type ReservedReferenceWriteFlag = Arc<ConnectionAuthorizationState>;
@@ -38,6 +41,8 @@ enum AuthorizationKind {
     TypedDml,
     SchemaMigration,
     PlannerMaintenance,
+    IngestOwnerFence,
+    IngestOwnerFenceLifecycle,
 }
 
 pub(crate) struct ReservedReferenceWriteAuthorization {
@@ -55,6 +60,13 @@ impl Drop for ReservedReferenceWriteAuthorization {
             AuthorizationKind::PlannerMaintenance => {
                 self.flag.planner_maintenance.store(false, Ordering::SeqCst)
             }
+            AuthorizationKind::IngestOwnerFence => {
+                self.flag.ingest_owner_fence.store(false, Ordering::SeqCst)
+            }
+            AuthorizationKind::IngestOwnerFenceLifecycle => self
+                .flag
+                .ingest_owner_fence_active
+                .store(false, Ordering::SeqCst),
         }
     }
 }
@@ -66,6 +78,8 @@ pub(crate) fn register_reserved_reference_write_guard(
         typed_dml: AtomicBool::new(false),
         schema_migration: AtomicBool::new(false),
         planner_maintenance: AtomicBool::new(false),
+        ingest_owner_fence: AtomicBool::new(false),
+        ingest_owner_fence_active: AtomicBool::new(false),
     });
     let function_flag = Arc::clone(&flag);
     conn.create_scalar_function(
@@ -105,6 +119,43 @@ fn expected_search_generation_trigger(raw_name: *const c_char, raw_table: *const
     let name = unsafe { CStr::from_ptr(raw_name) }.to_str();
     let table = unsafe { CStr::from_ptr(raw_table) }.to_str();
     matches!((name, table), (Ok(name), Ok(table)) if crate::db::search_generation::is_expected_search_generation_trigger_target(name, table))
+}
+
+const INGEST_OWNER_FENCE_CONTEXT_TABLE: &[u8] = b"ingest_owner_fence_context";
+const INGEST_STABLE_OWNER_FENCE_TRIGGER: &[u8] = b"ingest_stable_owner_fence";
+
+fn is_exact_ingest_owner_fence_temp_ddl(
+    action: c_int,
+    arg1: *const c_char,
+    arg2: *const c_char,
+    database: *const c_char,
+) -> bool {
+    if !sqlite_identifier_eq(database, b"temp") {
+        return false;
+    }
+
+    match action {
+        rusqlite::ffi::SQLITE_CREATE_TEMP_TABLE | rusqlite::ffi::SQLITE_DROP_TEMP_TABLE => {
+            sqlite_identifier_eq(arg1, INGEST_OWNER_FENCE_CONTEXT_TABLE) && arg2.is_null()
+        }
+        rusqlite::ffi::SQLITE_CREATE_TEMP_TRIGGER | rusqlite::ffi::SQLITE_DROP_TEMP_TRIGGER => {
+            sqlite_identifier_eq(arg1, INGEST_STABLE_OWNER_FENCE_TRIGGER)
+                && sqlite_identifier_eq(arg2, b"memories")
+        }
+        _ => false,
+    }
+}
+
+fn is_ingest_owner_fence_context_write(
+    action: c_int,
+    arg1: *const c_char,
+    database: *const c_char,
+) -> bool {
+    matches!(
+        action,
+        rusqlite::ffi::SQLITE_INSERT | rusqlite::ffi::SQLITE_UPDATE | rusqlite::ffi::SQLITE_DELETE
+    ) && sqlite_identifier_eq(arg1, INGEST_OWNER_FENCE_CONTEXT_TABLE)
+        && sqlite_identifier_eq(database, b"temp")
 }
 
 fn schema_mutation(action: c_int) -> bool {
@@ -171,8 +222,9 @@ unsafe extern "C" fn reserved_reference_authorizer(
     database: *const c_char,
     accessor: *const c_char,
 ) -> c_int {
-    let (typed_dml, schema_migration, planner_maintenance) = if state.is_null() {
-        (false, false, false)
+    let (typed_dml, schema_migration, planner_maintenance, ingest_owner_fence) = if state.is_null()
+    {
+        (false, false, false, false)
     } else {
         // MemoryStore owns this state for longer than its Connection. Raw
         // fixture handles pass null and therefore remain permanently denied.
@@ -181,8 +233,12 @@ unsafe extern "C" fn reserved_reference_authorizer(
             state.typed_dml.load(Ordering::SeqCst),
             state.schema_migration.load(Ordering::SeqCst),
             state.planner_maintenance.load(Ordering::SeqCst),
+            state.ingest_owner_fence.load(Ordering::SeqCst),
         )
     };
+
+    let exact_ingest_owner_fence_temp_ddl =
+        ingest_owner_fence && is_exact_ingest_owner_fence_temp_ddl(action, arg1, arg2, database);
 
     let trigger_ddl = matches!(
         action,
@@ -200,7 +256,15 @@ unsafe extern "C" fn reserved_reference_authorizer(
             && ((expected_reference_trigger(arg1) && sqlite_identifier_eq(arg2, b"memories"))
                 || expected_search_generation_trigger(arg1, arg2))
             && sqlite_identifier_eq(database, b"main");
-        return if canonical_migration_trigger {
+        return if canonical_migration_trigger || exact_ingest_owner_fence_temp_ddl {
+            rusqlite::ffi::SQLITE_OK
+        } else {
+            rusqlite::ffi::SQLITE_DENY
+        };
+    }
+
+    if is_ingest_owner_fence_context_write(action, arg1, database) {
+        return if ingest_owner_fence {
             rusqlite::ffi::SQLITE_OK
         } else {
             rusqlite::ffi::SQLITE_DENY
@@ -221,7 +285,11 @@ unsafe extern "C" fn reserved_reference_authorizer(
     }
 
     if schema_mutation(action) {
-        return rusqlite::ffi::SQLITE_DENY;
+        return if exact_ingest_owner_fence_temp_ddl {
+            rusqlite::ffi::SQLITE_OK
+        } else {
+            rusqlite::ffi::SQLITE_DENY
+        };
     }
 
     let protected_memory_write = (action == rusqlite::ffi::SQLITE_INSERT
@@ -411,6 +479,138 @@ pub(crate) fn authorize_planner_maintenance(
     })
 }
 
+fn authorize_ingest_owner_fence(
+    flag: &ReservedReferenceWriteFlag,
+) -> Result<ReservedReferenceWriteAuthorization, MemoryError> {
+    flag.ingest_owner_fence
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| {
+            MemoryError::InvalidArg(
+                "ingest owner-fence authorization is already active".to_string(),
+            )
+        })?;
+    Ok(ReservedReferenceWriteAuthorization {
+        flag: Arc::clone(flag),
+        kind: AuthorizationKind::IngestOwnerFence,
+    })
+}
+
+fn begin_ingest_owner_fence_lifecycle(
+    flag: &ReservedReferenceWriteFlag,
+) -> Result<ReservedReferenceWriteAuthorization, MemoryError> {
+    flag.ingest_owner_fence_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| {
+            MemoryError::InvalidArg("ingest owner-fence lifecycle is already active".to_string())
+        })?;
+    Ok(ReservedReferenceWriteAuthorization {
+        flag: Arc::clone(flag),
+        kind: AuthorizationKind::IngestOwnerFenceLifecycle,
+    })
+}
+
+impl MemoryStore {
+    fn install_ingest_stable_owner_fence(
+        &self,
+        event_hash: &str,
+        worker: &str,
+        owner_token: &str,
+    ) -> Result<(), MemoryError> {
+        let authorization = authorize_ingest_owner_fence(&self.reserved_reference_write)?;
+        let result = (|| -> rusqlite::Result<()> {
+            self.conn.execute_batch(
+                "DROP TRIGGER IF EXISTS temp.ingest_stable_owner_fence; \
+                 DROP TABLE IF EXISTS temp.ingest_owner_fence_context; \
+                 CREATE TEMP TABLE ingest_owner_fence_context ( \
+                     event_hash TEXT NOT NULL, worker TEXT NOT NULL, owner_token TEXT NOT NULL \
+                 );",
+            )?;
+            self.conn.execute(
+                "INSERT INTO temp.ingest_owner_fence_context \
+                 (event_hash, worker, owner_token) VALUES (?1, ?2, ?3)",
+                rusqlite::params![event_hash, worker, owner_token],
+            )?;
+            self.conn.execute_batch(
+                "CREATE TEMP TRIGGER ingest_stable_owner_fence \
+                 BEFORE INSERT ON main.memories \
+                 WHEN NOT EXISTS ( \
+                     SELECT 1 FROM main.processed_events AS p \
+                     JOIN temp.ingest_owner_fence_context AS c \
+                       ON p.event_hash = c.event_hash AND p.worker = c.worker \
+                      AND p.event_id = c.owner_token \
+                 ) \
+                 BEGIN \
+                     SELECT RAISE(ABORT, 'ingest claim ownership lost before stable row write'); \
+                 END;",
+            )?;
+            Ok(())
+        })();
+        drop(authorization);
+        result?;
+        Ok(())
+    }
+
+    fn remove_ingest_stable_owner_fence(&self) -> Result<(), MemoryError> {
+        let authorization = authorize_ingest_owner_fence(&self.reserved_reference_write)?;
+        let result = self.conn.execute_batch(
+            "DROP TRIGGER IF EXISTS temp.ingest_stable_owner_fence; \
+             DROP TABLE IF EXISTS temp.ingest_owner_fence_context;",
+        );
+        drop(authorization);
+        result?;
+        Ok(())
+    }
+
+    /// Run one durable-memory action behind the exact temporary ingest-owner
+    /// fence. The temporary objects and their private DDL authority cannot
+    /// escape this lifecycle, including when the action errors or panics.
+    pub fn with_ingest_stable_owner_fence<T, F>(
+        &mut self,
+        event_hash: &str,
+        worker: &str,
+        owner_token: &str,
+        action: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce(&mut MemoryStore) -> Result<T, String>,
+    {
+        let lifecycle = begin_ingest_owner_fence_lifecycle(&self.reserved_reference_write)
+            .map_err(|error| format!("begin stable row write owner fence: {error}"))?;
+        if let Err(prepare) =
+            self.install_ingest_stable_owner_fence(event_hash, worker, owner_token)
+        {
+            let cleanup = self.remove_ingest_stable_owner_fence();
+            drop(lifecycle);
+            return Err(match cleanup {
+                Ok(()) => format!("install stable row write owner fence: {prepare}"),
+                Err(cleanup) => format!(
+                    "install stable row write owner fence: {prepare}; cleanup stable row write owner fence: {cleanup}"
+                ),
+            });
+        }
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
+        let cleanup = self.remove_ingest_stable_owner_fence();
+        drop(lifecycle);
+        match outcome {
+            Ok(Ok(value)) => match cleanup {
+                Ok(()) => Ok(value),
+                Err(cleanup) => Err(format!("cleanup stable row write owner fence: {cleanup}")),
+            },
+            Ok(Err(action)) => match cleanup {
+                Ok(()) => Err(action),
+                Err(cleanup) => Err(format!(
+                    "{action}; cleanup stable row write owner fence: {cleanup}"
+                )),
+            },
+            Err(panic) => {
+                let _ = cleanup;
+                std::panic::resume_unwind(panic)
+            }
+        }
+    }
+}
+
 /// Process-wide count of explicit application-level lock-retry backoffs —
 /// i.e. how many times `retry_memory_locked` observed a BUSY/LOCKED error and
 /// slept before retrying. This is NOT time spent inside SQLite's own opaque
@@ -565,4 +765,195 @@ pub fn sqlite_error_is_locked(error: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(err, _)
             if matches!(err.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
     )
+}
+
+#[cfg(test)]
+mod ingest_owner_fence_authorizer_tests {
+    use super::*;
+
+    fn temp_owner_fence_object_count(store: &MemoryStore) -> i64 {
+        store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM temp.sqlite_master \
+                 WHERE name IN ('ingest_owner_fence_context', 'ingest_stable_owner_fence')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count owner-fence temp objects")
+    }
+
+    fn assert_sqlite_auth(result: rusqlite::Result<usize>, operation: &str) {
+        let error = result.expect_err(operation);
+        assert!(
+            matches!(
+                &error,
+                rusqlite::Error::SqliteFailure(error, _)
+                    if error.extended_code == rusqlite::ffi::SQLITE_AUTH
+            ),
+            "{operation} returned {error:?} instead of SQLITE_AUTH"
+        );
+    }
+
+    #[test]
+    fn scoped_owner_fence_keeps_temp_ddl_private_and_cleans_after_success() {
+        let mut store = MemoryStore::open_in_memory().expect("open guarded store");
+
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TEMP TABLE ingest_owner_fence_context(\
+                     event_hash TEXT NOT NULL, worker TEXT NOT NULL, owner_token TEXT NOT NULL)",
+                )
+                .is_err(),
+            "raw SQL created the reserved owner-fence context table"
+        );
+
+        let value = store
+            .with_ingest_stable_owner_fence("event", "worker", "owner", |store| {
+                assert_eq!(
+                    temp_owner_fence_object_count(store),
+                    2,
+                    "exact owner-fence objects must exist only during the action"
+                );
+                assert!(
+                    store
+                        .connection()
+                        .execute_batch("DROP TRIGGER temp.ingest_stable_owner_fence")
+                        .is_err(),
+                    "action escaped the private owner-fence DDL authority"
+                );
+                assert!(
+                    store
+                        .connection()
+                        .execute_batch("CREATE TEMP TABLE arbitrary_temp_ddl(value INTEGER)")
+                        .is_err(),
+                    "owner-fence lifecycle authorized an arbitrary temp table"
+                );
+                for (operation, sql) in [
+                    (
+                        "qualified context update",
+                        "UPDATE temp.ingest_owner_fence_context SET owner_token = 'tampered'",
+                    ),
+                    (
+                        "quoted case-spoofed context update",
+                        "UPDATE \"TEMP\".\"INGEST_OWNER_FENCE_CONTEXT\" \
+                         SET owner_token = 'tampered'",
+                    ),
+                    (
+                        "unqualified context delete",
+                        "DELETE FROM ingest_owner_fence_context",
+                    ),
+                    (
+                        "qualified context insert",
+                        "INSERT INTO temp.ingest_owner_fence_context \
+                         (event_hash, worker, owner_token) VALUES ('other', 'worker', 'owner')",
+                    ),
+                ] {
+                    assert_sqlite_auth(store.connection().execute(sql, []), operation);
+                }
+
+                let reentry = store.with_ingest_stable_owner_fence(
+                    "nested-event",
+                    "worker",
+                    "nested-owner",
+                    |_store| Ok::<_, String>(()),
+                );
+                assert!(
+                    reentry
+                        .expect_err("nested owner-fence lifecycle must fail")
+                        .contains("lifecycle is already active"),
+                    "nested owner-fence lifecycle was not rejected loudly"
+                );
+                assert_eq!(
+                    temp_owner_fence_object_count(store),
+                    2,
+                    "reentry attempt disturbed the outer owner fence"
+                );
+                Ok::<_, String>(7)
+            })
+            .expect("run exact owner fence");
+        assert_eq!(value, 7);
+        assert_eq!(
+            temp_owner_fence_object_count(&store),
+            0,
+            "successful action left stale owner-fence temp objects"
+        );
+    }
+
+    #[test]
+    fn scoped_owner_fence_cleans_and_relocks_after_action_error() {
+        let mut store = MemoryStore::open_in_memory().expect("open guarded store");
+
+        let error = store
+            .with_ingest_stable_owner_fence("event", "worker", "owner", |_store| {
+                Err::<(), _>("injected action error".to_string())
+            })
+            .expect_err("action error must be preserved");
+        assert_eq!(error, "injected action error");
+        assert_eq!(
+            temp_owner_fence_object_count(&store),
+            0,
+            "action error left stale owner-fence temp objects"
+        );
+
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TEMP TRIGGER ingest_stable_owner_fence \
+                     BEFORE INSERT ON main.memories BEGIN SELECT 1; END;",
+                )
+                .is_err(),
+            "raw SQL recreated the reserved owner-fence trigger after cleanup"
+        );
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TEMP TABLE ingest_owner_fence_context(\
+                     event_hash TEXT NOT NULL, worker TEXT NOT NULL, owner_token TEXT NOT NULL)",
+                )
+                .is_err(),
+            "raw SQL recreated the reserved owner-fence context table after cleanup"
+        );
+
+        store
+            .with_ingest_stable_owner_fence("second-event", "worker", "second-owner", |_store| {
+                Ok::<_, String>(())
+            })
+            .expect("second fenced operation after action error");
+        assert_eq!(temp_owner_fence_object_count(&store), 0);
+    }
+
+    #[test]
+    fn scoped_owner_fence_cleans_and_rethrows_action_panic() {
+        let mut store = MemoryStore::open_in_memory().expect("open guarded store");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), String> =
+                store.with_ingest_stable_owner_fence("event", "worker", "owner", |_store| {
+                    panic!("injected owner-fence action panic")
+                });
+        }))
+        .expect_err("action panic must be rethrown");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"injected owner-fence action panic"),
+            "wrapper changed the action panic payload"
+        );
+        assert_eq!(
+            temp_owner_fence_object_count(&store),
+            0,
+            "action panic left stale owner-fence temp objects"
+        );
+
+        store
+            .with_ingest_stable_owner_fence("second-event", "worker", "second-owner", |_store| {
+                Ok::<_, String>(())
+            })
+            .expect("second fenced operation after action panic");
+        assert_eq!(temp_owner_fence_object_count(&store), 0);
+    }
 }
