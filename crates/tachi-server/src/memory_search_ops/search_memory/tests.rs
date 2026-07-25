@@ -342,25 +342,99 @@ fn cache_generation_fingerprint_includes_global_and_bound_project_stores() {
 
 #[cfg(unix)]
 #[test]
-fn cache_generation_fingerprint_dedupes_symlink_aliases() {
+fn cache_generation_through_plan_c_alias_tracks_canonical_bound_project_writes() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().expect("temporary database directory");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp.path().join("home"));
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    let global = temp.path().join("global.sqlite");
+    let repo = temp.path().join("project");
+    let project_db = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(repo.join(".git")).expect("repository marker");
+    let server = crate::MemoryServer::new(global, Some(project_db.clone()))
+        .expect("server with canonical bound project database");
+    let project_name =
+        crate::path_utils::plan_c_dir_name_from_root(&repo).expect("Plan C project identity");
+    let alias = crate::path_utils::plan_c_global_db_path(&project_name);
+    std::fs::create_dir_all(alias.parent().expect("Plan C alias parent"))
+        .expect("create Plan C alias parent");
+    std::os::unix::fs::symlink(&project_db, &alias).expect("managed Plan C alias");
+
+    let mut search = params("cache generation probe");
+    search.project = Some(project_name);
+
+    let generation_before = recall_cache_generation_fingerprint(&server, &search, false)
+        .expect("managed Plan C alias must be cache-safe");
+    let generation_before: serde_json::Value =
+        serde_json::from_str(&generation_before).expect("fingerprint json");
+    assert_eq!(
+        generation_before["databases"].as_array().map(Vec::len),
+        Some(2),
+        "the named Plan C alias and unrelated global store are both selected"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&alias).expect("resolve Plan C alias"),
+        std::fs::canonicalize(&project_db).expect("resolve canonical project DB"),
+        "only the managed alias may resolve to the canonical project DB"
+    );
+
+    server
+        .with_project_store(|store| {
+            store
+                .upsert(&entry(None, "/scratch/plan-c-alias"))
+                .map_err(|error| error.to_string())
+        })
+        .expect("canonical project write");
+
+    let generation_after = recall_cache_generation_fingerprint(&server, &search, false)
+        .expect("Plan C alias must observe canonical project generation changes");
+
+    assert_ne!(
+        serde_json::to_string(&generation_before).expect("serialize before fingerprint"),
+        generation_after,
+        "a write through the canonical project DB must invalidate the Plan C alias generation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_generation_refuses_direct_project_leaf_symlink_loudly() {
     let temp = tempfile::tempdir().expect("temporary database directory");
     let global = temp.path().join("global.sqlite");
-    let _seed = crate::MemoryServer::new(global.clone(), None).expect("seed database");
-    let alias = temp.path().join("project-alias.sqlite");
-    std::os::unix::fs::symlink(&global, &alias).expect("database symlink");
-    let server = crate::MemoryServer::new(global, Some(alias)).expect("aliased server");
-    let mut search = params("cache generation probe");
-    search.project = None;
+    let _seed = crate::MemoryServer::new(global.clone(), None).expect("seed global database");
+    let project_leaf = temp
+        .path()
+        .join("project")
+        .join(".tachi")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(project_leaf.parent().expect("project DB parent"))
+        .expect("create project DB parent");
+    std::os::unix::fs::symlink(&global, &project_leaf).expect("direct project leaf symlink");
 
-    let generation = recall_cache_generation_fingerprint(&server, &search, false)
-        .expect("symlink alias must be cache-safe");
-    let generation: serde_json::Value =
-        serde_json::from_str(&generation).expect("fingerprint json");
+    let error = match crate::MemoryServer::new(global.clone(), Some(project_leaf.clone())) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("direct project DB leaf symlinks must refuse before cache generation"),
+    };
 
+    assert!(
+        error.contains("project DB path") && error.contains("must not be a symlink"),
+        "expected loud direct-project refusal, got: {error}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&project_leaf)
+            .expect("direct project leaf preserved")
+            .file_type()
+            .is_symlink(),
+        "refusal must not replace the direct project leaf"
+    );
     assert_eq!(
-        generation["databases"].as_array().map(Vec::len),
-        Some(1),
-        "one physical database must produce one generation read"
+        std::fs::read_link(&project_leaf).expect("direct project leaf target"),
+        global,
+        "refusal must not follow or retarget the direct project leaf"
     );
 }
 
