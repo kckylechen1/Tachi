@@ -642,6 +642,89 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6
     );
 }
 
+/// A complete append is not durable merely because recovery can read it.
+/// Simulate interruption after the full descriptor write but before file
+/// fsync, then prove recovery cannot become terminal while its descriptor
+/// fsync gate is injected to fail.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_completed_recovery_fsyncs_file_before_terminal_state() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "completed-recovery-fsync");
+
+    let proposal = generate_recall_source_proposal(&server, "completed-recovery-fsync").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let append_payload =
+        "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n";
+    let expected_after = format!("{source}{append_payload}");
+    let mut first_apply = tachi_memory_params("apply_recall_proposals");
+    first_apply.proposal_id = Some(proposal_id.clone());
+    first_apply.confirm = true;
+    first_apply.metadata = Some(json!({
+        "test_crash_after_recall_write_before_file_sync": true,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, first_apply)
+        .await
+        .expect_err("fixture must interrupt after the full write and before file fsync");
+    assert!(
+        err.contains("injected_crash_before_recall_file_sync"),
+        "unexpected pre-fsync interruption: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read complete unsynced append"),
+        expected_after
+    );
+    let applying_row = read_recall_row(&server, &proposal_id);
+
+    let mut blocked_retry = tachi_memory_params("apply_recall_proposals");
+    blocked_retry.proposal_id = Some(proposal_id.clone());
+    blocked_retry.confirm = true;
+    blocked_retry.metadata = Some(json!({
+        "test_fail_completed_recovery_file_sync": true,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, blocked_retry)
+        .await
+        .expect_err("recovery file fsync failure must block terminal state");
+    assert!(
+        err.contains("injected_completed_recovery_file_sync_failure"),
+        "unexpected recovery fsync refusal: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        applying_row,
+        "failed recovery fsync must leave the applying receipt recoverable"
+    );
+
+    let mut retry = tachi_memory_params("apply_recall_proposals");
+    retry.format = Some("json".to_string());
+    retry.proposal_id = Some(proposal_id);
+    retry.confirm = true;
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, retry)
+        .await
+        .expect("recovery with successful descriptor fsync must finalize");
+    let applied: Value = serde_json::from_str(&body).expect("apply JSON");
+    assert_eq!(applied["proposal"]["status"], json!("applied"));
+    assert_eq!(
+        applied["apply_outcome"],
+        json!("applied_finalized_existing")
+    );
+}
+
 /// A persisted receipt is not authority to bless arbitrary bytes. Even when
 /// its forged after_digest equals the live third-party source, recovery must
 /// reject a receipt suffix that omits the separator required by the approved

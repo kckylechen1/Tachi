@@ -188,6 +188,48 @@ fn run_recall_apply_missing_create_test_hook(
     Ok(())
 }
 
+#[cfg(test)]
+fn run_recall_apply_post_write_pre_sync_test_hook(
+    params: &TachiMemoryParams,
+) -> Result<(), String> {
+    if params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("test_crash_after_recall_write_before_file_sync"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("injected_crash_before_recall_file_sync".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn run_recall_apply_post_write_pre_sync_test_hook(
+    _params: &TachiMemoryParams,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_completed_recovery_pre_sync_test_hook(params: &TachiMemoryParams) -> Result<(), String> {
+    if params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("test_fail_completed_recovery_file_sync"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("injected_completed_recovery_file_sync_failure".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn run_completed_recovery_pre_sync_test_hook(_params: &TachiMemoryParams) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(not(test))]
 fn run_recall_apply_pre_append_test_hook(
     _params: &TachiMemoryParams,
@@ -708,16 +750,25 @@ fn drive_recall_apply_state_machine(
             if append_progress == Some(receipt.append_payload.len()) {
                 // Append already landed before the crash. The validator above
                 // proved exact length, approved prefix digest, exact suffix,
-                // and receipt-bound whole-source digest before finalization.
+                // and receipt-bound whole-source digest. Re-open only through
+                // the anchored no-follow protocol, repeat that proof on the
+                // descriptor being synced, then finalize without another path
+                // lookup.
+                sync_completed_recall_recovery(
+                    config_env_path,
+                    &bound_source_revision,
+                    &patch,
+                    &receipt,
+                    params,
+                )?;
                 let outcome = RecallApplyOutcome::FinalizedExisting {
                     attempt_id: receipt.attempt_id.to_string(),
                 };
-                finalize_recall_apply(
+                finalize_recall_apply_state(
                     server,
                     proposal_id,
                     &outcome,
                     &patch,
-                    receipt.after_digest,
                     config_env_path,
                 )
             } else if append_progress.is_some() {
@@ -851,6 +902,20 @@ fn finalize_recall_apply(
     // CAS on every finalize path, including recovery after a process crash.
     // An unsupported directory sync is loud and leaves the proposal applying.
     sync_recall_config_parent(config_env_path)?;
+    finalize_recall_apply_state(server, proposal_id, outcome, patch, config_env_path)
+}
+
+/// Persist the terminal proposal only after the caller has established both
+/// config-file and parent-directory durability. This helper performs no path
+/// lookup, so descriptor-bound recovery proof cannot be invalidated by an
+/// unvalidated reopen between fsync and the applying -> applied CAS.
+fn finalize_recall_apply_state(
+    server: &MemoryServer,
+    proposal_id: &str,
+    outcome: &RecallApplyOutcome,
+    patch: &BTreeMap<String, String>,
+    config_env_path: &Path,
+) -> Result<(Value, RecallApplyResult, RecallApplyOutcome), String> {
     let applied_at = Utc::now().to_rfc3339();
     let terminal = server.with_global_store(|store| {
         let (raw, version) = store
@@ -1865,6 +1930,76 @@ fn validate_recall_receipt_source_projection(
     Ok(Some(landed_len))
 }
 
+#[cfg(unix)]
+fn sync_completed_recall_recovery(
+    path: &Path,
+    approved_before_digest: &str,
+    patch: &BTreeMap<String, String>,
+    receipt: &ValidatedRecallReceipt<'_>,
+    params: &TachiMemoryParams,
+) -> Result<(), String> {
+    let anchored = open_anchored_recall_config_parent(path, false)?.ok_or_else(|| {
+        format!(
+            "third_party_drift: completed recovery config parent for {} disappeared",
+            path.display()
+        )
+    })?;
+    let mut file = open_recall_config_leaf_at(&anchored, libc::O_RDWR, 0)
+        .map_err(|err| map_recall_leaf_open_error(path, err))?;
+    let descriptor_metadata = file.metadata().map_err(|err| {
+        format!(
+            "read completed recovery config.env metadata {}: {err}",
+            path.display()
+        )
+    })?;
+    validate_recall_config_metadata(path, &descriptor_metadata)?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
+
+    let source = read_recall_config_descriptor(&mut file, path)?;
+    if validate_recall_receipt_source_projection(&source, approved_before_digest, patch, receipt)?
+        != Some(receipt.append_payload.len())
+    {
+        return Err(format!(
+            "third_party_drift: config.env {} no longer contains the complete approved append on the descriptor selected for recovery fsync",
+            path.display()
+        ));
+    }
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
+    run_completed_recovery_pre_sync_test_hook(params)?;
+    file.sync_all().map_err(|err| {
+        format!(
+            "fsync completed recovery config.env {}: {err}",
+            path.display()
+        )
+    })?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
+    anchored.directory.sync_all().map_err(|err| {
+        format!(
+            "fsync completed recovery config.env parent {}: {err}",
+            path.display()
+        )
+    })?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)
+}
+
+#[cfg(not(unix))]
+fn sync_completed_recall_recovery(
+    path: &Path,
+    _approved_before_digest: &str,
+    _patch: &BTreeMap<String, String>,
+    _receipt: &ValidatedRecallReceipt<'_>,
+    _params: &TachiMemoryParams,
+) -> Result<(), String> {
+    Err(format!(
+        "unsupported_platform: completed recall recovery for {} requires descriptor identity and fsync guarantees",
+        path.display()
+    ))
+}
+
 // Reads the BOUND apply payload (`identity_payload.apply_payload.config_env`),
 // not the unbound top-level `proposal.config_env` display field. Callers must
 // pass the `identity_payload` sub-value (already digest-validated by the
@@ -1993,6 +2128,7 @@ fn append_recall_config_env(
 
     file.write_all(&expected_append_payload.as_bytes()[revalidated_progress..])
         .map_err(|err| format!("append recall config.env {}: {err}", path.display()))?;
+    run_recall_apply_post_write_pre_sync_test_hook(params)?;
     file.sync_all()
         .map_err(|err| format!("fsync recall config.env {}: {err}", path.display()))?;
     assert_anchored_parent_identity(path, &anchored)?;
