@@ -80,19 +80,75 @@ pub(super) fn read_bounded_json_file(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
-fn result_written_for_run(run_dir: &Path) -> bool {
+fn result_written_for_run(run_dir: &Path) -> Result<bool, String> {
     match std::fs::symlink_metadata(run_dir.join("result.md")) {
-        Ok(metadata) => metadata.file_type().is_file(),
-        Err(error) if error.kind() == ErrorKind::NotFound => false,
-        Err(error) => {
-            tracing::warn!(
-                run_dir = %run_dir.display(),
-                error = %error,
-                "board skipped unreadable result marker"
-            );
-            false
-        }
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(format!(
+            "refuse non-regular result marker {}",
+            run_dir.join("result.md").display()
+        )),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "inspect result marker {}: {error}",
+            run_dir.join("result.md").display()
+        )),
     }
+}
+
+fn status_updated_at(status: &Value, status_path: &Path) -> Result<Option<String>, String> {
+    if let Some(updated_at) = status.get("updated_at").and_then(Value::as_str) {
+        return Ok(Some(updated_at.to_string()));
+    }
+    let metadata = std::fs::metadata(status_path).map_err(|error| {
+        format!(
+            "inspect status timestamp {}: {error}",
+            status_path.display()
+        )
+    })?;
+    let modified = metadata
+        .modified()
+        .map_err(|error| format!("read status timestamp {}: {error}", status_path.display()))?;
+    Ok(Some(chrono::DateTime::<Utc>::from(modified).to_rfc3339()))
+}
+
+struct RunStateFields {
+    result_written: bool,
+    abandoned: bool,
+    state: &'static str,
+    updated_at: Option<String>,
+    stale_reason: Option<String>,
+}
+
+fn run_state_fields(
+    run_dir: &Path,
+    status_path: &Path,
+    status: &Value,
+    now: chrono::DateTime<Utc>,
+) -> Result<RunStateFields, String> {
+    let result_written = result_written_for_run(run_dir)?;
+    let updated_at_dt = parse_status_updated_at(status, status_path);
+    let abandoned = is_abandoned_working_run(status, result_written, updated_at_dt, now);
+    let state = if abandoned {
+        "TASK_STATE_FAILED"
+    } else {
+        status_state(status, result_written)
+    };
+    let updated_at = status_updated_at(status, status_path)?;
+    let stale_reason = if abandoned {
+        Some(format!(
+            "run ledger stayed WORKING for more than {}s without terminal status or exit_code",
+            stale_after_secs(status)
+        ))
+    } else {
+        None
+    };
+    Ok(RunStateFields {
+        result_written,
+        abandoned,
+        state,
+        updated_at,
+        stale_reason,
+    })
 }
 
 pub(super) fn dispatch_timestamp_key(name: &std::ffi::OsStr) -> Option<String> {
@@ -246,51 +302,36 @@ pub(super) fn collect_run_tasks_from_dir(
             );
             continue;
         };
-        let result_written = result_written_for_run(&run_dir);
-        let updated_at_dt = parse_status_updated_at(&status, &status_path);
-        let abandoned = is_abandoned_working_run(&status, result_written, updated_at_dt, now);
-        let state = if abandoned {
-            "TASK_STATE_FAILED"
-        } else {
-            status_state(&status, result_written)
+        let fields = match run_state_fields(&run_dir, &status_path, &status, now) {
+            Ok(fields) => fields,
+            Err(error) => {
+                invalid_entries += 1;
+                tracing::warn!(
+                    run_dir = %run_dir.display(),
+                    error = %error,
+                    "board skipped run with invalid filesystem state"
+                );
+                continue;
+            }
         };
         let closure_kind = status.get("closure_kind").and_then(Value::as_str);
-        if !state_matches_filter_with_closure_kind(state_filter, state, closure_kind) {
+        if !state_matches_filter_with_closure_kind(state_filter, fields.state, closure_kind) {
             continue;
         }
-        let updated_at = status
-            .get("updated_at")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .or_else(|| {
-                std::fs::metadata(&status_path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(chrono::DateTime::<Utc>::from)
-                    .map(|dt| dt.to_rfc3339())
-            });
-        let stale_reason = if abandoned {
-            Some(format!(
-                "run ledger stayed WORKING for more than {}s without terminal status or exit_code",
-                stale_after_secs(&status)
-            ))
-        } else {
-            None
-        };
         runs.push(json!({
             "dispatch_id": dispatch_id,
             "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
-            "state": state,
+            "state": fields.state,
             "closure_kind": status.get("closure_kind").cloned().unwrap_or(serde_json::Value::Null),
             "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
             "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
-            "updated_at": updated_at,
+            "updated_at": fields.updated_at,
             "run_dir": run_dir.to_string_lossy(),
-            "result_written": result_written,
+            "result_written": fields.result_written,
             "source": "run",
-            "stale": abandoned,
-            "stale_reason": stale_reason,
-            "state_source": if abandoned { "run_stale_timeout" } else { "run" },
+            "stale": fields.abandoned,
+            "stale_reason": fields.stale_reason,
+            "state_source": if fields.abandoned { "run_stale_timeout" } else { "run" },
             "harness_transport": status.get("harness_transport").cloned().unwrap_or(serde_json::Value::Null),
             "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(serde_json::Value::Null),
             "harness_server_status": probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
@@ -318,14 +359,8 @@ pub(super) fn collect_run_tasks_from_dir(
 pub(crate) fn collect_run_task_for_server(
     server: &MemoryServer,
     dispatch_id: &str,
-) -> Option<serde_json::Value> {
-    match collect_run_task_by_id(&runs_dir_for_server(server), dispatch_id) {
-        Ok(task) => task,
-        Err(error) => {
-            tracing::warn!(dispatch_id, error = %error, "run status lookup failed");
-            None
-        }
-    }
+) -> Result<Option<serde_json::Value>, String> {
+    collect_run_task_by_id(&runs_dir_for_server(server), dispatch_id)
 }
 
 /// tachi#1173 board autopsy review: `dispatch_id` here is caller-supplied
@@ -343,7 +378,7 @@ pub(super) fn collect_run_task_by_id(
     dispatch_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
     if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
-        return Ok(None);
+        return Err("invalid dispatch_id for run status lookup".to_string());
     }
     let run_dir = runs_dir.join(dispatch_id);
     let run_metadata = match std::fs::symlink_metadata(&run_dir) {
@@ -357,10 +392,16 @@ pub(super) fn collect_run_task_by_id(
         }
     };
     if run_metadata.file_type().is_symlink() || !run_metadata.file_type().is_dir() {
-        return Ok(None);
+        return Err(format!(
+            "refuse non-directory run status path {}",
+            run_dir.display()
+        ));
     }
     if !crate::dispatch_ops::canonical_dir_is_within(&run_dir, runs_dir) {
-        return Ok(None);
+        return Err(format!(
+            "refuse run status path outside ledger {}",
+            run_dir.display()
+        ));
     }
     collect_run_task_from_dir(&run_dir)
 }
@@ -389,48 +430,21 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Result<Option<serde_json::Value>
                 .map(str::to_string)
         })
         .ok_or_else(|| format!("run status {} has no dispatch id", status_path.display()))?;
-    let result_written = result_written_for_run(run_dir);
-    let updated_at_dt = parse_status_updated_at(&status, &status_path);
-    let now = Utc::now();
-    let abandoned = is_abandoned_working_run(&status, result_written, updated_at_dt, now);
-    let state = if abandoned {
-        "TASK_STATE_FAILED"
-    } else {
-        status_state(&status, result_written)
-    };
-    let updated_at = status
-        .get("updated_at")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .or_else(|| {
-            std::fs::metadata(&status_path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(chrono::DateTime::<Utc>::from)
-                .map(|dt| dt.to_rfc3339())
-        });
-    let stale_reason = if abandoned {
-        Some(format!(
-            "run ledger stayed WORKING for more than {}s without terminal status or exit_code",
-            stale_after_secs(&status)
-        ))
-    } else {
-        None
-    };
+    let fields = run_state_fields(run_dir, &status_path, &status, Utc::now())?;
     Ok(Some(json!({
         "dispatch_id": dispatch_id,
         "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
-        "state": state,
+        "state": fields.state,
         "closure_kind": status.get("closure_kind").cloned().unwrap_or(serde_json::Value::Null),
         "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
         "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
-        "updated_at": updated_at,
+        "updated_at": fields.updated_at,
         "run_dir": run_dir.to_string_lossy(),
-        "result_written": result_written,
+        "result_written": fields.result_written,
         "source": "run",
-        "stale": abandoned,
-        "stale_reason": stale_reason,
-        "state_source": if abandoned { "run_stale_timeout" } else { "run" },
+        "stale": fields.abandoned,
+        "stale_reason": fields.stale_reason,
+        "state_source": if fields.abandoned { "run_stale_timeout" } else { "run" },
         "harness_transport": status.get("harness_transport").cloned().unwrap_or(serde_json::Value::Null),
         "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(serde_json::Value::Null),
         "harness_server_status": probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
@@ -561,12 +575,9 @@ mod tests {
         ] {
             let result = collect_run_task_by_id(&runs_dir, malicious);
             assert!(
-                result
-                    .as_ref()
-                    .expect("invalid ids retain not-found semantics")
-                    .is_none(),
+                result.is_err(),
                 "dispatch_id {malicious:?} must be rejected fail-closed (treated as \
-                 not-found), not resolved outside runs_dir; got: {result:?}"
+                 a loud error), not resolved outside runs_dir; got: {result:?}"
             );
         }
     }
@@ -599,10 +610,7 @@ mod tests {
 
         let result = collect_run_task_by_id(&runs_dir, link_name);
         assert!(
-            result
-                .as_ref()
-                .expect("symlinked run dirs retain fail-closed not-found semantics")
-                .is_none(),
+            result.is_err(),
             "a symlinked run_dir resolving outside runs_dir must be rejected even though \
              its name alone passes the character allowlist; got: {result:?}"
         );
@@ -689,6 +697,37 @@ mod tests {
         assert!(
             error.contains("refuse oversized JSON file"),
             "unexpected oversized status error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_run_task_by_id_surfaces_symlinked_result_marker_as_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "20260725T000000Z-codex-result-link";
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_COMPLETED",
+                "updated_at": Utc::now().to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .expect("write status");
+        let outside = tmp.path().join("outside-result.md");
+        std::fs::write(&outside, "done").expect("write outside result");
+        std::os::unix::fs::symlink(&outside, run_dir.join("result.md"))
+            .expect("symlink result marker");
+
+        let error = collect_run_task_by_id(&runs_dir, dispatch_id)
+            .expect_err("symlinked result marker must be a loud error");
+        assert!(
+            error.contains("refuse non-regular result marker"),
+            "unexpected result marker error: {error}"
         );
     }
 }

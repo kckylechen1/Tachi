@@ -532,6 +532,15 @@ pub(crate) fn slim_kanban(value: Value) -> Value {
     let now = chrono::Utc::now();
     json!({
         "count": value.get("count"),
+        "incomplete": value.get("incomplete"),
+        "limit_incomplete": value.get("limit_incomplete"),
+        "warning": value.get("warning"),
+        "incomplete_reasons": value.get("incomplete_reasons"),
+        "kanban_fetch_truncated": value.get("kanban_fetch_truncated"),
+        "flow_fetch_truncated": value.get("flow_fetch_truncated"),
+        "run_fallback_incomplete": value.get("run_fallback_incomplete"),
+        "run_scan_truncated": value.get("run_scan_truncated"),
+        "run_scan_invalid_entries": value.get("run_scan_invalid_entries"),
         "tasks": value
             .get("tasks")
             .and_then(|v| v.as_array())
@@ -611,6 +620,35 @@ mod tests {
         assert!(tasks[0]["age_secs"]
             .as_i64()
             .is_some_and(|age| age >= 6 * 3600));
+    }
+
+    #[test]
+    fn slim_kanban_preserves_incomplete_board_evidence() {
+        let board = json!({
+            "count": 0,
+            "tasks": [],
+            "incomplete": true,
+            "limit_incomplete": true,
+            "warning": "bounded fallback is incomplete",
+            "incomplete_reasons": ["run_fallback_invalid_entries"],
+            "kanban_fetch_truncated": false,
+            "flow_fetch_truncated": false,
+            "run_fallback_incomplete": true,
+            "run_scan_truncated": false,
+            "run_scan_invalid_entries": 1,
+        });
+
+        let slim = slim_kanban(board);
+
+        assert_eq!(slim["incomplete"], json!(true), "{slim:#}");
+        assert_eq!(slim["limit_incomplete"], json!(true), "{slim:#}");
+        assert_eq!(
+            slim["incomplete_reasons"],
+            json!(["run_fallback_invalid_entries"]),
+            "{slim:#}"
+        );
+        assert_eq!(slim["warning"], json!("bounded fallback is incomplete"));
+        assert_eq!(slim["run_scan_invalid_entries"], json!(1));
     }
 
     #[test]

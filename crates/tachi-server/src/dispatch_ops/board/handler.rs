@@ -354,10 +354,14 @@ pub(crate) async fn handle_tachi_board(
         let is_failed =
             obj.get("state").and_then(|value| value.as_str()) == Some("TASK_STATE_FAILED");
         let tail = if is_failed {
-            obj.get("run_dir")
+            match obj
+                .get("run_dir")
                 .and_then(|value| value.as_str())
                 .map(PathBuf::from)
-                .and_then(|run_dir| super::read_failure_tail(&run_dir))
+            {
+                Some(run_dir) => super::read_failure_tail(&run_dir)?,
+                None => None,
+            }
         } else {
             None
         };
