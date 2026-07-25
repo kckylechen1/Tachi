@@ -44,7 +44,8 @@ async fn hub_export_skills_rejects_unknown_agent() {
 #[tokio::test]
 async fn hub_export_skills_generic_writes_files() {
     let server = make_server();
-    let export_dir = crate::utils::test_fixture_path(format!("tachi-export-{}", uuid::Uuid::new_v4()));
+    let export_dir =
+        crate::utils::test_fixture_path(format!("tachi-export-{}", uuid::Uuid::new_v4()));
 
     // Register a skill
     server
