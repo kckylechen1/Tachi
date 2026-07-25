@@ -1,7 +1,11 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "open3"
+require "pathname"
 require "psych"
+require "set"
+require "shellwords"
 
 class PolicyError < StandardError; end
 
@@ -23,38 +27,115 @@ AUDITED_PINS = [
   Pin.new("taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8", "releases/nextest snapshot 2026-07-25")
 ].freeze
 
-class ActionPolicy
-  attr_reader :uses_count
+AUDITED_CARGO_INSTALLS = {
+  "cargo install cargo-audit --version 0.22.2 --locked --quiet" => 1
+}.freeze
 
-  def initialize(pins = AUDITED_PINS)
+class RepoInventory
+  attr_reader :root, :tracked_files
+
+  def self.actual(root)
+    root = Pathname.new(root).expand_path
+    stdout, stderr, status = Open3.capture3("git", "-C", root.to_s, "ls-files", "-z")
+    raise PolicyError, "git ls-files failed: #{stderr.strip}" unless status.success?
+
+    new(root, stdout.split("\0").to_set)
+  end
+
+  def self.virtual(sources)
+    new(Pathname.new("/virtual-repo"), sources.keys.to_set, sources)
+  end
+
+  def initialize(root, tracked_files, sources = nil)
+    @root = root
+    @root_real = sources ? root : root.realpath
+    @tracked_files = tracked_files
+    @sources = sources
+  end
+
+  def workflow_files
+    tracked_files.grep(%r{\A\.github/workflows/.+\.ya?ml\z}).sort
+  end
+
+  def read(relative)
+    return @sources.fetch(relative) if @sources
+
+    File.read(root.join(relative))
+  rescue KeyError, Errno::ENOENT
+    raise PolicyError, "tracked policy file is missing: #{relative}"
+  end
+
+  def local_manifest(value)
+    relative_dir = Pathname.new(value.delete_prefix("./")).cleanpath
+    if relative_dir.absolute? || relative_dir.to_s == ".." || relative_dir.to_s.start_with?("../")
+      raise PolicyError, "local action escapes repository root: #{value}"
+    end
+
+    candidates = %w[action.yml action.yaml].map { |name| relative_dir.join(name).to_s }
+    manifests = candidates.select { |path| tracked_files.include?(path) }
+    raise PolicyError, "local action manifest is missing or untracked: #{value}" if manifests.empty?
+    raise PolicyError, "local action manifest is ambiguous: #{value}" if manifests.length > 1
+
+    manifest = manifests.first
+    unless @sources
+      absolute = root.join(manifest)
+      raise PolicyError, "tracked local action manifest is missing: #{manifest}" unless absolute.file?
+      raise PolicyError, "local action manifest must not be a symlink: #{manifest}" if absolute.symlink?
+
+      real = absolute.realpath
+      root_prefix = "#{@root_real}#{File::SEPARATOR}"
+      unless real.to_s.start_with?(root_prefix)
+        raise PolicyError, "local action manifest resolves outside repository: #{manifest}"
+      end
+    end
+    manifest
+  end
+end
+
+class ActionPolicy
+  attr_reader :run_count, :uses_count
+
+  def initialize(inventory, pins = AUDITED_PINS, cargo_installs = AUDITED_CARGO_INSTALLS)
+    @inventory = inventory
     @pins = pins
+    @cargo_installs = cargo_installs
     @approved = {}
     @ref_sha = {}
-    @uses = Hash.new(0)
+    @pin_uses = Hash.new(0)
+    @cargo_uses = Hash.new(0)
+    @states = {}
+    @stack = []
+    @run_count = 0
     @uses_count = 0
     build_map!
   end
 
-  def validate_source(source, path)
-    @source_lines = source.lines
-    stream = Psych.parse_stream(source, path)
-    walk(stream, path)
-  rescue Psych::SyntaxError => e
-    raise PolicyError, "#{path}: invalid YAML: #{e.message}"
-  ensure
-    @source_lines = nil
-  end
+  def validate_roots(roots)
+    normalized = roots.map { |path| Pathname.new(path).cleanpath.to_s }
+    raise PolicyError, "workflow roots contain duplicates" unless normalized.uniq.length == normalized.length
 
-  def validate_file(path)
-    validate_source(File.read(path), path)
+    expected = @inventory.workflow_files
+    missing = expected - normalized
+    extra = normalized - expected
+    unless missing.empty? && extra.empty?
+      raise PolicyError, "workflow root coverage mismatch: missing=#{missing.join(',')} extra=#{extra.join(',')}"
+    end
+
+    normalized.sort.each { |path| parse_path(path) }
   end
 
   def finish!
-    stale = @pins.reject { |pin| @uses[[pin.value, pin.label]].positive? }
-    return if stale.empty?
+    stale_pin = @pins.find { |pin| @pin_uses[[pin.value, pin.label]].zero? }
+    if stale_pin
+      raise PolicyError, "audited action mapping is stale and unused: #{stale_pin.value} # #{stale_pin.label}"
+    end
 
-    pin = stale.first
-    raise PolicyError, "audited action mapping is stale and unused: #{pin.value} # #{pin.label}"
+    @cargo_installs.each do |command, expected_count|
+      actual_count = @cargo_uses[command]
+      next if actual_count == expected_count
+
+      raise PolicyError, "audited cargo install count mismatch: expected=#{expected_count} actual=#{actual_count}: #{command}"
+    end
   end
 
   private
@@ -85,32 +166,63 @@ class ActionPolicy
     end
   end
 
-  def walk(node, path)
+  def parse_path(path)
+    case @states[path]
+    when :done
+      return
+    when :visiting
+      cycle = (@stack + [path]).join(" -> ")
+      raise PolicyError, "local action cycle detected: #{cycle}"
+    end
+
+    @states[path] = :visiting
+    @stack << path
+    source = @inventory.read(path)
+    lines = source.lines
+    stream = Psych.parse_stream(source, path)
+    walk(stream, path, lines)
+    @states[path] = :done
+  rescue Psych::SyntaxError => e
+    raise PolicyError, "#{path}: invalid YAML: #{e.message}"
+  ensure
+    @stack.pop if @stack.last == path
+  end
+
+  def walk(node, path, lines)
     case node
     when Psych::Nodes::Alias
       raise PolicyError, "#{path}: YAML aliases are forbidden in supply-chain policy files"
     when Psych::Nodes::Mapping
       node.children.each_slice(2) do |key, value|
-        walk(key, path)
+        walk(key, path, lines)
         if key.is_a?(Psych::Nodes::Scalar) && key.value == "uses"
-          unless value.is_a?(Psych::Nodes::Scalar)
-            raise PolicyError, "#{path}: uses must have a scalar value"
-          end
-          validate_use(value, path)
+          require_scalar!(value, path, "uses")
+          validate_use(value, path, lines)
+        elsif key.is_a?(Psych::Nodes::Scalar) && key.value == "run"
+          require_scalar!(value, path, "run")
+          validate_run(value, path)
         else
-          walk(value, path)
+          walk(value, path, lines)
         end
       end
     when Psych::Nodes::Stream, Psych::Nodes::Document, Psych::Nodes::Sequence
-      node.children.each { |child| walk(child, path) }
+      node.children.each { |child| walk(child, path, lines) }
     end
   end
 
-  def validate_use(node, path)
+  def require_scalar!(node, path, key)
+    return if node.is_a?(Psych::Nodes::Scalar)
+
+    raise PolicyError, "#{path}: #{key} must have a scalar value"
+  end
+
+  def validate_use(node, path, lines)
     value = node.value
     @uses_count += 1
 
-    if value.match?(/\A\.\/[^[:space:]]+\z/)
+    if value.start_with?("./")
+      manifest = @inventory.local_manifest(value)
+      parse_path(manifest)
       return
     end
 
@@ -121,71 +233,131 @@ class ActionPolicy
       return
     end
 
-    label = trailing_ref_comment(node)
+    label = trailing_ref_comment(node, lines)
     key = [value, label]
     unless @approved.key?(key)
       rendered_label = label ? " # #{label}" : ""
       raise PolicyError, "#{path}: remote action is not in the audited mapping: #{value}#{rendered_label}"
     end
-    @uses[key] += 1
+    @pin_uses[key] += 1
   end
 
-  def trailing_ref_comment(node)
+  def validate_run(node, path)
+    value = node.value
+    @run_count += 1
+    return unless cargo_install_occurrence?(value)
+
+    unless node.start_line == node.end_line && @cargo_installs.key?(value)
+      raise PolicyError, "#{path}: unaudited cargo install command: #{value.inspect}"
+    end
+    @cargo_uses[value] += 1
+  end
+
+  def cargo_install_occurrence?(value)
+    normalized = value.gsub(/\\\r?\n/, " ").gsub(/[[:space:]]+/, " ")
+    tokens = Shellwords.shellsplit(normalized)
+    tokens.each_cons(2).any? { |command, argument| File.basename(command) == "cargo" && argument == "install" } ||
+      tokens.any? { |token| token.match?(/\bcargo[[:space:]]+install\b/) }
+  rescue ArgumentError
+    normalized.match?(%r{(?:\A|[;&|()[:space:]])(?:[^[:space:];&|()]*/)?cargo[[:space:]]+install(?:[[:space:]]|\z)})
+  end
+
+  def trailing_ref_comment(node, lines)
     return nil unless node.start_line == node.end_line
 
-    line = @source_lines.fetch(node.end_line, "")
+    line = lines.fetch(node.end_line, "")
     tail = line[node.end_column..] || ""
     comment = tail.match(/#[[:space:]]*(.*?)[[:space:]]*\z/)
     comment && comment[1]
   end
 end
 
-def expect_rejected(name, source, pins = AUDITED_PINS)
-  begin
-    policy = ActionPolicy.new(pins)
-    policy.validate_source(source, "fixture:#{name}")
-    policy.finish!
-  rescue PolicyError
-    puts "fixture REJECTED #{name}"
-    return
-  end
+def virtual_policy(sources, pins: [], cargo_installs: {})
+  ActionPolicy.new(RepoInventory.virtual(sources), pins, cargo_installs)
+end
+
+def expect_rejected(name)
+  yield
+rescue PolicyError
+  puts "fixture REJECTED #{name}"
+else
   raise PolicyError, "fixture unexpectedly accepted: #{name}"
 end
 
 def self_test!
-  good_checkout = AUDITED_PINS.find { |pin| pin.value.start_with?("actions/checkout@fbc6") }
-  good_nextest = AUDITED_PINS.find { |pin| pin.value.start_with?("taiki-e/install-action@") }
   wrong_sha = "0123456789abcdef0123456789abcdef01234567"
+  root = ".github/workflows/root.yml"
+  action = "custom/action/action.yml"
 
-  expect_rejected("quoted-key", %Q{"uses": actions/checkout@#{wrong_sha} # v5\n})
-  expect_rejected("flow-mapping", %Q{step: {uses: actions/checkout@#{wrong_sha}} # v5\n})
-  expect_rejected("folded-scalar", %Q{uses: >-\n  unknown/action@#{wrong_sha}\n})
-  expect_rejected("nested-composite", %Q{runs:\n  using: composite\n  steps:\n    - uses: unknown/action@#{wrong_sha} # v1\n})
-  expect_rejected("wrong-sha", %Q{uses: actions/checkout@#{wrong_sha} # v5\n})
-  expect_rejected("wrong-label", "uses: #{good_checkout.value} # v5.0.0\n")
-  expect_rejected("unknown-action", %Q{uses: unknown/action@#{wrong_sha} # v1\n})
-  expect_rejected("mutable-ref", "uses: actions/checkout@v5 # v5\n")
-  expect_rejected("docker-tag", "uses: docker://alpine:3.20\n")
-  expect_rejected("alias", "base: &pin\n  uses: ./local-action\ncopy: *pin\n")
+  expect_rejected("local-missing") do
+    virtual_policy(root => "uses: ./missing\n").validate_roots([root])
+  end
+  expect_rejected("local-escape") do
+    virtual_policy(root => "uses: ./../outside\n").validate_roots([root])
+  end
+  expect_rejected("local-ambiguous") do
+    sources = {root => "uses: ./custom/action\n", action => "name: a\n", "custom/action/action.yaml" => "name: b\n"}
+    virtual_policy(sources).validate_roots([root])
+  end
+  expect_rejected("local-cycle") do
+    sources = {root => "uses: ./custom/a\n", "custom/a/action.yml" => "uses: ./custom/b\n", "custom/b/action.yml" => "uses: ./custom/a\n"}
+    virtual_policy(sources).validate_roots([root])
+  end
+  expect_rejected("nested-local-remote") do
+    sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - uses: unknown/action@#{wrong_sha} # v1\n"}
+    virtual_policy(sources).validate_roots([root])
+  end
+  expect_rejected("nested-local-docker") do
+    sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - uses: docker://alpine:3.20\n"}
+    virtual_policy(sources).validate_roots([root])
+  end
+  expect_rejected("root-coverage") do
+    sources = {root => "name: one\n", ".github/workflows/other.yaml" => "name: two\n"}
+    virtual_policy(sources).validate_roots([root])
+  end
 
-  duplicate_pins = [good_checkout, Pin.new(good_checkout.value, good_checkout.label)]
-  expect_rejected("duplicate-map", "uses: ./local-action\n", duplicate_pins)
-  conflicting_pins = [good_checkout, Pin.new("actions/checkout@#{wrong_sha}", good_checkout.label)]
-  expect_rejected("conflicting-map", "uses: ./local-action\n", conflicting_pins)
-  expect_rejected("stale-map", "uses: ./local-action\n", [good_checkout])
+  audited = AUDITED_CARGO_INSTALLS.keys.first
+  cargo_fixtures = {
+    "cargo-env-prefix" => "run: FOO=bar #{audited}\n",
+    "cargo-sudo" => "run: sudo #{audited}\n",
+    "cargo-semicolon" => "run: #{audited}; echo done\n",
+    "cargo-multiline" => "run: |\n  #{audited}\n",
+    "cargo-continuation" => "run: |\n  cargo \\\n  install cargo-audit --version 0.22.2 --locked --quiet\n",
+    "cargo-shell-string" => "run: sh -c 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n",
+    "cargo-wrong-args" => "run: cargo install --locked cargo-audit --version 0.22.2 --quiet\n",
+    "cargo-quoted" => "run: \"cargo install cargo-audit --version 0.22.1 --locked --quiet\"\n",
+    "cargo-folded" => "run: >-\n  #{audited}\n"
+  }
+  cargo_fixtures.each do |name, source|
+    expect_rejected(name) do
+      virtual_policy({root => source}, cargo_installs: AUDITED_CARGO_INSTALLS).validate_roots([root])
+    end
+  end
+  expect_rejected("cargo-nested-local") do
+    sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - run: FOO=bar #{audited}\n"}
+    virtual_policy(sources, cargo_installs: AUDITED_CARGO_INSTALLS).validate_roots([root])
+  end
 
-  valid = ActionPolicy.new([good_checkout, good_nextest])
-  valid.validate_source("on: push\nsteps:\n  - \"uses\": ./local-action\n  - uses: #{good_checkout.value} # #{good_checkout.label}\n  - uses: #{good_nextest.value} # #{good_nextest.label}\n  - uses: docker://alpine@sha256:#{'a' * 64}\n", "fixture:valid")
+  valid_sources = {
+    root => "on: push\nsteps:\n  - \"uses\": ./custom/action\n  - run: #{audited}\n",
+    action => "runs:\n  using: composite\n  steps:\n    - run: echo ok\n"
+  }
+  valid = virtual_policy(valid_sources, cargo_installs: AUDITED_CARGO_INSTALLS)
+  valid.validate_roots([root])
   valid.finish!
-  raise PolicyError, "valid fixture did not enumerate every uses key" unless valid.uses_count == 4
-
-  puts "fixture ACCEPTED yaml-1.1-on quoted-key local remote nextest docker-digest"
+  raise PolicyError, "valid fixture inventory mismatch" unless valid.uses_count == 1 && valid.run_count == 2
+  puts "fixture ACCEPTED complete-roots nested-local exact-cargo-install yaml-1.1-on"
 end
 
-self_test! if ARGV.delete("--self-test")
-raise PolicyError, "no policy files supplied" if ARGV.empty?
+run_self_test = ARGV.delete("--self-test")
+repo_root_index = ARGV.index("--repo-root")
+repo_root = repo_root_index ? ARGV.delete_at(repo_root_index + 1) : Dir.pwd
+ARGV.delete_at(repo_root_index) if repo_root_index
+self_test! if run_self_test
+raise PolicyError, "no workflow roots supplied" if ARGV.empty?
 
-policy = ActionPolicy.new
-ARGV.each { |path| policy.validate_file(path) }
+inventory = RepoInventory.actual(repo_root)
+policy = ActionPolicy.new(inventory)
+policy.validate_roots(ARGV)
 policy.finish!
-puts "action-policy OK files=#{ARGV.length} uses=#{policy.uses_count} audited=#{AUDITED_PINS.length}"
+puts "supply-policy OK workflows=#{ARGV.length} uses=#{policy.uses_count} runs=#{policy.run_count} audited_actions=#{AUDITED_PINS.length}"

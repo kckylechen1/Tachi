@@ -51,22 +51,14 @@ jobs:
             exit 1
           fi
 
-          ruby .github/scripts/validate_action_pins.rb --self-test "${policy_files[@]}"
+          ruby .github/scripts/validate_action_pins.rb --self-test --repo-root . "${workflow_files[@]}"
 
-          cargo_install_pattern='^[[:space:]]*(run:[[:space:]]+)?(sudo[[:space:]]+)?cargo([[:space:]]+\+[^[:space:]]+)?[[:space:]]+install[[:space:]]+'
-          pinned_cargo_pattern='--version [0-9]+\.[0-9]+\.[0-9]+ .*--locked([[:space:]]|$)'
           image_reference_pattern='^[[:space:]]*(image|container):[[:space:]]+[^[:space:]#]+'
           digest_pattern='@sha256:[0-9a-f]{64}'
           direct_toolchain_action_pattern='^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+.*(rust-toolchain|setup-rust-toolchain)@'
           toolchain_input_pattern='^[[:space:]]*toolchain:[[:space:]]+'
           moving_rustup_pattern='^[[:space:]]*(run:[[:space:]]+)?(sudo[[:space:]]+)?rustup.*(^|[^[:alnum:]_.-])(stable|beta|nightly)([^[:alnum:]_.-]|$)'
 
-          if ! printf '%s\n' '      run: cargo install cargo-audit --quiet' | grep -Eq "${cargo_install_pattern}" \
-            || printf '%s\n' '      run: cargo install cargo-audit --quiet' | grep -Eq -- "${pinned_cargo_pattern}" \
-            || ! printf '%s\n' '      run: cargo install cargo-audit --version 0.22.2 --locked --quiet' | grep -Eq -- "${pinned_cargo_pattern}"; then
-            echo 'cargo-install policy self-test failed' >&2
-            exit 1
-          fi
           digest_fixture="$(printf 'a%.0s' {1..64})"
           image_tag_fixture='        image: alpine:3.20'
           image_digest_fixture="        image: alpine@sha256:${digest_fixture}"
@@ -95,11 +87,6 @@ jobs:
             exit 1
           fi
 
-          if grep -hE "${cargo_install_pattern}" "${policy_files[@]}" \
-            | grep -Ev -- "${pinned_cargo_pattern}"; then
-            echo 'cargo installs require an exact version and --locked' >&2
-            exit 1
-          fi
           if grep -hE "${image_reference_pattern}" "${policy_files[@]}" \
             | grep -Ev "${digest_pattern}"; then
             echo 'workflow and action container images require an immutable sha256 digest' >&2
@@ -224,10 +211,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked --quiet
+
       - name: Run cargo audit
-        run: |
-          cargo install cargo-audit --version 0.22.2 --locked --quiet
-          cargo audit --deny warnings
+        run: cargo audit --deny warnings
 
       - name: Install cargo-nextest
         # get.nextest.rs is unreachable from this runner's network (DNS blocked);
