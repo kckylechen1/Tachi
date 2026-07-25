@@ -548,7 +548,7 @@ mod exact_dedupe_open_tests {
     }
 
     #[test]
-    fn fresh_schema_initialization_installs_only_canonical_reference_triggers() {
+    fn fresh_schema_initialization_installs_exact_canonical_trigger_inventory() {
         let store = MemoryStore::open_in_memory().expect("initialize fresh store");
         let triggers: Vec<(String, String)> = store
             .connection()
@@ -574,8 +574,44 @@ mod exact_dedupe_open_tests {
                     "memories_reserved_refs_update_guard".to_string(),
                     "memories".to_string(),
                 ),
+                (
+                    "memory_access_search_generation_after_delete".to_string(),
+                    "access_history".to_string(),
+                ),
+                (
+                    "memory_access_search_generation_after_insert".to_string(),
+                    "access_history".to_string(),
+                ),
+                (
+                    "memory_access_search_generation_after_update".to_string(),
+                    "access_history".to_string(),
+                ),
+                (
+                    "memory_edge_search_generation_after_delete".to_string(),
+                    "memory_edges".to_string(),
+                ),
+                (
+                    "memory_edge_search_generation_after_insert".to_string(),
+                    "memory_edges".to_string(),
+                ),
+                (
+                    "memory_edge_search_generation_after_update".to_string(),
+                    "memory_edges".to_string(),
+                ),
+                (
+                    "memory_search_generation_after_delete".to_string(),
+                    "memories".to_string(),
+                ),
+                (
+                    "memory_search_generation_after_insert".to_string(),
+                    "memories".to_string(),
+                ),
+                (
+                    "memory_search_generation_after_update".to_string(),
+                    "memories".to_string(),
+                ),
             ],
-            "fresh schema initialization must install only repository trigger definitions"
+            "fresh schema initialization must install the exact canonical trigger inventory"
         );
         db::validate_persistent_trigger_inventory(store.connection(), true)
             .expect("fresh schema trigger inventory must be canonical");
