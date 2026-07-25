@@ -77,6 +77,26 @@ fn read_route_policy_row(server: &crate::MemoryServer, proposal_id: &str) -> (St
         .expect("route proposal row")
 }
 
+fn tamper_route_policy_identity_payload(server: &crate::MemoryServer, proposal_id: &str) {
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("route proposal row");
+            let mut value: serde_json::Value = serde_json::from_str(&raw).expect("route row JSON");
+            value["identity_payload"]["tampered_after_generation"] = json!(true);
+            store
+                .set_state(
+                    tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+                    proposal_id,
+                    &serde_json::to_string(&value).expect("serialize tampered route row"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("tamper digest-bound identity payload");
+}
+
 fn test_route_content_digest(identity_payload: &serde_json::Value) -> String {
     let canonical = tachi_dispatch::policy::canonical_json(identity_payload).to_string();
     let mut hasher = Sha256::new();
@@ -86,6 +106,25 @@ fn test_route_content_digest(identity_payload: &serde_json::Value) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn assert_stale_route_digest_with_matching_display(raw: &str) -> serde_json::Value {
+    let value: serde_json::Value = serde_json::from_str(raw).expect("tampered route row JSON");
+    let recomputed = test_route_content_digest(&value["identity_payload"]);
+    assert_ne!(
+        value["content_digest"].as_str(),
+        Some(recomputed.as_str()),
+        "fixture must leave content_digest stale after identity-only tamper"
+    );
+    assert_eq!(
+        value["policy_rule"], value["identity_payload"]["apply_payload"],
+        "fixture must keep the policy-rule display copy aligned"
+    );
+    assert_eq!(
+        value["evidence"], value["identity_payload"]["evidence_review"],
+        "fixture must keep the evidence display copy aligned"
+    );
+    value
 }
 
 #[tokio::test]
@@ -823,6 +862,15 @@ async fn route_terminal_state_cannot_be_rereviewed() {
     reject.review_status = Some("rejected".to_string());
     let _ = server.tachi_task(Parameters(reject)).await.expect("reject");
 
+    let (before_raw, before_version) = read_route_policy_row(&server, &proposal_id);
+    let before_value: serde_json::Value =
+        serde_json::from_str(&before_raw).expect("rejected route row JSON");
+    assert_eq!(
+        before_value["status"],
+        json!("rejected"),
+        "the first review must establish the rejected terminal state"
+    );
+
     // Re-review the rejected row: must refuse with a terminal-state error.
     let mut re_approve = task_params("review_proposal");
     re_approve.proposal_id = Some(proposal_id.clone());
@@ -834,6 +882,119 @@ async fn route_terminal_state_cannot_be_rereviewed() {
     assert!(
         err.contains("terminal state"),
         "expected a terminal-state refusal, got: {err}"
+    );
+
+    let (after_raw, after_version) = read_route_policy_row(&server, &proposal_id);
+    assert_eq!(
+        after_version, before_version,
+        "a refused terminal re-review must not bump state_version"
+    );
+    assert_eq!(
+        after_raw, before_raw,
+        "a refused terminal re-review must leave the exact stored row bytes unchanged"
+    );
+    let after_value: serde_json::Value =
+        serde_json::from_str(&after_raw).expect("route row JSON after refused re-review");
+    assert_eq!(
+        after_value["status"],
+        json!("rejected"),
+        "a refused re-review must leave status rejected"
+    );
+}
+
+/// Discrimination through the shipped `tachi_task` facade: mutating only the
+/// digest-bound identity payload of a real pending v3 proposal while leaving
+/// its stored content_digest stale must refuse review at the digest check.
+/// The unbound display copies remain untouched, so `content_digest_mismatch`
+/// is necessarily the first applicable refusal rather than display drift.
+#[tokio::test]
+async fn route_review_identity_tamper_refuses_with_exact_row_unchanged() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_route_policy_inputs(&server, "review-content-digest-tamper").await;
+    let proposal = generate_route_policy_proposal(&server).await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("route proposal id")
+        .to_string();
+    assert_eq!(proposal["schema_version"], json!(3));
+
+    tamper_route_policy_identity_payload(&server, &proposal_id);
+    let before = read_route_policy_row(&server, &proposal_id);
+    let stored = assert_stale_route_digest_with_matching_display(&before.0);
+    assert_eq!(stored["status"], json!("pending"));
+
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = server
+        .tachi_task(Parameters(review))
+        .await
+        .expect_err("identity tamper with stale content_digest must refuse review");
+    assert!(
+        err.contains("content_digest_mismatch"),
+        "expected content_digest_mismatch before any later validator, got: {err}"
+    );
+    assert_eq!(
+        read_route_policy_row(&server, &proposal_id),
+        before,
+        "refused digest-tampered review must preserve exact row bytes and state_version"
+    );
+}
+
+/// Apply-side discriminator for the same shipped facade boundary. Approval is
+/// recorded while the real v3 proposal is intact; an identity-only tamper then
+/// leaves content_digest stale. Apply must refuse without changing the exact
+/// approved row or writing any active route rule.
+#[tokio::test]
+async fn route_apply_identity_tamper_refuses_without_rule_or_row_mutation() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_route_policy_inputs(&server, "apply-content-digest-tamper").await;
+    let proposal = generate_route_policy_proposal(&server).await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("route proposal id")
+        .to_string();
+    assert_eq!(proposal["schema_version"], json!(3));
+
+    let mut approve = task_params("review_proposal");
+    approve.proposal_id = Some(proposal_id.clone());
+    approve.review_status = Some("approved".to_string());
+    server
+        .tachi_task(Parameters(approve))
+        .await
+        .expect("approve intact route proposal");
+
+    tamper_route_policy_identity_payload(&server, &proposal_id);
+    let before = read_route_policy_row(&server, &proposal_id);
+    let stored = assert_stale_route_digest_with_matching_display(&before.0);
+    assert_eq!(stored["status"], json!("approved"));
+
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("identity tamper with stale content_digest must refuse apply");
+    assert!(
+        err.contains("content_digest_mismatch"),
+        "expected content_digest_mismatch before any later validator, got: {err}"
+    );
+    assert_eq!(
+        read_route_policy_row(&server, &proposal_id),
+        before,
+        "refused digest-tampered apply must preserve exact row bytes and state_version"
+    );
+    let rule = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::ROUTE_POLICY_RULE_NS, &proposal_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("query active route rule after refused apply");
+    assert!(
+        rule.is_none(),
+        "refused digest-tampered apply must not write ROUTE_POLICY_RULE_NS: {rule:?}"
     );
 }
 
