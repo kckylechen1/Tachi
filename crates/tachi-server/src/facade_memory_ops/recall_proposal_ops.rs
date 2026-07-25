@@ -7,9 +7,10 @@ use crate::MemoryServer;
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use tachi_dispatch::policy::{
     canonical_json_eq, recall_config_v3_identity_payload, RECALL_CONFIG_PROPOSAL_KIND,
     RECALL_CONFIG_PROPOSAL_POLICY_VERSION, RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION,
@@ -71,6 +72,38 @@ fn run_recall_review_post_cas_test_hook(
 
 #[cfg(not(test))]
 fn run_recall_review_post_cas_test_hook(
+    _params: &TachiMemoryParams,
+    _config_env_path: &Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
+/// Deterministic test seam for a non-cooperating writer in the former
+/// post-read/pre-rename window. Production has no hook; tests use it to mutate
+/// the already-open descriptor's source immediately before final validation.
+#[cfg(test)]
+fn run_recall_apply_pre_append_test_hook(
+    params: &TachiMemoryParams,
+    config_env_path: &Path,
+) -> Result<(), String> {
+    let Some(body) = params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("test_config_env_before_recall_append"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    std::fs::write(config_env_path, body).map_err(|e| {
+        format!(
+            "test hook edit config.env {} before recall append: {e}",
+            config_env_path.display()
+        )
+    })
+}
+
+#[cfg(not(test))]
+fn run_recall_apply_pre_append_test_hook(
     _params: &TachiMemoryParams,
     _config_env_path: &Path,
 ) -> Result<(), String> {
@@ -317,7 +350,7 @@ pub(crate) fn handle_recall_config_apply(
     // (and any concurrent caller) can re-derive from the live file to decide
     // idempotent-finalize vs. safe-retry vs. loud third-party-drift refusal.
     let (proposal, apply_result, outcome) =
-        drive_recall_apply_state_machine(server, proposal_id, &config_env_path)?;
+        drive_recall_apply_state_machine(server, params, proposal_id, &config_env_path)?;
 
     let response = json!({
         "status": "completed",
@@ -352,10 +385,10 @@ outcome: {}",
 enum RecallApplyOutcome {
     /// Fresh apply: approved -> applying -> applied on this call.
     Fresh { attempt_id: String },
-    /// Recovery where the file already matched `after_digest` (rename landed,
+    /// Recovery where the file already matched `after_digest` (append landed,
     /// finalize CAS did not). Finalized idempotently; no file mutation.
     FinalizedExisting { attempt_id: String },
-    /// Recovery where the file still matched `before_digest` (rename did not
+    /// Recovery where the file still matched `before_digest` (append did not
     /// land). Redid the file write and finalized.
     Retried { attempt_id: String },
 }
@@ -382,6 +415,13 @@ struct RecallApplyResult {
     updated_keys: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct RecallAppendPlan {
+    before_len: usize,
+    append_payload: String,
+    after_digest: String,
+}
+
 /// Drive one proposal through the recoverable apply state machine. Returns
 /// the terminal `applied` proposal row, the keys that the proposal updates on
 /// `config.env`, and the outcome that describes which recovery branch was
@@ -390,7 +430,7 @@ struct RecallApplyResult {
 /// fails with `stale_state_version`).
 ///
 /// State graph:
-///   approved  --(CAS)-->  applying  --(rename, CAS)-->  applied
+///   approved  --(CAS)-->  applying  --(append, CAS)-->  applied
 ///                 |                |
 ///                 |                +-- recovery: observed == after  -> finalize
 ///                 |                +-- recovery: observed == before -> retry
@@ -398,6 +438,7 @@ struct RecallApplyResult {
 ///                 +-- anything else -> REFUSE (legacy / pending / etc.)
 fn drive_recall_apply_state_machine(
     server: &MemoryServer,
+    params: &TachiMemoryParams,
     proposal_id: &str,
     config_env_path: &Path,
 ) -> Result<(Value, RecallApplyResult, RecallApplyOutcome), String> {
@@ -487,25 +528,36 @@ fn drive_recall_apply_state_machine(
             // above rather than being silently blessed as this attempt's new
             // baseline.
             let before_digest = bound_source_revision.as_str();
-            let after_digest = compute_projected_recall_digest(config_env_path, &patch)?;
-            // Fresh apply: stamp an applying receipt, do the rename, finalize.
+            let append_plan = compute_recall_append_plan(config_env_path, &patch)?;
+            let after_digest = append_plan.after_digest.as_str();
+            // Fresh apply: stamp an applying receipt, do the descriptor append,
+            // then finalize.
             let attempt_id = uuid::Uuid::new_v4().to_string();
             stamp_applying_receipt(
                 server,
                 proposal_id,
                 &attempt_id,
                 before_digest,
-                &after_digest,
+                after_digest,
                 &patch,
+                append_plan.before_len,
+                &append_plan.append_payload,
             )?;
-            write_recall_config_env(config_env_path, &patch, before_digest)?;
+            append_recall_config_env(
+                config_env_path,
+                before_digest,
+                after_digest,
+                append_plan.before_len,
+                &append_plan.append_payload,
+                params,
+            )?;
             let outcome = RecallApplyOutcome::Fresh { attempt_id };
             finalize_recall_apply(
                 server,
                 proposal_id,
                 &outcome,
                 &patch,
-                &after_digest,
+                after_digest,
                 config_env_path,
             )
         }
@@ -535,14 +587,27 @@ fn drive_recall_apply_state_machine(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let receipt_before_len = receipt
+                .get("before_len")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            let receipt_append_payload = receipt
+                .get("append_payload")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             if receipt_attempt_id.is_empty()
                 || receipt_before.is_empty()
                 || receipt_after.is_empty()
+                || receipt_before_len.is_none()
+                || receipt_append_payload.is_none()
             {
                 return Err(format!(
-                    "recall config proposal {proposal_id} applying_receipt is missing attempt_id/before_digest/after_digest; refusing to guess — operator must reconcile the row"
+                    "recall config proposal {proposal_id} applying_receipt is missing attempt_id/before_digest/after_digest/before_len/append_payload; refusing to guess — operator must reconcile the row"
                 ));
             }
+            let receipt_before_len = receipt_before_len.expect("checked above");
+            let receipt_append_payload = receipt_append_payload.expect("checked above");
+            validate_receipt_append_payload(&patch, &receipt_append_payload)?;
             if receipt_before != bound_source_revision {
                 return Err(format!(
                     "source_revision_mismatch: recall config proposal {proposal_id} applying receipt baseline {receipt_before} does not match its approved bound source revision {bound_source_revision}; refusing recovery"
@@ -550,7 +615,7 @@ fn drive_recall_apply_state_machine(
             }
             let observed = compute_recall_digest(config_env_path)?;
             if observed == receipt_after {
-                // Rename already landed before the crash; finalize idempotently.
+                // Append already landed before the crash; finalize idempotently.
                 let outcome =
                     RecallApplyOutcome::FinalizedExisting { attempt_id: receipt_attempt_id };
                 finalize_recall_apply(
@@ -561,10 +626,24 @@ fn drive_recall_apply_state_machine(
                     &receipt_after,
                     config_env_path,
                 )
-            } else if observed == receipt_before {
-                // Rename never landed; safe to redo the file write against the
-                // known-clean before state, then finalize.
-                write_recall_config_env(config_env_path, &patch, &receipt_before)?;
+            } else if recall_append_progress(
+                &read_config_env_body(config_env_path)?,
+                &receipt_before,
+                receipt_before_len,
+                &receipt_append_payload,
+            )
+            .is_some()
+            {
+                // The append did not land or only a receipt-bound prefix
+                // landed before a crash. Resume only the missing suffix.
+                append_recall_config_env(
+                    config_env_path,
+                    &receipt_before,
+                    &receipt_after,
+                    receipt_before_len,
+                    &receipt_append_payload,
+                    params,
+                )?;
                 let observed_after = compute_recall_digest(config_env_path)?;
                 if observed_after != receipt_after {
                     return Err(format!(
@@ -606,6 +685,8 @@ fn stamp_applying_receipt(
     before_digest: &str,
     after_digest: &str,
     patch: &BTreeMap<String, String>,
+    before_len: usize,
+    append_payload: &str,
 ) -> Result<u32, String> {
     server.with_global_store(|store| {
         let (raw, version) = store
@@ -630,6 +711,8 @@ fn stamp_applying_receipt(
             "attempt_id": attempt_id,
             "before_digest": before_digest,
             "after_digest": after_digest,
+            "before_len": before_len,
+            "append_payload": append_payload,
             "updated_keys": patch.keys().cloned().collect::<Vec<_>>(),
             "started_at": Utc::now().to_rfc3339(),
         });
@@ -649,7 +732,7 @@ fn stamp_applying_receipt(
 
 /// CAS applying -> applied. Re-asserts the observed config.env digest equals
 /// the receipt's `after_digest` immediately before the CAS, so a crash between
-/// the rename and this finalize cannot stamp `applied` on a row whose file is
+/// the append and this finalize cannot stamp `applied` on a row whose file is
 /// somehow not actually at the after state. Returns the terminal proposal row
 /// and the apply result so the caller can surface them in the response.
 fn finalize_recall_apply(
@@ -666,11 +749,10 @@ fn finalize_recall_apply(
             "finalize_refused: recall config proposal {proposal_id} observed config.env digest {observed} does not match expected after_digest {expected_after_digest}; refusing to mark applied"
         ));
     }
-    // A rename can be durable as file data while the directory entry itself
-    // is not. Confirm parent-directory durability before the terminal CAS on
-    // every finalize path, including recovery after a process crash. Opening
-    // or syncing a directory may be unsupported on some platforms; that is a
-    // loud error and leaves the proposal in `applying`, never `applied`.
+    // A newly created file can be durable as file data while its directory
+    // entry is not. Confirm parent-directory durability before the terminal
+    // CAS on every finalize path, including recovery after a process crash.
+    // An unsupported directory sync is loud and leaves the proposal applying.
     sync_recall_config_parent(config_env_path)?;
     let applied_at = Utc::now().to_rfc3339();
     let terminal = server.with_global_store(|store| {
@@ -1115,33 +1197,76 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 /// SHA-256 hex of the complete config.env source currently on disk at `path`.
 /// Used as the `before_digest` of a fresh apply and as the `observed` digest
-/// the recovery path compares against the receipt's before/after digests. The
-/// atomic writer reconstructs the whole source, so the fingerprint must cover
-/// provider/Vault lines, comments, and formatting too; otherwise a concurrent
-/// non-recall edit could be silently blessed or overwritten by that rewrite.
+/// the recovery path compares against the receipt's before/after digests. It
+/// covers provider/Vault lines, comments, and formatting so any non-recall
+/// source edit rotates the proposal identity and blocks stale application.
 fn compute_recall_digest(path: &Path) -> Result<String, String> {
     Ok(digest_config_env_source(&read_config_env_body(path)?))
 }
 
 /// SHA-256 hex of the complete config.env source at `path` *after* `patch` is
-/// applied (existing recall keys replaced, new recall keys appended). Used as
-/// the `after_digest` of a fresh apply, so recovery detects drift in any line
-/// the atomic replacement can carry forward.
-fn compute_projected_recall_digest(
+/// applied as trailing assignments. Both shipped dotenv readers use
+/// last-assignment-wins semantics, so the append changes effective recall
+/// values without replacing any pre-existing provider/Vault bytes.
+fn compute_recall_append_plan(
     path: &Path,
     patch: &BTreeMap<String, String>,
-) -> Result<String, String> {
-    let source = read_config_env_body(path)?;
-    Ok(digest_config_env_source(&render_recall_config_env(
-        &source, patch,
-    )))
+) -> Result<RecallAppendPlan, String> {
+    let mut source = read_config_env_body(path)?;
+    let before_len = source.len();
+    let append_payload = recall_config_append_payload(&source, patch);
+    source.push_str(&append_payload);
+    Ok(RecallAppendPlan {
+        before_len,
+        append_payload,
+        after_digest: digest_config_env_source(&source),
+    })
 }
 
+#[cfg(unix)]
 fn read_config_env_body(path: &Path) -> Result<String, String> {
-    match std::fs::read_to_string(path) {
-        Ok(body) => Ok(body),
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            validate_recall_config_metadata(path, &metadata)?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(err) => {
+            return Err(format!(
+                "read config.env metadata {}: {err}",
+                path.display()
+            ))
+        }
+    }
+
+    let mut file = open_existing_recall_config_read(path)?;
+    let descriptor_metadata = file
+        .metadata()
+        .map_err(|err| format!("read open config.env metadata {}: {err}", path.display()))?;
+    validate_recall_config_metadata(path, &descriptor_metadata)?;
+    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    let source = read_recall_config_descriptor(&mut file, path)?;
+    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    Ok(source)
+}
+
+#[cfg(not(unix))]
+fn read_config_env_body(path: &Path) -> Result<String, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "symlink_config_refused: config.env {} is a symlink; refusing to read or apply without a stable object identity",
+            path.display()
+        )),
+        Ok(metadata) if !metadata.file_type().is_file() => Err(format!(
+            "unsupported_config_type: config.env {} is not a regular file",
+            path.display()
+        )),
+        Ok(_) => std::fs::read_to_string(path)
+            .map_err(|err| format!("read config.env {}: {err}", path.display())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(err) => return Err(format!("read config.env {}: {err}", path.display())),
+        Err(err) => Err(format!(
+            "read config.env metadata {}: {err}",
+            path.display()
+        )),
     }
 }
 
@@ -1149,31 +1274,53 @@ fn digest_config_env_source(source: &str) -> String {
     hex_lower(&Sha256::digest(source.as_bytes()))
 }
 
-fn render_recall_config_env(source: &str, values: &BTreeMap<String, String>) -> String {
-    let mut seen = BTreeSet::new();
-    let mut lines = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        let Some((raw_key, _raw_value)) = trimmed.split_once('=') else {
-            lines.push(line.to_string());
-            continue;
-        };
-        let key = raw_key.trim();
-        if let Some(value) = values.get(key) {
-            lines.push(format!("{key}={value}"));
-            seen.insert(key.to_string());
-        } else {
-            lines.push(line.to_string());
-        }
+fn recall_config_append_payload(source: &str, values: &BTreeMap<String, String>) -> String {
+    let mut body = String::new();
+    if !source.is_empty() && !source.ends_with('\n') {
+        body.push('\n');
     }
     for (key, value) in values {
-        if !seen.contains(key) {
-            lines.push(format!("{key}={value}"));
-        }
+        body.push_str(key);
+        body.push('=');
+        body.push_str(value);
+        body.push('\n');
     }
-    let mut body = lines.join("\n");
-    body.push('\n');
     body
+}
+
+fn validate_receipt_append_payload(
+    values: &BTreeMap<String, String>,
+    append_payload: &str,
+) -> Result<(), String> {
+    let assignments = recall_config_append_payload("", values);
+    if append_payload == assignments || append_payload == format!("\n{assignments}") {
+        return Ok(());
+    }
+    Err("invalid_applying_receipt: append_payload does not encode exactly the approved recall assignments"
+        .to_string())
+}
+
+fn recall_append_progress(
+    source: &str,
+    expected_before_revision: &str,
+    expected_before_len: usize,
+    expected_append_payload: &str,
+) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.len() < expected_before_len
+        || bytes.len() > expected_before_len + expected_append_payload.len()
+    {
+        return None;
+    }
+    let before = &bytes[..expected_before_len];
+    if hex_lower(&Sha256::digest(before)) != expected_before_revision {
+        return None;
+    }
+    let landed = &bytes[expected_before_len..];
+    expected_append_payload
+        .as_bytes()
+        .starts_with(landed)
+        .then_some(landed.len())
 }
 
 // Reads the BOUND apply payload (`identity_payload.apply_payload.config_env`),
@@ -1206,37 +1353,48 @@ fn parse_config_env_patch(identity_payload: &Value) -> Result<BTreeMap<String, S
     Ok(out)
 }
 
-/// Write `values` into the config.env at `path`, replacing any existing
-/// same-key lines and appending new ones. Durability:
-/// * a fresh temp file is written and `fsync`'d (data + metadata) **before**
-///   the rename, so the bytes are on stable storage when the atomic rename
-///   exposes them;
-/// * the rename is the only mutation visible to a concurrent reader, so the
-///   file is either fully old or fully new, never partially rewritten;
-/// * the parent directory is `fsync`'d after rename so the new directory entry
-///   is confirmed durable before the proposal can finalize as applied;
-/// * the temp name carries a per-attempt uuid so two concurrent applies (which
-///   the upper CAS already serializes) cannot collide on the same temp path.
-fn write_recall_config_env(
+/// Append recall assignments through a descriptor for the exact regular file
+/// whose full source revision was approved. This never replaces existing
+/// bytes. The same descriptor and final path identity are checked immediately
+/// before and after the append, so a non-cooperating replacement survives and
+/// is refused rather than overwritten.
+#[cfg(unix)]
+fn append_recall_config_env(
     path: &Path,
-    values: &BTreeMap<String, String>,
     expected_source_revision: &str,
+    expected_after_revision: &str,
+    expected_before_len: usize,
+    expected_append_payload: &str,
+    params: &TachiMemoryParams,
 ) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create config.env parent {}: {e}", parent.display()))?;
     }
-    let existing = read_config_env_body(path)?;
-    let observed_source_revision = digest_config_env_source(&existing);
-    if observed_source_revision != expected_source_revision {
-        return Err(format!(
-            "source_state_drift: config.env {} changed before atomic replacement; expected source revision {expected_source_revision}, observed {observed_source_revision}; refusing to overwrite the current source",
-            path.display()
-        ));
-    }
-    let existing_permissions = match std::fs::metadata(path) {
-        Ok(metadata) => Some(metadata.permissions()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+
+    let mut file = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            validate_recall_config_metadata(path, &metadata)?;
+            open_existing_recall_config(path)?
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let mut options = std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .append(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            match options.open(path) {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    open_existing_recall_config(path)?
+                }
+                Err(err) => return Err(format!("create config.env {}: {err}", path.display())),
+            }
+        }
         Err(err) => {
             return Err(format!(
                 "read config.env metadata {}: {err}",
@@ -1244,34 +1402,182 @@ fn write_recall_config_env(
             ))
         }
     };
-    let body = render_recall_config_env(&existing, values);
-    let tmp = tmp_path_for(path);
-    {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&tmp)
-            .map_err(|e| format!("create temp config.env {}: {e}", tmp.display()))?;
-        file.write_all(body.as_bytes())
-            .map_err(|e| format!("write temp config.env {}: {e}", tmp.display()))?;
-        if let Some(permissions) = existing_permissions {
-            file.set_permissions(permissions).map_err(|e| {
-                format!("preserve config.env permissions on {}: {e}", tmp.display())
-            })?;
-        }
-        file.sync_all()
-            .map_err(|e| format!("fsync temp config.env {}: {e}", tmp.display()))?;
+    let descriptor_metadata = file
+        .metadata()
+        .map_err(|err| format!("read open config.env metadata {}: {err}", path.display()))?;
+    validate_recall_config_metadata(path, &descriptor_metadata)?;
+    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+
+    let existing = read_recall_config_descriptor(&mut file, path)?;
+    let Some(initial_progress) = recall_append_progress(
+        &existing,
+        expected_source_revision,
+        expected_before_len,
+        expected_append_payload,
+    ) else {
+        let observed_source_revision = digest_config_env_source(&existing);
+        return Err(format!(
+            "source_state_drift: config.env {} changed before descriptor append; expected source revision {expected_source_revision}, observed {observed_source_revision}; refusing to modify the current source",
+            path.display()
+        ));
+    };
+    let mut projected = existing.as_bytes()[..expected_before_len].to_vec();
+    projected.extend_from_slice(expected_append_payload.as_bytes());
+    let projected_revision = hex_lower(&Sha256::digest(&projected));
+    if projected_revision != expected_after_revision {
+        return Err(format!(
+            "projected_digest_mismatch: config.env {} append projects revision {projected_revision}, but applying receipt expects {expected_after_revision}; refusing to write",
+            path.display()
+        ));
     }
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("replace config.env {}: {e}", path.display())
-    })?;
+
+    run_recall_apply_pre_append_test_hook(params, path)?;
+    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    let revalidated = read_recall_config_descriptor(&mut file, path)?;
+    let Some(revalidated_progress) = recall_append_progress(
+        &revalidated,
+        expected_source_revision,
+        expected_before_len,
+        expected_append_payload,
+    ) else {
+        let revalidated_revision = digest_config_env_source(&revalidated);
+        return Err(format!(
+            "source_state_drift: config.env {} changed immediately before descriptor append; expected source revision {expected_source_revision}, observed {revalidated_revision}; refusing to modify the current source",
+            path.display()
+        ));
+    };
+    if revalidated_progress < initial_progress {
+        return Err(format!(
+            "source_state_drift: config.env {} lost receipt-bound append bytes during final validation; refusing to modify the current source",
+            path.display()
+        ));
+    }
+
+    file.write_all(&expected_append_payload.as_bytes()[revalidated_progress..])
+        .map_err(|err| format!("append recall config.env {}: {err}", path.display()))?;
+    file.sync_all()
+        .map_err(|err| format!("fsync recall config.env {}: {err}", path.display()))?;
+    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    let appended = read_recall_config_descriptor(&mut file, path)?;
+    let appended_revision = digest_config_env_source(&appended);
+    if appended_revision != expected_after_revision {
+        return Err(format!(
+            "append_source_drift: config.env {} revision after append is {appended_revision}, expected {expected_after_revision}; refusing to finalize",
+            path.display()
+        ));
+    }
     sync_recall_config_parent(path)
+}
+
+#[cfg(unix)]
+fn open_existing_recall_config(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .append(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    options.open(path).map_err(|err| {
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            format!(
+                "symlink_config_refused: config.env {} is a symlink; refusing to apply without a stable object identity",
+                path.display()
+            )
+        } else {
+            format!("open config.env {} for append: {err}", path.display())
+        }
+    })
+}
+
+#[cfg(unix)]
+fn open_existing_recall_config_read(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    options.open(path).map_err(|err| {
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            format!(
+                "symlink_config_refused: config.env {} is a symlink; refusing to read without a stable object identity",
+                path.display()
+            )
+        } else {
+            format!("open config.env {} for read: {err}", path.display())
+        }
+    })
+}
+
+#[cfg(unix)]
+fn validate_recall_config_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), String> {
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "symlink_config_refused: config.env {} is a symlink; refusing to apply without a stable object identity",
+            path.display()
+        ));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "unsupported_config_type: config.env {} is not a regular file",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn assert_recall_config_path_identity(
+    path: &Path,
+    descriptor_metadata: &std::fs::Metadata,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let path_metadata = std::fs::symlink_metadata(path).map_err(|err| {
+        format!(
+            "source_identity_drift: config.env {} cannot be inspected after opening: {err}",
+            path.display()
+        )
+    })?;
+    validate_recall_config_metadata(path, &path_metadata)?;
+    if path_metadata.dev() != descriptor_metadata.dev()
+        || path_metadata.ino() != descriptor_metadata.ino()
+    {
+        return Err(format!(
+            "source_identity_drift: config.env {} no longer names the opened object; refusing to append or finalize",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_recall_config_descriptor(file: &mut std::fs::File, path: &Path) -> Result<String, String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|err| format!("seek config.env {}: {err}", path.display()))?;
+    let mut source = String::new();
+    file.read_to_string(&mut source)
+        .map_err(|err| format!("read open config.env {}: {err}", path.display()))?;
+    Ok(source)
+}
+
+#[cfg(not(unix))]
+fn append_recall_config_env(
+    path: &Path,
+    _expected_source_revision: &str,
+    _expected_after_revision: &str,
+    _expected_before_len: usize,
+    _expected_append_payload: &str,
+    _params: &TachiMemoryParams,
+) -> Result<(), String> {
+    Err(format!(
+        "unsupported_platform: recall config apply for {} requires descriptor identity and no-follow guarantees",
+        path.display()
+    ))
 }
 
 fn sync_recall_config_parent(path: &Path) -> Result<(), String> {
@@ -1286,16 +1592,6 @@ fn sync_recall_config_parent(path: &Path) -> Result<(), String> {
     directory
         .sync_all()
         .map_err(|e| format!("fsync config.env parent {}: {e}", parent.display()))
-}
-
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(format!(
-        ".tmp-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    PathBuf::from(tmp)
 }
 
 fn required_proposal_id(params: &TachiMemoryParams) -> Result<&str, String> {
