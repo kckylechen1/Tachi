@@ -151,6 +151,90 @@ async fn arena_collect_marks_corrupt_result_as_read_error_instead_of_pending() {
     assert!(read_error.contains("arena mission result"), "{read_error}");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn arena_collect_surfaces_linked_result_symlink_refusal() {
+    struct TachiHomeRestore(Option<std::ffi::OsString>);
+    impl Drop for TachiHomeRestore {
+        fn drop(&mut self) {
+            // SAFETY: this test holds tachi_run_root_env_lock for its lifetime.
+            unsafe {
+                match self.0.as_ref() {
+                    Some(value) => std::env::set_var("TACHI_HOME", value),
+                    None => std::env::remove_var("TACHI_HOME"),
+                }
+            }
+        }
+    }
+
+    let _run_lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let original_home = TachiHomeRestore(std::env::var_os("TACHI_HOME"));
+    let tachi_home = tempfile::tempdir().expect("temporary tachi home");
+    // SAFETY: serialized by tachi_run_root_env_lock and restored on drop.
+    unsafe {
+        std::env::set_var("TACHI_HOME", tachi_home.path());
+    }
+    let _arena_root = temp_arena_root();
+    let server = server();
+
+    let mut open = params("open");
+    open.objective = Some("surface linked result refusal".into());
+    let opened: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id.clone());
+    spawn.prompt = Some("collect linked result".into());
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
+    let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+
+    let dispatch_id = "20260725T200000Z-linked-refusal";
+    let run_dir = tachi_home.path().join("runs").join(dispatch_id);
+    let outside = tempfile::tempdir().expect("outside target");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::json!({"state": "completed"}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(outside.path().join("result.md"), "outside bytes").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("result.md"), run_dir.join("result.md"))
+        .unwrap();
+
+    let status_path = mission_dir.join("status.json");
+    let mut status: Value =
+        serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
+    status["dispatch_id"] = json!(dispatch_id);
+    status["run_dir"] = json!(run_dir);
+    std::fs::write(&status_path, serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    let mut collect = params("collect");
+    collect.arena_id = Some(arena_id);
+    collect.mission_id = Some(mission_id);
+    let collected: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, collect).await.unwrap()).unwrap();
+    let mission = &collected["missions"][0];
+    assert_eq!(
+        mission["state"],
+        json!("artifact_read_error"),
+        "{mission:#}"
+    );
+    assert_eq!(mission["result_source"], json!("result_read_error"));
+    assert_ne!(mission["state"], json!("pending_result"));
+    assert_eq!(mission["result"], json!(""));
+    let error = mission["artifact_read_error"]
+        .as_str()
+        .expect("caller-visible refusal");
+    assert!(error.contains("refusing descriptor-bound read"), "{error}");
+
+    drop(original_home);
+}
+
 #[tokio::test]
 async fn arena_close_blocks_active_missions_until_reaped_or_aborted() {
     let _root = temp_arena_root();

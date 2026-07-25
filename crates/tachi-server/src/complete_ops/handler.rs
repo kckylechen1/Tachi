@@ -61,7 +61,7 @@ fn resolved_completion_run_dir(
     // manufacture it from a caller-supplied id: a missing or symlink-escaped
     // directory is a broken dispatch, not a place to create new truth.
     let (run_dir, _, _) =
-        crate::dispatch_ops::resolve_completion_predicate_context(home_dir, dispatch_id);
+        crate::dispatch_ops::resolve_completion_predicate_context(home_dir, dispatch_id)?;
     run_dir.ok_or_else(|| {
         format!(
             "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
@@ -78,16 +78,21 @@ fn persist_resolved_completion_receipt_at(
     reviewed: bool,
 ) -> Result<(), String> {
     let status_path = run_dir.join("status.json");
-    let mut status = match crate::task_lifecycle::read_json_file(&status_path) {
-        Ok(Some(status)) => status,
-        Ok(None) => json!({ "dispatch_id": dispatch_id }),
-        Err(error) => {
-            return Err(format!(
+    let mut status = match crate::dispatch_ops::read_text_file_within(run_dir, &status_path)
+        .map_err(|error| {
+            format!(
                 "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
-                 read {}: {error}",
+                 {error}"
+            )
+        })? {
+        Some(raw) => serde_json::from_str(&raw).map_err(|error| {
+            format!(
+                "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+                 parse {}: {error}",
                 status_path.display()
-            ));
-        }
+            )
+        })?,
+        None => json!({ "dispatch_id": dispatch_id }),
     };
     let status_object = status.as_object_mut().ok_or_else(|| {
         format!(
@@ -264,37 +269,28 @@ pub(crate) async fn handle_tachi_complete(
     // raw self-report. The kanban block below reuses this exact verdict rather
     // than recomputing it. `None` when there is no dispatch_id (no predicate to
     // apply; the outcome write is skipped anyway).
-    let completion_verdict = params
+    let completion_dispatch_id = params
         .dispatch_id
         .as_deref()
-        .filter(|id| !id.trim().is_empty())
-        .map(|did| {
-            let (predicate_run_dir, declared_predicate, predicate_cwd) =
-                crate::dispatch_ops::resolve_completion_predicate_context(
-                    &server.tachi_home_dir(),
-                    did,
-                );
-            let predicate_output = predicate_run_dir
-                .as_deref()
-                .and_then(|dir| std::fs::read_to_string(dir.join("result.md")).ok())
-                .unwrap_or_default();
-            let empty_run_dir = std::path::PathBuf::new();
-            let verdict = crate::dispatch_ops::evaluate_completion_predicate(
-                declared_predicate.as_ref(),
-                predicate_run_dir.as_deref().unwrap_or(&empty_run_dir),
-                predicate_cwd.as_deref(),
-                &predicate_output,
-            );
-            let (new_state, reviewed_flag, override_reason) =
-                crate::dispatch_ops::resolve_completion_state(params.outcome.as_str(), &verdict);
-            CompletionVerdict {
-                declared: declared_predicate.is_some(),
-                verdict_tag: verdict.tag(),
-                new_state,
-                reviewed_flag,
-                override_reason,
-            }
-        });
+        .filter(|id| !id.trim().is_empty());
+    let completion_verdict = if let Some(did) = completion_dispatch_id {
+        let (declared, verdict) = crate::dispatch_ops::evaluate_completion_predicate_for_dispatch(
+            &server.tachi_home_dir(),
+            did,
+            "",
+        )?;
+        let (new_state, reviewed_flag, override_reason) =
+            crate::dispatch_ops::resolve_completion_state(params.outcome.as_str(), &verdict);
+        Some(CompletionVerdict {
+            declared,
+            verdict_tag: verdict.tag(),
+            new_state,
+            reviewed_flag,
+            override_reason,
+        })
+    } else {
+        None
+    };
 
     // Machine-resolved execution outcome + interception class for the outcome
     // row: the value AFTER the predicate has had its chance to intercept.
@@ -840,7 +836,7 @@ mod tests {
         assert_eq!(
             resolved_completion_run_dir(temp.path(), dispatch_id)
                 .expect("pre-existing confined run directory is accepted"),
-            run_dir
+            run_dir.canonicalize().unwrap()
         );
     }
 }

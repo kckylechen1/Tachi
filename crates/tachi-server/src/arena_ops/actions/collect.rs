@@ -46,16 +46,21 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
         if result.trim().is_empty() && artifact_read_errors.is_empty() {
             if let Some(dispatch_id) = status_before.get("dispatch_id").and_then(Value::as_str) {
                 let run_dir_hint = status_before.get("run_dir").and_then(Value::as_str);
-                if let Some(dispatch_result) =
-                    read_linked_dispatch_result(dispatch_id, run_dir_hint)
-                {
-                    crate::utils::write_owner_only_file_atomic(
-                        &result_path,
-                        dispatch_result.as_bytes(),
-                    )
-                    .map_err(|e| format!("write linked dispatch result.md: {e}"))?;
-                    result = dispatch_result;
-                    result_source = "linked_dispatch_result";
+                match read_linked_dispatch_result(dispatch_id, run_dir_hint) {
+                    Ok(Some(dispatch_result)) => {
+                        crate::utils::write_owner_only_file_atomic(
+                            &result_path,
+                            dispatch_result.as_bytes(),
+                        )
+                        .map_err(|e| format!("write linked dispatch result.md: {e}"))?;
+                        result = dispatch_result;
+                        result_source = "linked_dispatch_result";
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        artifact_read_errors.push(error);
+                        result_source = "result_read_error";
+                    }
                 }
             }
         }

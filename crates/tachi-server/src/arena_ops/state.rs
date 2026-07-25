@@ -57,24 +57,45 @@ fn tachi_home() -> PathBuf {
 /// - `run_dir_hint` is honored only when it canonicalizes to a directory that
 ///   still lives inside the canonical dispatch runs root (`~/.tachi/runs`).
 ///   A hint that escapes via `..`, an absolute path elsewhere, or a symlink
-///   out of the runs tree is ignored fail-closed and the id-derived canonical
-///   path is used instead. The accepted resolved path, rather than the
+///   out of the runs tree is refused loudly. The accepted resolved path, rather than the
 ///   original hint, is returned so a later symlink retarget cannot redirect a
 ///   reader after validation.
 ///
 /// Returns `None` (behaves identically to "run not found") for an invalid
 /// dispatch id, giving a probe no signal about what does or doesn't exist.
-fn canonical_dir_within(candidate: &Path, root: &Path) -> Option<PathBuf> {
-    let canonical_candidate = candidate.canonicalize().ok()?;
-    let canonical_root = root.canonicalize().ok()?;
-    canonical_candidate
-        .starts_with(&canonical_root)
-        .then_some(canonical_candidate)
+fn canonical_dir_within(candidate: &Path, root: &Path) -> Result<Option<PathBuf>, String> {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        format!(
+            "refusing linked dispatch read: runs root {} cannot be resolved: {error}",
+            root.display()
+        )
+    })?;
+    let canonical_candidate = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "refusing linked dispatch read: run directory {} cannot be resolved: {error}",
+                candidate.display()
+            ));
+        }
+    };
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(format!(
+            "refusing linked dispatch read: run directory {} resolves outside runs root {}",
+            canonical_candidate.display(),
+            canonical_root.display()
+        ));
+    }
+    Ok(Some(canonical_candidate))
 }
 
-fn dispatch_run_dir(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<PathBuf> {
+fn dispatch_run_dir(
+    dispatch_id: &str,
+    run_dir_hint: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
     if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
-        return None;
+        return Ok(None);
     }
     let runs_root = tachi_home().join("runs");
     let fallback = runs_root.join(dispatch_id);
@@ -85,89 +106,9 @@ fn dispatch_run_dir(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<Pat
     else {
         return canonical_dir_within(&fallback, &runs_root);
     };
-    canonical_dir_within(&hint, &runs_root).or_else(|| canonical_dir_within(&fallback, &runs_root))
-}
-
-/// tachi#1270: defense-in-depth against the residual TOCTOU window between
-/// `dispatch_run_dir`'s validation and the actual read that follows it in
-/// the readers below. `dispatch_run_dir` already returns a canonical,
-/// contained path, but the subsequent `read_to_string`/`read_json_file`
-/// against that same `PathBuf` resolves symlinks fresh at OS-open time --
-/// so an actor with write access to the runs tree could `rm` + symlink the
-/// *validated final directory itself* out of the runs root in the gap
-/// between validation and read. Re-run the identical canonicalize +
-/// `starts_with(runs_root)` check immediately before the read; on failure
-/// return `None`, indistinguishable from "not found" (no probe signal).
-/// A narrower open-by-pathname window still remains between this
-/// revalidation and the actual `open`/`read_to_string` call right after it;
-/// closing that fully needs `openat`/`O_NOFOLLOW`, deferred per #1270.
-fn revalidate_run_dir_at_read_time(run_dir: &Path) -> Option<PathBuf> {
-    canonical_dir_within(run_dir, &tachi_home().join("runs"))
-}
-
-/// Resolve a linked-run file through every path component and retain it only
-/// when the final leaf remains a regular file inside the dispatch runs root.
-///
-/// `canonical_dir_within` protects the run directory itself, but a later
-/// `status.json` or `result.md` symlink can still escape that directory. The
-/// full candidate path must therefore be canonicalized immediately before the
-/// read, not just its parent directory.
-fn canonical_regular_file_within(candidate: &Path, root: &Path) -> Result<Option<PathBuf>, String> {
-    let canonical_root = root.canonicalize().map_err(|err| {
-        format!(
-            "containment root {} cannot be resolved: {err}",
-            root.display()
-        )
-    })?;
-    let canonical_candidate = match candidate.canonicalize() {
-        Ok(path) => path,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(format!(
-                "path {} cannot be resolved: {err}",
-                candidate.display()
-            ));
-        }
-    };
-    if !canonical_candidate.starts_with(&canonical_root) {
-        return Err(format!(
-            "path {} resolves outside containment root {}",
-            canonical_candidate.display(),
-            canonical_root.display()
-        ));
-    }
-    let metadata = canonical_candidate.metadata().map_err(|err| {
-        format!(
-            "resolved path {} cannot be inspected: {err}",
-            canonical_candidate.display()
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(format!(
-            "resolved path {} is not a regular file",
-            canonical_candidate.display()
-        ));
-    }
-    Ok(Some(canonical_candidate))
-}
-
-fn linked_run_file_at_read_time(
-    dispatch_id: &str,
-    run_dir: &Path,
-    file_name: &str,
-) -> Option<PathBuf> {
-    let candidate = run_dir.join(file_name);
-    match canonical_regular_file_within(&candidate, &tachi_home().join("runs")) {
-        Ok(path) => path,
-        Err(reason) => {
-            tracing::warn!(
-                dispatch_id,
-                path = %candidate.display(),
-                reason = %reason,
-                "refusing linked dispatch file read after containment validation failed"
-            );
-            None
-        }
+    match canonical_dir_within(&hint, &runs_root)? {
+        Some(run_dir) => Ok(Some(run_dir)),
+        None => canonical_dir_within(&fallback, &runs_root),
     }
 }
 
@@ -202,6 +143,7 @@ fn compact_dispatch_status(source: &Value) -> Value {
         "harness_server_url",
         "exit_code",
         "result_written",
+        "artifact_read_error",
         "source",
         "redacted",
     ] {
@@ -266,13 +208,34 @@ pub(super) fn compact_mission_status(status: &Value) -> Value {
     Value::Object(out)
 }
 
-fn read_linked_dispatch_status(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<Value> {
-    let run_dir = dispatch_run_dir(dispatch_id, run_dir_hint)?;
-    let run_dir = revalidate_run_dir_at_read_time(&run_dir)?;
-    let status_path = linked_run_file_at_read_time(dispatch_id, &run_dir, "status.json")?;
-    let status = read_json_file(&status_path).ok()?;
-    let result_written = linked_run_file_at_read_time(dispatch_id, &run_dir, "result.md").is_some();
-    Some(json!({
+fn read_linked_dispatch_status(
+    dispatch_id: &str,
+    run_dir_hint: Option<&str>,
+) -> Result<Option<Value>, String> {
+    let Some(run_dir) = dispatch_run_dir(dispatch_id, run_dir_hint)? else {
+        return Ok(None);
+    };
+    let runs_root = tachi_home().join("runs");
+    let status_path = run_dir.join("status.json");
+    let Some(status_raw) = crate::dispatch_ops::read_text_file_within(&runs_root, &status_path)?
+    else {
+        return Ok(None);
+    };
+    let status: Value = serde_json::from_str(&status_raw)
+        .map_err(|error| format!("read linked dispatch {}: {error}", status_path.display()))?;
+    let result_path = run_dir.join("result.md");
+    let (result_written, artifact_read_error) =
+        match crate::dispatch_ops::regular_file_len_within(&runs_root, &result_path) {
+            Ok(Some(_)) => (true, None),
+            Ok(None) => (false, None),
+            Err(error) => (
+                false,
+                Some(format!(
+                    "refusing linked dispatch result read for dispatch_id={dispatch_id}: {error}"
+                )),
+            ),
+        };
+    Ok(Some(json!({
         "dispatch_id": dispatch_id,
         "state": status.get("state").cloned().unwrap_or(Value::Null),
         "agent": status.get("agent").cloned().unwrap_or(Value::Null),
@@ -283,23 +246,29 @@ fn read_linked_dispatch_status(dispatch_id: &str, run_dir_hint: Option<&str>) ->
         "updated_at": status.get("updated_at").cloned().unwrap_or(Value::Null),
         "run_dir": run_dir.to_string_lossy().to_string(),
         "result_written": result_written,
+        "artifact_read_error": artifact_read_error,
         "source": "dispatch_run_summary",
         "redacted": true,
-    }))
+    })))
 }
 
 pub(super) fn read_linked_dispatch_result(
     dispatch_id: &str,
     run_dir_hint: Option<&str>,
-) -> Option<String> {
-    let run_dir = dispatch_run_dir(dispatch_id, run_dir_hint)?;
-    let run_dir = revalidate_run_dir_at_read_time(&run_dir)?;
-    let result_path = linked_run_file_at_read_time(dispatch_id, &run_dir, "result.md")?;
-    let raw = std::fs::read_to_string(result_path).ok()?;
+) -> Result<Option<String>, String> {
+    let Some(run_dir) = dispatch_run_dir(dispatch_id, run_dir_hint)? else {
+        return Ok(None);
+    };
+    let result_path = run_dir.join("result.md");
+    let Some(raw) =
+        crate::dispatch_ops::read_text_file_within(&tachi_home().join("runs"), &result_path)?
+    else {
+        return Ok(None);
+    };
     if raw.trim().is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(raw)
+        Ok(Some(raw))
     }
 }
 
@@ -316,22 +285,42 @@ pub(super) fn refresh_linked_dispatch_fields(status: &mut Value) {
     };
     obj.remove("dispatch_response");
     let run_dir_hint = obj.get("run_dir").and_then(Value::as_str);
-    if let Some(linked) = read_linked_dispatch_status(&dispatch_id, run_dir_hint) {
-        let linked_result_written = linked
-            .get("result_written")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let mission_result_written = obj
-            .get("result_written")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if linked_result_written && !mission_result_written {
+    match read_linked_dispatch_status(&dispatch_id, run_dir_hint) {
+        Err(error) => {
+            obj.insert("collection_state".to_string(), json!("artifact_read_error"));
+            obj.insert("artifact_read_error".to_string(), json!(error.clone()));
             obj.insert(
-                "collection_state".to_string(),
-                json!("pending_collect_from_dispatch"),
+                "linked_dispatch".to_string(),
+                json!({
+                    "dispatch_id": dispatch_id,
+                    "artifact_read_error": error,
+                    "source": "dispatch_run_summary",
+                    "redacted": true,
+                }),
             );
         }
-        obj.insert("linked_dispatch".to_string(), linked);
+        Ok(Some(linked)) => {
+            if let Some(error) = linked.get("artifact_read_error").filter(|v| !v.is_null()) {
+                obj.insert("collection_state".to_string(), json!("artifact_read_error"));
+                obj.insert("artifact_read_error".to_string(), error.clone());
+            }
+            let linked_result_written = linked
+                .get("result_written")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mission_result_written = obj
+                .get("result_written")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if linked_result_written && !mission_result_written {
+                obj.insert(
+                    "collection_state".to_string(),
+                    json!("pending_collect_from_dispatch"),
+                );
+            }
+            obj.insert("linked_dispatch".to_string(), linked);
+        }
+        Ok(None) => {}
     }
 }
 
@@ -556,7 +545,9 @@ mod dispatch_run_dir_gate_tests {
         let legit = home.root.join("runs").join(id);
         std::fs::create_dir_all(&legit).unwrap();
         let hint = legit.to_string_lossy().to_string();
-        let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id");
+        let resolved = dispatch_run_dir(id, Some(&hint))
+            .expect("lookup")
+            .expect("valid id");
         assert_eq!(
             resolved.canonicalize().unwrap(),
             legit.canonicalize().unwrap()
@@ -572,13 +563,8 @@ mod dispatch_run_dir_gate_tests {
         let decoy = home.root.join("decoy");
         std::fs::create_dir_all(&decoy).unwrap();
         let hint = decoy.to_string_lossy().to_string();
-        let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id");
-        // Falls back to the id-derived canonical path, never the decoy.
-        assert_eq!(
-            resolved,
-            home.root.join("runs").join(id).canonicalize().unwrap()
-        );
-        assert_ne!(resolved.canonicalize().ok(), decoy.canonicalize().ok());
+        let error = dispatch_run_dir(id, Some(&hint)).expect_err("outside hint must be loud");
+        assert!(error.contains("outside runs root"), "{error}");
     }
 
     #[test]
@@ -590,11 +576,8 @@ mod dispatch_run_dir_gate_tests {
         std::fs::create_dir_all(&outside).unwrap();
         // `..`-escape out of the runs tree, resolving to an existing dir.
         let hint = format!("{}/runs/{}/../../outside", home.root.display(), id);
-        let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id");
-        assert_eq!(
-            resolved,
-            home.root.join("runs").join(id).canonicalize().unwrap()
-        );
+        let error = dispatch_run_dir(id, Some(&hint)).expect_err("traversal hint must be loud");
+        assert!(error.contains("outside runs root"), "{error}");
     }
 
     #[cfg(unix)]
@@ -609,12 +592,8 @@ mod dispatch_run_dir_gate_tests {
         let link = home.root.join("runs").join("escape");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         let hint = link.to_string_lossy().to_string();
-        let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id");
-        // canonicalize resolves the symlink to `outside_target` → rejected.
-        assert_eq!(
-            resolved,
-            home.root.join("runs").join(id).canonicalize().unwrap()
-        );
+        let error = dispatch_run_dir(id, Some(&hint)).expect_err("outside symlink must be loud");
+        assert!(error.contains("outside runs root"), "{error}");
     }
 
     #[cfg(unix)]
@@ -628,9 +607,15 @@ mod dispatch_run_dir_gate_tests {
         std::fs::write(outside.join("result.md"), "outside result").unwrap();
         std::os::unix::fs::symlink(&outside, home.root.join("runs").join(id)).unwrap();
 
-        assert!(dispatch_run_dir(id, None).is_none());
-        assert!(read_linked_dispatch_status(id, None).is_none());
-        assert!(read_linked_dispatch_result(id, None).is_none());
+        assert!(dispatch_run_dir(id, None)
+            .expect_err("run-dir symlink refusal")
+            .contains("outside runs root"));
+        assert!(read_linked_dispatch_status(id, None)
+            .expect_err("status refusal")
+            .contains("outside runs root"));
+        assert!(read_linked_dispatch_result(id, None)
+            .expect_err("result refusal")
+            .contains("outside runs root"));
     }
 
     #[cfg(unix)]
@@ -645,17 +630,33 @@ mod dispatch_run_dir_gate_tests {
         std::fs::write(run_dir.join("status.json"), r#"{"state":"completed"}"#).unwrap();
         std::fs::write(outside.join("status.json"), r#"{"state":"outside"}"#).unwrap();
 
-        let ordinary = read_linked_dispatch_status(id, None).expect("ordinary status file");
+        let ordinary = read_linked_dispatch_status(id, None)
+            .expect("status read")
+            .expect("ordinary status file");
         assert_eq!(ordinary.get("state"), Some(&json!("completed")));
 
         std::fs::remove_file(run_dir.join("status.json")).unwrap();
         std::os::unix::fs::symlink(outside.join("status.json"), run_dir.join("status.json"))
             .unwrap();
 
-        assert!(
-            read_linked_dispatch_status(id, None).is_none(),
-            "status reader must refuse a final leaf that resolves outside the runs root"
+        let error = read_linked_dispatch_status(id, None)
+            .expect_err("status reader must refuse an outward final leaf");
+        assert!(error.contains("outside containment root"), "{error}");
+
+        let mut mission_status = json!({
+            "dispatch_id": id,
+            "run_dir": run_dir,
+            "result_written": false,
+        });
+        refresh_linked_dispatch_fields(&mut mission_status);
+        assert_eq!(
+            mission_status.get("collection_state"),
+            Some(&json!("artifact_read_error"))
         );
+        assert!(mission_status
+            .get("artifact_read_error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("refusing")));
     }
 
     #[cfg(unix)]
@@ -672,19 +673,26 @@ mod dispatch_run_dir_gate_tests {
         std::fs::write(outside.join("result.md"), "outside result").unwrap();
 
         assert_eq!(
-            read_linked_dispatch_result(id, None).as_deref(),
+            read_linked_dispatch_result(id, None)
+                .expect("ordinary result read")
+                .as_deref(),
             Some("ordinary result")
         );
 
         std::fs::remove_file(run_dir.join("result.md")).unwrap();
         std::os::unix::fs::symlink(outside.join("result.md"), run_dir.join("result.md")).unwrap();
 
-        let status = read_linked_dispatch_status(id, None).expect("contained status file");
+        let status = read_linked_dispatch_status(id, None)
+            .expect("status read")
+            .expect("contained status file");
         assert_eq!(status.get("result_written"), Some(&json!(false)));
-        assert!(
-            read_linked_dispatch_result(id, None).is_none(),
-            "result reader must refuse a final leaf that resolves outside the runs root"
-        );
+        assert!(status
+            .get("artifact_read_error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("refusing")));
+        let error = read_linked_dispatch_result(id, None)
+            .expect_err("result reader must refuse an outward final leaf");
+        assert!(error.contains("outside containment root"), "{error}");
     }
 
     #[cfg(unix)]
@@ -702,7 +710,9 @@ mod dispatch_run_dir_gate_tests {
         std::os::unix::fs::symlink(&safe, &hint_link).unwrap();
         let hint = hint_link.to_string_lossy().to_string();
 
-        let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id and in-root hint");
+        let resolved = dispatch_run_dir(id, Some(&hint))
+            .expect("lookup")
+            .expect("valid id and in-root hint");
         assert_eq!(resolved, safe.canonicalize().unwrap());
         std::fs::remove_file(&hint_link).unwrap();
         std::os::unix::fs::symlink(&outside, &hint_link).unwrap();
@@ -714,18 +724,7 @@ mod dispatch_run_dir_gate_tests {
 
     #[cfg(unix)]
     #[test]
-    fn read_time_revalidation_rejects_validated_dir_swapped_before_read() {
-        // tachi#1270: `dispatch_run_dir` validates once and hands back a
-        // canonical `PathBuf`; the residual TOCTOU is the *validated
-        // directory itself* being swapped for an outward symlink in the
-        // window between that validation and the reader's later
-        // `read_to_string`/`read_json_file` against the same path (which
-        // resolves symlinks fresh at OS-open time, not at canonicalize
-        // time). Mirrors `validated_hint_returns_canonical_path_that_survives_link_swap`'s
-        // setup: validate once via `dispatch_run_dir`, mutate the
-        // filesystem after, then exercise the exact check the readers now
-        // run immediately before reading (`revalidate_run_dir_at_read_time`)
-        // against the *same* already-resolved path.
+    fn linked_result_read_keeps_opened_object_across_post_open_swap() {
         let home = set_home();
         let id = "abc123";
         let real = home.root.join("runs").join(id);
@@ -735,25 +734,29 @@ mod dispatch_run_dir_gate_tests {
         std::fs::write(real.join("result.md"), "safe result").unwrap();
         std::fs::write(outside.join("result.md"), "outside result").unwrap();
 
-        let resolved = dispatch_run_dir(id, None).expect("valid id");
-        assert_eq!(resolved, real.canonicalize().unwrap());
+        let result_path = real.join("result.md");
+        let outside_result = outside.join("result.md");
+        crate::dispatch_ops::install_secure_read_hook(
+            crate::dispatch_ops::SecureReadHookStage::AfterOpen,
+            result_path.clone(),
+            move |opened| {
+                std::fs::remove_file(opened).unwrap();
+                std::os::unix::fs::symlink(&outside_result, opened).unwrap();
+            },
+        );
 
-        // TOCTOU: the validated directory itself is replaced by an
-        // outward-pointing symlink after validation, before the read.
-        std::fs::remove_dir_all(&real).unwrap();
-        std::os::unix::fs::symlink(&outside, &real).unwrap();
-
-        // Re-validating the same already-resolved path immediately before
-        // the read must fail closed rather than silently following the
-        // swapped symlink out of the runs root.
-        assert!(revalidate_run_dir_at_read_time(&resolved).is_none());
+        let raw = read_linked_dispatch_result(id, None)
+            .expect("descriptor read")
+            .expect("result present");
+        assert_eq!(raw, "safe result");
+        assert_ne!(raw, "outside result");
     }
 
     #[test]
     fn invalid_dispatch_id_is_fail_closed() {
         let _home = set_home();
-        assert!(dispatch_run_dir("../../etc", None).is_none());
-        assert!(dispatch_run_dir("a/b", Some("whatever")).is_none());
-        assert!(dispatch_run_dir("", None).is_none());
+        assert!(dispatch_run_dir("../../etc", None).unwrap().is_none());
+        assert!(dispatch_run_dir("a/b", Some("whatever")).unwrap().is_none());
+        assert!(dispatch_run_dir("", None).unwrap().is_none());
     }
 }

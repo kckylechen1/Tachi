@@ -249,13 +249,20 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // Poll for kanban state instead of a fixed sleep to avoid race conditions
         let (watchdog_polls, watchdog_interval) = watchdog_poll_config();
         let mut receipt_terminal_state = None;
+        let mut receipt_read_error = None;
         let mut kanban_state = None;
         for _ in 0..watchdog_polls {
             tokio::time::sleep(watchdog_interval).await;
-            let receipt_state = resolved_completion_terminal_state(&workspace_dir_for_spawn);
-            if receipt_state.is_some() {
-                receipt_terminal_state = receipt_state;
-                break;
+            match resolved_completion_terminal_state(&workspace_dir_for_spawn) {
+                Ok(Some(receipt_state)) => {
+                    receipt_terminal_state = Some(receipt_state);
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    receipt_read_error = Some(error);
+                    break;
+                }
             }
             let state = get_kanban_state(&server_clone, &d_id).await;
             if canonical_terminal_state(state.as_deref()).is_some() {
@@ -267,8 +274,12 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Some(s) => Some(s),
             None => get_kanban_state(&server_clone, &d_id).await,
         };
-        let receipt_terminal_state = receipt_terminal_state
-            .or_else(|| resolved_completion_terminal_state(&workspace_dir_for_spawn));
+        if receipt_terminal_state.is_none() && receipt_read_error.is_none() {
+            match resolved_completion_terminal_state(&workspace_dir_for_spawn) {
+                Ok(receipt_state) => receipt_terminal_state = receipt_state,
+                Err(error) => receipt_read_error = Some(error),
+            }
+        }
         let polled_terminal_state = canonical_terminal_state(kanban_state.as_deref());
         let is_closed = receipt_terminal_state.is_some() || polled_terminal_state.is_some();
         // #1250: terminal accounting in the final `status.json` rewrite must
@@ -281,8 +292,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // not run (run already closed via `tachi_complete`) or runs the
         // crash/timeout sub-branch, preserving the existing exit-code
         // semantics for those non-predicate paths.
-        let mut watchdog_resolved_state: Option<&'static str> = None;
-        if !is_closed {
+        let mut watchdog_resolved_state = receipt_read_error.as_ref().map(|error| {
+            eprintln!(
+                "[watchdog] refusing completion status read for dispatch {}: {}",
+                d_id, error
+            );
+            "TASK_STATE_FAILED"
+        });
+        if !is_closed && watchdog_resolved_state.is_none() {
             let exited_ok = matches!(&result, Ok(r) if r.exit_code == Some(0));
 
             if exited_ok {
@@ -293,25 +310,22 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 // predicate is declared, keep the conservative unreviewed
                 // COMPLETED (no synthesized success eval for routing stats).
                 let tail = tail_chars(&full_output, 500);
-                let (run_dir_opt, declared_pred, pred_cwd) =
-                    crate::dispatch_ops::resolve_completion_predicate_context(
-                        &server_clone.tachi_home_dir(),
-                        &d_id,
-                    );
-                let empty_run = std::path::PathBuf::new();
-                let run_dir = run_dir_opt.as_deref().unwrap_or(&empty_run);
-                let output_for_pred = run_dir
-                    .join("result.md")
-                    .exists()
-                    .then(|| std::fs::read_to_string(run_dir.join("result.md")).ok())
-                    .flatten()
-                    .unwrap_or_else(|| full_output.clone());
-                let verdict = crate::dispatch_ops::evaluate_completion_predicate(
-                    declared_pred.as_ref(),
-                    run_dir,
-                    pred_cwd.as_deref(),
-                    &output_for_pred,
-                );
+                let verdict = match crate::dispatch_ops::evaluate_completion_predicate_for_dispatch(
+                    &server_clone.tachi_home_dir(),
+                    &d_id,
+                    &full_output,
+                ) {
+                    Ok((_, verdict)) => verdict,
+                    Err(error) => {
+                        eprintln!(
+                            "[watchdog] refusing completion artifact read for dispatch {}: {}",
+                            d_id, error
+                        );
+                        crate::dispatch_ops::PredicateVerdict::Fail(format!(
+                            "completion artifact read refused: {error}"
+                        ))
+                    }
+                };
                 let (kanban_state, reviewed, override_reason) =
                     crate::dispatch_ops::resolve_completion_state("success", &verdict);
                 // #1250: thread the predicate-resolved state into the final
@@ -481,10 +495,23 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
 
         // Preserve dispatch-time contract fields across the final status rewrite
         // so complete/watchdog can still evaluate the #878-A predicate after exit.
-        let prev_status =
-            crate::task_lifecycle::read_json_file(&workspace_dir_for_spawn.join("status.json"))
-                .ok()
-                .flatten();
+        let status_path = workspace_dir_for_spawn.join("status.json");
+        let (prev_status, final_status_read_error) =
+            match crate::dispatch_ops::read_text_file_within(&workspace_dir_for_spawn, &status_path)
+            {
+                Ok(Some(raw)) => match serde_json::from_str::<Value>(&raw) {
+                    Ok(status) => (Some(status), None),
+                    Err(error) => (
+                        None,
+                        Some(format!(
+                            "completion status artifact {} is not valid JSON: {error}",
+                            status_path.display()
+                        )),
+                    ),
+                },
+                Ok(None) => (None, None),
+                Err(error) => (None, Some(error)),
+            };
         let preserved_predicate = prev_status
             .as_ref()
             .and_then(|v| v.get("completion_predicate").cloned())
@@ -502,12 +529,23 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             .and_then(|v| v.get("authority").cloned())
             .unwrap_or(Value::Null);
 
-        let final_status_state = terminal_status_state(
-            receipt_terminal_state,
-            watchdog_resolved_state,
-            polled_terminal_state,
-            final_exit_code,
-        );
+        let artifact_read_error = final_status_read_error.or(receipt_read_error);
+        if let Some(error) = artifact_read_error.as_deref() {
+            eprintln!(
+                "[watchdog] completion artifact refusal persisted for dispatch {}: {}",
+                d_id, error
+            );
+        }
+        let final_status_state = if artifact_read_error.is_some() {
+            "TASK_STATE_FAILED"
+        } else {
+            terminal_status_state(
+                receipt_terminal_state,
+                watchdog_resolved_state,
+                polled_terminal_state,
+                final_exit_code,
+            )
+        };
         write_status_json(
             &workspace_dir_for_spawn,
             &d_id,
@@ -526,6 +564,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "updated_at": Utc::now().to_rfc3339(),
                 "run_dir": workspace_dir_for_spawn.to_string_lossy(),
                 "result_written": true,
+                "artifact_read_error": artifact_read_error,
                 "completion_predicate": preserved_predicate,
                 "cwd": preserved_cwd,
                 "authority": preserved_authority,
@@ -737,19 +776,40 @@ fn terminal_status_state(
 /// receipt is valid only with its explicit closure marker, so the generic
 /// INPUT_REQUIRED vocabulary used by plan review cannot be misclassified as a
 /// terminal partial close.
-fn resolved_completion_terminal_state(run_dir: &std::path::Path) -> Option<&'static str> {
-    let status = crate::task_lifecycle::read_json_file(&run_dir.join("status.json"))
-        .ok()
-        .flatten()?;
-    let receipt = status.get("resolved_completion")?.as_object()?;
-    let state = receipt.get("state")?.as_str()?;
-    receipt
-        .get("eval_ledger_id")?
-        .as_str()
-        .filter(|value| !value.trim().is_empty())?;
-    receipt.get("reviewed")?.as_bool()?;
-    chrono::DateTime::parse_from_rfc3339(receipt.get("recorded_at")?.as_str()?).ok()?;
-    match state {
+fn resolved_completion_terminal_state(
+    run_dir: &std::path::Path,
+) -> Result<Option<&'static str>, String> {
+    let Some(raw_status) =
+        crate::dispatch_ops::read_text_file_within(run_dir, &run_dir.join("status.json"))?
+    else {
+        return Ok(None);
+    };
+    let status: Value = serde_json::from_str(&raw_status).map_err(|error| {
+        format!(
+            "completion status artifact {} is not valid JSON: {error}",
+            run_dir.join("status.json").display()
+        )
+    })?;
+    let Some(receipt) = status.get("resolved_completion").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let Some(state) = receipt.get("state").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if receipt
+        .get("eval_ledger_id")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty())
+        || receipt.get("reviewed").and_then(Value::as_bool).is_none()
+        || receipt
+            .get("recorded_at")
+            .and_then(Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_none()
+    {
+        return Ok(None);
+    }
+    Ok(match state {
         "TASK_STATE_INPUT_REQUIRED"
             if receipt.get("closure_kind").and_then(Value::as_str) == Some("partial") =>
         {
@@ -760,7 +820,7 @@ fn resolved_completion_terminal_state(run_dir: &std::path::Path) -> Option<&'sta
             canonical_terminal_state(Some(terminal))
         }
         _ => None,
-    }
+    })
 }
 
 /// The status ledger keeps INPUT_REQUIRED for both partial outcomes and plan
@@ -1150,7 +1210,8 @@ mod tests {
         )
         .expect("write ordinary plan-review status");
 
-        let receipt_terminal_state = resolved_completion_terminal_state(temp.path());
+        let receipt_terminal_state = resolved_completion_terminal_state(temp.path())
+            .expect("read ordinary plan-review status");
         let polled_terminal_state = canonical_terminal_state(Some("TASK_STATE_INPUT_REQUIRED"));
         assert_eq!(
             receipt_terminal_state, None,
@@ -1181,6 +1242,39 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn completion_receipt_reader_loudly_refuses_final_leaf_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temporary root");
+        let run_dir = root.path().join("run");
+        std::fs::create_dir(&run_dir).expect("create run directory");
+        let outside = root.path().join("outside-status.json");
+        std::fs::write(
+            &outside,
+            serde_json::json!({
+                "resolved_completion": {
+                    "state": "TASK_STATE_COMPLETED",
+                    "closure_kind": null,
+                    "eval_ledger_id": "outside-eval",
+                    "reviewed": true,
+                    "recorded_at": "2026-07-19T00:00:00Z",
+                }
+            })
+            .to_string(),
+        )
+        .expect("write outside status");
+        symlink(&outside, run_dir.join("status.json")).expect("symlink status leaf");
+
+        let error = resolved_completion_terminal_state(&run_dir)
+            .expect_err("completion receipt symlink must be a loud refusal");
+        assert!(
+            error.contains("refusing descriptor-bound read"),
+            "error={error}"
+        );
+    }
+
     /// A missing kanban card must not erase a deliberate partial close.  The
     /// completion handler records the resolved close in the run receipt first;
     /// the watchdog reads that receipt before consulting kanban, whose card may
@@ -1203,7 +1297,8 @@ mod tests {
         )
         .expect("write resolved completion receipt");
 
-        let receipt_terminal_state = resolved_completion_terminal_state(temp.path());
+        let receipt_terminal_state = resolved_completion_terminal_state(temp.path())
+            .expect("read partial completion receipt");
         assert_eq!(
             receipt_terminal_state,
             Some("TASK_STATE_INPUT_REQUIRED"),
@@ -1225,7 +1320,8 @@ mod tests {
         )
         .expect("write ordinary plan-input status");
         assert_eq!(
-            resolved_completion_terminal_state(temp.path()),
+            resolved_completion_terminal_state(temp.path())
+                .expect("read ordinary plan-input status"),
             None,
             "ordinary plan input without a resolved-completion receipt must remain open"
         );
@@ -1244,7 +1340,8 @@ mod tests {
         )
         .expect("write incomplete partial receipt");
         assert_eq!(
-            resolved_completion_terminal_state(temp.path()),
+            resolved_completion_terminal_state(temp.path())
+                .expect("read incomplete partial receipt"),
             None,
             "an incomplete or garbled partial receipt must not close the watchdog"
         );
@@ -1264,7 +1361,8 @@ mod tests {
         )
         .expect("write garbled completed receipt");
         assert_eq!(
-            resolved_completion_terminal_state(temp.path()),
+            resolved_completion_terminal_state(temp.path())
+                .expect("read garbled completed receipt"),
             None,
             "a non-partial outcome carrying a partial marker must be rejected"
         );

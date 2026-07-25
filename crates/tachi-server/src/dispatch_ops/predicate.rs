@@ -58,51 +58,6 @@ fn is_safe_relative_path(path: &str) -> bool {
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
-/// Canonicalize a complete file path and require every component, including
-/// the final leaf, to resolve below `root`. A lexical relative-path check does
-/// not constrain a symlinked parent or final artifact leaf.
-fn canonical_regular_file_within(
-    candidate: &Path,
-    root: &Path,
-) -> Result<Option<(PathBuf, std::fs::Metadata)>, String> {
-    let canonical_root = root.canonicalize().map_err(|err| {
-        format!(
-            "containment root {} cannot be resolved: {err}",
-            root.display()
-        )
-    })?;
-    let canonical_candidate = match candidate.canonicalize() {
-        Ok(path) => path,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(format!(
-                "path {} cannot be resolved: {err}",
-                candidate.display()
-            ));
-        }
-    };
-    if !canonical_candidate.starts_with(&canonical_root) {
-        return Err(format!(
-            "path {} resolves outside containment root {}",
-            canonical_candidate.display(),
-            canonical_root.display()
-        ));
-    }
-    let metadata = canonical_candidate.metadata().map_err(|err| {
-        format!(
-            "resolved path {} cannot be inspected: {err}",
-            canonical_candidate.display()
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(format!(
-            "resolved path {} is not a regular file",
-            canonical_candidate.display()
-        ));
-    }
-    Ok(Some((canonical_candidate, metadata)))
-}
-
 /// Evaluate a (possibly absent) completion predicate.
 ///
 /// * `pred`    — the declared predicate, or `None` (→ [`PredicateVerdict::Unverified`]).
@@ -132,8 +87,8 @@ pub(crate) fn evaluate_completion_predicate(
                 None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             };
             let full = base.join(path);
-            match canonical_regular_file_within(&full, &base) {
-                Ok(Some((_, meta))) if meta.len() > 0 => PredicateVerdict::Pass,
+            match crate::dispatch_ops::regular_file_len_within(&base, &full) {
+                Ok(Some(len)) if len > 0 => PredicateVerdict::Pass,
                 Ok(Some(_)) => PredicateVerdict::Fail(format!(
                     "expected artifact '{path}' exists but is empty"
                 )),
@@ -184,13 +139,16 @@ pub(crate) fn evaluate_completion_predicate(
 pub(crate) fn resolve_completion_predicate_context(
     home: &Path,
     dispatch_id: &str,
-) -> (
-    Option<PathBuf>,
-    Option<CompletionPredicate>,
-    Option<PathBuf>,
-) {
+) -> Result<
+    (
+        Option<PathBuf>,
+        Option<CompletionPredicate>,
+        Option<PathBuf>,
+    ),
+    String,
+> {
     if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
-        return (None, None, None);
+        return Ok((None, None, None));
     }
     let runs_dir = home.join("runs");
     let run_dir = runs_dir.join(dispatch_id);
@@ -208,18 +166,34 @@ pub(crate) fn resolve_completion_predicate_context(
             "completion predicate context: run directory not found under resolved home; \
              falling through to Unverified"
         );
-        return (None, None, None);
+        return Ok((None, None, None));
     }
     if !crate::dispatch_ops::canonical_dir_is_within(&run_dir, &runs_dir) {
-        return (None, None, None);
+        return Err(format!(
+            "refusing completion predicate context for dispatch_id={dispatch_id}: \
+             run directory escapes {}",
+            runs_dir.display()
+        ));
     }
+    let run_dir = run_dir.canonicalize().map_err(|error| {
+        format!(
+            "refusing completion predicate context for dispatch_id={dispatch_id}: \
+             resolve run directory {}: {error}",
+            run_dir.display()
+        )
+    })?;
     let status_path = run_dir.join("status.json");
-    let status = match crate::task_lifecycle::read_json_file(&status_path) {
-        Ok(Some(v)) => v,
-        _ => {
-            return (Some(run_dir), None, None);
-        }
+    let status_raw = match crate::dispatch_ops::read_text_file_within(&runs_dir, &status_path)? {
+        Some(raw) => raw,
+        None => return Ok((Some(run_dir), None, None)),
     };
+    let status: Value = serde_json::from_str(&status_raw).map_err(|error| {
+        format!(
+            "refusing completion predicate context for dispatch_id={dispatch_id}: \
+             parse {}: {error}",
+            status_path.display()
+        )
+    })?;
     let pred = status
         .get("completion_predicate")
         .cloned()
@@ -230,7 +204,35 @@ pub(crate) fn resolve_completion_predicate_context(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
-    (Some(run_dir), pred, cwd)
+    Ok((Some(run_dir), pred, cwd))
+}
+
+/// Resolve the dispatch ledger context and evaluate its predicate using a
+/// descriptor-bound read of `result.md`. A missing result uses
+/// `fallback_output`; containment, symlink-race, UTF-8, or status parse
+/// failures are returned to the caller and may not degrade to Unverified.
+pub(crate) fn evaluate_completion_predicate_for_dispatch(
+    home: &Path,
+    dispatch_id: &str,
+    fallback_output: &str,
+) -> Result<(bool, PredicateVerdict), String> {
+    let (run_dir, predicate, cwd) = resolve_completion_predicate_context(home, dispatch_id)?;
+    let output = match run_dir.as_deref() {
+        Some(run_dir) => crate::dispatch_ops::read_text_file_within(
+            &home.join("runs"),
+            &run_dir.join("result.md"),
+        )?
+        .unwrap_or_else(|| fallback_output.to_string()),
+        None => fallback_output.to_string(),
+    };
+    let empty_run_dir = PathBuf::new();
+    let verdict = evaluate_completion_predicate(
+        predicate.as_ref(),
+        run_dir.as_deref().unwrap_or(&empty_run_dir),
+        cwd.as_deref(),
+        &output,
+    );
+    Ok((predicate.is_some(), verdict))
 }
 
 /// Pure kanban state mapping for a completion, folding the predicate verdict in.
@@ -540,7 +542,7 @@ mod tests {
         std::fs::write(
             decoy_dir.join("status.json"),
             serde_json::json!({
-                "completion_predicate": {"kind": "output_matches", "pattern": ".*"},
+                "completion_predicate": {"type": "output_matches", "pattern": ".*"},
                 "cwd": "/should/never/be/read",
             })
             .to_string(),
@@ -555,7 +557,8 @@ mod tests {
             "/etc/passwd",
             "a/../../decoy",
         ] {
-            let (run_dir, pred, cwd) = resolve_completion_predicate_context(home, malicious);
+            let (run_dir, pred, cwd) = resolve_completion_predicate_context(home, malicious)
+                .expect("invalid ids are a quiet miss");
             assert!(
                 run_dir.is_none() && pred.is_none() && cwd.is_none(),
                 "dispatch_id {malicious:?} must be rejected fail-closed, not resolved \
@@ -580,8 +583,127 @@ mod tests {
         .expect("write status.json");
 
         let (resolved_run_dir, _pred, cwd) =
-            resolve_completion_predicate_context(home, dispatch_id);
-        assert_eq!(resolved_run_dir, Some(run_dir));
+            resolve_completion_predicate_context(home, dispatch_id).expect("context read");
+        assert_eq!(resolved_run_dir, Some(run_dir.canonicalize().unwrap()));
         assert_eq!(cwd, Some(PathBuf::from("/legit/cwd")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_status_context_keeps_opened_object_across_post_open_swap() {
+        let tmp = td();
+        let outside = td();
+        let home = tmp.path();
+        let dispatch_id = "20260718T101011Z-status-race";
+        let run_dir = home.join("runs").join(dispatch_id);
+        let status_path = run_dir.join("status.json");
+        let outside_status = outside.path().join("status.json");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            &status_path,
+            serde_json::json!({
+                "completion_predicate": {"type": "output_matches", "pattern": "inside"},
+                "cwd": "/inside/cwd",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &outside_status,
+            serde_json::json!({
+                "completion_predicate": {"type": "output_matches", "pattern": "outside"},
+                "cwd": "/outside/cwd",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        crate::dispatch_ops::install_secure_read_hook(
+            crate::dispatch_ops::SecureReadHookStage::AfterOpen,
+            status_path.clone(),
+            move |opened| {
+                std::fs::remove_file(opened).unwrap();
+                std::os::unix::fs::symlink(&outside_status, opened).unwrap();
+            },
+        );
+
+        let (_, predicate, cwd) = resolve_completion_predicate_context(home, dispatch_id)
+            .expect("descriptor-bound context read");
+        assert_eq!(cwd, Some(PathBuf::from("/inside/cwd")));
+        assert!(matches!(
+            predicate,
+            Some(CompletionPredicate::OutputMatches { pattern }) if pattern == "inside"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_result_refuses_pre_open_swap_and_never_matches_outside_bytes() {
+        let tmp = td();
+        let outside = td();
+        let home = tmp.path();
+        let dispatch_id = "20260718T101012Z-result-pre-open-race";
+        let run_dir = home.join("runs").join(dispatch_id);
+        let result_path = run_dir.join("result.md");
+        let outside_result = outside.path().join("result.md");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({
+                "completion_predicate": {"type": "output_matches", "pattern": "outside bytes"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(&result_path, "inside bytes").unwrap();
+        std::fs::write(&outside_result, "outside bytes").unwrap();
+        crate::dispatch_ops::install_secure_read_hook(
+            crate::dispatch_ops::SecureReadHookStage::AfterValidation,
+            result_path.clone(),
+            move |validated| {
+                std::fs::remove_file(validated).unwrap();
+                std::os::unix::fs::symlink(&outside_result, validated).unwrap();
+            },
+        );
+
+        let error = evaluate_completion_predicate_for_dispatch(home, dispatch_id, "fallback")
+            .expect_err("pre-open swap must refuse instead of reading outside bytes");
+        assert!(error.contains("refusing descriptor-bound read"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_result_keeps_opened_object_across_post_open_swap() {
+        let tmp = td();
+        let outside = td();
+        let home = tmp.path();
+        let dispatch_id = "20260718T101013Z-result-post-open-race";
+        let run_dir = home.join("runs").join(dispatch_id);
+        let result_path = run_dir.join("result.md");
+        let outside_result = outside.path().join("result.md");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({
+                "completion_predicate": {"type": "output_matches", "pattern": "inside bytes"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(&result_path, "inside bytes").unwrap();
+        std::fs::write(&outside_result, "outside bytes").unwrap();
+        crate::dispatch_ops::install_secure_read_hook(
+            crate::dispatch_ops::SecureReadHookStage::AfterOpen,
+            result_path.clone(),
+            move |opened| {
+                std::fs::remove_file(opened).unwrap();
+                std::os::unix::fs::symlink(&outside_result, opened).unwrap();
+            },
+        );
+
+        let (declared, verdict) =
+            evaluate_completion_predicate_for_dispatch(home, dispatch_id, "fallback")
+                .expect("descriptor-bound result read");
+        assert!(declared);
+        assert_eq!(verdict, PredicateVerdict::Pass);
     }
 }

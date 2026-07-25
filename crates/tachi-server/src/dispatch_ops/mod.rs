@@ -39,10 +39,14 @@ pub(crate) use prompt::seat_card::{
 // canonicalize-and-confine), consumed by `board::runs`, `dispatch::dedupe`,
 // `tools::dispatch_complete_defaults`, and `predicate` -- see `path_gate` for
 // the full call-site inventory this closes.
-pub(crate) use path_gate::{canonical_dir_is_within, is_valid_dispatch_id};
+pub(crate) use path_gate::{
+    canonical_dir_is_within, is_valid_dispatch_id, read_text_file_within, regular_file_len_within,
+};
+#[cfg(test)]
+pub(crate) use path_gate::{install_secure_read_hook, SecureReadHookStage};
 pub(crate) use predicate::{
-    evaluate_completion_predicate, execution_outcome_for_kanban_state,
-    resolve_completion_predicate_context, resolve_completion_state,
+    evaluate_completion_predicate_for_dispatch, execution_outcome_for_kanban_state,
+    resolve_completion_predicate_context, resolve_completion_state, PredicateVerdict,
 };
 #[cfg(test)]
 pub(crate) use prompt::{assemble_prompt, assemble_prompt_with_trace};
