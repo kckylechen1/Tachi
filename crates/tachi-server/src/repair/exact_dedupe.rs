@@ -253,7 +253,7 @@ mod tests {
         let mut store = MemoryStore::open(&db_path.to_string_lossy()).unwrap();
         for id in ["winner", "loser"] {
             store
-                .upsert(&memcore::MemoryEntry {
+                .insert_if_absent(&memcore::MemoryEntry {
                     id: id.into(),
                     path: "/same".into(),
                     summary: String::new(),
@@ -291,6 +291,10 @@ mod tests {
         let dedupe_plan = store
             .plan_exact_dedupe(identity.clone(), None, None)
             .unwrap();
+        assert_eq!(
+            dedupe_plan.planned_losers, 1,
+            "fixture must seed one intentional exact duplicate"
+        );
         let plan_path = dir.path().join("plan.json");
         std::fs::write(&plan_path, serde_json::to_vec_pretty(&dedupe_plan).unwrap()).unwrap();
         let mut manifest = Manifest::empty();
