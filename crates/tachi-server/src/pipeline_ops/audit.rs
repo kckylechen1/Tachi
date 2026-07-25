@@ -2,7 +2,7 @@ use chrono::Utc;
 use memcore::MemoryStore;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::server_state::{DbScope, MemoryServer};
@@ -28,6 +28,13 @@ pub(crate) struct RetryableIngestLease {
     heartbeat_failure: watch::Receiver<Option<String>>,
     stop_tx: Option<watch::Sender<bool>>,
     heartbeat: Option<JoinHandle<()>>,
+    runtime: tokio::runtime::Handle,
+    join_notify: Option<oneshot::Sender<()>>,
+}
+
+struct HeartbeatOptions {
+    interval: Duration,
+    join_notify: Option<oneshot::Sender<()>>,
 }
 
 impl RetryableIngestLease {
@@ -59,6 +66,61 @@ impl RetryableIngestLease {
         claim: RetryableIngestClaim,
         interval: Duration,
     ) -> Self {
+        Self::start_inner(
+            server,
+            target_db,
+            project,
+            worker,
+            event_hash,
+            claim,
+            HeartbeatOptions {
+                interval,
+                join_notify: None,
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn start_with_join_receipt(
+        server: &MemoryServer,
+        target_db: DbScope,
+        project: Option<&str>,
+        worker: &str,
+        event_hash: &str,
+        claim: RetryableIngestClaim,
+        interval: Duration,
+    ) -> (Self, oneshot::Receiver<()>) {
+        let (join_notify, joined) = oneshot::channel();
+        (
+            Self::start_inner(
+                server,
+                target_db,
+                project,
+                worker,
+                event_hash,
+                claim,
+                HeartbeatOptions {
+                    interval,
+                    join_notify: Some(join_notify),
+                },
+            ),
+            joined,
+        )
+    }
+
+    fn start_inner(
+        server: &MemoryServer,
+        target_db: DbScope,
+        project: Option<&str>,
+        worker: &str,
+        event_hash: &str,
+        claim: RetryableIngestClaim,
+        options: HeartbeatOptions,
+    ) -> Self {
+        let HeartbeatOptions {
+            interval,
+            join_notify,
+        } = options;
         let gate = Arc::new(Mutex::new(()));
         let (failure_tx, heartbeat_failure) = watch::channel(None);
         let (stop_tx, mut stop_rx) = watch::channel(false);
@@ -120,6 +182,8 @@ impl RetryableIngestLease {
             heartbeat_failure,
             stop_tx: Some(stop_tx),
             heartbeat: Some(heartbeat),
+            runtime: tokio::runtime::Handle::current(),
+            join_notify,
         }
     }
 
@@ -169,21 +233,15 @@ impl RetryableIngestLease {
     {
         let _guard = self.gate.lock().await;
         self.check_heartbeat()?;
-        // Stable row helpers open their own transactions, so they cannot nest
-        // under the graph savepoint. Refresh immediately before each row: the
-        // store's 5s SQLite busy bound is well below this lease's 5 minutes.
-        refresh_retryable_ingest_claim(
-            &self.server,
-            self.target_db,
-            self.project.as_deref(),
-            &self.worker,
-            &self.event_hash,
-            &self.claim,
-        )?;
+        let fenced_action = |store: &mut MemoryStore| {
+            owner_fenced_stable_write(store, &self.worker, &self.event_hash, &self.claim, action)
+        };
         if let Some(project_name) = self.project.as_deref() {
-            self.server.with_named_project_store(project_name, action)
+            self.server
+                .with_named_project_store(project_name, fenced_action)
         } else {
-            self.server.with_store_for_scope(self.target_db, action)
+            self.server
+                .with_store_for_scope(self.target_db, fenced_action)
         }
     }
 
@@ -287,11 +345,20 @@ impl RetryableIngestLease {
 
     async fn join_heartbeat(&mut self) -> Result<(), String> {
         let Some(heartbeat) = self.heartbeat.take() else {
+            self.notify_joined();
             return Ok(());
         };
-        heartbeat
+        let result = heartbeat
             .await
-            .map_err(|error| format!("join ingest claim heartbeat: {error}"))
+            .map_err(|error| format!("join ingest claim heartbeat: {error}"));
+        self.notify_joined();
+        result
+    }
+
+    fn notify_joined(&mut self) {
+        if let Some(join_notify) = self.join_notify.take() {
+            let _ = join_notify.send(());
+        }
     }
 }
 
@@ -299,7 +366,16 @@ impl Drop for RetryableIngestLease {
     fn drop(&mut self) {
         self.signal_stop();
         if let Some(heartbeat) = self.heartbeat.take() {
-            heartbeat.abort();
+            let join_notify = self.join_notify.take();
+            let joiner = self.runtime.spawn(async move {
+                let _ = heartbeat.await;
+                if let Some(join_notify) = join_notify {
+                    let _ = join_notify.send(());
+                }
+            });
+            drop(joiner);
+        } else {
+            self.notify_joined();
         }
     }
 }
@@ -402,7 +478,7 @@ pub(crate) fn claim_retryable_ingest_event(
     Ok(claimed.then_some(claim))
 }
 
-fn ingest_success_audit_exists(
+pub(crate) fn ingest_success_audit_exists(
     server: &MemoryServer,
     label: &str,
     audit_key: &str,
@@ -508,6 +584,97 @@ where
         ));
     }
     Ok(value)
+}
+
+fn owner_fenced_stable_write<T, F>(
+    store: &mut MemoryStore,
+    worker: &str,
+    event_hash: &str,
+    claim: &RetryableIngestClaim,
+    action: F,
+) -> Result<T, String>
+where
+    F: FnOnce(&mut MemoryStore) -> Result<T, String>,
+{
+    let rows_changed = store
+        .connection()
+        .execute(
+            "UPDATE processed_events \
+             SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE event_hash = ?1 AND worker = ?2 AND event_id = ?3",
+            rusqlite::params![event_hash, worker, claim.owner_token],
+        )
+        .map_err(|error| format!("refresh ingest claim before stable row fence: {error}"))?;
+    if rows_changed != 1 {
+        return Err("ingest claim ownership was lost before stable row write".to_string());
+    }
+
+    store
+        .connection()
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS temp.ingest_stable_owner_fence; \
+             DROP TABLE IF EXISTS temp.ingest_owner_fence_context; \
+             CREATE TEMP TABLE ingest_owner_fence_context ( \
+                 event_hash TEXT NOT NULL, worker TEXT NOT NULL, owner_token TEXT NOT NULL \
+             );",
+        )
+        .map_err(|error| format!("prepare stable row write owner fence: {error}"))?;
+    store
+        .connection()
+        .execute(
+            "INSERT INTO temp.ingest_owner_fence_context \
+             (event_hash, worker, owner_token) VALUES (?1, ?2, ?3)",
+            rusqlite::params![event_hash, worker, claim.owner_token],
+        )
+        .map_err(|error| format!("bind stable row write owner fence: {error}"))?;
+    if let Err(error) = store.connection().execute_batch(
+        "CREATE TEMP TRIGGER ingest_stable_owner_fence \
+         BEFORE INSERT ON main.memories \
+         WHEN NOT EXISTS ( \
+             SELECT 1 FROM main.processed_events AS p \
+             JOIN temp.ingest_owner_fence_context AS c \
+               ON p.event_hash = c.event_hash AND p.worker = c.worker \
+              AND p.event_id = c.owner_token \
+         ) \
+         BEGIN \
+             SELECT RAISE(ABORT, 'ingest claim ownership lost before stable row write'); \
+         END;",
+    ) {
+        let cleanup_error = cleanup_stable_owner_fence(store).err();
+        return Err(match cleanup_error {
+            Some(cleanup_error) => {
+                format!("install stable row write owner fence: {error}; {cleanup_error}")
+            }
+            None => format!("install stable row write owner fence: {error}"),
+        });
+    }
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(store)));
+    let cleanup = cleanup_stable_owner_fence(store);
+    match outcome {
+        Ok(Ok(value)) => {
+            cleanup?;
+            Ok(value)
+        }
+        Ok(Err(error)) => match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!("{error}; {cleanup_error}")),
+        },
+        Err(panic) => {
+            let _ = cleanup;
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
+fn cleanup_stable_owner_fence(store: &mut MemoryStore) -> Result<(), String> {
+    store
+        .connection()
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS temp.ingest_stable_owner_fence; \
+             DROP TABLE IF EXISTS temp.ingest_owner_fence_context;",
+        )
+        .map_err(|error| format!("cleanup stable row write owner fence: {error}"))
 }
 
 fn rollback_owner_fence(store: &mut MemoryStore, error: String) -> String {
@@ -761,6 +928,231 @@ mod tests {
             )
             .await;
         assert_eq!(error, "cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_owner_cannot_commit_idempotent_row_after_takeover() {
+        let temp = tempfile::tempdir().expect("temp stable-row fence database");
+        let db_path = temp.path().join("memory.db");
+        let server_a = MemoryServer::new(db_path.clone(), None).expect("open owner A database");
+        let server_b = MemoryServer::new(db_path, None).expect("open owner B database");
+        let event_hash = "stable-row-takeover-event";
+        let audit_key = ingest_audit_key("ingest_source", DbScope::Global, None, event_hash);
+        let claim_a = claim_retryable_ingest_event(
+            &server_a,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            &audit_key,
+            "ingest_source",
+            event_hash,
+            "owner-a",
+        )
+        .expect("claim A")
+        .expect("A owns claim");
+        let lease_a = RetryableIngestLease::start_with_interval(
+            &server_a,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            event_hash,
+            claim_a,
+            Duration::from_secs(60),
+        );
+        let mut entry = graph_entry("stable-row-after-takeover", "stale row must not commit");
+        entry.path = "/ingest-lease/stable-row-after-takeover".to_string();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let owner_a = tokio::spawn(async move {
+            let write = lease_a
+                .write_idempotent(move |store| {
+                    started_tx.send(()).expect("signal stalled row write");
+                    resume_rx.recv().expect("resume stalled row write");
+                    store
+                        .insert_if_absent(&entry)
+                        .map_err(|error| format!("stale row insert: {error}"))
+                })
+                .await;
+            (write, lease_a)
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A reaches the pre-insert stall");
+
+        server_b
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE processed_events \
+                         SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes') \
+                         WHERE event_hash = ?1 AND worker = 'ingest_source'",
+                        [event_hash],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| format!("age stalled A claim: {error}"))
+            })
+            .expect("age stalled A claim");
+        let claim_b = claim_retryable_ingest_event(
+            &server_b,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            &audit_key,
+            "ingest_source",
+            event_hash,
+            "owner-b",
+        )
+        .expect("claim B")
+        .expect("B takes stalled claim");
+        let lease_b = RetryableIngestLease::start_with_interval(
+            &server_b,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            event_hash,
+            claim_b,
+            Duration::from_secs(60),
+        );
+
+        resume_tx.send(()).expect("resume A after takeover");
+        let (stale_write, lease_a) = owner_a.await.expect("join stalled owner A");
+        let stale_error = stale_write.expect_err("stale A must not commit after B takeover");
+        let _ = lease_a
+            .fail(
+                "ingest_source",
+                &audit_key,
+                "claim_ownership_lost",
+                stale_error,
+            )
+            .await;
+
+        let mut current_entry = graph_entry("stable-row-after-takeover", "current owner row");
+        current_entry.path = "/ingest-lease/stable-row-after-takeover".to_string();
+        lease_b
+            .write_idempotent(|store| {
+                store
+                    .insert_if_absent(&current_entry)
+                    .map_err(|error| format!("current row insert: {error}"))
+            })
+            .await
+            .expect("B commits stable row");
+        lease_b
+            .complete("ingest_source", &audit_key)
+            .await
+            .expect("B completes ingest");
+
+        let rows = server_b
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories WHERE id = 'stable-row-after-takeover' \
+                         AND text = 'current owner row'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| format!("count current owner row: {error}"))
+            })
+            .expect("count current owner row");
+        assert_eq!(rows, 1, "only B's stable row may commit");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_joined_after_error_panic_and_cancellation() {
+        let server = crate::tests::make_server();
+
+        let make_claim = |event_hash: &str| {
+            let audit_key = ingest_audit_key("ingest_source", DbScope::Global, None, event_hash);
+            let claim = claim_retryable_ingest_event(
+                &server,
+                DbScope::Global,
+                None,
+                "ingest_source",
+                &audit_key,
+                "ingest_source",
+                event_hash,
+                event_hash,
+            )
+            .expect("create lifecycle claim")
+            .expect("lifecycle claim is owned");
+            (audit_key, claim)
+        };
+
+        let (error_audit_key, error_claim) = make_claim("heartbeat-error-exit");
+        let (error_lease, error_joined) = RetryableIngestLease::start_with_join_receipt(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            "heartbeat-error-exit",
+            error_claim,
+            Duration::from_secs(60),
+        );
+        let error = error_lease
+            .fail(
+                "ingest_source",
+                &error_audit_key,
+                "injected_error",
+                "injected error".to_string(),
+            )
+            .await;
+        assert_eq!(error, "injected error");
+        tokio::time::timeout(Duration::from_secs(2), error_joined)
+            .await
+            .expect("error exit joins heartbeat in time")
+            .expect("error exit join receipt");
+
+        let (_, panic_claim) = make_claim("heartbeat-panic-exit");
+        let (panic_lease, panic_joined) = RetryableIngestLease::start_with_join_receipt(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            "heartbeat-panic-exit",
+            panic_claim,
+            Duration::from_secs(60),
+        );
+        let panic_task = tokio::spawn(async move {
+            let _lease = panic_lease;
+            panic!("injected ingest owner panic");
+        });
+        assert!(
+            panic_task.await.is_err(),
+            "panic task must report its panic"
+        );
+        tokio::time::timeout(Duration::from_secs(2), panic_joined)
+            .await
+            .expect("panic exit joins heartbeat in time")
+            .expect("panic exit join receipt");
+
+        let (_, cancel_claim) = make_claim("heartbeat-cancel-exit");
+        let (cancel_lease, cancel_joined) = RetryableIngestLease::start_with_join_receipt(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            "heartbeat-cancel-exit",
+            cancel_claim,
+            Duration::from_secs(60),
+        );
+        let cancel_task = tokio::spawn(async move {
+            let _lease = cancel_lease;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        cancel_task.abort();
+        assert!(
+            cancel_task
+                .await
+                .expect_err("task is cancelled")
+                .is_cancelled(),
+            "cancelled task must report cancellation"
+        );
+        tokio::time::timeout(Duration::from_secs(2), cancel_joined)
+            .await
+            .expect("cancel exit joins heartbeat in time")
+            .expect("cancel exit join receipt");
     }
 
     #[tokio::test(start_paused = true)]

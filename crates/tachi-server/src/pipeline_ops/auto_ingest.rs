@@ -5,11 +5,20 @@ use std::collections::HashSet;
 
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::IngestSourceParams;
-use crate::utils::sanitize_safe_path_name;
+use crate::utils::{sanitize_safe_path_name, stable_hash};
 
-use super::audit::RetryableIngestLease;
+use super::audit::{ingest_audit_key, ingest_success_audit_exists, RetryableIngestLease};
 use super::helpers::{default_ingest_chunk_overlap, default_ingest_chunk_size, resolve_domain};
 use super::ingest::handle_ingest_source;
+
+const AUTO_INGEST_JOB_WORKER: &str = "auto_ingest_job";
+
+pub(crate) struct StagedAutoIngest {
+    job_hash: String,
+    source_event_hash: String,
+    source_audit_key: String,
+    params: IngestSourceParams,
+}
 
 pub(crate) async fn build_similarity_edges(
     server: &MemoryServer,
@@ -113,25 +122,22 @@ pub(crate) fn extract_text_from_tool_result(
     }
 }
 
-pub(crate) async fn schedule_auto_ingest_from_mcp(
-    server: &MemoryServer,
+fn prepare_auto_ingest_from_mcp(
     capability_id: &str,
     tool_name: &str,
     definition: &serde_json::Value,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     result: &rmcp::model::CallToolResult,
-) -> Result<Option<String>, String> {
+) -> Option<IngestSourceParams> {
     let enabled = definition
         .get("auto_ingest")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
     if !enabled {
-        return Ok(None);
+        return None;
     }
 
-    let Some(content) = extract_text_from_tool_result(result) else {
-        return Ok(None);
-    };
+    let content = extract_text_from_tool_result(result)?;
 
     let resolved_server = capability_id.strip_prefix("mcp:").unwrap_or(capability_id);
     let source_url = arguments
@@ -176,7 +182,7 @@ pub(crate) async fn schedule_auto_ingest_from_mcp(
         "auto_ingest": true,
     });
 
-    let params = IngestSourceParams {
+    Some(IngestSourceParams {
         content,
         source_url,
         source: Some(source),
@@ -191,7 +197,113 @@ pub(crate) async fn schedule_auto_ingest_from_mcp(
         chunk_size_chars: default_ingest_chunk_size(),
         chunk_overlap_chars: default_ingest_chunk_overlap(),
         metadata: Some(metadata),
-    };
+    })
+}
 
-    handle_ingest_source(server, params).await.map(Some)
+pub(crate) fn stage_auto_ingest_from_mcp(
+    server: &MemoryServer,
+    capability_id: &str,
+    tool_name: &str,
+    definition: &serde_json::Value,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    result: &rmcp::model::CallToolResult,
+) -> Result<Option<StagedAutoIngest>, String> {
+    let Some(params) =
+        prepare_auto_ingest_from_mcp(capability_id, tool_name, definition, arguments, result)
+    else {
+        return Ok(None);
+    };
+    let payload = json!({
+        "content": &params.content,
+        "source_url": &params.source_url,
+        "source": &params.source,
+        "path_prefix": &params.path_prefix,
+        "auto_chunk": params.auto_chunk,
+        "auto_summarize": params.auto_summarize,
+        "auto_link": params.auto_link,
+        "importance": params.importance,
+        "scope": &params.scope,
+        "project": &params.project,
+        "domain": &params.domain,
+        "chunk_size_chars": params.chunk_size_chars,
+        "chunk_overlap_chars": params.chunk_overlap_chars,
+        "metadata": &params.metadata,
+    });
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|error| format!("serialize durable auto-ingest job: {error}"))?;
+    let job_hash = stable_hash(&format!("auto-ingest-job:{payload_json}"));
+    server.with_global_store(|store| {
+        store
+            .connection()
+            .execute(
+                "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                 VALUES (?1, ?2, ?3, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')) \
+                 ON CONFLICT(event_hash, worker) DO UPDATE SET event_id = excluded.event_id",
+                rusqlite::params![job_hash, payload_json, AUTO_INGEST_JOB_WORKER],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("stage durable auto-ingest job: {error}"))
+    })?;
+    let persisted_payload = server.with_global_store_read(|store| {
+        store
+            .connection()
+            .query_row(
+                "SELECT event_id FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+                rusqlite::params![job_hash, AUTO_INGEST_JOB_WORKER],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| format!("load durable auto-ingest job: {error}"))
+    })?;
+    let params: IngestSourceParams = serde_json::from_str(&persisted_payload)
+        .map_err(|error| format!("decode durable auto-ingest job: {error}"))?;
+
+    let content = params.content.trim();
+    let source_label = params
+        .source
+        .as_deref()
+        .or(params.source_url.as_deref())
+        .unwrap_or("ingest_source");
+    let path_prefix = params.path_prefix.as_deref().unwrap_or("/");
+    let source_event_hash = stable_hash(&format!("{source_label}:{path_prefix}:{content}"));
+    let (target_db, _) = server.resolve_write_scope(&params.scope);
+    let source_audit_key = ingest_audit_key(
+        "ingest_source",
+        target_db,
+        params.project.as_deref(),
+        &source_event_hash,
+    );
+
+    Ok(Some(StagedAutoIngest {
+        job_hash,
+        source_event_hash,
+        source_audit_key,
+        params,
+    }))
+}
+
+pub(crate) async fn run_staged_auto_ingest(
+    server: &MemoryServer,
+    staged: StagedAutoIngest,
+) -> Result<Option<String>, String> {
+    let response = handle_ingest_source(server, staged.params).await?;
+    let completed = ingest_success_audit_exists(
+        server,
+        "ingest_source",
+        &staged.source_audit_key,
+        &staged.source_event_hash,
+    )?;
+    if !completed {
+        return Err("auto-ingest source returned without a durable success audit".to_string());
+    }
+    server.with_global_store(|store| {
+        store
+            .connection()
+            .execute(
+                "DELETE FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+                rusqlite::params![staged.job_hash, AUTO_INGEST_JOB_WORKER],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("complete durable auto-ingest job: {error}"))
+    })?;
+    Ok(Some(response))
 }

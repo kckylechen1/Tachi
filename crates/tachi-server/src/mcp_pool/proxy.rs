@@ -8,6 +8,57 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tachi_hub::{capability_callable, capability_not_callable_reason};
 
+fn return_with_background_auto_ingest(
+    server: &MemoryServer,
+    capability_id: &str,
+    tool_name: &str,
+    definition: &serde_json::Value,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    result: rmcp::model::CallToolResult,
+) -> rmcp::model::CallToolResult {
+    if result.is_error.unwrap_or(false) {
+        return result;
+    }
+
+    let staged = match crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        server,
+        capability_id,
+        tool_name,
+        definition,
+        arguments,
+        &result,
+    ) {
+        Ok(Some(staged)) => staged,
+        Ok(None) => return result,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                capability_id,
+                tool_name,
+                "failed to stage durable MCP result auto-ingest"
+            );
+            return result;
+        }
+    };
+    let ingest_server = server.clone();
+    let capability_id = capability_id.to_string();
+    let tool_name = tool_name.to_string();
+    let task = tokio::spawn(async move {
+        if let Err(error) =
+            crate::pipeline_ops::run_staged_auto_ingest(&ingest_server, staged).await
+        {
+            tracing::warn!(
+                error = %error,
+                capability_id,
+                tool_name,
+                "background MCP result auto-ingest failed"
+            );
+        }
+    });
+    drop(task);
+    result
+}
+
 impl MemoryServer {
     pub(crate) async fn proxy_call_internal(
         &self,
@@ -97,24 +148,14 @@ impl MemoryServer {
             let result = self
                 .proxy_call_bigmodel_mcp(&server_id, &cap_def, tool_name, arguments.clone())
                 .await?;
-            if !result.is_error.unwrap_or(false) {
-                crate::pipeline_ops::schedule_auto_ingest_from_mcp(
-                    self,
-                    &server_id,
-                    tool_name,
-                    &cap_def,
-                    arguments.as_ref(),
-                    &result,
-                )
-                .await
-                .map_err(|error| {
-                    rmcp::ErrorData::internal_error(
-                        format!("MCP result auto-ingest failed: {error}"),
-                        None,
-                    )
-                })?;
-            }
-            return Ok(result);
+            return Ok(return_with_background_auto_ingest(
+                self,
+                &server_id,
+                tool_name,
+                &cap_def,
+                arguments.as_ref(),
+                result,
+            ));
         }
         let (sandbox_policy, policy_source) =
             self.get_effective_sandbox_policy(requested_capability_id, &server_id);
@@ -363,31 +404,15 @@ impl MemoryServer {
                         .circuits
                         .insert(server_name.to_string(), (CircuitState::Closed, 0));
                 }
-                if !r.is_error.unwrap_or(false) {
-                    if let Err(error) = crate::pipeline_ops::schedule_auto_ingest_from_mcp(
-                        self,
-                        &server_id,
-                        tool_name,
-                        &cap_def,
-                        arguments.as_ref(),
-                        &r,
-                    )
-                    .await
-                    {
-                        (
-                            Err(rmcp::ErrorData::internal_error(
-                                format!("MCP result auto-ingest failed: {error}"),
-                                None,
-                            )),
-                            "failed",
-                            Some("auto_ingest_failed"),
-                        )
-                    } else {
-                        (Ok(r), "allowed", None)
-                    }
-                } else {
-                    (Ok(r), "allowed", None)
-                }
+                let r = return_with_background_auto_ingest(
+                    self,
+                    &server_id,
+                    tool_name,
+                    &cap_def,
+                    arguments.as_ref(),
+                    r,
+                );
+                (Ok(r), "allowed", None)
             }
             Ok(Err(e)) => {
                 // Transport/protocol error — increment circuit breaker
@@ -474,5 +499,101 @@ impl MemoryServer {
             };
             state.connections.remove(server_name);
         }
+    }
+}
+
+#[cfg(test)]
+mod auto_ingest_response_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_auto_ingest_does_not_replace_successful_mcp_result() {
+        let server = crate::tests::make_server();
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute_batch(
+                        "CREATE TRIGGER fail_proxy_auto_ingest_row \
+                         BEFORE INSERT ON memories \
+                         BEGIN SELECT RAISE(FAIL, 'injected proxy auto-ingest failure'); END;",
+                    )
+                    .map_err(|error| format!("install proxy auto-ingest fault: {error}"))
+            })
+            .expect("install proxy auto-ingest fault");
+        let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+            "content": [{"type": "text", "text": "successful remote MCP payload"}],
+            "isError": false
+        }))
+        .expect("successful MCP result fixture");
+        let original = serde_json::to_value(&result).expect("serialize original MCP result");
+        let definition = json!({
+            "auto_ingest": true,
+            "ingest_domain": "general",
+            "ingest_path_prefix": "/auto-ingest/proxy-failure"
+        });
+
+        let returned = return_with_background_auto_ingest(
+            &server,
+            "mcp:test-server",
+            "test-tool",
+            &definition,
+            None,
+            result,
+        );
+        assert_eq!(
+            serde_json::to_value(&returned).expect("serialize returned MCP result"),
+            original,
+            "optional ingest failure must not alter a successful MCP result"
+        );
+
+        let mut failure_audits = 0;
+        for _ in 0..100 {
+            failure_audits = server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT COUNT(*) FROM audit_log \
+                             WHERE server_id = 'ingest' AND tool_name = 'ingest_source' \
+                               AND success = 0 AND error_kind = 'durable_write_failed'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(|error| format!("count auto-ingest failures: {error}"))
+                })
+                .expect("read auto-ingest failure audit");
+            if failure_audits == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let audits = server
+            .with_global_store_read(|store| {
+                store
+                    .audit_log_list(20, Some("ingest"))
+                    .map_err(|error| format!("list ingest audits: {error}"))
+            })
+            .expect("list ingest audits");
+        assert_eq!(
+            failure_audits, 1,
+            "background ingest failure must be recorded; audits={audits:?}"
+        );
+        let retry_jobs = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events WHERE worker = 'auto_ingest_job'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| format!("count durable auto-ingest jobs: {error}"))
+            })
+            .expect("count durable auto-ingest jobs");
+        assert_eq!(
+            retry_jobs, 1,
+            "failed background ingest must remain retryable"
+        );
     }
 }
