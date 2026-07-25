@@ -759,6 +759,39 @@ mod resolve_or_register_workspace_root_tests {
         });
     }
 
+    #[test]
+    fn auto_registered_fresh_project_survives_strict_named_read_open() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Fresh-Read-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let name = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("auto-register fresh named project");
+            drop(server);
+
+            let reopened = make_server(root);
+            let trigger_count = reopened
+                .with_named_project_store_read(&name, |store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT count(*) FROM main.sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name IN (
+                                   'memories_reserved_refs_insert_guard',
+                                   'memories_reserved_refs_update_guard'
+                               )",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .expect("strict read-open of the newly registered named project");
+            assert_eq!(trigger_count, 2, "fresh named-project guard inventory");
+        });
+    }
+
     /// A caller may declare a subdirectory of the repo (its own cwd, which is
     /// rarely the repo root) — the daemon must walk up to the git root the
     /// same way `find_git_root_from` already does for every other caller.

@@ -39,7 +39,8 @@ mod ddl;
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     apply_connection_pragmas(conn)?;
-    init_schema_inner(conn)
+    init_schema_inner(conn)?;
+    super::validate_persistent_trigger_inventory(conn, true)
 }
 
 /// Initialize schema and run data migrations with a known DB label and path.
@@ -92,6 +93,7 @@ pub fn init_schema_with_label_mut(
     test_hooks::fail_after_legacy_work_before_stamp()?;
     let report = crate::db::migrations::run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
     crate::db::migrations::write_schema_version_stamp(&tx)?;
+    super::validate_persistent_trigger_inventory(&tx, true)?;
     tx.commit()?;
 
     remember_migration_fingerprint(conn, current_db_path)?;

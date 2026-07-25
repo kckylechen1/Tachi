@@ -221,12 +221,15 @@ pub fn foundry_job_status_counts(conn: &Connection) -> FoundryJobStatusCounts {
     counts
 }
 
-/// Open a connection for a checkpoint-copy step: read-write, best-effort 5s
-/// busy timeout (matches the prior inline behavior — a timeout failure is
-/// not fatal, the checkpoint attempt still proceeds).
+/// Open an existing checkpoint copy with only the authority needed by
+/// [`checkpoint_wal_truncate`]. Schema mutation and protected memory writes
+/// remain denied even though SQLite requires a read-write handle for the WAL
+/// checkpoint itself.
 pub fn open_for_wal_checkpoint(path: &str) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(path)?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let _ = conn.busy_timeout(Duration::from_millis(5_000));
+    let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
+    super::install_reserved_reference_authorizer(&conn, None)?;
     Ok(conn)
 }
 

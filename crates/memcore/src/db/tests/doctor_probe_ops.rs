@@ -188,10 +188,42 @@ fn open_immutable_readonly_errors_on_missing_file() {
 fn checkpoint_wal_truncate_is_a_harmless_noop_off_wal_mode() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chk.db");
+    let seed = Connection::open(&path).unwrap();
+    seed.execute_batch(
+        "CREATE TABLE memories (
+             id TEXT PRIMARY KEY,
+             metadata TEXT NOT NULL DEFAULT '{}'
+         );
+         INSERT INTO memories(id, metadata)
+         VALUES ('protected-evidence', '{\"evidence_refs_v1\":[{\"ref\":\"#1\"}]}');",
+    )
+    .unwrap();
+    drop(seed);
+
     let conn = open_for_wal_checkpoint(path.to_str().unwrap()).expect("open for checkpoint");
-    conn.execute_batch("CREATE TABLE t (id INTEGER);").unwrap();
+    assert!(
+        conn.execute_batch("CREATE TABLE checkpoint_schema_escape(id INTEGER)")
+            .is_err(),
+        "checkpoint handle mutated schema"
+    );
+    assert!(
+        conn.execute(
+            "UPDATE memories SET metadata = '{}' WHERE id = 'protected-evidence'",
+            [],
+        )
+        .is_err(),
+        "checkpoint handle mutated protected evidence"
+    );
     // Not in WAL mode here — PRAGMA wal_checkpoint is still a valid no-op.
     checkpoint_wal_truncate(&conn).expect("checkpoint should not error off WAL mode");
+    let metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM memories WHERE id = 'protected-evidence'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(metadata.contains("evidence_refs_v1"));
 }
 
 // ── #1041 S4: doctor cross-domain keyword suspect probe ─────────────────────
