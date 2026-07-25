@@ -339,6 +339,11 @@ pub(crate) fn validate_persistent_trigger_inventory(
                 )));
             }
         }
+        // A current-version open must reject missing generation triggers before
+        // init_schema can recreate them. Fresh and older stamped DBs pass
+        // require_complete=false until private provisioning/migration repairs
+        // their canonical trigger inventory.
+        crate::db::search_generation::search_generation(conn)?;
     }
     Ok(())
 }

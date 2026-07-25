@@ -2033,6 +2033,63 @@ mod tests {
             .expect("refusal must preserve the canonical search-generation trigger inventory");
     }
 
+    #[test]
+    fn stamped_v23_with_missing_search_generation_trigger_is_refused_without_repair() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision current fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open current fixture");
+            assert_eq!(read_schema_version(&conn).unwrap(), 23);
+            let guard_trigger_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema
+                     WHERE type = 'trigger'
+                       AND name IN (
+                           'memories_reserved_refs_insert_guard',
+                           'memories_reserved_refs_update_guard'
+                       )",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(guard_trigger_count, 2, "fixture keeps v23 guards intact");
+            conn.execute_batch("DROP TRIGGER memory_search_generation_after_update")
+                .expect("remove exactly one canonical search-generation trigger");
+        }
+
+        let err = match crate::MemoryStore::open(&path_str) {
+            Ok(_) => panic!("a damaged v23 DB must not repair its search-generation trigger"),
+            Err(error) => error,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("memory search generation trigger")
+                && message.contains("memory_search_generation_after_update")
+                && message.contains("unsafe"),
+            "damaged current DB must fail loudly before schema repair, got: {err}"
+        );
+
+        let verify = Connection::open(&path).expect("verify refused DB");
+        assert_eq!(read_schema_version(&verify).unwrap(), 23);
+        let trigger_present: bool = verify
+            .query_row(
+                "SELECT 1 FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = 'memory_search_generation_after_update'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(
+            !trigger_present,
+            "refusal must not repair the missing search-generation trigger"
+        );
+    }
+
     /// #1331 BUG 4: after a legacy path rewrite in the same upgrade, symbolic
     /// retrieval must use the post-migration path (v22 full rebuild).
     #[test]
