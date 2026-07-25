@@ -1,4 +1,10 @@
+use super::super::audit::{
+    claim_retryable_ingest_event, fail_retryable_ingest_event, ingest_audit_key,
+    insert_required_ingest_audit,
+};
 use super::*;
+
+const STRUCTURED_INGEST_WORKER: &str = "ingest_event";
 
 pub(super) async fn ingest_structured_event(
     server: &MemoryServer,
@@ -66,11 +72,19 @@ pub(super) async fn ingest_structured_event(
         }
     );
 
-    let claimed = claim_ingest_event(
+    let audit_key = ingest_audit_key(
+        "ingest_event",
+        target_db,
+        named_project.as_deref(),
+        &event_hash,
+    );
+    let claimed = claim_retryable_ingest_event(
         server,
         target_db,
         named_project.as_deref(),
         "ingest_event",
+        &audit_key,
+        STRUCTURED_INGEST_WORKER,
         &event_hash,
         &event_id,
     )?;
@@ -90,7 +104,7 @@ pub(super) async fn ingest_structured_event(
             &params.conversation_id,
         )
     });
-    let entry_id = uuid::Uuid::new_v4().to_string();
+    let entry_id = format!("ingest:{event_hash}");
     let metadata = crate::provenance::inject_provenance(
         server,
         merge_optional_metadata(params.metadata.clone()),
@@ -120,7 +134,7 @@ pub(super) async fn ingest_structured_event(
 
     let save_action = |store: &mut MemoryStore| {
         store
-            .upsert(&entry)
+            .insert_if_absent(&entry)
             .map_err(|e| format!("Failed to save structured event: {e}"))
     };
     let save_result = if let Some(project_name) = named_project.as_deref() {
@@ -130,14 +144,17 @@ pub(super) async fn ingest_structured_event(
     };
 
     if let Err(error) = save_result {
-        release_ingest_claim(
+        return Err(fail_retryable_ingest_event(
             server,
             target_db,
             named_project.as_deref(),
             "ingest_event",
             &event_hash,
-        );
-        return Err(error);
+            STRUCTURED_INGEST_WORKER,
+            &audit_key,
+            "durable_write_failed",
+            error,
+        ));
     }
 
     if should_enqueue_enrichment(&entry) {
@@ -150,7 +167,7 @@ pub(super) async fn ingest_structured_event(
                     true,
                     true,
                     target_db,
-                    named_project,
+                    named_project.clone(),
                     None,
                     None,
                     None,
@@ -158,7 +175,20 @@ pub(super) async fn ingest_structured_event(
                 ));
     }
 
-    insert_ingest_audit(server, "ingest_event", &event_hash);
+    if let Err(error) = insert_required_ingest_audit(server, "ingest_event", &audit_key, true, None)
+    {
+        return Err(fail_retryable_ingest_event(
+            server,
+            target_db,
+            named_project.as_deref(),
+            "ingest_event",
+            &event_hash,
+            STRUCTURED_INGEST_WORKER,
+            &audit_key,
+            "success_audit_failed",
+            format!("structured ingest write completed but success audit failed: {error}"),
+        ));
+    }
 
     let mut response = serde_json::Map::new();
     response.insert("status".into(), json!("completed"));
