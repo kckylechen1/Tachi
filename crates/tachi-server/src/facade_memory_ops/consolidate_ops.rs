@@ -38,7 +38,7 @@ use chrono::{Duration, Utc};
 use memcore::store::memory_lifecycle as lifecycle;
 use memcore::MemoryEntry;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const SCRATCH_PREFIX: &str = "/scratch";
 const STALE_DAYS_DEFAULT: i64 = 30;
@@ -57,6 +57,7 @@ const SCOPE_ACCOUNTING_SAMPLE_LIMIT: usize = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
 enum ConsolidationExclusionReason {
     OutsideRequestedPrefix,
+    AlreadySuperseded,
     AlreadyArchived,
     PatternTier,
     WikiCategory,
@@ -69,6 +70,7 @@ impl ConsolidationExclusionReason {
     const fn as_str(self) -> &'static str {
         match self {
             Self::OutsideRequestedPrefix => "outside_requested_prefix",
+            Self::AlreadySuperseded => "already_superseded",
             Self::AlreadyArchived => "already_archived",
             Self::PatternTier => "pattern_tier",
             Self::WikiCategory => "wiki_category",
@@ -91,13 +93,19 @@ struct ConsolidationScope {
 }
 
 impl ConsolidationScope {
-    fn from_entries(entries: Vec<MemoryEntry>, path_prefix: &str) -> Self {
+    fn from_entries(
+        entries: Vec<MemoryEntry>,
+        path_prefix: &str,
+        superseded_ids: &HashSet<String>,
+    ) -> Self {
         let mut eligible = Vec::new();
         let mut exclusions = Vec::new();
 
         for entry in entries {
             let exclusion = if !entry.path.starts_with(path_prefix) {
                 Some(ConsolidationExclusionReason::OutsideRequestedPrefix)
+            } else if superseded_ids.contains(&entry.id) {
+                Some(ConsolidationExclusionReason::AlreadySuperseded)
             } else {
                 protection_reason(&entry)
             };
@@ -605,18 +613,38 @@ fn generate_and_persist_proposals(
     params: &TachiMemoryParams,
     path_prefix: &str,
 ) -> Result<ProposalGeneration, String> {
-    let entries = with_memory_store_read(server, params, |store| {
-        store
+    let (scope, proposals) = with_memory_store_read(server, params, |store| {
+        let entries = store
             .list_by_path(path_prefix, 500, false)
-            .map_err(|e| format!("list_by_path: {e}"))
-    })?;
+            .map_err(|e| format!("list_by_path: {e}"))?;
 
-    let scope = ConsolidationScope::from_entries(entries, path_prefix);
-    let mut proposals = Vec::new();
-    proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
-    proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
-    proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
-    proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
+        // `list_by_path(..., include_archived=false)` excludes archived rows
+        // but deliberately does not hide a live row whose supersession edge
+        // was written without archiving it. Every lifecycle payload currently
+        // records `superseded_by=None` at propose time, so remove those rows
+        // from the one shared source/target pool before any generator reaches
+        // `snapshot_endpoint`. Keep the exclusion in scope accounting rather
+        // than making a superseded scan look empty.
+        let mut superseded_ids = HashSet::new();
+        for entry in &entries {
+            if store
+                .supersession_target(&entry.id)
+                .map_err(|e| format!("load supersession state for {}: {e}", entry.id))?
+                .flatten()
+                .is_some()
+            {
+                superseded_ids.insert(entry.id.clone());
+            }
+        }
+
+        let scope = ConsolidationScope::from_entries(entries, path_prefix, &superseded_ids);
+        let mut proposals = Vec::new();
+        proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
+        proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
+        proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
+        proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
+        Ok((scope, proposals))
+    })?;
 
     if proposals.is_empty() {
         return Ok(ProposalGeneration { proposals, scope });

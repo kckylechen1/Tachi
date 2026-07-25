@@ -833,6 +833,134 @@ async fn consolidate_apply_refuses_target_no_revision_supersession_drift_without
         .expect("refused target drift preserves C state and approved proposal");
 }
 
+/// Regression for the propose-time half of the no-revision supersession
+/// invariant. `list_by_path(..., false)` still returns unarchived rows with a
+/// `superseded_by` edge, so the facade must remove them from the shared
+/// source/target pool before any generator snapshots `superseded_by=None`.
+/// On 911bc021 the excluded row remains eligible and this test fails both the
+/// endpoint census and scope-accounting assertions below.
+#[tokio::test]
+async fn consolidate_propose_excludes_preexisting_superseded_rows_from_all_endpoints() {
+    let server = make_server();
+    let superseded = seed_scratch(
+        "life-pre-propose-superseded",
+        "/scratch/pre-propose/excluded",
+        "obsolete regional vendor policy awaiting canonical replacement",
+        10,
+    );
+    let canonical = seed_scratch(
+        "life-pre-propose-canonical",
+        "/scratch/pre-propose/excluded",
+        "new canonical executive planning baseline",
+        1,
+    );
+    let active_older = seed_scratch(
+        "life-pre-propose-active-old",
+        "/scratch/pre-propose/active",
+        "older active release checklist for the same deployment",
+        10,
+    );
+    let active_newer = seed_scratch(
+        "life-pre-propose-active-new",
+        "/scratch/pre-propose/active",
+        "newer active release checklist for the same deployment",
+        1,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&superseded).map_err(|e| e.to_string())?;
+            store.upsert(&canonical).map_err(|e| e.to_string())?;
+            store.upsert(&active_older).map_err(|e| e.to_string())?;
+            store.upsert(&active_newer).map_err(|e| e.to_string())?;
+            let revision_before = store
+                .connection()
+                .query_row(
+                    "SELECT revision FROM memories WHERE id = ?1",
+                    ["life-pre-propose-superseded"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                store
+                    .mark_superseded_closing_validity(
+                        "life-pre-propose-superseded",
+                        "life-pre-propose-canonical",
+                        "2026-07-25T00:00:02.000Z",
+                    )
+                    .map_err(|e| e.to_string())?,
+                1,
+                "the real no-revision writer must land before propose"
+            );
+            let state_after = store
+                .connection()
+                .query_row(
+                    "SELECT archived, superseded_by, revision FROM memories WHERE id = ?1",
+                    ["life-pre-propose-superseded"],
+                    |row| {
+                        Ok((
+                            row.get::<_, bool>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            assert!(!state_after.0, "the regression requires an unarchived row");
+            assert_eq!(state_after.1.as_deref(), Some("life-pre-propose-canonical"));
+            assert_eq!(
+                state_after.2, revision_before,
+                "the regression requires supersession without a revision bump"
+            );
+            Ok(())
+        })
+        .expect("seed pre-proposal supersession and active peer pair");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch/pre-propose".to_string());
+    let parsed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+            .await
+            .expect("propose"),
+    )
+    .expect("proposal json");
+    let generated = parsed["generated"].as_array().expect("generated proposals");
+
+    assert!(
+        generated.iter().all(|proposal| {
+            proposal["source_id"] != json!("life-pre-propose-superseded")
+                && proposal["target_id"] != json!("life-pre-propose-superseded")
+        }),
+        "a pre-existing superseded row must be neither source nor target: {parsed}"
+    );
+    assert!(
+        generated.iter().any(|proposal| {
+            proposal["source_id"] == json!("life-pre-propose-active-old")
+                && proposal["target_id"] == json!("life-pre-propose-active-new")
+        }),
+        "excluding the superseded row must not suppress eligible active proposals: {parsed}"
+    );
+    assert_eq!(parsed["scope_accounting"]["examined"], json!(4));
+    assert_eq!(parsed["scope_accounting"]["evaluated"], json!(3));
+    assert_eq!(
+        parsed["scope_accounting"]["expected_exclusions"]["count"],
+        json!(1)
+    );
+    assert_eq!(
+        parsed["scope_accounting"]["expected_exclusions"]["by_reason"]["already_superseded"],
+        json!(1)
+    );
+    assert!(
+        parsed["scope_accounting"]["expected_exclusions"]["samples"]
+            .as_array()
+            .is_some_and(|samples| samples.iter().any(|sample| {
+                sample["id"] == "life-pre-propose-superseded"
+                    && sample["reason"] == "already_superseded"
+            })),
+        "scope accounting must explain why the row was excluded: {parsed}"
+    );
+}
+
 #[tokio::test]
 async fn consolidate_review_refuses_tampered_display_copies_without_mutation() {
     for (field, tampered_value) in [
