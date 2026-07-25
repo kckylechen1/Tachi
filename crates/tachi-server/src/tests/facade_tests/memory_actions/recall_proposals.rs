@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 #[tokio::test]
 async fn tachi_memory_recall_proposals_review_and_apply_config_env() {
@@ -423,10 +424,10 @@ async fn recall_regen_with_changed_evidence_does_not_inherit_approval() {
         .expect("id A")
         .to_string();
     assert!(
-        id_a.starts_with("recall_config:v2:"),
+        id_a.starts_with("recall_config:v3:"),
         "v2 id format expected, got: {id_a}"
     );
-    assert_eq!(proposal_a["schema_version"], json!(2));
+    assert_eq!(proposal_a["schema_version"], json!(3));
 
     // Approve proposal A.
     let mut review_a = tachi_memory_params("review_recall_proposal");
@@ -496,7 +497,7 @@ async fn recall_regen_with_changed_evidence_does_not_inherit_approval() {
         json!("pending"),
         "the regenerated proposal at the new v2 id must NOT inherit the prior approval"
     );
-    assert_eq!(proposal_b["schema_version"], json!(2));
+    assert_eq!(proposal_b["schema_version"], json!(3));
 }
 
 /// Discrimination: a recall-config apply that crashed between the atomic
@@ -922,6 +923,55 @@ fn read_recall_row(server: &crate::MemoryServer, proposal_id: &str) -> (String, 
         })
         .expect("read recall proposal row")
         .expect("recall proposal row present")
+}
+
+async fn generate_recall_source_proposal(
+    server: &crate::MemoryServer,
+    suffix: &str,
+) -> serde_json::Value {
+    let mut proposals = tachi_memory_params("recall_proposals");
+    proposals.format = Some("json".to_string());
+    proposals.scope = Some("memory".to_string());
+    proposals.top_k = 3;
+    proposals.force = true;
+    proposals.metadata = Some(json!({
+        "cases": [{
+            "name": "partial-cleanup",
+            "query": "cleanup preview safe",
+            "expected_id": format!("recall-{suffix}-partial-term"),
+        }],
+        "variants": [{
+            "name": "or-fallback-0.6",
+            "recall_config": {
+                "or_fallback_fts_score_factor": 0.6,
+                "or_fallback_fts_max_terms": 4,
+            },
+        }],
+    }));
+    let body = crate::facade_memory_ops::handle_tachi_memory(server, proposals)
+        .await
+        .expect("generate recall proposal");
+    let parsed: Value = serde_json::from_str(&body).expect("recall proposal JSON");
+    parsed["proposals"]
+        .as_array()
+        .and_then(|proposals| {
+            proposals
+                .iter()
+                .find(|proposal| proposal["variant"] == json!("or-fallback-0.6"))
+        })
+        .cloned()
+        .expect("recall source proposal")
+}
+
+fn test_recall_content_digest(identity_payload: &Value) -> String {
+    let canonical = tachi_dispatch::policy::canonical_json(identity_payload).to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Discrimination: once a recall-config proposal is in a terminal state
@@ -1527,5 +1577,184 @@ async fn recall_review_refuses_tampered_unbound_top_level_config_env() {
         after_value["status"],
         json!("pending"),
         "status must remain pending; the refused review must not record a decision"
+    );
+}
+
+/// Discrimination: recall proposal identity binds the live TACHI_RECALL_*
+/// source digest. Config drift must refuse review and approved apply without
+/// changing proposal state, while regeneration mints a distinct pending id.
+#[tokio::test]
+async fn recall_source_config_drift_refuses_review_apply_and_rotates_pending_identity() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_env_path,
+        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+    )
+    .expect("seed config");
+    seed_recall_pair(&server, "source-drift");
+
+    let first = generate_recall_source_proposal(&server, "source-drift").await;
+    let first_id = first["proposal_id"].as_str().expect("first id").to_string();
+    std::fs::write(
+        &config_env_path,
+        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.2\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+    )
+    .expect("third-party config edit before review");
+
+    let (before_review, before_review_version) = read_recall_row(&server, &first_id);
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(first_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect_err("review after config drift must refuse");
+    assert!(
+        err.contains("source_state_drift"),
+        "unexpected review error: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &first_id),
+        (before_review, before_review_version),
+        "review refusal must leave the pending row untouched"
+    );
+
+    let regenerated = generate_recall_source_proposal(&server, "source-drift").await;
+    let regenerated_id = regenerated["proposal_id"]
+        .as_str()
+        .expect("regenerated id")
+        .to_string();
+    assert_ne!(
+        first_id, regenerated_id,
+        "source revision must rotate the id"
+    );
+    assert_eq!(regenerated["status"], json!("pending"));
+
+    let mut approve = tachi_memory_params("review_recall_proposal");
+    approve.proposal_id = Some(regenerated_id.clone());
+    approve.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, approve)
+        .await
+        .expect("approve regenerated proposal");
+    std::fs::write(
+        &config_env_path,
+        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.3\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+    )
+    .expect("third-party config edit after approval");
+
+    let (before_apply, before_apply_version) = read_recall_row(&server, &regenerated_id);
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(regenerated_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("approved proposal must refuse after config drift");
+    assert!(
+        err.contains("source_state_drift"),
+        "unexpected apply error: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &regenerated_id),
+        (before_apply, before_apply_version),
+        "apply refusal must leave the approved row untouched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read config after refusal"),
+        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.3\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+        "refused apply must not overwrite third-party config"
+    );
+}
+
+/// Discrimination: recomputing a row's digest after changing only its stored
+/// policy version does not make it current. Both review and apply must reject
+/// the stale policy before mutating lifecycle state.
+#[tokio::test]
+async fn recall_stale_current_policy_with_recomputed_digest_refuses_review_and_apply() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_env_path,
+        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n",
+    )
+    .expect("seed config");
+    seed_recall_pair(&server, "stale-policy");
+    let proposal = generate_recall_source_proposal(&server, "stale-policy").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+
+    let mutate_policy = |status: Option<&str>| {
+        server
+            .with_global_store(|store| {
+                let (raw, _version) = store
+                    .get_state_kv("recall_config_proposals", &proposal_id)
+                    .map_err(|e| e.to_string())?
+                    .expect("proposal row");
+                let mut value: Value = serde_json::from_str(&raw).expect("row JSON");
+                value["policy_version"] = json!("retired-recall-policy");
+                value["identity_payload"]["policy_version"] = json!("retired-recall-policy");
+                value["content_digest"] =
+                    json!(test_recall_content_digest(&value["identity_payload"]));
+                if let Some(status) = status {
+                    value["status"] = json!(status);
+                }
+                store
+                    .set_state(
+                        "recall_config_proposals",
+                        &proposal_id,
+                        &serde_json::to_string(&value).expect("serialize stale row"),
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("store stale but self-consistent proposal");
+    };
+
+    mutate_policy(None);
+    let (before_review, before_review_version) = read_recall_row(&server, &proposal_id);
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect_err("stale current policy must refuse review");
+    assert!(
+        err.contains("current_policy_mismatch"),
+        "unexpected review error: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        (before_review, before_review_version),
+        "review refusal must not mutate a self-consistent stale row"
+    );
+
+    let regenerated = generate_recall_source_proposal(&server, "stale-policy").await;
+    assert_eq!(regenerated["status"], json!("pending"));
+    let mut approve = tachi_memory_params("review_recall_proposal");
+    approve.proposal_id = Some(proposal_id.clone());
+    approve.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, approve)
+        .await
+        .expect("approve restored proposal");
+    mutate_policy(Some("approved"));
+    let (before_apply, before_apply_version) = read_recall_row(&server, &proposal_id);
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("stale current policy must refuse apply");
+    assert!(
+        err.contains("current_policy_mismatch"),
+        "unexpected apply error: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        (before_apply, before_apply_version),
+        "apply refusal must not mutate or terminalize a self-consistent stale row"
     );
 }

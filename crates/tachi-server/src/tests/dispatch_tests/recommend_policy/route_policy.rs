@@ -1,4 +1,92 @@
 use super::*;
+use sha2::{Digest, Sha256};
+
+async fn seed_route_policy_inputs(server: &crate::MemoryServer, suffix: &str) {
+    for (profile, outcome, cost_usd, quality_score) in [
+        ("opencode_builder", "success", 0.01, 0.80),
+        ("opencode_builder", "failure", 0.01, 0.20),
+        ("glm_51_impl", "success", 2.00, 0.98),
+    ] {
+        server
+            .tachi_complete(Parameters(TachiCompleteParams {
+                task_id: Some(format!("route-source-{suffix}-{profile}-{outcome}")),
+                task: "Route proposal source-revision fixture".to_string(),
+                agent: "custom".to_string(),
+                outcome: outcome.to_string(),
+                task_type: Some("fix_request".to_string()),
+                profile: Some(profile.to_string()),
+                risk: Some("medium".to_string()),
+                duration_ms: Some(100_000),
+                skills_used: vec!["skill:route-source-revision".to_string()],
+                cost_tokens: Some(1000),
+                cost_usd: Some(cost_usd),
+                quality_score: Some(quality_score),
+                notes: None,
+                trajectory: None,
+                diff: Some("diff --git a/x b/x".to_string()),
+                worktree: None,
+                subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
+                dispatch_id: None,
+                flow_id: Some(format!("flow-route-source-{suffix}")),
+                issue_ref: Some("kckylechen1/tachi#1425".to_string()),
+                pr_ref: None,
+                evidence_refs: vec!["route-source-revision".to_string()],
+                tests_run: vec!["targeted route source revision test".to_string()],
+                diff_present: Some(true),
+                scope: Some("project".to_string()),
+                project: None,
+                format: None,
+                signatures: Vec::new(),
+                rulings: Vec::new(),
+                adjudication: None,
+                eval_run_ids: Vec::new(),
+            }))
+            .await
+            .expect("seed route policy input");
+    }
+}
+
+async fn generate_route_policy_proposal(server: &crate::MemoryServer) -> serde_json::Value {
+    let mut params = task_params("proposals");
+    params.limit = Some(50);
+    let body = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("generate route policy proposal");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("route proposal JSON");
+    parsed["proposals"]
+        .as_array()
+        .and_then(|proposals| {
+            proposals
+                .iter()
+                .find(|proposal| proposal["kind"] == json!("route_policy"))
+        })
+        .cloned()
+        .expect("route policy proposal")
+}
+
+fn read_route_policy_row(server: &crate::MemoryServer, proposal_id: &str) -> (String, u32) {
+    server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, proposal_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("load route proposal row")
+        .expect("route proposal row")
+}
+
+fn test_route_content_digest(identity_payload: &serde_json::Value) -> String {
+    let canonical = tachi_dispatch::policy::canonical_json(identity_payload).to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 #[tokio::test]
 async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
@@ -560,11 +648,11 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         .expect("at least one route_policy proposal in phase A");
     let first_id = first["proposal_id"].as_str().expect("id").to_string();
     assert!(
-        first_id.starts_with("route_policy:v2:"),
+        first_id.starts_with("route_policy:v3:"),
         "v2 id format expected, got: {first_id}"
     );
     assert_eq!(first["status"], json!("pending"));
-    assert_eq!(first["schema_version"], json!(2));
+    assert_eq!(first["schema_version"], json!(3));
     // Pin the construction itself, not just its shape: the phase-A proposal is
     // the cost_sensitive variant proposing opencode_builder while `current`
     // still routes fix_request to glm_impl. If this ever fails, the seeds no
@@ -640,7 +728,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         json!("pending"),
         "the rotated-id proposal must NOT inherit the prior approval"
     );
-    assert_eq!(new["schema_version"], json!(2));
+    assert_eq!(new["schema_version"], json!(3));
     // The rotation is observably driven by the fallback flip, not merely by
     // "some field somewhere changed": the regenerated proposal records the NEW
     // current-policy winner (`claude_plan`) where phase A recorded `glm_impl`.
@@ -1228,5 +1316,194 @@ async fn route_review_refuses_tampered_unbound_top_level_policy_rule() {
         after_value["status"],
         json!("pending"),
         "status must remain pending; the refused review must not record a decision"
+    );
+}
+
+/// Discrimination: route proposals bind the complete active rule namespace,
+/// not only their own payload. A source-rule edit after generation must refuse
+/// both review and apply; regeneration must mint a distinct pending identity.
+#[tokio::test]
+async fn route_source_rule_drift_refuses_review_apply_and_rotates_pending_identity() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_route_policy_inputs(&server, "source-drift").await;
+
+    let first = generate_route_policy_proposal(&server).await;
+    let first_id = first["proposal_id"].as_str().expect("first id").to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .set_state(
+                    tachi_dispatch::ROUTE_POLICY_RULE_NS,
+                    "third-party-source-rule",
+                    &json!({"policy_rule": {"prefer_profile": "glm_impl"}}).to_string(),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("mutate active route source");
+
+    let (before_review, before_review_version) = read_route_policy_row(&server, &first_id);
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(first_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = server
+        .tachi_task(Parameters(review))
+        .await
+        .expect_err("review after active-route drift must refuse");
+    assert!(
+        err.contains("source_state_drift"),
+        "unexpected review error: {err}"
+    );
+    assert_eq!(
+        read_route_policy_row(&server, &first_id),
+        (before_review, before_review_version),
+        "review refusal must leave the pending row untouched"
+    );
+
+    let regenerated = generate_route_policy_proposal(&server).await;
+    let regenerated_id = regenerated["proposal_id"]
+        .as_str()
+        .expect("regenerated id")
+        .to_string();
+    assert_ne!(
+        first_id, regenerated_id,
+        "source revision must rotate the id"
+    );
+    assert_eq!(regenerated["status"], json!("pending"));
+
+    let mut approve = task_params("review_proposal");
+    approve.proposal_id = Some(regenerated_id.clone());
+    approve.review_status = Some("approved".to_string());
+    server
+        .tachi_task(Parameters(approve))
+        .await
+        .expect("approve regenerated proposal");
+    server
+        .with_global_store(|store| {
+            store
+                .set_state(
+                    tachi_dispatch::ROUTE_POLICY_RULE_NS,
+                    "third-party-source-rule",
+                    &json!({"policy_rule": {"prefer_profile": "opencode_builder"}}).to_string(),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("mutate route source after approval");
+
+    let (before_apply, before_apply_version) = read_route_policy_row(&server, &regenerated_id);
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(regenerated_id.clone());
+    apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("approved proposal must refuse after route-source drift");
+    assert!(
+        err.contains("source_state_drift"),
+        "unexpected apply error: {err}"
+    );
+    assert_eq!(
+        read_route_policy_row(&server, &regenerated_id),
+        (before_apply, before_apply_version),
+        "apply refusal must leave the approved row untouched"
+    );
+    let written_rule = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::ROUTE_POLICY_RULE_NS, &regenerated_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("query applied route rule");
+    assert!(
+        written_rule.is_none(),
+        "refused apply must not write a rule"
+    );
+}
+
+/// Discrimination: a stored row can recompute a matching content digest while
+/// naming an obsolete policy version. Current-policy validation must still
+/// reject it at review and apply, before either lifecycle transition.
+#[tokio::test]
+async fn route_stale_current_policy_with_recomputed_digest_refuses_review_and_apply() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_route_policy_inputs(&server, "stale-policy").await;
+    let proposal = generate_route_policy_proposal(&server).await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+
+    let mutate_policy = |status: Option<&str>| {
+        server
+            .with_global_store(|store| {
+                let (raw, _version) = store
+                    .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                    .map_err(|e| e.to_string())?
+                    .expect("proposal row");
+                let mut value: serde_json::Value = serde_json::from_str(&raw).expect("row JSON");
+                value["policy_version"] = json!("retired-route-policy");
+                value["identity_payload"]["policy_version"] = json!("retired-route-policy");
+                value["content_digest"] =
+                    json!(test_route_content_digest(&value["identity_payload"]));
+                if let Some(status) = status {
+                    value["status"] = json!(status);
+                }
+                store
+                    .set_state(
+                        tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+                        &proposal_id,
+                        &serde_json::to_string(&value).expect("serialize stale row"),
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("store stale but self-consistent proposal");
+    };
+
+    mutate_policy(None);
+    let (before_review, before_review_version) = read_route_policy_row(&server, &proposal_id);
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = server
+        .tachi_task(Parameters(review))
+        .await
+        .expect_err("stale current policy must refuse review");
+    assert!(
+        err.contains("current_policy_mismatch"),
+        "unexpected review error: {err}"
+    );
+    assert_eq!(
+        read_route_policy_row(&server, &proposal_id),
+        (before_review, before_review_version),
+        "review refusal must not mutate a self-consistent stale row"
+    );
+
+    // Restore the generated row, approve it through the real path, then make
+    // the same internally consistent stale-policy mutation before apply.
+    let regenerated = generate_route_policy_proposal(&server).await;
+    assert_eq!(regenerated["status"], json!("pending"));
+    let mut approve = task_params("review_proposal");
+    approve.proposal_id = Some(proposal_id.clone());
+    approve.review_status = Some("approved".to_string());
+    server
+        .tachi_task(Parameters(approve))
+        .await
+        .expect("approve restored proposal");
+    mutate_policy(Some("approved"));
+    let (before_apply, before_apply_version) = read_route_policy_row(&server, &proposal_id);
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("stale current policy must refuse apply");
+    assert!(
+        err.contains("current_policy_mismatch"),
+        "unexpected apply error: {err}"
+    );
+    assert_eq!(
+        read_route_policy_row(&server, &proposal_id),
+        (before_apply, before_apply_version),
+        "apply refusal must not mutate or terminalize a self-consistent stale row"
     );
 }

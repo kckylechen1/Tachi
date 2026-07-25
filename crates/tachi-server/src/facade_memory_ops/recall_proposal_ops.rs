@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tachi_dispatch::policy::{
-    canonical_json_eq, recall_config_v2_identity_payload, RECALL_CONFIG_PROPOSAL_POLICY_VERSION,
+    canonical_json_eq, recall_config_v3_identity_payload, RECALL_CONFIG_PROPOSAL_KIND,
+    RECALL_CONFIG_PROPOSAL_POLICY_VERSION, RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION,
     RECALL_CONFIG_PROPOSAL_TARGET,
 };
 
@@ -48,8 +49,18 @@ pub(crate) async fn handle_recall_config_proposals(
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
     let generated = if has_eval_input(params) {
+        let app_home = crate::cli_client::app_home_from_global_db(&server.global_db_path_buf());
+        let config_env_path = app_home.join("config.env");
+        let source_revision = compute_recall_digest(&config_env_path)?;
         let simulation = build_recall_simulation_report(server, params).await?;
-        let proposals = build_proposals_from_simulation(&simulation, params.force)?;
+        let proposals =
+            build_proposals_from_simulation(&simulation, params.force, &source_revision)?;
+        let live_source_revision = compute_recall_digest(&config_env_path)?;
+        if live_source_revision != source_revision {
+            return Err(format!(
+                "source_state_drift: recall config.env changed while proposals were generated; no proposals were persisted, regenerate from source revision {live_source_revision}"
+            ));
+        }
         persist_generated_proposals(server, proposals)?;
         Some(simulation)
     } else {
@@ -106,6 +117,9 @@ pub(crate) fn handle_recall_config_review(
         }
     };
     let reviewed_at = Utc::now().to_rfc3339();
+    let app_home = crate::cli_client::app_home_from_global_db(&server.global_db_path_buf());
+    let config_env_path = app_home.join("config.env");
+    let live_source_revision = compute_recall_digest(&config_env_path)?;
     let updated = server.with_global_store(|store| {
         let (raw, version) = store
             .get_state_kv(RECALL_CONFIG_PROPOSAL_NS, proposal_id)
@@ -120,7 +134,7 @@ pub(crate) fn handle_recall_config_review(
         let is_v2 = value
             .get("schema_version")
             .and_then(Value::as_u64)
-            .map(|v| v >= 2)
+            .map(|v| v == RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION)
             .unwrap_or(false);
         if !is_v2 {
             return Err(format!(
@@ -160,8 +174,13 @@ pub(crate) fn handle_recall_config_review(
         if recall_config_display_drifted(&value, &identity_payload) {
             return Err(format!(
                 "display_copy_drift: recall config proposal {proposal_id} top-level `config_env` does not match its digest-bound identity_payload copy; refusing to record a review decision against display content that has diverged from what was actually generated"
-            ));
+                ));
         }
+        validate_recall_config_proposal(
+            proposal_id,
+            &value,
+            Some(&live_source_revision),
+        )?;
         // Review only permits pending -> approved | rejected. A terminal
         // (rejected/applied) row cannot be resurrected, and an already-approved
         // row cannot be silently re-decided without a fresh regeneration.
@@ -339,7 +358,7 @@ fn drive_recall_apply_state_machine(
     let is_v2 = proposal
         .get("schema_version")
         .and_then(Value::as_u64)
-        .map(|v| v >= 2)
+        .map(|v| v == RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION)
         .unwrap_or(false);
     if !is_v2 {
         return Err(format!(
@@ -375,6 +394,8 @@ fn drive_recall_apply_state_machine(
             "display_copy_drift: recall config proposal {proposal_id} top-level `config_env` does not match its digest-bound identity_payload copy; refusing to apply content that diverged from what was reviewed"
         ));
     }
+    let (identity_payload, bound_source_revision) =
+        validate_recall_config_proposal(proposal_id, &proposal, None)?;
 
     // Consume the BOUND copy (identity_payload.apply_payload.config_env),
     // never the unbound top-level `proposal.config_env` display field. The
@@ -395,18 +416,27 @@ fn drive_recall_apply_state_machine(
         .and_then(Value::as_str)
         .unwrap_or("pending");
 
-    let before_digest = compute_recall_digest(config_env_path)?;
-    let after_digest = compute_projected_recall_digest(config_env_path, &patch)?;
-
     match status {
         "approved" => {
+            let observed_source_revision = compute_recall_digest(config_env_path)?;
+            if observed_source_revision != bound_source_revision {
+                return Err(format!(
+                    "source_state_drift: recall config proposal {proposal_id} was approved against source revision {bound_source_revision}, but config.env is now {observed_source_revision}; refusing without changing the proposal or file"
+                ));
+            }
+            // The approved identity, not a fresh apply-time observation, is
+            // the receipt's before state. A post-approval edit must refuse
+            // above rather than being silently blessed as this attempt's new
+            // baseline.
+            let before_digest = bound_source_revision.as_str();
+            let after_digest = compute_projected_recall_digest(config_env_path, &patch)?;
             // Fresh apply: stamp an applying receipt, do the rename, finalize.
             let attempt_id = uuid::Uuid::new_v4().to_string();
             stamp_applying_receipt(
                 server,
                 proposal_id,
                 &attempt_id,
-                &before_digest,
+                before_digest,
                 &after_digest,
                 &patch,
             )?;
@@ -455,6 +485,11 @@ fn drive_recall_apply_state_machine(
                     "recall config proposal {proposal_id} applying_receipt is missing attempt_id/before_digest/after_digest; refusing to guess — operator must reconcile the row"
                 ));
             }
+            if receipt_before != bound_source_revision {
+                return Err(format!(
+                    "source_revision_mismatch: recall config proposal {proposal_id} applying receipt baseline {receipt_before} does not match its approved bound source revision {bound_source_revision}; refusing recovery"
+                ));
+            }
             let observed = compute_recall_digest(config_env_path)?;
             if observed == receipt_after {
                 // Rename already landed before the crash; finalize idempotently.
@@ -465,7 +500,7 @@ fn drive_recall_apply_state_machine(
                     proposal_id,
                     &outcome,
                     &patch,
-                    &after_digest,
+                    &receipt_after,
                     config_env_path,
                 )
             } else if observed == receipt_before {
@@ -484,7 +519,7 @@ fn drive_recall_apply_state_machine(
                     proposal_id,
                     &outcome,
                     &patch,
-                    &after_digest,
+                    &receipt_after,
                     config_env_path,
                 )
             } else {
@@ -642,6 +677,7 @@ fn has_eval_input(params: &TachiMemoryParams) -> bool {
 fn build_proposals_from_simulation(
     simulation: &Value,
     include_non_improving: bool,
+    source_revision: &str,
 ) -> Result<Vec<Value>, String> {
     let variants = simulation["variants"]
         .as_array()
@@ -722,24 +758,23 @@ fn build_proposals_from_simulation(
         // reviewing against, (c) the policy-version tag, (d) the apply target.
         // Any change to any of those rotates the SHA-256 id and starts a fresh
         // pending row, never inheriting an old approval.
-        let identity_payload = recall_config_v2_identity_payload(
+        let identity_payload = recall_config_v3_identity_payload(
             &config_env_value,
             &evidence_review,
             RECALL_CONFIG_PROPOSAL_POLICY_VERSION,
             RECALL_CONFIG_PROPOSAL_TARGET,
+            source_revision,
         );
         let content_digest = content_digest_hex(&identity_payload);
-        let id = format!(
-            "recall_config:v2:{}",
-            &content_digest[..16.min(content_digest.len())]
-        );
+        let id = format!("recall_config:v3:{content_digest}");
         out.push(json!({
             "proposal_id": id,
             "legacy_proposal_id": legacy_id,
-            "kind": "recall_config",
-            "schema_version": 2,
+            "kind": RECALL_CONFIG_PROPOSAL_KIND,
+            "schema_version": RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION,
             "policy_version": RECALL_CONFIG_PROPOSAL_POLICY_VERSION,
             "target": RECALL_CONFIG_PROPOSAL_TARGET,
+            "source_revision": source_revision,
             "identity_payload": identity_payload,
             "content_digest": content_digest,
             "status": "pending",
@@ -879,7 +914,7 @@ fn list_proposals(
         let is_v2 = value
             .get("schema_version")
             .and_then(Value::as_u64)
-            .map(|version| version >= 2)
+            .map(|version| version == RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION)
             .unwrap_or(false);
         if !is_v2 {
             value["legacy_unbound_proposal"] = json!(true);
@@ -899,13 +934,111 @@ fn list_proposals(
 /// SHA-256 hex of a canonical identity payload. Mirrors the helper in
 /// `dispatch_profile/policy/handlers.rs`; kept local because the two modules
 /// are in different crate sub-trees and a shared util would expand this PR's
-/// scope. Both must serialize through the same `recall_config_v2_identity_payload`
+/// scope. Both must serialize through the same `recall_config_v3_identity_payload`
 /// canonical form first.
 fn content_digest_hex(identity_payload: &Value) -> String {
-    let canonical = identity_payload.to_string();
+    let canonical = tachi_dispatch::policy::canonical_json(identity_payload).to_string();
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     hex_lower(&hasher.finalize())
+}
+
+/// Reject rows that remain self-consistent after a hand edit but no longer
+/// implement the current recall proposal contract. The optional live source
+/// revision is supplied at review and on the fresh approved->applying path;
+/// recovery from an already-stamped applying receipt validates that receipt's
+/// bound baseline separately because the file may legitimately equal `after`.
+fn validate_recall_config_proposal(
+    proposal_id: &str,
+    value: &Value,
+    live_source_revision: Option<&str>,
+) -> Result<(Value, String), String> {
+    if value.get("schema_version").and_then(Value::as_u64)
+        != Some(RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION)
+    {
+        return Err(format!(
+            "schema_version_mismatch: recall config proposal {proposal_id} must use current schema version {RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION}; regenerate a fresh pending proposal"
+        ));
+    }
+    if value.get("kind").and_then(Value::as_str) != Some(RECALL_CONFIG_PROPOSAL_KIND) {
+        return Err(format!(
+            "kind_mismatch: recall config proposal {proposal_id} is not the current {RECALL_CONFIG_PROPOSAL_KIND} kind"
+        ));
+    }
+    if value.get("policy_version").and_then(Value::as_str)
+        != Some(RECALL_CONFIG_PROPOSAL_POLICY_VERSION)
+    {
+        return Err(format!(
+            "current_policy_mismatch: recall config proposal {proposal_id} does not use current policy version {RECALL_CONFIG_PROPOSAL_POLICY_VERSION}; regenerate before review or apply"
+        ));
+    }
+    if value.get("target").and_then(Value::as_str) != Some(RECALL_CONFIG_PROPOSAL_TARGET) {
+        return Err(format!(
+            "target_mismatch: recall config proposal {proposal_id} does not target {RECALL_CONFIG_PROPOSAL_TARGET}"
+        ));
+    }
+    let identity_payload = value
+        .get("identity_payload")
+        .cloned()
+        .unwrap_or(Value::Null);
+    if identity_payload.get("kind").and_then(Value::as_str) != Some(RECALL_CONFIG_PROPOSAL_KIND)
+        || identity_payload
+            .get("policy_version")
+            .and_then(Value::as_str)
+            != Some(RECALL_CONFIG_PROPOSAL_POLICY_VERSION)
+        || identity_payload.get("target").and_then(Value::as_str)
+            != Some(RECALL_CONFIG_PROPOSAL_TARGET)
+    {
+        return Err(format!(
+            "current_policy_mismatch: recall config proposal {proposal_id} identity payload does not bind the current kind, policy version, and target"
+        ));
+    }
+    let bound_source_revision = identity_payload
+        .get("source_revision")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "legacy_unbound_proposal: recall config proposal {proposal_id} has no bound source revision; regenerate a fresh pending proposal"
+            )
+        })?;
+    if value.get("source_revision").and_then(Value::as_str) != Some(bound_source_revision.as_str())
+    {
+        return Err(format!(
+            "source_revision_mismatch: recall config proposal {proposal_id} display revision does not match its bound source revision"
+        ));
+    }
+    let stored_digest = value
+        .get("content_digest")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let recomputed_digest = content_digest_hex(&identity_payload);
+    if stored_digest.is_empty() || stored_digest != recomputed_digest {
+        return Err(format!(
+            "content_digest_mismatch: recall config proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed_digest}; refusing unreviewed content"
+        ));
+    }
+    let expected_id = format!("recall_config:v3:{recomputed_digest}");
+    if proposal_id != expected_id.as_str()
+        || value.get("proposal_id").and_then(Value::as_str) != Some(expected_id.as_str())
+    {
+        return Err(format!(
+            "proposal_identity_mismatch: recall config proposal {proposal_id} is not stored under its canonical full content-address key {expected_id}"
+        ));
+    }
+    if let Some(live_source_revision) = live_source_revision {
+        if live_source_revision != bound_source_revision.as_str() {
+            return Err(format!(
+                "source_state_drift: recall config proposal {proposal_id} was generated against source revision {bound_source_revision}, but config.env is now {live_source_revision}; regenerate and re-review"
+            ));
+        }
+    }
+    if recall_config_display_drifted(value, &identity_payload) {
+        return Err(format!(
+            "display_copy_drift: recall config proposal {proposal_id} top-level `config_env` does not match its digest-bound identity_payload copy; refusing content that diverged from what was reviewed"
+        ));
+    }
+    Ok((identity_payload, bound_source_revision))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

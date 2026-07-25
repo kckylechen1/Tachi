@@ -8,13 +8,15 @@ use crate::{
     DISPATCH_PROFILES, MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES,
 };
 
-/// Policy-version tag bound into every v2 route-policy proposal identity. The
+/// Policy-version tag bound into every v3 route-policy proposal identity. The
 /// identity binds the *complete immutable apply payload + the evidence used
 /// for review + this policy version + the apply target*, so any change to the
 /// apply shape (a new field on `policy_rule`, a renamed target, or this const
 /// itself) rotates every proposal id and forces re-review. Bumped only on a
 /// breaking change to the proposal schema/apply payload.
-pub const ROUTE_POLICY_PROPOSAL_POLICY_VERSION: &str = "2026-07-route-policy-v2";
+pub const ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION: u64 = 3;
+pub const ROUTE_POLICY_PROPOSAL_POLICY_VERSION: &str = "2026-07-route-policy-v3";
+pub const ROUTE_POLICY_PROPOSAL_KIND: &str = "route_policy";
 
 /// Stable apply-target tag bound into the identity, so a proposal cannot be
 /// replayed against a different namespace (route-rule vs profile overlay) by
@@ -25,7 +27,7 @@ pub const ROUTE_POLICY_PROPOSAL_TARGET: &str = "route_policy_rule";
 /// becomes a sorted-key `BTreeMap`, every array is canonicalized element-wise,
 /// and scalars pass through untouched. The output is deterministic regardless
 /// of the input's insertion order, which is the property the v2 content-addressed
-/// identity (see [`route_policy_v2_identity_payload`]) requires: two callers
+/// identity (see [`route_policy_v3_identity_payload`]) requires: two callers
 /// that built the "same" proposal from different code paths must hash to the
 /// same id, and any change to the apply payload, review evidence, policy
 /// version, or target must produce a different id.
@@ -51,7 +53,7 @@ pub fn canonical_json(value: &Value) -> Value {
 }
 
 /// `true` iff `a` and `b` are equal after canonicalization through the same
-/// [`canonical_json`] the v2 identity hash uses. The single comparison rule
+/// [`canonical_json`] the v3 identity hash uses. The single comparison rule
 /// for every display-copy-vs-bound-copy drift check in the server crate
 /// (route policy's `policy_rule`/`evidence`, recall's `config_env`) — never
 /// duplicate this as a second normalization.
@@ -59,7 +61,7 @@ pub fn canonical_json_eq(a: &Value, b: &Value) -> bool {
     canonical_json(a) == canonical_json(b)
 }
 
-/// Build the canonical identity payload that the v2 proposal id hashes. The
+/// Build the canonical identity payload that the v3 proposal id hashes. The
 /// returned value is a fully canonicalized [`Value`] (sorted keys top to
 /// bottom) ready to be serialized and SHA-256 hashed by the caller — the
 /// dispatch crate is intentionally free of a crypto dependency, so the hash
@@ -74,14 +76,17 @@ pub fn canonical_json_eq(a: &Value, b: &Value) -> bool {
 ///
 /// What is *not* bound (and thus must never rotate the id): `status`,
 /// `created_or_refreshed_at`, `review`, `applied_at`, `requires_human_approval`.
-pub fn route_policy_v2_identity_payload(
+pub fn route_policy_v3_identity_payload(
     apply_payload: &Value,
     evidence_review: &Value,
     policy_version: &str,
     target: &str,
+    source_revision: &str,
 ) -> Value {
     let mut map: BTreeMap<String, Value> = BTreeMap::new();
+    map.insert("kind".to_string(), json!(ROUTE_POLICY_PROPOSAL_KIND));
     map.insert("policy_version".to_string(), json!(policy_version));
+    map.insert("source_revision".to_string(), json!(source_revision));
     map.insert("target".to_string(), json!(target));
     map.insert("apply_payload".to_string(), canonical_json(apply_payload));
     map.insert(
@@ -96,17 +101,22 @@ pub fn route_policy_v2_identity_payload(
 /// this is a thin canonicalizer over a caller-supplied apply payload
 /// (`config_env`) and review evidence. The server crate's
 /// `recall_proposal_ops` is the only caller.
-pub const RECALL_CONFIG_PROPOSAL_POLICY_VERSION: &str = "2026-07-recall-config-v2";
+pub const RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION: u64 = 3;
+pub const RECALL_CONFIG_PROPOSAL_POLICY_VERSION: &str = "2026-07-recall-config-v3";
+pub const RECALL_CONFIG_PROPOSAL_KIND: &str = "recall_config";
 pub const RECALL_CONFIG_PROPOSAL_TARGET: &str = "recall_config_env";
 
-pub fn recall_config_v2_identity_payload(
+pub fn recall_config_v3_identity_payload(
     config_env: &Value,
     evidence_review: &Value,
     policy_version: &str,
     target: &str,
+    source_revision: &str,
 ) -> Value {
     let mut map: BTreeMap<String, Value> = BTreeMap::new();
+    map.insert("kind".to_string(), json!(RECALL_CONFIG_PROPOSAL_KIND));
     map.insert("policy_version".to_string(), json!(policy_version));
+    map.insert("source_revision".to_string(), json!(source_revision));
     map.insert("target".to_string(), json!(target));
     map.insert(
         "apply_payload".to_string(),
@@ -302,6 +312,7 @@ pub fn build_route_policy_proposals(
     row_count: usize,
     limit: usize,
     created_or_refreshed_at: &str,
+    source_revision: &str,
 ) -> Vec<Value> {
     let current_by_task = current
         .route_choices
@@ -337,19 +348,21 @@ pub fn build_route_policy_proposals(
                 "proposed": choice,
                 "route_simulate_call": "tachi_task(action='route_simulate', limit=...)",
             });
-            let identity_payload = route_policy_v2_identity_payload(
+            let identity_payload = route_policy_v3_identity_payload(
                 &apply_payload,
                 &evidence,
                 ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
                 ROUTE_POLICY_PROPOSAL_TARGET,
+                source_revision,
             );
             out.push(json!({
                 "proposal_id": legacy_proposal_id,
                 "legacy_proposal_id": legacy_proposal_id,
-                "kind": "route_policy",
-                "schema_version": 2,
+                "kind": ROUTE_POLICY_PROPOSAL_KIND,
+                "schema_version": ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION,
                 "policy_version": ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
                 "target": ROUTE_POLICY_PROPOSAL_TARGET,
+                "source_revision": source_revision,
                 "identity_payload": identity_payload,
                 "status": "pending",
                 "requires_human_approval": true,
@@ -1041,7 +1054,7 @@ mod tests {
             ..current.clone()
         };
 
-        let proposals = build_route_policy_proposals(&current, &[variant], 4, 50, "now");
+        let proposals = build_route_policy_proposals(&current, &[variant], 4, 50, "now", "source");
 
         assert_eq!(proposals.len(), 1);
         assert_eq!(
@@ -1058,7 +1071,7 @@ mod tests {
     /// design); it just produces the canonical input the server layer hashes.
     /// This pins the schema so an accidental field drop/rename is caught here.
     #[test]
-    fn route_policy_proposals_carry_v2_identity_payload() {
+    fn route_policy_proposals_carry_v3_identity_payload() {
         let current = RouteSimulationSummary {
             policy: "current".to_string(),
             selected_route_count: 1,
@@ -1101,12 +1114,15 @@ mod tests {
             ..current.clone()
         };
 
-        let proposals = build_route_policy_proposals(&current, &[variant], 4, 50, "now");
+        let proposals = build_route_policy_proposals(&current, &[variant], 4, 50, "now", "source");
         assert_eq!(proposals.len(), 1);
         let proposal = &proposals[0];
 
         // Schema marker present and on the v2 baseline.
-        assert_eq!(proposal["schema_version"], json!(2));
+        assert_eq!(
+            proposal["schema_version"],
+            json!(ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)
+        );
         assert_eq!(
             proposal["policy_version"],
             json!(ROUTE_POLICY_PROPOSAL_POLICY_VERSION)
@@ -1195,7 +1211,8 @@ mod tests {
         };
         let mk_identity = |fallback_profile: &str| {
             let (current, variant) = mk_summary(fallback_profile);
-            let proposals = build_route_policy_proposals(&current, &[variant], 4, 50, "now");
+            let proposals =
+                build_route_policy_proposals(&current, &[variant], 4, 50, "now", "source");
             serde_json::to_string(&proposals[0]["identity_payload"]).unwrap()
         };
 
@@ -1261,8 +1278,14 @@ mod tests {
         };
         let mk_identity = |row_count: usize, limit: usize| {
             let (current, variant) = mk_summary();
-            let proposals =
-                build_route_policy_proposals(&current, &[variant], row_count, limit, "now");
+            let proposals = build_route_policy_proposals(
+                &current,
+                &[variant],
+                row_count,
+                limit,
+                "now",
+                "source",
+            );
             serde_json::to_string(&proposals[0]["identity_payload"]).unwrap()
         };
 

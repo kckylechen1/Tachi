@@ -2,9 +2,10 @@ use super::super::*;
 use super::simulation::{route_simulation_caveats, simulate_route_policy};
 use sha2::{Digest, Sha256};
 use tachi_dispatch::policy::{
-    build_loadout_evolution_proposals, build_route_policy_proposals, canonical_json_eq,
-    route_policy_v2_identity_payload, LoadoutEvalEntry, ProfileCardRiskInputs,
-    ProfilePositiveEvolutionInputs, ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
+    build_loadout_evolution_proposals, build_route_policy_proposals, canonical_json,
+    canonical_json_eq, route_policy_v3_identity_payload, LoadoutEvalEntry, ProfileCardRiskInputs,
+    ProfilePositiveEvolutionInputs, ROUTE_POLICY_PROPOSAL_KIND,
+    ROUTE_POLICY_PROPOSAL_POLICY_VERSION, ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION,
     ROUTE_POLICY_PROPOSAL_TARGET,
 };
 
@@ -13,9 +14,9 @@ use tachi_dispatch::policy::{
 /// can re-validate the persisted row was not mutated after review.
 pub(super) fn content_digest_hex(identity_payload: &Value) -> String {
     // `serde_json` does not guarantee key order across rebuilds; serialize the
-    // value through `route_policy_v2_identity_payload`'s canonical form first
+    // value through `route_policy_v3_identity_payload`'s canonical form first
     // so the hash is stable regardless of how the caller assembled the input.
-    let canonical = identity_payload.to_string();
+    let canonical = canonical_json(identity_payload).to_string();
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     let bytes = hasher.finalize();
@@ -69,25 +70,142 @@ pub(super) fn route_policy_display_drift(
     None
 }
 
-/// v2 proposal id: human-readable kind prefix + the content digest. The digest
+/// v3 proposal id: human-readable kind prefix + the content digest. The digest
 /// is the SHA-256 of the canonical identity payload, so any change to the
 /// apply payload, evidence, policy version, or target rotates the id and
 /// forces a fresh pending row instead of inheriting an old approval.
-fn route_policy_v2_proposal_id(identity_payload: &Value) -> String {
-    let digest = content_digest_hex(identity_payload);
-    let short = &digest[..16.min(digest.len())];
-    format!("route_policy:v2:{short}")
+pub(super) fn route_policy_v3_proposal_id(identity_payload: &Value) -> String {
+    format!("route_policy:v3:{}", content_digest_hex(identity_payload))
 }
 
-/// `true` iff the persisted row carries the additive v2 schema marker
-/// (`schema_version: 2`). Legacy rows predate the content-addressed identity
+/// `true` iff the persisted row carries the exact current v3 schema marker.
+/// Older rows predate the source-revision content-addressed identity
 /// and are refused at review/apply as `legacy_unbound_proposal`.
 fn is_v2_proposal(value: &Value) -> bool {
     value
         .get("schema_version")
         .and_then(Value::as_u64)
-        .map(|version| version >= 2)
+        .map(|version| version == ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)
         .unwrap_or(false)
+}
+
+/// Deterministic revision of every active route-rule row. It deliberately
+/// includes each hard-state version as well as canonical value content: a
+/// third party writing the same JSON still advances the active configuration
+/// revision and must invalidate an approval made against the earlier state.
+pub(super) fn route_policy_source_revision(rows: &[memcore::db::StateRow]) -> String {
+    let mut snapshot = rows
+        .iter()
+        .map(|row| {
+            let value = serde_json::from_str::<Value>(&row.value_json)
+                .map(|value| canonical_json(&value))
+                .unwrap_or_else(|_| Value::String(row.value_json.clone()));
+            json!({
+                "key": row.key,
+                "version": row.version,
+                "value": value,
+            })
+        })
+        .collect::<Vec<_>>();
+    snapshot.sort_by(|left, right| left["key"].as_str().cmp(&right["key"].as_str()));
+    content_digest_hex(&Value::Array(snapshot))
+}
+
+/// Reject rows that are internally self-consistent but no longer represent
+/// the current proposal contract. `live_source_revision` is supplied at
+/// review and inside route apply's write transaction; omitting it is only for
+/// preliminary structural validation before that transaction is opened.
+pub(super) fn validate_route_policy_proposal(
+    proposal_id: &str,
+    value: &Value,
+    live_source_revision: Option<&str>,
+) -> Result<Value, String> {
+    if value.get("schema_version").and_then(Value::as_u64)
+        != Some(ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)
+    {
+        return Err(format!(
+            "schema_version_mismatch: route policy proposal {proposal_id} must use current schema version {ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION}; regenerate a fresh pending proposal"
+        ));
+    }
+    if value.get("kind").and_then(Value::as_str) != Some(ROUTE_POLICY_PROPOSAL_KIND) {
+        return Err(format!(
+            "kind_mismatch: route policy proposal {proposal_id} is not the current {ROUTE_POLICY_PROPOSAL_KIND} kind"
+        ));
+    }
+    if value.get("policy_version").and_then(Value::as_str)
+        != Some(ROUTE_POLICY_PROPOSAL_POLICY_VERSION)
+    {
+        return Err(format!(
+            "current_policy_mismatch: route policy proposal {proposal_id} does not use current policy version {ROUTE_POLICY_PROPOSAL_POLICY_VERSION}; regenerate before review or apply"
+        ));
+    }
+    if value.get("target").and_then(Value::as_str) != Some(ROUTE_POLICY_PROPOSAL_TARGET) {
+        return Err(format!(
+            "target_mismatch: route policy proposal {proposal_id} does not target {ROUTE_POLICY_PROPOSAL_TARGET}"
+        ));
+    }
+
+    let identity_payload = value
+        .get("identity_payload")
+        .cloned()
+        .unwrap_or(Value::Null);
+    if identity_payload.get("kind").and_then(Value::as_str) != Some(ROUTE_POLICY_PROPOSAL_KIND)
+        || identity_payload
+            .get("policy_version")
+            .and_then(Value::as_str)
+            != Some(ROUTE_POLICY_PROPOSAL_POLICY_VERSION)
+        || identity_payload.get("target").and_then(Value::as_str)
+            != Some(ROUTE_POLICY_PROPOSAL_TARGET)
+    {
+        return Err(format!(
+            "current_policy_mismatch: route policy proposal {proposal_id} identity payload does not bind the current kind, policy version, and target"
+        ));
+    }
+    let bound_source_revision = identity_payload
+        .get("source_revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "legacy_unbound_proposal: route policy proposal {proposal_id} has no bound source revision; regenerate a fresh pending proposal"
+            )
+        })?;
+    if value.get("source_revision").and_then(Value::as_str) != Some(bound_source_revision) {
+        return Err(format!(
+            "source_revision_mismatch: route policy proposal {proposal_id} display revision does not match its bound source revision"
+        ));
+    }
+
+    let stored_digest = value
+        .get("content_digest")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let recomputed = content_digest_hex(&identity_payload);
+    if stored_digest.is_empty() || recomputed != stored_digest {
+        return Err(format!(
+            "content_digest_mismatch: route policy proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing unreviewed content"
+        ));
+    }
+    let expected_id = route_policy_v3_proposal_id(&identity_payload);
+    if proposal_id != expected_id.as_str()
+        || value.get("proposal_id").and_then(Value::as_str) != Some(expected_id.as_str())
+    {
+        return Err(format!(
+            "proposal_identity_mismatch: route policy proposal {proposal_id} is not stored under its canonical full content-address key {expected_id}"
+        ));
+    }
+    if let Some(live_source_revision) = live_source_revision {
+        if live_source_revision != bound_source_revision {
+            return Err(format!(
+                "source_state_drift: route policy proposal {proposal_id} was generated against source revision {bound_source_revision}, but active {ROUTE_POLICY_RULE_NS} is now {live_source_revision}; regenerate and re-review"
+            ));
+        }
+    }
+    if let Some(field) = route_policy_display_drift(value, &identity_payload) {
+        return Err(format!(
+            "display_copy_drift: route policy proposal {proposal_id} top-level `{field}` does not match its digest-bound identity_payload copy; refusing content that diverged from what was reviewed"
+        ));
+    }
+    Ok(identity_payload)
 }
 
 pub(crate) fn handle_route_simulation(
@@ -133,6 +251,12 @@ pub(crate) fn handle_route_policy_proposals(
     limit: usize,
     status_filter: Option<&str>,
 ) -> Result<String, String> {
+    let source_rows = server.with_global_store_read(|store| {
+        store
+            .list_state(ROUTE_POLICY_RULE_NS)
+            .map_err(|e| format!("list active route policy rules: {e}"))
+    })?;
+    let source_revision = route_policy_source_revision(&source_rows);
     let rows = load_live_eval_rows(server, limit.max(1))?;
     let performance_matrix = aggregate_performance_matrix(&rows);
     let current = simulate_route_policy("current", &performance_matrix, None);
@@ -141,8 +265,14 @@ pub(crate) fn handle_route_policy_proposals(
         .map(|policy| simulate_route_policy(policy, &performance_matrix, None))
         .collect::<Vec<_>>();
     let generated_at = Utc::now().to_rfc3339();
-    let mut proposals =
-        build_route_policy_proposals(&current, &variants, rows.len(), limit.max(1), &generated_at);
+    let mut proposals = build_route_policy_proposals(
+        &current,
+        &variants,
+        rows.len(),
+        limit.max(1),
+        &generated_at,
+        &source_revision,
+    );
     let eval_entries = load_live_eval_entries(server, limit.max(1))?
         .into_iter()
         .map(|entry| LoadoutEvalEntry {
@@ -160,10 +290,19 @@ pub(crate) fn handle_route_policy_proposals(
     )?);
 
     server.with_global_store(|store| {
+        let current_source_rows = store
+            .list_state(ROUTE_POLICY_RULE_NS)
+            .map_err(|e| format!("revalidate active route policy rules: {e}"))?;
+        let current_source_revision = route_policy_source_revision(&current_source_rows);
+        if current_source_revision != source_revision {
+            return Err(format!(
+                "source_state_drift: active {ROUTE_POLICY_RULE_NS} changed while route policy proposals were generated; no proposals were persisted, regenerate from the current source revision"
+            ));
+        }
         for proposal in proposals {
             // The dispatch layer emits the legacy deterministic id
             // (`route_policy:<policy>:<task>:<profile>`); we replace it with
-            // the v2 content-addressed id derived from the canonical identity
+            // the v3 content-addressed id derived from the canonical identity
             // payload. Two regenerations of the same content hash to the same
             // id and thus preserve any prior approval; any change to apply
             // payload / evidence / policy version / target rotates the id and
@@ -184,17 +323,18 @@ pub(crate) fn handle_route_policy_proposals(
                     // proposals do not yet carry identity_payload in this PR).
                     let apply_payload = proposal.get("policy_rule").cloned().unwrap_or(json!({}));
                     let evidence_review = proposal.get("evidence").cloned().unwrap_or(json!({}));
-                    route_policy_v2_identity_payload(
+                    route_policy_v3_identity_payload(
                         &apply_payload,
                         &evidence_review,
                         ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
                         ROUTE_POLICY_PROPOSAL_TARGET,
+                        &source_revision,
                     )
                 }
             };
             let content_digest = content_digest_hex(&identity_payload);
             let id = match proposal.get("kind").and_then(Value::as_str) {
-                Some("route_policy") => route_policy_v2_proposal_id(&identity_payload),
+                Some("route_policy") => route_policy_v3_proposal_id(&identity_payload),
                 // loadout_evolution proposals are out of scope for v2 in this
                 // PR; keep their legacy id so existing tests still match.
                 _ => legacy_id.clone(),
@@ -217,7 +357,7 @@ pub(crate) fn handle_route_policy_proposals(
                 if let Ok(existing_json) = serde_json::from_str::<Value>(&existing) {
                     // Preserve a prior review/apply decision ONLY when the
                     // persisted row carries the SAME content digest as the
-                    // freshly regenerated proposal. For v2 route_policy rows
+                    // freshly regenerated proposal. For v3 route_policy rows
                     // the id already only collides with itself when content
                     // is identical, so this is a belt-and-braces guard against
                     // any path that writes the same id with different content
@@ -365,29 +505,11 @@ pub(crate) fn handle_route_policy_review(
         // be detected, not just the last one. Mirrors the same check apply.rs
         // runs immediately before mutating routing state.
         if kind == "route_policy" {
-            let stored_digest = value
-                .get("content_digest")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let identity_payload = value.get("identity_payload").cloned().unwrap_or(json!({}));
-            let recomputed = content_digest_hex(&identity_payload);
-            if stored_digest.is_empty() || recomputed != stored_digest {
-                return Err(format!(
-                    "content_digest_mismatch: route policy proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing to review a proposal that drifted from what was generated"
-                ));
-            }
-            // Distinct from the digest check above: prove the DISPLAY copy
-            // this action's own response returns (`policy_rule`/`evidence` at
-            // the top level) still matches what `identity_payload` binds. A
-            // reviewer approves based on the display copy, not
-            // `identity_payload` — if it drifted, the approval about to be
-            // recorded would not actually cover the bound content. Refuse
-            // rather than silently reviewing content the caller never saw.
-            if let Some(field) = route_policy_display_drift(&value, &identity_payload) {
-                return Err(format!(
-                    "display_copy_drift: route policy proposal {proposal_id} top-level `{field}` does not match its digest-bound identity_payload copy; refusing to record a review decision against display content that has diverged from what was actually generated"
-                ));
-            }
+            let source_rows = store
+                .list_state(ROUTE_POLICY_RULE_NS)
+                .map_err(|e| format!("list active route policy rules for review: {e}"))?;
+            let live_source_revision = route_policy_source_revision(&source_rows);
+            validate_route_policy_proposal(proposal_id, &value, Some(&live_source_revision))?;
         }
         // Review only permits pending -> approved | rejected. A terminal
         // (rejected/applied) row cannot be resurrected, and an already-approved

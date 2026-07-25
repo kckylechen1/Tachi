@@ -43,49 +43,11 @@ pub(crate) fn handle_route_policy_apply(
                 // guarantee of what apply will persist. Refuse loudly; the row
                 // remains listable with `legacy_unbound_proposal: true` but
                 // cannot be applied.
-                if !value
-                    .get("schema_version")
-                    .and_then(Value::as_u64)
-                    .map(|v| v >= 2)
-                    .unwrap_or(false)
+                if value.get("schema_version").and_then(Value::as_u64)
+                    != Some(tachi_dispatch::policy::ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)
                 {
                     return Err(format!(
                         "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be applied; regenerate with action='proposals' to mint a fresh pending v2 proposal"
-                    ));
-                }
-                // Re-validate the persisted content_digest against the
-                // identity_payload still in the row. A mismatch means the row
-                // was mutated after review (a hand-edit, a partial write);
-                // refuse rather than silently applying unreviewed content.
-                let stored_digest = value
-                    .get("content_digest")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let identity_payload = value.get("identity_payload").cloned().unwrap_or(json!({}));
-                let recomputed = super::handlers::content_digest_hex(&identity_payload);
-                if stored_digest.is_empty() || recomputed != stored_digest {
-                    return Err(format!(
-                        "content_digest_mismatch: route policy proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing to apply unreviewed content"
-                    ));
-                }
-                // Distinct from the digest check above: prove the DISPLAY
-                // copy (`policy_rule`/`evidence` at the top level — what
-                // `handle_route_policy_proposals`/`handle_route_policy_review`
-                // actually return to a caller) still matches what
-                // `identity_payload` binds. A human approves based on the
-                // display copy; if it drifted after review (a hand-edit, a
-                // partial write) — even in a "softer" direction that a human
-                // would have approved — that approval did not actually cover
-                // the bound content, and silently applying the bound copy
-                // would be this code deciding on the human's behalf that they
-                // "really meant" the bound version. Refuse instead: zero
-                // mutation, loud enough for an operator to reconcile the row.
-                if let Some(field) = super::handlers::route_policy_display_drift(
-                    &value,
-                    &identity_payload,
-                ) {
-                    return Err(format!(
-                        "display_copy_drift: route policy proposal {proposal_id} top-level `{field}` does not match its digest-bound identity_payload copy; refusing to apply content that diverged from what was reviewed"
                     ));
                 }
                 // Overwrite the top-level `policy_rule` / `evidence` fields
@@ -104,17 +66,6 @@ pub(crate) fn handle_route_policy_apply(
                 // what actually stops a drifted proposal; this is defense in
                 // depth for what lands in the namespace every routing
                 // decision reads.
-                if let Some(bound_apply_payload) = identity_payload.get("apply_payload") {
-                    value["policy_rule"] = bound_apply_payload.clone();
-                }
-                if let Some(bound_evidence) = identity_payload.get("evidence_review") {
-                    value["evidence"] = bound_evidence.clone();
-                }
-
-                value["status"] = json!("applied");
-                value["applied_at"] = json!(applied_at);
-                let next = serde_json::to_string(&value)
-                    .map_err(|e| format!("serialize applied route policy proposal: {e}"))?;
                 // Atomically write proposal + route rule in ONE SQLite
                 // transaction with a hard_state version CAS on the proposal
                 // row's approved -> applied transition. A late write failure
@@ -124,6 +75,24 @@ pub(crate) fn handle_route_policy_apply(
                     .connection_mut()
                     .transaction()
                     .map_err(|e| format!("open route policy apply tx: {e}"))?;
+                let source_rows = memcore::db::list_state(&tx, ROUTE_POLICY_RULE_NS)
+                    .map_err(|e| format!("list active route policy rules in apply tx: {e}"))?;
+                let live_source_revision = super::handlers::route_policy_source_revision(&source_rows);
+                let identity_payload = super::handlers::validate_route_policy_proposal(
+                    proposal_id,
+                    &value,
+                    Some(&live_source_revision),
+                )?;
+                if let Some(bound_apply_payload) = identity_payload.get("apply_payload") {
+                    value["policy_rule"] = bound_apply_payload.clone();
+                }
+                if let Some(bound_evidence) = identity_payload.get("evidence_review") {
+                    value["evidence"] = bound_evidence.clone();
+                }
+                value["status"] = json!("applied");
+                value["applied_at"] = json!(applied_at);
+                let next = serde_json::to_string(&value)
+                    .map_err(|e| format!("serialize applied route policy proposal: {e}"))?;
                 let cas_ok = memcore::db::set_state_if_version(
                     &tx,
                     DISPATCH_POLICY_PROPOSAL_NS,
