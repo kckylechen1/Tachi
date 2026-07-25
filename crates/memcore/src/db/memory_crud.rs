@@ -1,4 +1,5 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde_json::{Map, Value};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::MemoryError;
@@ -344,6 +345,134 @@ pub fn upsert(
     vec_available: bool,
 ) -> Result<(), MemoryError> {
     upsert_with_idless_identity(conn, entry, vec_available, None).map(|_| ())
+}
+
+fn atomic_evidence_path_validation_disabled() -> bool {
+    matches!(
+        std::env::var("TACHI_DISABLE_PATH_VALIDATION")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
+impl crate::MemoryStore {
+    /// Save through the normal upsert body while atomically preserving and
+    /// extending typed evidence metadata. The trusted refs and metadata patch
+    /// are separate arguments so caller-controlled metadata cannot impersonate
+    /// validated evidence.
+    pub fn upsert_with_atomic_evidence_refs(
+        &mut self,
+        entry: &MemoryEntry,
+        idless_identity: Option<&str>,
+        metadata_patch: &Map<String, Value>,
+        append_refs: &[Value],
+    ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+        if self.path_validation && !atomic_evidence_path_validation_disabled() {
+            let allow_cross = entry
+                .metadata
+                .get("allow_cross_project")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if let Err(error) =
+                crate::path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
+            {
+                eprintln!(
+                    "warning: path-routing validation rejected write db_label={} path={} error={}",
+                    self.db_label, entry.path, error
+                );
+                return Err(MemoryError::InvalidArg(error.to_string()));
+            }
+        }
+
+        let db_label = self.db_label.clone();
+        let vec_available = self.vec_available;
+        crate::db::retry_memory_locked("upsert_atomic_evidence_refs", &db_label, || {
+            upsert_with_atomic_evidence_refs(
+                &mut self.conn,
+                entry,
+                vec_available,
+                idless_identity,
+                metadata_patch,
+                append_refs,
+            )
+        })
+    }
+}
+
+fn typed_evidence_ref_key(value: &Value) -> Option<&str> {
+    let object = value.as_object()?;
+    let reference = object.get("ref")?.as_str()?.trim();
+    let captured_at = object.get("captured_at")?.as_str()?.trim();
+    (!reference.is_empty() && !captured_at.is_empty()).then_some(reference)
+}
+
+fn merge_atomic_evidence_metadata(
+    tx: &rusqlite::Transaction<'_>,
+    entry_id: &str,
+    metadata_patch: &Map<String, Value>,
+    append_refs: &[Value],
+) -> Result<Value, MemoryError> {
+    let existing_metadata = tx
+        .query_row(
+            "SELECT metadata FROM memories WHERE id = ?1",
+            params![entry_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|raw| serde_json::from_str::<Value>(&raw))
+        .transpose()?;
+    let mut merged = existing_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut evidence_refs = merged
+        .remove("evidence_refs_v1")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|value| typed_evidence_ref_key(value).is_some())
+        .collect::<Vec<_>>();
+    merged.remove("source_refs");
+
+    for (key, value) in metadata_patch {
+        if key != "evidence_refs_v1" && key != "source_refs" {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    for new_ref in append_refs {
+        let reference = typed_evidence_ref_key(new_ref).ok_or_else(|| {
+            MemoryError::InvalidArg("atomic evidence append contained a malformed typed ref".into())
+        })?;
+        if !evidence_refs
+            .iter()
+            .any(|existing| typed_evidence_ref_key(existing) == Some(reference))
+        {
+            evidence_refs.push(new_ref.clone());
+        }
+    }
+    if !evidence_refs.is_empty() {
+        merged.insert("evidence_refs_v1".to_string(), Value::Array(evidence_refs));
+    }
+    Ok(Value::Object(merged))
+}
+
+fn upsert_with_atomic_evidence_refs(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+    metadata_patch: &Map<String, Value>,
+    append_refs: &[Value],
+) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut merged_entry = entry.clone();
+    merged_entry.metadata =
+        merge_atomic_evidence_metadata(&tx, &entry.id, metadata_patch, append_refs)?;
+    let result = upsert_within_tx(&tx, &merged_entry, vec_available, idless_identity)?;
+    tx.commit()?;
+    Ok((result, merged_entry.metadata))
 }
 
 /// Insert `entry` only when its id is absent. The existence decision and all

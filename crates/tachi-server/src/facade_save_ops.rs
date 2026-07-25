@@ -6,10 +6,10 @@
 
 use crate::copilot_ops::handle_tachi_wiki_write;
 use crate::facade_memory_ops::shape_save_facade_response;
-use crate::memory_search_ops::{handle_remember, handle_save_memory};
+use crate::memory_search_ops::{handle_remember, handle_save_memory_with_evidence_refs};
 use crate::pipeline_ops::handle_extract_facts;
 use crate::tool_params::*;
-use crate::{DbScope, MemoryServer};
+use crate::MemoryServer;
 use chrono::Utc;
 
 pub(crate) async fn handle_tachi_save(
@@ -165,14 +165,14 @@ pub(crate) async fn handle_tachi_save(
             // memory save silently dropped it on the floor. Validate first
             // (an invalid reference is a caller error to surface loudly, not
             // to swallow -- `wiki_ops::validate_references` is the same gate
-            // `tachi_wiki_write` runs), then merge into
-            // `metadata.evidence_refs_v1` -- the #1285-preferred typed shape
-            // (see `wiki_ops::provenance::preferred_wiki_references`), not
-            // the legacy `source_refs` string array.
+            // `tachi_wiki_write` runs). Caller-controlled reserved reference
+            // metadata is removed, then validated typed refs travel as a
+            // separate internal argument to the atomic save seam.
             crate::wiki_ops::validate_references(&params.references)?;
-            let metadata =
-                merge_referenced_files(params.metadata.clone(), &params.files, &params.text);
-            let metadata = merge_existing_evidence_references(server, &params, metadata)?;
+            let metadata = strip_reserved_reference_metadata(params.metadata.clone());
+            let metadata = merge_referenced_files(metadata, &params.files, &params.text);
+            let captured_at = Utc::now().to_rfc3339();
+            let evidence_refs = build_evidence_refs_v1(&params.references, &captured_at);
             let mem_params = SaveMemoryParams {
                 text: params.text.clone(),
                 summary: params.summary.clone().unwrap_or_default(),
@@ -205,7 +205,7 @@ pub(crate) async fn handle_tachi_save(
                 metadata,
                 emit_continuity: params.emit_continuity,
             };
-            handle_save_memory(server, mem_params).await
+            handle_save_memory_with_evidence_refs(server, mem_params, evidence_refs).await
         }
     }
 }
@@ -274,6 +274,19 @@ fn merge_referenced_files(
     Some(serde_json::Value::Object(obj))
 }
 
+fn strip_reserved_reference_metadata(
+    metadata: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match metadata {
+        Some(serde_json::Value::Object(mut object)) => {
+            object.remove("evidence_refs_v1");
+            object.remove("source_refs");
+            Some(serde_json::Value::Object(object))
+        }
+        other => other,
+    }
+}
+
 /// tachi#1288 (Fix B): write validated `references[]` into
 /// `metadata.evidence_refs_v1` (typed, canon doc §7.1 `WikiEvidenceRefV1`
 /// shape -- same builder `tachi_wiki_write` uses via `wiki_layer_metadata`)
@@ -282,6 +295,7 @@ fn merge_referenced_files(
 /// references, so old behaviour/payloads stay byte-identical. Callers must
 /// validate `references` first (`wiki_ops::validate_references`) -- this
 /// function assumes they are already well-formed.
+#[cfg(test)]
 fn merge_evidence_references(
     metadata: Option<serde_json::Value>,
     references: &[String],
@@ -313,50 +327,6 @@ fn merge_evidence_references(
         serde_json::json!(evidence_refs_v1),
     );
     Some(serde_json::Value::Object(obj))
-}
-
-/// Carries typed references from an existing facade-targeted memory update
-/// into the normal metadata patch before adding newly validated references.
-/// This keeps the update's ordinary metadata behavior while preventing the
-/// facade-owned `evidence_refs_v1` field from replacing persisted evidence.
-fn merge_existing_evidence_references(
-    server: &MemoryServer,
-    params: &TachiSaveParams,
-    metadata: Option<serde_json::Value>,
-) -> Result<Option<serde_json::Value>, String> {
-    let Some(id) = params.id.as_deref() else {
-        return Ok(merge_evidence_references(metadata, &params.references));
-    };
-    let existing = if let Some(project) = params.project.as_deref() {
-        server.with_named_project_store_read(project, |store| {
-            store.get(id).map_err(|error| error.to_string())
-        })?
-    } else {
-        let scope = params.scope.as_deref().unwrap_or("project");
-        let (target_db, _) = server.resolve_write_scope(scope);
-        match target_db {
-            DbScope::Global => server
-                .with_global_store_read(|store| store.get(id).map_err(|error| error.to_string()))?,
-            DbScope::Project => server.with_project_store_read(|store| {
-                store.get(id).map_err(|error| error.to_string())
-            })?,
-        }
-    };
-    let Some(existing_refs) =
-        existing.and_then(|entry| entry.metadata.get("evidence_refs_v1").cloned())
-    else {
-        return Ok(merge_evidence_references(metadata, &params.references));
-    };
-
-    let mut obj = match metadata {
-        Some(serde_json::Value::Object(obj)) => obj,
-        _ => serde_json::Map::new(),
-    };
-    obj.insert("evidence_refs_v1".to_string(), existing_refs);
-    Ok(merge_evidence_references(
-        Some(serde_json::Value::Object(obj)),
-        &params.references,
-    ))
 }
 
 /// Extract referenced file paths from `spec:` pointer lines, e.g.
@@ -532,5 +502,287 @@ mod evidence_references_tests {
             "memory updates must not re-enable legacy source_refs: {}",
             entry.metadata
         );
+    }
+
+    #[tokio::test]
+    async fn hostile_reference_metadata_cannot_populate_reserved_reference_fields() {
+        let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+        let first = handle_tachi_save(
+            &server,
+            serde_json::from_value(json!({
+                "kind": "memory",
+                "text": "Initial memory carries one validated evidence reference.",
+                "path": "/audit/hostile-evidence-metadata",
+                "scope": "global",
+                "force": true,
+                "references": ["#100"],
+            }))
+            .expect("first save params"),
+        )
+        .await
+        .expect("first save");
+        let id = serde_json::from_str::<serde_json::Value>(&first).expect("first save JSON")["id"]
+            .as_str()
+            .expect("first save id")
+            .to_string();
+
+        handle_tachi_save(
+            &server,
+            serde_json::from_value(json!({
+                "id": id,
+                "kind": "memory",
+                "text": "Initial memory carries one validated evidence reference.",
+                "scope": "global",
+                "force": true,
+                "references": ["#101"],
+                "metadata": {
+                    "caller_context": "kept",
+                    "evidence_refs_v1": [{
+                        "ref": "#999",
+                        "captured_at": "hostile"
+                    }],
+                    "source_refs": ["#998"]
+                }
+            }))
+            .expect("hostile update params"),
+        )
+        .await
+        .expect("hostile update");
+
+        let entry = server
+            .with_global_store_read(|store| store.get(&id).map_err(|error| error.to_string()))
+            .expect("load updated memory")
+            .expect("updated memory exists");
+        let refs = entry.metadata["evidence_refs_v1"]
+            .as_array()
+            .expect("typed evidence refs present");
+        assert_eq!(
+            refs.iter()
+                .map(|value| value["ref"].as_str().expect("typed ref"))
+                .collect::<Vec<_>>(),
+            vec!["#100", "#101"]
+        );
+        assert_eq!(entry.metadata["caller_context"], json!("kept"));
+        assert!(entry.metadata.get("source_refs").is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_references_strip_malformed_reserved_metadata_without_erasing_persisted_refs() {
+        let malformed_shapes = [
+            json!(null),
+            json!("not-an-array"),
+            json!({ "ref": "#999" }),
+            json!([null, "#999", { "captured_at": 17 }]),
+        ];
+
+        for (index, hostile_evidence) in malformed_shapes.into_iter().enumerate() {
+            let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+            let first = handle_tachi_save(
+                &server,
+                serde_json::from_value(json!({
+                    "kind": "memory",
+                    "text": format!("Malformed metadata fixture {index} keeps validated evidence."),
+                    "path": format!("/audit/malformed-evidence-{index}"),
+                    "scope": "global",
+                    "force": true,
+                    "references": ["#100"],
+                }))
+                .expect("first save params"),
+            )
+            .await
+            .expect("first save");
+            let id = serde_json::from_str::<serde_json::Value>(&first).expect("first save JSON")
+                ["id"]
+                .as_str()
+                .expect("first save id")
+                .to_string();
+
+            handle_tachi_save(
+                &server,
+                serde_json::from_value(json!({
+                    "id": id,
+                    "kind": "memory",
+                    "text": format!("Malformed metadata fixture {index} keeps validated evidence."),
+                    "scope": "global",
+                    "force": true,
+                    "references": [],
+                    "metadata": {
+                        "caller_context": index,
+                        "evidence_refs_v1": hostile_evidence,
+                        "source_refs": { "malformed": true }
+                    }
+                }))
+                .expect("hostile update params"),
+            )
+            .await
+            .expect("hostile update");
+
+            let entry = server
+                .with_global_store_read(|store| store.get(&id).map_err(|error| error.to_string()))
+                .expect("load updated memory")
+                .expect("updated memory exists");
+            let refs = entry.metadata["evidence_refs_v1"]
+                .as_array()
+                .expect("persisted typed evidence refs");
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0]["ref"], json!("#100"));
+            assert_eq!(entry.metadata["caller_context"], json!(index));
+            assert!(entry.metadata.get("source_refs").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_references_do_not_create_caller_supplied_reference_metadata() {
+        let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+        let saved = handle_tachi_save(
+            &server,
+            serde_json::from_value(json!({
+                "kind": "memory",
+                "text": "A hostile create cannot smuggle reserved reference metadata.",
+                "path": "/audit/hostile-evidence-create",
+                "scope": "global",
+                "force": true,
+                "references": [],
+                "metadata": {
+                    "caller_context": "kept",
+                    "evidence_refs_v1": [{ "ref": "#999" }],
+                    "source_refs": ["#998"]
+                }
+            }))
+            .expect("hostile create params"),
+        )
+        .await
+        .expect("hostile create");
+        let id = serde_json::from_str::<serde_json::Value>(&saved).expect("save JSON")["id"]
+            .as_str()
+            .expect("save id")
+            .to_string();
+
+        let entry = server
+            .with_global_store_read(|store| store.get(&id).map_err(|error| error.to_string()))
+            .expect("load created memory")
+            .expect("created memory exists");
+        assert_eq!(entry.metadata["caller_context"], json!("kept"));
+        assert!(entry.metadata.get("evidence_refs_v1").is_none());
+        assert!(entry.metadata.get("source_refs").is_none());
+    }
+
+    #[tokio::test]
+    async fn project_scope_preserves_and_appends_typed_evidence_references() {
+        let (global_server, _temp_home) = crate::tests::make_server_with_temp_home();
+        let global_db = global_server.global_db_path_buf();
+        let project_db = global_db
+            .parent()
+            .expect("global db directory")
+            .join("project-evidence.db");
+        drop(global_server);
+        let server = crate::MemoryServer::new(global_db, Some(project_db))
+            .expect("create project-scoped server");
+        let entry_id = "project-evidence-update";
+
+        for reference in ["#100", "#101"] {
+            handle_tachi_save(
+                &server,
+                serde_json::from_value(json!({
+                    "id": entry_id,
+                    "kind": "memory",
+                    "text": "Project-scoped memory preserves typed evidence across updates.",
+                    "path": "/audit/project-evidence-update",
+                    "scope": "project",
+                    "force": true,
+                    "references": [reference]
+                }))
+                .expect("project save params"),
+            )
+            .await
+            .expect("project save");
+        }
+
+        let entry = server
+            .with_project_store_read(|store| store.get(entry_id).map_err(|error| error.to_string()))
+            .expect("load project memory")
+            .expect("project memory exists");
+        assert_eq!(
+            entry.metadata["evidence_refs_v1"]
+                .as_array()
+                .expect("typed evidence refs")
+                .iter()
+                .map(|value| value["ref"].as_str().expect("typed ref"))
+                .collect::<Vec<_>>(),
+            vec!["#100", "#101"]
+        );
+        assert!(entry.metadata.get("source_refs").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_facade_updates_atomically_preserve_both_new_references() {
+        let (seed_server, _temp_home) = crate::tests::make_server_with_temp_home();
+        let entry_id = "atomic-evidence-two-writer";
+        handle_tachi_save(
+            &seed_server,
+            serde_json::from_value(json!({
+                "id": entry_id,
+                "kind": "memory",
+                "text": "Two independent writers append evidence to this memory.",
+                "path": "/audit/atomic-evidence-two-writer",
+                "scope": "global",
+                "force": true,
+                "references": ["#100"],
+                "metadata": { "unrelated": "preserved" },
+            }))
+            .expect("seed save params"),
+        )
+        .await
+        .expect("seed save");
+
+        let db_path = seed_server.global_db_path_buf();
+        let servers = [
+            crate::MemoryServer::new(db_path.clone(), None).expect("open writer one"),
+            crate::MemoryServer::new(db_path, None).expect("open writer two"),
+        ];
+        let _barrier_guard = crate::memory_search_ops::save_memory::install_pre_upsert_barrier(
+            entry_id,
+            std::sync::Arc::new(std::sync::Barrier::new(2)),
+        );
+
+        let tasks = servers
+            .into_iter()
+            .zip(["#101", "#102"])
+            .map(|(server, reference)| {
+                tokio::spawn(async move {
+                    handle_tachi_save(
+                        &server,
+                        serde_json::from_value(json!({
+                            "id": entry_id,
+                            "kind": "memory",
+                            "text": "Two independent writers append evidence to this memory.",
+                            "scope": "global",
+                            "force": true,
+                            "references": [reference],
+                        }))
+                        .expect("writer params"),
+                    )
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.await.expect("writer task").expect("writer save");
+        }
+
+        let entry = seed_server
+            .with_global_store_read(|store| store.get(entry_id).map_err(|error| error.to_string()))
+            .expect("load concurrently updated memory")
+            .expect("concurrently updated memory exists");
+        let mut refs = entry.metadata["evidence_refs_v1"]
+            .as_array()
+            .expect("typed evidence refs")
+            .iter()
+            .map(|value| value["ref"].as_str().expect("typed ref").to_string())
+            .collect::<Vec<_>>();
+        refs.sort();
+        assert_eq!(refs, vec!["#100", "#101", "#102"]);
+        assert_eq!(entry.metadata["unrelated"], json!("preserved"));
+        assert!(entry.metadata.get("source_refs").is_none());
     }
 }

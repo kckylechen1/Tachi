@@ -2,18 +2,95 @@ use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
     find_exact_path_text_duplicate, lookup_existing_entry, spawn_save_contradiction_detection,
-    upsert_idless_save_entry, upsert_save_entry,
+    upsert_idless_save_entry, upsert_save_entry, AtomicEvidenceWrite,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
 use super::write_affinity::{apply_write_affinity, AffinityNote};
 use crate::memory_search_ops::auto_link::{is_training_seed, spawn_auto_linking};
 use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
-use crate::tool_params::SaveMemoryParams;
+use crate::tool_params::{SaveMemoryParams, WikiEvidenceRefV1};
 use crate::{DbScope, MemoryServer};
 use blake2::{Blake2s256, Digest};
 use chrono::Utc;
 use serde_json::json;
+
+#[cfg(test)]
+struct PreUpsertBarrier {
+    entry_id: String,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static PRE_UPSERT_BARRIER: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsertBarrier>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct PreUpsertBarrierGuard;
+
+#[cfg(test)]
+pub(crate) fn install_pre_upsert_barrier(
+    entry_id: &str,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+) -> PreUpsertBarrierGuard {
+    let slot = PRE_UPSERT_BARRIER.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PreUpsertBarrier {
+        entry_id: entry_id.to_string(),
+        barrier,
+    });
+    PreUpsertBarrierGuard
+}
+
+#[cfg(test)]
+impl Drop for PreUpsertBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = PRE_UPSERT_BARRIER.get() {
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn wait_at_pre_upsert_barrier(entry_id: &str) {
+    let barrier = PRE_UPSERT_BARRIER.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|configured| configured.entry_id == entry_id)
+            .map(|configured| std::sync::Arc::clone(&configured.barrier))
+    });
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+fn atomic_evidence_metadata_patch(
+    existing: Option<&serde_json::Value>,
+    final_metadata: &serde_json::Value,
+    explicit_keys: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    let Some(final_object) = final_metadata.as_object() else {
+        return serde_json::Map::new();
+    };
+    let existing_object = existing.and_then(serde_json::Value::as_object);
+    let mut patch = serde_json::Map::new();
+    for key in explicit_keys {
+        if !matches!(key.as_str(), "evidence_refs_v1" | "source_refs") {
+            if let Some(value) = final_object.get(key) {
+                patch.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    for (key, value) in final_object {
+        if matches!(key.as_str(), "evidence_refs_v1" | "source_refs") {
+            continue;
+        }
+        if existing_object.and_then(|object| object.get(key)) != Some(value) {
+            patch.insert(key.clone(), value.clone());
+        }
+    }
+    patch
+}
 
 fn idless_save_identity(path: &str, text: &str) -> String {
     let path = memcore::path_router::normalize_path(path);
@@ -50,7 +127,23 @@ fn domain_affinity_note_json(note: &AffinityNote) -> serde_json::Value {
 
 pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
+    params: SaveMemoryParams,
+) -> Result<String, String> {
+    handle_save_memory_impl(server, params, None).await
+}
+
+pub(crate) async fn handle_save_memory_with_evidence_refs(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+    evidence_refs: Vec<WikiEvidenceRefV1>,
+) -> Result<String, String> {
+    handle_save_memory_impl(server, params, Some(evidence_refs)).await
+}
+
+async fn handle_save_memory_impl(
+    server: &MemoryServer,
     mut params: SaveMemoryParams,
+    evidence_refs: Option<Vec<WikiEvidenceRefV1>>,
 ) -> Result<String, String> {
     params.text = scrub_think_tags(&params.text);
     params.summary = scrub_think_tags(&params.summary);
@@ -207,6 +300,12 @@ pub(crate) async fn handle_save_memory(
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
     let emit_continuity = params.emit_continuity;
+    let explicit_metadata_keys = evidence_refs
+        .as_ref()
+        .and_then(|_| params.metadata.as_ref())
+        .and_then(serde_json::Value::as_object)
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
     let mut entry = build_save_entry(
         server,
         params,
@@ -237,13 +336,29 @@ pub(crate) async fn handle_save_memory(
         }
     }
 
+    let evidence_write = evidence_refs.map(|references| AtomicEvidenceWrite {
+        metadata_patch: atomic_evidence_metadata_patch(
+            existing_entry.as_ref().map(|existing| &existing.metadata),
+            &entry.metadata,
+            &explicit_metadata_keys,
+        ),
+        append_refs: references
+            .into_iter()
+            .map(|reference| serde_json::json!(reference))
+            .collect(),
+    });
+
+    #[cfg(test)]
+    wait_at_pre_upsert_barrier(&entry.id);
+
     if let Some(identity) = idless_identity.as_deref() {
         match upsert_idless_save_entry(
             server,
-            &entry,
+            &mut entry,
             identity,
             target_db,
             named_project.as_deref(),
+            evidence_write.as_ref(),
         )? {
             memcore::db::IdlessUpsertResult::Saved => {}
             memcore::db::IdlessUpsertResult::Duplicate { id } => {
@@ -253,7 +368,13 @@ pub(crate) async fn handle_save_memory(
             }
         }
     } else {
-        upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
+        upsert_save_entry(
+            server,
+            &mut entry,
+            target_db,
+            named_project.as_deref(),
+            evidence_write.as_ref(),
+        )?;
     }
 
     // #1435 slice 3 / #2059: write-side recall-cache bust, shared with the

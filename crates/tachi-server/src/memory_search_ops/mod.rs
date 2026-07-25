@@ -27,6 +27,7 @@ pub(crate) use rerank::{
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;
+pub(crate) use save_memory::handle_save_memory_with_evidence_refs;
 pub(crate) use save_memory::save_eval_memory;
 pub(crate) use search_helpers::client_project_precedence;
 pub(crate) use search_helpers::explicit_workspace_project;
