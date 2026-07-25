@@ -10,8 +10,16 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 #[cfg(unix)]
+use std::ffi::{CString, OsStr};
+#[cfg(unix)]
 use std::io::Write;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::path::Component;
 use std::path::Path;
 use tachi_dispatch::policy::{
     canonical_json_eq, recall_config_v3_identity_payload, RECALL_CONFIG_PROPOSAL_KIND,
@@ -89,6 +97,31 @@ fn run_recall_apply_pre_append_test_hook(
     params: &TachiMemoryParams,
     config_env_path: &Path,
 ) -> Result<(), String> {
+    #[cfg(unix)]
+    if let Some(target) = params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("test_config_parent_symlink_before_recall_append"))
+        .and_then(Value::as_str)
+    {
+        use std::os::unix::fs::symlink;
+
+        let parent = config_env_path
+            .parent()
+            .ok_or_else(|| "test hook config.env has no parent".to_string())?;
+        let mut displaced = parent.as_os_str().to_os_string();
+        displaced.push(format!(".displaced-{}", uuid::Uuid::new_v4().simple()));
+        let displaced = std::path::PathBuf::from(displaced);
+        std::fs::rename(parent, &displaced)
+            .map_err(|e| format!("test hook displace config parent {}: {e}", parent.display()))?;
+        symlink(target, parent).map_err(|e| {
+            format!(
+                "test hook symlink replacement config parent {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+
     let Some(body) = params
         .metadata
         .as_ref()
@@ -444,6 +477,12 @@ struct RecallAppendPlan {
     before_len: usize,
     append_payload: String,
     after_digest: String,
+}
+
+#[cfg(unix)]
+struct AnchoredRecallConfigParent {
+    directory: std::fs::File,
+    leaf: CString,
 }
 
 struct ValidatedRecallReceipt<'a> {
@@ -1241,29 +1280,274 @@ fn compute_recall_append_plan(
 }
 
 #[cfg(unix)]
-fn read_config_env_body(path: &Path) -> Result<String, String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            validate_recall_config_metadata(path, &metadata)?;
-            validate_recall_config_size(path, metadata.len())?;
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(err) => {
-            return Err(format!(
-                "read config.env metadata {}: {err}",
-                path.display()
-            ))
+fn open_anchored_recall_config_parent(
+    path: &Path,
+    create_missing: bool,
+) -> Result<Option<AnchoredRecallConfigParent>, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "invalid_config_path: config.env {} has no parent",
+            path.display()
+        )
+    })?;
+    let leaf = path.file_name().ok_or_else(|| {
+        format!(
+            "invalid_config_path: config.env {} has no file name",
+            path.display()
+        )
+    })?;
+    let leaf = cstring_for_path_component(leaf, path)?;
+
+    let anchor_path = if parent.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut directory = options.open(anchor_path).map_err(|err| {
+        format!(
+            "open config path anchor {} for {}: {err}",
+            anchor_path.display(),
+            path.display()
+        )
+    })?;
+
+    for component in parent.components() {
+        let name = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(name) => name,
+            Component::ParentDir => {
+                return Err(format!(
+                    "unsafe_config_parent_refused: config.env {} contains '..'",
+                    path.display()
+                ))
+            }
+            Component::Prefix(_) => {
+                return Err(format!(
+                    "unsupported_config_path: config.env {} has a platform prefix",
+                    path.display()
+                ))
+            }
+        };
+        match open_recall_directory_at(&directory, name, path) {
+            Ok(next) => directory = next,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && !create_missing => {
+                return Ok(None)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                create_recall_directory_at(&directory, name, path)?;
+                directory = open_recall_directory_at(&directory, name, path)
+                    .map_err(|err| map_recall_parent_open_error(name, path, err))?;
+            }
+            Err(err) => return Err(map_recall_parent_open_error(name, path, err)),
         }
     }
 
-    let mut file = open_existing_recall_config_read(path)?;
+    Ok(Some(AnchoredRecallConfigParent { directory, leaf }))
+}
+
+#[cfg(unix)]
+fn cstring_for_path_component(component: &OsStr, path: &Path) -> Result<CString, String> {
+    CString::new(component.as_bytes()).map_err(|_| {
+        format!(
+            "invalid_config_path: config.env {} contains a NUL byte",
+            path.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn open_recall_directory_at(
+    parent: &std::fs::File,
+    name: &OsStr,
+    path: &Path,
+) -> std::io::Result<std::fs::File> {
+    let name = cstring_for_path_component(name, path)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn create_recall_directory_at(
+    parent: &std::fs::File,
+    name: &OsStr,
+    path: &Path,
+) -> Result<(), String> {
+    let name_c = cstring_for_path_component(name, path)?;
+    let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o700) };
+    if result == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.kind() == std::io::ErrorKind::AlreadyExists {
+        return Ok(());
+    }
+    Err(format!(
+        "create config parent component {} for {}: {err}",
+        name.to_string_lossy(),
+        path.display()
+    ))
+}
+
+#[cfg(unix)]
+fn map_recall_parent_open_error(name: &OsStr, path: &Path, err: std::io::Error) -> String {
+    if matches!(err.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) {
+        format!(
+            "symlink_config_parent_refused: component {} in config.env {} is a symlink or not a directory",
+            name.to_string_lossy(),
+            path.display()
+        )
+    } else {
+        format!(
+            "open config parent component {} for {}: {err}",
+            name.to_string_lossy(),
+            path.display()
+        )
+    }
+}
+
+#[cfg(unix)]
+fn open_recall_config_leaf_at(
+    parent: &AnchoredRecallConfigParent,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> std::io::Result<std::fs::File> {
+    let fd = unsafe {
+        libc::openat(
+            parent.directory.as_raw_fd(),
+            parent.leaf.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            mode as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn map_recall_leaf_open_error(path: &Path, err: std::io::Error) -> String {
+    if err.raw_os_error() == Some(libc::ELOOP) {
+        format!(
+            "symlink_config_refused: config.env {} is a symlink",
+            path.display()
+        )
+    } else {
+        format!("open config.env {}: {err}", path.display())
+    }
+}
+
+#[cfg(unix)]
+fn assert_anchored_parent_identity(
+    path: &Path,
+    anchored: &AnchoredRecallConfigParent,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let reopened = open_anchored_recall_config_parent(path, false)?.ok_or_else(|| {
+        format!(
+            "source_identity_drift: config parent for {} disappeared",
+            path.display()
+        )
+    })?;
+    let expected = anchored.directory.metadata().map_err(|err| {
+        format!(
+            "read anchored config parent metadata {}: {err}",
+            path.display()
+        )
+    })?;
+    let observed = reopened.directory.metadata().map_err(|err| {
+        format!(
+            "read reopened config parent metadata {}: {err}",
+            path.display()
+        )
+    })?;
+    if expected.dev() != observed.dev() || expected.ino() != observed.ino() {
+        return Err(format!(
+            "source_identity_drift: config parent for {} no longer names the anchored directory",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn assert_anchored_leaf_identity(
+    path: &Path,
+    anchored: &AnchoredRecallConfigParent,
+    descriptor_metadata: &std::fs::Metadata,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            anchored.directory.as_raw_fd(),
+            anchored.leaf.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return Err(format!(
+            "source_identity_drift: inspect anchored config.env {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    if (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK {
+        return Err(format!(
+            "symlink_config_refused: config.env {} is a symlink",
+            path.display()
+        ));
+    }
+    if stat.st_dev as u64 != descriptor_metadata.dev()
+        || stat.st_ino as u64 != descriptor_metadata.ino()
+    {
+        return Err(format!(
+            "source_identity_drift: config.env {} no longer names the opened object",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_config_env_body(path: &Path) -> Result<String, String> {
+    let Some(anchored) = open_anchored_recall_config_parent(path, false)? else {
+        return Ok(String::new());
+    };
+    let mut file = match open_recall_config_leaf_at(&anchored, libc::O_RDONLY, 0) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(err) => return Err(map_recall_leaf_open_error(path, err)),
+    };
     let descriptor_metadata = file
         .metadata()
         .map_err(|err| format!("read open config.env metadata {}: {err}", path.display()))?;
     validate_recall_config_metadata(path, &descriptor_metadata)?;
-    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
     let source = read_recall_config_descriptor(&mut file, path)?;
-    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
     Ok(source)
 }
 
@@ -1506,46 +1790,37 @@ fn append_recall_config_env(
     expected_append_payload: &str,
     params: &TachiMemoryParams,
 ) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create config.env parent {}: {e}", parent.display()))?;
-    }
-
-    let mut file = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            validate_recall_config_metadata(path, &metadata)?;
-            open_existing_recall_config(path)?
-        }
+    let anchored = open_anchored_recall_config_parent(path, true)?.ok_or_else(|| {
+        format!(
+            "create config.env parent {}: component traversal returned no directory",
+            path.display()
+        )
+    })?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    let mut file = match open_recall_config_leaf_at(&anchored, libc::O_RDWR | libc::O_APPEND, 0) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let mut options = std::fs::OpenOptions::new();
-            options
-                .read(true)
-                .append(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-            match options.open(path) {
+            match open_recall_config_leaf_at(
+                &anchored,
+                libc::O_RDWR | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            ) {
                 Ok(file) => file,
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    open_existing_recall_config(path)?
+                    open_recall_config_leaf_at(&anchored, libc::O_RDWR | libc::O_APPEND, 0)
+                        .map_err(|err| map_recall_leaf_open_error(path, err))?
                 }
-                Err(err) => return Err(format!("create config.env {}: {err}", path.display())),
+                Err(err) => return Err(map_recall_leaf_open_error(path, err)),
             }
         }
-        Err(err) => {
-            return Err(format!(
-                "read config.env metadata {}: {err}",
-                path.display()
-            ))
-        }
+        Err(err) => return Err(map_recall_leaf_open_error(path, err)),
     };
     let descriptor_metadata = file
         .metadata()
         .map_err(|err| format!("read open config.env metadata {}: {err}", path.display()))?;
     validate_recall_config_metadata(path, &descriptor_metadata)?;
-    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
 
     let existing = read_recall_config_descriptor(&mut file, path)?;
     let Some(initial_progress) = recall_append_progress(
@@ -1572,7 +1847,8 @@ fn append_recall_config_env(
     }
 
     run_recall_apply_pre_append_test_hook(params, path)?;
-    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
     let revalidated = read_recall_config_descriptor(&mut file, path)?;
     let Some(revalidated_progress) = recall_append_progress(
         &revalidated,
@@ -1597,7 +1873,8 @@ fn append_recall_config_env(
         .map_err(|err| format!("append recall config.env {}: {err}", path.display()))?;
     file.sync_all()
         .map_err(|err| format!("fsync recall config.env {}: {err}", path.display()))?;
-    assert_recall_config_path_identity(path, &descriptor_metadata)?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
     let appended = read_recall_config_descriptor(&mut file, path)?;
     let appended_revision = digest_config_env_source(&appended);
     if appended_revision != expected_after_revision {
@@ -1606,48 +1883,10 @@ fn append_recall_config_env(
             path.display()
         ));
     }
-    sync_recall_config_parent(path)
-}
-
-#[cfg(unix)]
-fn open_existing_recall_config(path: &Path) -> Result<std::fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut options = std::fs::OpenOptions::new();
-    options
-        .read(true)
-        .append(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    options.open(path).map_err(|err| {
-        if err.raw_os_error() == Some(libc::ELOOP) {
-            format!(
-                "symlink_config_refused: config.env {} is a symlink; refusing to apply without a stable object identity",
-                path.display()
-            )
-        } else {
-            format!("open config.env {} for append: {err}", path.display())
-        }
-    })
-}
-
-#[cfg(unix)]
-fn open_existing_recall_config_read(path: &Path) -> Result<std::fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut options = std::fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    options.open(path).map_err(|err| {
-        if err.raw_os_error() == Some(libc::ELOOP) {
-            format!(
-                "symlink_config_refused: config.env {} is a symlink; refusing to read without a stable object identity",
-                path.display()
-            )
-        } else {
-            format!("open config.env {} for read: {err}", path.display())
-        }
-    })
+    anchored
+        .directory
+        .sync_all()
+        .map_err(|err| format!("fsync anchored config.env parent {}: {err}", path.display()))
 }
 
 #[cfg(unix)]
@@ -1674,31 +1913,6 @@ fn validate_recall_config_size(path: &Path, size: u64) -> Result<(), String> {
     if size > MAX_RECALL_CONFIG_ENV_BYTES as u64 {
         return Err(format!(
             "config_env_too_large: config.env {} is {size} bytes, maximum is {MAX_RECALL_CONFIG_ENV_BYTES}",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn assert_recall_config_path_identity(
-    path: &Path,
-    descriptor_metadata: &std::fs::Metadata,
-) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-
-    let path_metadata = std::fs::symlink_metadata(path).map_err(|err| {
-        format!(
-            "source_identity_drift: config.env {} cannot be inspected after opening: {err}",
-            path.display()
-        )
-    })?;
-    validate_recall_config_metadata(path, &path_metadata)?;
-    if path_metadata.dev() != descriptor_metadata.dev()
-        || path_metadata.ino() != descriptor_metadata.ino()
-    {
-        return Err(format!(
-            "source_identity_drift: config.env {} no longer names the opened object; refusing to append or finalize",
             path.display()
         ));
     }
@@ -1741,6 +1955,17 @@ fn append_recall_config_env(
     ))
 }
 
+#[cfg(unix)]
+fn sync_recall_config_parent(path: &Path) -> Result<(), String> {
+    let anchored = open_anchored_recall_config_parent(path, false)?
+        .ok_or_else(|| format!("fsync config.env parent: {} does not exist", path.display()))?;
+    anchored
+        .directory
+        .sync_all()
+        .map_err(|err| format!("fsync anchored config.env parent {}: {err}", path.display()))
+}
+
+#[cfg(not(unix))]
 fn sync_recall_config_parent(path: &Path) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| {
         format!(

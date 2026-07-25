@@ -1,6 +1,26 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
+fn make_server_with_temp_home() -> (crate::MemoryServer, crate::tests::TempHomeGuard) {
+    crate::tests::ensure_test_env();
+    let mut temp_home = crate::tests::TempHomeGuard::new();
+    temp_home.temp_home = temp_home
+        .temp_home
+        .canonicalize()
+        .expect("canonicalize recall test home");
+    std::env::set_var("HOME", &temp_home.temp_home);
+    std::env::set_var("TACHI_HOME", temp_home.temp_home.join(".tachi"));
+    std::env::set_var("TACHI_RUN_ROOT", temp_home.temp_home.join(".tachi/runs"));
+
+    let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
+    std::fs::create_dir_all(global_db.parent().expect("global db parent"))
+        .expect("create global db dir");
+    crate::tests::copy_template_db(&global_db);
+    let server = crate::MemoryServer::new(global_db, None).expect("failed to create test server");
+    (server, temp_home)
+}
+
 #[tokio::test]
 async fn tachi_memory_recall_proposals_review_and_apply_config_env() {
     let (server, temp_home) = make_server_with_temp_home();
@@ -1891,6 +1911,123 @@ async fn recall_apply_refuses_symlinked_config_env_loudly() {
         before_row,
         "symlink refusal must not mutate the approved proposal row"
     );
+}
+
+/// Every parent component is part of the config identity boundary. Even when
+/// an outside config has byte-identical approved content, a symlinked `.tachi`
+/// parent must refuse before the approved proposal or outside file changes.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_refuses_symlinked_config_parent_before_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_parent = temp_home.temp_home.join(".tachi");
+    let config_env_path = config_parent.join("config.env");
+    std::fs::create_dir_all(&config_parent).expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "symlink-parent");
+
+    let proposal = generate_recall_source_proposal(&server, "symlink-parent").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+    let before_row = read_recall_row(&server, &proposal_id);
+
+    let displaced_parent = temp_home.temp_home.join(".tachi.displaced");
+    std::fs::rename(&config_parent, &displaced_parent).expect("displace real config parent");
+    let outside = tempfile::tempdir().expect("outside config dir");
+    let outside_config = outside.path().join("config.env");
+    std::fs::write(&outside_config, source).expect("seed byte-identical outside config");
+    symlink(outside.path(), &config_parent).expect("symlink config parent outside");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("symlinked config parent must refuse before apply mutation");
+    assert!(
+        err.contains("symlink_config_parent_refused"),
+        "unexpected parent-symlink refusal: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        before_row,
+        "parent-symlink refusal must leave the approved row byte-identical"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_config).expect("read outside config"),
+        source,
+        "parent traversal refusal must not append to the outside config"
+    );
+    assert_eq!(
+        std::fs::read_to_string(displaced_parent.join("config.env"))
+            .expect("read displaced config"),
+        source,
+        "parent traversal refusal must not mutate the displaced real config"
+    );
+}
+
+/// If the verified parent is replaced by a symlink after the applying receipt
+/// is stamped, re-opening the component chain must refuse before descriptor
+/// append. The outside target survives and the row remains recoverable.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_parent_replacement_race_refuses_without_outside_write() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_parent = temp_home.temp_home.join(".tachi");
+    let config_env_path = config_parent.join("config.env");
+    std::fs::create_dir_all(&config_parent).expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "parent-replacement-race");
+
+    let proposal = generate_recall_source_proposal(&server, "parent-replacement-race").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let outside = tempfile::tempdir().expect("outside config dir");
+    let outside_config = outside.path().join("config.env");
+    std::fs::write(&outside_config, source).expect("seed byte-identical outside config");
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    apply.metadata = Some(json!({
+        "test_config_parent_symlink_before_recall_append": outside.path().display().to_string(),
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("parent replacement race must refuse before append");
+    assert!(
+        err.contains("symlink_config_parent_refused"),
+        "unexpected parent replacement refusal: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_config).expect("read outside config"),
+        source,
+        "replacement race must not append through the new parent symlink"
+    );
+    let (raw, _) = read_recall_row(&server, &proposal_id);
+    let row: Value = serde_json::from_str(&raw).expect("applying row JSON");
+    assert_eq!(row["status"], json!("applying"));
+    assert!(row["applying_receipt"].is_object());
 }
 
 /// Non-Unix has no equivalent to the descriptor/no-follow identity protocol.
