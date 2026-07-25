@@ -1,5 +1,5 @@
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
@@ -337,6 +337,17 @@ pub fn get_edges(
     direction: &str,
     relation_filter: Option<&str>,
 ) -> Result<Vec<MemoryEdge>, MemoryError> {
+    get_edges_limited(conn, memory_id, direction, relation_filter, usize::MAX)
+}
+
+/// Get edges connected to a memory ID with the row ceiling applied by SQLite.
+pub fn get_edges_limited(
+    conn: &Connection,
+    memory_id: &str,
+    direction: &str,
+    relation_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MemoryEdge>, MemoryError> {
     let base_sql = match direction {
         "incoming" =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE target_id = ?1
@@ -351,9 +362,15 @@ pub fn get_edges(
 
     // Use parameterized query for relation_filter to prevent SQL injection
     let full_sql = if relation_filter.is_some() {
-        format!("{} AND relation = ?2", base_sql)
+        format!(
+            "{} AND relation = ?2 ORDER BY source_id ASC, target_id ASC, relation ASC LIMIT ?3",
+            base_sql
+        )
     } else {
-        base_sql.to_string()
+        format!(
+            "{} ORDER BY source_id ASC, target_id ASC, relation ASC LIMIT ?2",
+            base_sql
+        )
     };
 
     let mut stmt = conn.prepare(&full_sql)?;
@@ -373,12 +390,13 @@ pub fn get_edges(
     };
 
     let mut edges = Vec::new();
+    let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
     if let Some(rel) = relation_filter {
-        for row in stmt.query_map(params![memory_id, rel], row_mapper)? {
+        for row in stmt.query_map(params![memory_id, rel, sql_limit], row_mapper)? {
             edges.push(row?);
         }
     } else {
-        for row in stmt.query_map(params![memory_id], row_mapper)? {
+        for row in stmt.query_map(params![memory_id, sql_limit], row_mapper)? {
             edges.push(row?);
         }
     }
@@ -390,10 +408,10 @@ fn get_edges_batch(
     conn: &Connection,
     ids: &[String],
     relation_filter: Option<&str>,
-) -> Result<HashMap<String, Vec<MemoryEdge>>, MemoryError> {
-    use std::collections::HashMap;
+    limit: usize,
+) -> Result<Vec<MemoryEdge>, MemoryError> {
     if ids.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(Vec::new());
     }
 
     let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(", ");
@@ -407,9 +425,12 @@ fn get_edges_batch(
     );
 
     let full_sql = if relation_filter.is_some() {
-        format!("{base_sql} AND relation = ?")
+        format!(
+            "{base_sql} AND relation = ? \
+             ORDER BY source_id ASC, target_id ASC, relation ASC LIMIT ?"
+        )
     } else {
-        base_sql
+        format!("{base_sql} ORDER BY source_id ASC, target_id ASC, relation ASC LIMIT ?")
     };
 
     let mut stmt = conn.prepare(&full_sql)?;
@@ -428,31 +449,25 @@ fn get_edges_batch(
         })
     };
 
-    let mut params: Vec<&str> = Vec::with_capacity(ids.len() * 2 + 1);
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+        Vec::with_capacity(ids.len() * 2 + 2);
     for id in ids {
-        params.push(id.as_str());
+        param_values.push(Box::new(id.clone()));
     }
     for id in ids {
-        params.push(id.as_str());
+        param_values.push(Box::new(id.clone()));
     }
     if let Some(rel) = relation_filter {
-        params.push(rel);
+        param_values.push(Box::new(rel.to_string()));
     }
+    param_values.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
 
-    let mut result: HashMap<String, Vec<MemoryEdge>> = HashMap::new();
-    for id in ids {
-        result.insert(id.clone(), Vec::new());
-    }
-
-    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), row_mapper)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|value| value.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), row_mapper)?;
+    let mut result = Vec::new();
     for edge in rows {
-        let edge = edge?;
-        if let Some(entry) = result.get_mut(&edge.source_id) {
-            entry.push(edge.clone());
-        }
-        if let Some(entry) = result.get_mut(&edge.target_id) {
-            entry.push(edge);
-        }
+        result.push(edge?);
     }
 
     Ok(result)
@@ -532,11 +547,23 @@ pub fn graph_expand(
     max_hops: u32,
     relation_filter: Option<&str>,
 ) -> Result<GraphExpandResult, MemoryError> {
+    graph_expand_limited(conn, seed_ids, max_hops, relation_filter, usize::MAX)
+}
+
+/// BFS graph expansion with a global edge ceiling enforced in each SQLite batch.
+pub fn graph_expand_limited(
+    conn: &Connection,
+    seed_ids: &[String],
+    max_hops: u32,
+    relation_filter: Option<&str>,
+    edge_limit: usize,
+) -> Result<GraphExpandResult, MemoryError> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
     let mut visited: HashSet<String> = HashSet::new();
     let mut distances: HashMap<String, u32> = HashMap::new();
     let mut all_edges: Vec<MemoryEdge> = Vec::new();
+    let mut seen_edges: HashSet<(String, String, String)> = HashSet::new();
     let mut queue: VecDeque<(String, u32)> = VecDeque::new();
 
     for id in seed_ids {
@@ -569,21 +596,47 @@ pub fn graph_expand(
             break;
         }
 
-        let edges_batch = get_edges_batch(conn, &frontier, relation_filter)?;
-        for (node_id, edges) in &edges_batch {
-            for edge in edges {
-                let neighbor = if &edge.source_id == node_id {
-                    &edge.target_id
-                } else {
-                    &edge.source_id
-                };
+        let remaining_edges = edge_limit.saturating_sub(all_edges.len());
+        if remaining_edges == 0 {
+            break;
+        }
+        // A later frontier can encounter every edge already accumulated. Allow
+        // those rows within this bounded query without reducing the unseen-edge
+        // budget, while never fetching more than the global edge ceiling.
+        let batch_limit = remaining_edges.saturating_add(seen_edges.len());
+        let frontier_ids: HashSet<&str> = frontier.iter().map(String::as_str).collect();
+        let edges_batch = get_edges_batch(conn, &frontier, relation_filter, batch_limit)?;
+        for edge in edges_batch {
+            if all_edges.len() >= edge_limit {
+                break;
+            }
+            let edge_key = (
+                edge.source_id.clone(),
+                edge.target_id.clone(),
+                edge.relation.clone(),
+            );
+            if !seen_edges.insert(edge_key) {
+                continue;
+            }
+
+            for neighbor in [
+                frontier_ids
+                    .contains(edge.source_id.as_str())
+                    .then_some(&edge.target_id),
+                frontier_ids
+                    .contains(edge.target_id.as_str())
+                    .then_some(&edge.source_id),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 if visited.insert(neighbor.clone()) {
                     let new_depth = current_depth + 1;
                     distances.insert(neighbor.clone(), new_depth);
                     queue.push_back((neighbor.clone(), new_depth));
                 }
             }
-            all_edges.extend(edges.iter().cloned());
+            all_edges.push(edge);
         }
 
         if visited.len() >= MAX_NODES {
@@ -605,12 +658,9 @@ pub fn graph_expand(
         map.into_values().collect()
     };
 
-    // Deduplicate edges
+    // Keep the stable ordering the legacy result exposed after deduplication.
     all_edges.sort_by(|a, b| {
         (&a.source_id, &a.target_id, &a.relation).cmp(&(&b.source_id, &b.target_id, &b.relation))
-    });
-    all_edges.dedup_by(|a, b| {
-        a.source_id == b.source_id && a.target_id == b.target_id && a.relation == b.relation
     });
 
     Ok(GraphExpandResult {

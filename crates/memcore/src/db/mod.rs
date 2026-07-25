@@ -86,14 +86,15 @@ pub use gc_candidates::{
 pub use graph::{
     add_component_governance_edge, add_component_governance_edge_with_provenance, add_edge,
     add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
-    count_same_topic, get_contradiction_count, get_edges, get_superseded_ids, graph_expand,
-    invalidate_observation, list_observations_for_edge, remove_edge, EdgeObservation,
-    EdgeProvenance,
+    count_same_topic, get_contradiction_count, get_edges, get_edges_limited, get_superseded_ids,
+    graph_expand, graph_expand_limited, invalidate_observation, list_observations_for_edge,
+    remove_edge, EdgeObservation, EdgeProvenance,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{
-    hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome, hub_record_feedback,
-    hub_search, hub_set_active_version_route, hub_set_enabled, hub_set_review, hub_upsert,
+    hub_get, hub_get_active_version_route, hub_list, hub_list_limited, hub_record_call_outcome,
+    hub_record_feedback, hub_search, hub_search_limited, hub_set_active_version_route,
+    hub_set_enabled, hub_set_review, hub_upsert,
 };
 #[cfg(test)]
 pub(crate) use memory_crud::record_access;

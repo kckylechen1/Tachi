@@ -70,6 +70,17 @@ impl MemoryStore {
         db::get_edges(&self.conn, memory_id, direction, relation_filter)
     }
 
+    /// Get connected edges with a database-enforced row ceiling.
+    pub fn get_edges_limited(
+        &self,
+        memory_id: &str,
+        direction: &str,
+        relation_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryEdge>, MemoryError> {
+        db::get_edges_limited(&self.conn, memory_id, direction, relation_filter, limit)
+    }
+
     /// BFS expansion from seed IDs through the memory graph.
     pub fn graph_expand(
         &self,
@@ -78,6 +89,17 @@ impl MemoryStore {
         relation_filter: Option<&str>,
     ) -> Result<GraphExpandResult, MemoryError> {
         db::graph_expand(&self.conn, seed_ids, max_hops, relation_filter)
+    }
+
+    /// Expand the graph with a global edge ceiling enforced in SQLite batches.
+    pub fn graph_expand_limited(
+        &self,
+        seed_ids: &[String],
+        max_hops: u32,
+        relation_filter: Option<&str>,
+        edge_limit: usize,
+    ) -> Result<GraphExpandResult, MemoryError> {
+        db::graph_expand_limited(&self.conn, seed_ids, max_hops, relation_filter, edge_limit)
     }
 
     /// Count active contradiction edges connected to a memory entry.
