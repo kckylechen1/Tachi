@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
-    let server = make_server();
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
 
     let bad = server
         .tachi_wiki_write(Parameters(WikiWriteParams {
