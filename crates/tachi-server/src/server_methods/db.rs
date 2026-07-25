@@ -766,6 +766,13 @@ mod resolve_named_project_tests {
                 MemoryStore::open(local_db.to_str().expect("project DB path"))
                     .expect("seed project DB"),
             );
+            crate::test_support::with_unrestricted_fixture_connection(&local_db, |connection| {
+                connection.execute_batch(
+                    "CREATE TABLE alias_open_probe (value INTEGER NOT NULL);
+                     INSERT INTO alias_open_probe VALUES (7);",
+                )
+            })
+            .expect("seed alias-open probe fixture");
             let target_identity = {
                 let metadata = std::fs::metadata(&local_db).expect("project DB metadata");
                 (metadata.dev(), metadata.ino())
@@ -778,19 +785,6 @@ mod resolve_named_project_tests {
 
             let global_db = tmp.path().join("global.db");
             let server = MemoryServer::new(global_db, None).expect("server");
-            server
-                .with_named_project_store(&project_name, |store| {
-                    store
-                        .connection()
-                        .execute("CREATE TABLE alias_open_probe (value INTEGER NOT NULL)", [])
-                        .map_err(|error| error.to_string())?;
-                    store
-                        .connection()
-                        .execute("INSERT INTO alias_open_probe VALUES (7)", [])
-                        .map_err(|error| error.to_string())?;
-                    Ok(())
-                })
-                .expect("write through valid Plan C alias");
             let value: i64 = server
                 .with_named_project_store_read(&project_name, |store| {
                     store
