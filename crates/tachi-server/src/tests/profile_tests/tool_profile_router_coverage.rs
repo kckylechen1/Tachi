@@ -522,7 +522,7 @@ fn f1098_live_action_inventory_has_explicit_effect_metadata() {
 
 /// #1098 acceptance: "dynamically enumerate every ... direct tool route;
 /// every routable operation has effect/replay metadata or fails closed." This
-/// dynamically walks the real, live router and proves the deny predicate runs
+/// dynamically walks the real, live router and proves the replay authority runs
 /// clean end to end for every tool name the server actually exposes today.
 ///
 /// codex review (PR #1213, checkpoint 3): the pre-fix-round version of this
@@ -531,14 +531,14 @@ fn f1098_live_action_inventory_has_explicit_effect_metadata() {
 /// unit test in `action_effect` checks in isolation), that every currently
 /// registered cache-invalidating standalone route this fix round fixed
 /// (`remember`/`extract_facts`/`ingest_event`) really does classify unsafe
-/// end to end through `shared_defs::dlq_mutation_is_unsafe` — catching a
+/// end to end through `shared_defs::dlq_replay_is_explicitly_safe` — catching a
 /// future regression where the route stays registered but drops out of
 /// `STANDALONE_UNSAFE_ROUTES`.
 #[test]
 fn f1098_every_live_native_route_classifies_without_panicking() {
     let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
     for name in &route_names {
-        let _ = crate::shared_defs::dlq_mutation_is_unsafe(name, None);
+        let _ = crate::shared_defs::dlq_replay_is_explicitly_safe(name, None);
     }
 
     for fixed_route in ["remember", "extract_facts", "ingest_event"] {
@@ -548,7 +548,7 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
              #1213 fail-open fix to mean anything"
         );
         assert!(
-            crate::shared_defs::dlq_mutation_is_unsafe(fixed_route, None),
+            !crate::shared_defs::dlq_replay_is_explicitly_safe(fixed_route, None),
             "'{fixed_route}' must classify unsafe-to-replay through the live \
              router (PR #1213 checkpoint 4 fix)"
         );

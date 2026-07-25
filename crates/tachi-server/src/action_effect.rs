@@ -437,15 +437,6 @@ pub(crate) fn dlq_replay_is_explicitly_safe(
     dlq_replay_metadata(tool_name, arguments).is_some_and(ActionEffectMetadata::permits_dlq_replay)
 }
 
-/// Compatibility predicate for callers that only need a deny decision. An
-/// unclassified route is unsafe for automatic replay, not safe by omission.
-pub(crate) fn dlq_mutation_is_unsafe(
-    tool_name: &str,
-    arguments: Option<&serde_json::Map<String, Value>>,
-) -> bool {
-    !dlq_replay_is_explicitly_safe(tool_name, arguments)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,14 +446,14 @@ mod tests {
         let args = action.map(|a| {
             serde_json::Map::from_iter([("action".to_string(), Value::String(a.to_string()))])
         });
-        dlq_mutation_is_unsafe(tool_name, args.as_ref())
+        !dlq_replay_is_explicitly_safe(tool_name, args.as_ref())
     }
 
     // ── Clause 1: external routes cannot borrow local authority ─────────────
 
     #[test]
     fn f1098_remote_prefixed_facade_mutation_is_no_longer_a_bypass() {
-        // Pre-#1098: dlq_mutation_is_unsafe compared the FACADE tuple against
+        // Pre-#1098: the deny predicate compared the FACADE tuple against
         // the raw name "remote__tachi_memory", which never matched
         // "tachi_memory" exactly, so this returned `false` (safe to replay) —
         // the exact bug the owner's adjudication comment named.

@@ -57,19 +57,6 @@ pub(super) fn categorize_error(error: &str) -> String {
     }
 }
 
-/// Returns true when replaying the tool through DLQ could duplicate writes.
-/// #1098: delegates to the single typed action-effect authority
-/// (`crate::action_effect`) instead of maintaining its own
-/// `NON_IDEMPOTENT_TOOL_NAMES` / `FACADE_MUTATING_ACTIONS` string tables —
-/// that module rejects proxy-qualified names before local classification,
-/// closing the remote-prefix bypass those hand-rolled tables were prone to.
-pub(super) fn dlq_mutation_is_unsafe(
-    tool_name: &str,
-    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> bool {
-    crate::action_effect::dlq_mutation_is_unsafe(tool_name, arguments)
-}
-
 pub(super) fn dlq_replay_is_explicitly_safe(
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -326,32 +313,32 @@ mod dlq_tests {
     }
 
     #[test]
-    fn dlq_mutation_is_unsafe_for_write_tools_and_hub_call() {
-        assert!(dlq_mutation_is_unsafe("save_memory", None));
-        assert!(dlq_mutation_is_unsafe("hub_call", None));
-        assert!(dlq_mutation_is_unsafe("remote__save_memory", None));
-        assert!(dlq_mutation_is_unsafe(
+    fn dlq_replay_authority_rejects_write_tools_and_hub_call() {
+        assert!(!dlq_replay_is_explicitly_safe("save_memory", None));
+        assert!(!dlq_replay_is_explicitly_safe("hub_call", None));
+        assert!(!dlq_replay_is_explicitly_safe("remote__save_memory", None));
+        assert!(!dlq_replay_is_explicitly_safe(
             "tachi_memory",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
                 json!("save")
             )]))
         ));
-        assert!(dlq_mutation_is_unsafe(
+        assert!(!dlq_replay_is_explicitly_safe(
             "tachi_memory",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
                 json!("search")
             )]))
         ));
-        assert!(dlq_mutation_is_unsafe(
+        assert!(!dlq_replay_is_explicitly_safe(
             "tachi_event",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
                 json!("emit")
             )]))
         ));
-        assert!(!dlq_mutation_is_unsafe(
+        assert!(dlq_replay_is_explicitly_safe(
             "tachi_event",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
