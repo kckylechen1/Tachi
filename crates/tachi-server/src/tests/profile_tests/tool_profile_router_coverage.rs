@@ -435,60 +435,89 @@ fn f1098_cache_policy_entries_are_live_registered_routes() {
     }
 }
 
-fn action_arguments_from_live_schema(
-    tool: &rmcp::model::Tool,
-) -> Vec<Option<serde_json::Map<String, serde_json::Value>>> {
-    let schema = serde_json::to_value(&tool.input_schema)
-        .expect("live MCP tool input schema must serialize for DLQ coverage");
-    let Some(actions) = schema
-        .pointer("/properties/action/enum")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return vec![None];
-    };
-
-    actions
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(|action| {
-            Some(serde_json::Map::from_iter([(
-                "action".to_string(),
-                serde_json::Value::String(action.to_string()),
-            )]))
-        })
-        .collect()
+enum LiveActionInventory {
+    Absent,
+    Unbounded,
+    Enumerated(Vec<String>),
 }
 
-/// #1098 / #1170 ratchet: enumerate the live registered router and each
-/// facade's advertised action enum. A route is admitted only when the actual
-/// typed authority marks it Safe; absent metadata has the same fail-closed
-/// outcome, and the retry boundary names that missing authority to callers.
+fn action_inventory_from_live_schema(tool: &rmcp::model::Tool) -> LiveActionInventory {
+    let schema = serde_json::to_value(&tool.input_schema)
+        .expect("live MCP tool input schema must serialize for effect coverage");
+    let Some(action_schema) = schema.pointer("/properties/action") else {
+        return LiveActionInventory::Absent;
+    };
+    let Some(actions) = action_schema
+        .get("enum")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return LiveActionInventory::Unbounded;
+    };
+    LiveActionInventory::Enumerated(
+        actions
+            .iter()
+            .map(|action| {
+                action
+                    .as_str()
+                    .expect("action enums must contain strings")
+                    .to_string()
+            })
+            .collect(),
+    )
+}
+
+/// #1098 / #1170 ratchet: enumerate the live registered router and compare each
+/// advertised action enum to the independent typed effect map. An action newly
+/// added to a schema must be added to that map explicitly; an invented action
+/// must have no metadata and therefore fail closed at the production gate.
 #[test]
-fn f1098_live_router_replay_admission_is_explicit_or_fail_closed() {
+fn f1098_live_action_inventory_has_explicit_effect_metadata() {
+    let mut missing_effects = Vec::new();
+    let mut implicit_unknowns = Vec::new();
+
     for tool in native_route_definitions() {
         let tool_name = tool.name.to_string();
-        for arguments in action_arguments_from_live_schema(&tool) {
-            let native_admission =
-                crate::shared_defs::should_enqueue_dlq(&tool_name, arguments.as_ref(), true);
-            assert!(
-                !native_admission,
-                "native route '{tool_name}' must never enter the generic DLQ"
-            );
-
-            if tool_name.starts_with("dlq_")
-                || tool_name.starts_with("ghost_")
-                || tool_name == "get_pipeline_status"
-            {
+        let actions = match action_inventory_from_live_schema(&tool) {
+            LiveActionInventory::Absent => continue,
+            LiveActionInventory::Unbounded => {
+                assert!(
+                    crate::action_effect::facade_action_effect(
+                        &tool_name,
+                        Some("__action_without_schema_inventory"),
+                    )
+                    .is_none(),
+                    "{tool_name} has no action enum but grants per-action effect metadata"
+                );
                 continue;
             }
+            LiveActionInventory::Enumerated(actions) => actions,
+        };
 
-            assert_eq!(
-                crate::shared_defs::should_enqueue_dlq(&tool_name, arguments.as_ref(), false,),
-                crate::action_effect::dlq_replay_is_explicitly_safe(&tool_name, arguments.as_ref(),),
-                "live route '{tool_name}' must be admitted only by explicit typed replay metadata"
-            );
+        for action in &actions {
+            let metadata = crate::action_effect::facade_action_effect(&tool_name, Some(action));
+            if metadata.is_none() {
+                missing_effects.push(format!("{tool_name}(action='{action}')"));
+            }
+        }
+
+        if crate::action_effect::facade_action_effect(
+            &tool_name,
+            Some("__new_action_without_effect_authority"),
+        )
+        .is_some()
+        {
+            implicit_unknowns.push(tool_name);
         }
     }
+
+    assert!(
+        missing_effects.is_empty(),
+        "live actions missing explicit typed effect mappings: {missing_effects:?}"
+    );
+    assert!(
+        implicit_unknowns.is_empty(),
+        "action schemas granting implicit metadata to new actions: {implicit_unknowns:?}"
+    );
 }
 
 /// #1098 acceptance: "dynamically enumerate every ... direct tool route;

@@ -84,8 +84,8 @@ async fn retry_dispatch_rejects_native_write_tools() {
 
 /// #1098 / #1170: the DLQ retry boundary must not treat a route it cannot
 /// classify as safe merely because it is not in an old mutation deny-list.
-/// The disabled capability is intentional: the safe read must get past the
-/// replay gate and reach real proxy governance, without spawning a child MCP.
+/// The disabled capability is intentional: a malicious proxy alias must be
+/// rejected by the replay gate before real proxy governance can dispatch it.
 #[tokio::test]
 async fn f1098_retry_requires_an_explicit_safe_effect_classification() {
     let server = make_server();
@@ -153,14 +153,66 @@ async fn f1098_retry_requires_an_explicit_safe_effect_classification() {
         );
     }
 
-    let safe_read_args = serde_json::Map::from_iter([("action".to_string(), json!("search"))]);
+    let aliased_read_args = serde_json::Map::from_iter([("action".to_string(), json!("search"))]);
     let err = server
-        .retry_dispatch("remote__tachi_memory", Some(safe_read_args))
+        .retry_dispatch("remote__tachi_memory", Some(aliased_read_args))
         .await
-        .expect_err("the disabled test capability should reject after replay dispatch");
+        .expect_err("external proxy aliases must not borrow local facade replay authority");
     assert!(
-        err.to_string().contains("not callable"),
-        "known safe read must reach proxy replay dispatch, got: {err}"
+        err.to_string()
+            .contains("explicit typed action-effect classification"),
+        "malicious remote alias bypassed the replay classification gate: {err}"
+    );
+}
+
+#[tokio::test]
+async fn f1098_telemetry_writing_searches_are_not_dlq_replayable() {
+    let server = make_server();
+
+    let cases = [
+        (
+            "search_memory",
+            serde_json::Map::from_iter([("query".to_string(), json!("audit trail"))]),
+        ),
+        (
+            "tachi_memory",
+            serde_json::Map::from_iter([
+                ("action".to_string(), json!("search")),
+                ("query".to_string(), json!("audit trail")),
+            ]),
+        ),
+    ];
+
+    for (tool_name, arguments) in cases {
+        let err = server
+            .retry_dispatch(tool_name, Some(arguments))
+            .await
+            .expect_err("record_access=true searches must not replay through the DLQ");
+        assert!(
+            err.to_string()
+                .contains("explicit typed action-effect classification"),
+            "telemetry-writing {tool_name} bypassed the replay classification gate: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn f1098_known_safe_local_read_retains_typed_replay_authority() {
+    let server = make_server();
+    let arguments = serde_json::Map::from_iter([("action".to_string(), json!("metrics"))]);
+
+    let err = server
+        .retry_dispatch("tachi_event", Some(arguments))
+        .await
+        .expect_err("native routes still require an explicit MCP retry");
+    assert!(
+        err.to_string().contains("native or non-idempotent"),
+        "known safe read did not pass the typed replay gate: {err}"
+    );
+    assert!(
+        !err.to_string()
+            .contains("no explicit typed action-effect classification"),
+        "known safe read lost its typed replay authority: {err}"
     );
 }
 

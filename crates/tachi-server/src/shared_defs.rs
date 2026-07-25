@@ -61,8 +61,8 @@ pub(super) fn categorize_error(error: &str) -> String {
 /// #1098: delegates to the single typed action-effect authority
 /// (`crate::action_effect`) instead of maintaining its own
 /// `NON_IDEMPOTENT_TOOL_NAMES` / `FACADE_MUTATING_ACTIONS` string tables —
-/// that module canonicalizes `tool_name` before classifying it, closing the
-/// remote-prefix bypass those two hand-rolled tables were prone to.
+/// that module rejects proxy-qualified names before local classification,
+/// closing the remote-prefix bypass those hand-rolled tables were prone to.
 pub(super) fn dlq_mutation_is_unsafe(
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -337,7 +337,7 @@ mod dlq_tests {
                 json!("save")
             )]))
         ));
-        assert!(!dlq_mutation_is_unsafe(
+        assert!(dlq_mutation_is_unsafe(
             "tachi_memory",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
@@ -372,9 +372,8 @@ mod dlq_tests {
     /// `remote__tachi_memory(action='save')` failing through a non-native
     /// (proxied) route used to pass the facade name match (raw name vs.
     /// canonical) and enter the DLQ, where it could be auto-replayed and
-    /// duplicate the write. Discrimination: red before #1098's
-    /// canonicalization fix (`should_enqueue_dlq` returned `true` here),
-    /// green after.
+    /// duplicate the write. All proxy-qualified names now fail closed because
+    /// the server has no per-remote-tool replay authority.
     #[test]
     fn f1098_should_enqueue_dlq_closes_remote_facade_mutation_bypass() {
         for action in [
@@ -398,15 +397,21 @@ mod dlq_tests {
                 "remote__tachi_event(action='{action}') must not enter the DLQ"
             );
         }
-        // A read-only failure through the same remote prefix still enters the
-        // normal (non-mutating) DLQ path — acceptance: "Read-only failures
-        // never enter a mutating DLQ path" does not mean they're excluded
-        // from the DLQ altogether, only that mutation classification never
-        // wrongly excludes them or wrongly admits an unsafe mutation.
-        let read_args = serde_json::Map::from_iter([("action".to_string(), json!("search"))]);
+        let aliased_read_args =
+            serde_json::Map::from_iter([("action".to_string(), json!("metrics"))]);
+        assert!(!should_enqueue_dlq(
+            "remote__tachi_event",
+            Some(&aliased_read_args),
+            false
+        ));
+
+        // Local read-only classification remains available to callers that
+        // have independently established a non-native replay boundary.
+        let local_read_args =
+            serde_json::Map::from_iter([("action".to_string(), json!("metrics"))]);
         assert!(should_enqueue_dlq(
-            "remote__tachi_memory",
-            Some(&read_args),
+            "tachi_event",
+            Some(&local_read_args),
             false
         ));
     }

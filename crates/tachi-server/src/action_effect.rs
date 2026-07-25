@@ -5,25 +5,20 @@
 //! `NON_IDEMPOTENT_TOOL_NAMES` + `FACADE_MUTATING_ACTIONS` string tables,
 //! `server_state::cache`'s `CACHEABLE_TOOLS` + `CACHE_INVALIDATING_TOOLS`
 //! string tables, `server_handler`'s DLQ-admission call site, and
-//! `server_methods::skill`'s retry gate. Exact-name facade matching also let
-//! a canonicalized/remote-prefixed route (`remote__tachi_memory`) bypass
-//! mutation classification entirely, because the facade check compared the
-//! *raw* incoming name instead of its resolved tail.
+//! `server_methods::skill`'s retry gate. Proxy-qualified routes must not borrow
+//! replay authority from a similarly named local facade: only the owning
+//! remote server could provide that authority, and no such registry exists.
 //!
 //! Owner ruling (2026-07-17, tachi#1098, adjudicated via leader package,
 //! option A): both clauses ratified —
 //!
-//! 1. **Canonicalize routes BEFORE any policy judgment.** [`canonical_route_name`]
-//!    is the one place a proxy-prefixed name is resolved to its bare tail;
-//!    every classification lookup in this module receives the canonical name,
-//!    never the raw wire name. A remote/relay route can no longer bypass
-//!    mutation classification by shape alone.
+//! 1. **External proxy routes fail closed.** A `server__tool` wire name has no
+//!    local replay authority even when its tail matches a safe local facade.
 //! 2. **Only explicitly typed read-only routes may replay.**
-//!    [`facade_action_effect`] is whitelist-shaped: it enumerates the actions
-//!    that are provably read-only (cited against their param-doc evidence
-//!    inline below). Standalone cacheable routes use the same typed
-//!    `READ_ONLY_SAFE` metadata; all other routes — including an action or
-//!    proxy alias this module has never seen — are refused by the DLQ gate.
+//!    [`facade_action_effect`] exhaustively maps the action enum advertised by
+//!    each audited facade. Cacheability is not replay authority: standalone
+//!    replay-safe routes have their own explicit inventory. All other routes
+//!    are refused by the DLQ gate.
 //!    Conservative refusal only costs retry throughput; an aggressive allow
 //!    can replay an unsafe mutation.
 //!
@@ -92,25 +87,6 @@ impl ActionEffectMetadata {
     fn permits_dlq_replay(self) -> bool {
         matches!(self.replay, ReplaySafety::Safe)
     }
-}
-
-// ─── Clause 1: canonicalize before judgment ──────────────────────────────────
-
-/// Resolve a possibly proxy-prefixed wire name (`server__tool`) to its bare
-/// tail. Every classification lookup below receives the output of this
-/// function, never the raw incoming name — the fix for the remote-route
-/// bypass the owner's adjudication comment identified
-/// (`remote__tachi_memory(action='save')` previously matched neither the
-/// native-tool-name table, keyed on the tail, nor the facade-name check,
-/// which compared the raw name — so it fell through both and was classified
-/// safe to replay).
-///
-/// Same fallback heuristic `server_handler::split_proxy_tool_name` uses when
-/// no registered-server list is available: this is a free function with no
-/// access to `self.tool_discovery.proxy_tools`, so it applies the
-/// context-free "last `__` wins" rule uniformly.
-pub(crate) fn canonical_route_name(tool_name: &str) -> &str {
-    tool_name.rsplit("__").next().unwrap_or(tool_name)
 }
 
 // ─── Cache policy: whole-tool-name granularity, unchanged from pre-#1098 ────
@@ -223,42 +199,53 @@ const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
     "remember",
     "extract_facts",
     "ingest_event",
+    // Both production entrypoints persist access telemetry.
+    "search_memory",
+    "tachi_search",
+];
+
+/// Standalone routes with explicit replay authority. This is intentionally
+/// separate from `CACHEABLE_TOOLS`: a cached operation may still write access
+/// telemetry (`search_memory`), and therefore may not be replay-safe.
+const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
+    "section_build",
+    "recommend_capability",
+    "recommend_skill",
+    "recommend_toolchain",
+    "prepare_capability_bundle",
+    "tachi_task_brief",
+    "tachi_wiki_search",
+    "find_similar_memory",
+    "get_memory",
+    "list_memories",
+    "memory_stats",
+    "hub_discover",
+    "hub_get",
+    "hub_stats",
+    "vc_list",
+    "vc_resolve",
+    "get_pipeline_status",
+    "wiki_search",
+    "tachi_web_search",
+    "tachi_browse",
 ];
 
 // ─── Clause 2: gated facades, default-deny per action ───────────────────────
 
-/// Facades DLQ/retry classification is aware of at all. The six that carry an
-/// explicit read-only whitelist below (`tachi_memory` … `tachi_shell`) mirror
-/// the pre-#1098 `FACADE_MUTATING_ACTIONS` facade tuple exactly — those are
-/// the surfaces this module has actually audited action-by-action. The
-/// remaining eight (`tachi_skill` … `tachi_complete`) are facades that also
-/// carry a generic `action` argument but have not been individually audited;
-/// per the owner's ruling every one of their actions defaults to
-/// `Mutating`/`Unsafe` unconditionally (the empty-whitelist arm below) rather
-/// than silently falling through unclassified.
-fn facade_action_effect(
-    canonical_tool: &str,
+/// Explicit effect map for every action advertised by a schema-enumerated
+/// facade. The live-router ratchet compares schema enums to this independent
+/// map, so a new action cannot inherit whole-tool cacheability.
+pub(crate) fn facade_action_effect(
+    tool_name: &str,
     action: Option<&str>,
 ) -> Option<ActionEffectMetadata> {
-    let action = action.map(str::trim).filter(|a| !a.is_empty());
-
-    let (read_only, conditional): (&[&str], &[&str]) = match canonical_tool {
-        // search/get/briefing/alerts/ask: pure reads or Q&A-over-evidence per
-        // TachiMemoryParams action doc. recall_simulate: "report recall@k/MRR
-        // without mutating access counters" (explicit). readiness: "health +
-        // tool visibility". doctor_scan: "read-only scan of memory.db roots"
-        // (explicit, matches the pre-existing doctor_scan cache carve-out).
-        //
-        // sticky_check is deliberately NOT here even though it is Observe-tier
-        // for authorization purposes: its own param doc says the *default*
-        // (include_read=false) call "claims" unread stickies, i.e. consumes
-        // the read-once note — the owner's adjudication comment named this
-        // exact mismatch. claim/release/gc/sticky_leave were the other
-        // actions the owner's comment named as missing from the old
-        // FACADE_MUTATING_ACTIONS check; all four fall to the default below.
+    let action = action.map(str::trim).filter(|action| !action.is_empty());
+    let (read_only, conditional, unsafe_actions): (&[&str], &[&str], &[&str]) = match tool_name {
+        // Search writes access telemetry through
+        // `handle_search_memory_with_access(..., true)` and is therefore not
+        // replay-safe. The remaining classifications are preserved.
         "tachi_memory" => (
             &[
-                "search",
                 "get",
                 "briefing",
                 "alerts",
@@ -267,30 +254,32 @@ fn facade_action_effect(
                 "readiness",
                 "doctor_scan",
             ],
-            // recall_proposals ("generate/list evidence-backed RecallConfig
-            // proposals") and progress (its own field doc implies recording
-            // an event name, e.g. step_done/failed) are not clearly
-            // side-effect-free — Conditional, not whitelisted Safe.
             &["recall_proposals", "progress"],
+            &[
+                "search",
+                "save",
+                "extract_facts",
+                "checkpoint",
+                "consolidate",
+                "review_recall_proposal",
+                "apply_recall_proposals",
+                "pattern_feedback",
+                "delete",
+                "gc",
+                "ingest",
+                "ingest_source",
+                "claim",
+                "release",
+                "sticky_leave",
+                "sticky_check",
+            ],
         ),
-        // query/metrics/a2a are explicitly documented read-only ("metrics
-        // returns read-only continuity metrics"; "a2a returns the read-only
-        // evidence/open-thread bundle without feedback writes"). `context` is
-        // deliberately excluded despite reading like a query: its own action
-        // doc says it "records seen feedback" — a real write hidden behind a
-        // read-shaped name, the same trap as tachi_memory's sticky_check.
-        // emit/project/promote are the three actions the owner's adjudication
-        // comment named directly as missing from the old classification.
-        "tachi_event" => (&["query", "metrics", "a2a"], &["label_eval", "context"]),
-        // write is the only mutating action; search/browse/read are plain reads.
-        "tachi_wiki" => (&["search", "browse", "read"], &[]),
-        // status/board/wait/briefing/doc_index/cycle_status/cycle_plan/
-        // profiles/profile are read/report actions per TachiTaskParams's
-        // action doc ("cycle_status/cycle_plan are read-only lifecycle
-        // models"). refine_issues is explicitly "read-only, proposal-only …
-        // it never closes/reopens/edits/writes back". route_simulate mirrors
-        // tachi_memory's recall_simulate naming convention (simulate = no
-        // persistence).
+        "tachi_event" => (
+            &["query", "metrics", "a2a"],
+            &["label_eval", "context"],
+            &["emit", "project", "promote"],
+        ),
+        "tachi_wiki" => (&["search", "browse", "read"], &[], &["write"]),
         "tachi_task" => (
             &[
                 "status",
@@ -305,13 +294,27 @@ fn facade_action_effect(
                 "profile",
                 "route_simulate",
             ],
-            // recommend/proposals "manage routing" per the action doc with no
-            // explicit no-write disclaimer (unlike route_simulate/
-            // refine_issues) — Conditional pending individual audit.
             &["recommend", "proposals"],
+            &[
+                "plan",
+                "dispatch",
+                "complete",
+                "card",
+                "review_proposal",
+                "apply_proposals",
+                "cancel",
+                "merge",
+                "intake",
+                "ux_matrix",
+                "build_references",
+                "close_loop",
+                "adjudicate",
+                "claim",
+                "release",
+                "heartbeat",
+                "handoff",
+            ],
         ),
-        // repo_view/issue_list/issue_read/pr_list/pr_read/pr_comments/
-        // pr_status are named-and-shaped as pure GitHub reads.
         "tachi_gh" => (
             &[
                 "repo_view",
@@ -322,41 +325,71 @@ fn facade_action_effect(
                 "pr_comments",
                 "pr_status",
             ],
-            // pr_review_digest's own param doc: "Write pr_review_digest
-            // artifacts under .tachi/reviews. Defaults to true." —
-            // filesystem write, not whitelisted Safe. issue_freshness_scan
-            // produces a scan report with no read-only disclaimer.
             &["issue_freshness_scan", "pr_review_digest"],
+            &[
+                "issue_create",
+                "issue_comment",
+                "issue_label",
+                "pr_comment",
+                "safe_merge",
+                "ship",
+                "link_pr",
+                "pr_handoff",
+                "release_note",
+            ],
         ),
-        // status is the only clear read; the other five are workflow stages
-        // that advance state ("Required Tachi shell workflow stage").
-        "tachi_shell" => (&["status"], &[]),
-        // Facades with a generic `action` concept that have not been
-        // individually audited action-by-action. Every action on them
-        // defaults to Mutating+Unsafe (empty whitelist).
-        "tachi_skill"
-        | "tachi_verify"
-        | "tachi_domain_adapter"
-        | "tachi_handoff"
-        | "tachi_orchestrator"
-        | "tachi_arena"
-        | "tachi_sandbox"
-        | "tachi_complete" => (&[], &[]),
+        "tachi_shell" => (&["status"], &[], &["dispatch"]),
+        "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
+        // Preserve the existing conservative treatment of these facades while
+        // making the set exhaustive. Unknown actions receive no metadata.
+        "tachi_skill" => (
+            &[],
+            &[],
+            &["discover", "run", "bundle", "loadout", "from_pattern"],
+        ),
+        "tachi_verify" => (&[], &[], &["start", "record", "status", "board"]),
+        "tachi_orchestrator" => (
+            &[],
+            &[],
+            &[
+                "todo_list",
+                "todo_update",
+                "handoff_write",
+                "handoff_read",
+                "recovery_briefing",
+            ],
+        ),
+        "tachi_arena" => (
+            &[],
+            &[],
+            &[
+                "open", "spawn", "board", "collect", "abort", "reap", "close",
+            ],
+        ),
         _ => return None,
     };
 
     let Some(action) = action else {
-        // A gated facade with no action at all is state-changing by default
-        // (clause 2) — never treat a missing action as read-only.
         return Some(ActionEffectMetadata::MUTATING_UNSAFE);
     };
 
-    if read_only.iter().any(|a| a.eq_ignore_ascii_case(action)) {
+    if read_only
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(action))
+    {
         Some(ActionEffectMetadata::READ_ONLY_SAFE)
-    } else if conditional.iter().any(|a| a.eq_ignore_ascii_case(action)) {
+    } else if conditional
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(action))
+    {
         Some(ActionEffectMetadata::MUTATING_CONDITIONAL)
-    } else {
+    } else if unsafe_actions
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(action))
+    {
         Some(ActionEffectMetadata::MUTATING_UNSAFE)
+    } else {
+        None
     }
 }
 
@@ -370,17 +403,23 @@ pub(crate) fn dlq_replay_metadata(
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, Value>>,
 ) -> Option<ActionEffectMetadata> {
-    let canonical = canonical_route_name(tool_name);
+    // A remote server's tool may share a tail with a local facade without
+    // sharing its implementation or effects. No per-remote-tool authority is
+    // registered today, so every proxy-qualified wire name fails closed.
+    if tool_name.contains("__") {
+        return None;
+    }
+
     let action = arguments
         .and_then(|args| args.get("action"))
         .and_then(Value::as_str);
 
-    facade_action_effect(canonical, action).or_else(|| {
-        if STANDALONE_UNSAFE_ROUTES.contains(&canonical)
-            || CACHE_INVALIDATING_TOOLS.contains(&canonical)
+    facade_action_effect(tool_name, action).or_else(|| {
+        if STANDALONE_UNSAFE_ROUTES.contains(&tool_name)
+            || CACHE_INVALIDATING_TOOLS.contains(&tool_name)
         {
             Some(ActionEffectMetadata::MUTATING_UNSAFE)
-        } else if CACHEABLE_TOOLS.contains(&canonical) {
+        } else if STANDALONE_REPLAY_SAFE_ROUTES.contains(&tool_name) {
             Some(ActionEffectMetadata::READ_ONLY_SAFE)
         } else {
             None
@@ -389,8 +428,8 @@ pub(crate) fn dlq_replay_metadata(
 }
 
 /// The sole DLQ allow condition: a route must have an explicit typed
-/// read-only/safe classification after canonicalization. Unknown names,
-/// unreviewed aliases, and future actions fail closed.
+/// read-only/safe classification. Unknown names, external aliases, and future
+/// actions fail closed.
 pub(crate) fn dlq_replay_is_explicitly_safe(
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, Value>>,
@@ -419,7 +458,7 @@ mod tests {
         dlq_mutation_is_unsafe(tool_name, args.as_ref())
     }
 
-    // ── Clause 1: canonicalization closes the remote-route bypass ──────────
+    // ── Clause 1: external routes cannot borrow local authority ─────────────
 
     #[test]
     fn f1098_remote_prefixed_facade_mutation_is_no_longer_a_bypass() {
@@ -446,22 +485,21 @@ mod tests {
                 "remote__tachi_event(action='{action}') must be unsafe to replay post-#1098"
             );
         }
-        // A read-only action through the same remote prefix stays safe.
-        assert!(!dlq_unsafe("remote__tachi_memory", Some("search")));
-        assert!(!dlq_unsafe("remote__tachi_event", Some("metrics")));
+        // A read-only-looking tail is still an external implementation with no
+        // server-owned per-tool replay authority.
+        assert!(dlq_unsafe("remote__tachi_memory", Some("search")));
+        assert!(dlq_unsafe("remote__tachi_event", Some("metrics")));
     }
 
     #[test]
-    fn f1098_canonicalization_also_covers_native_standalone_names() {
-        // Same tail heuristic must still classify a proxy-prefixed standalone
-        // tool name, matching pre-#1098 NON_IDEMPOTENT_TOOL_NAMES behavior.
+    fn f1098_proxy_prefixed_standalone_names_fail_closed() {
         assert!(dlq_unsafe("remote__save_memory", None));
         assert!(dlq_unsafe("remote__hub_call", None));
-        assert!(!dlq_unsafe("remote__search_memory", None));
+        assert!(dlq_unsafe("remote__search_memory", None));
     }
 
-    /// codex review (PR #1213, checkpoint 4): `remote__remember` used to
-    /// canonicalize to `remember`, which was absent from
+    /// codex review (PR #1213, checkpoint 4): `remote__remember` used to resolve
+    /// to `remember`, which was absent from
     /// `STANDALONE_UNSAFE_ROUTES` despite being cache-invalidating
     /// (state-mutating) — `facade_action_effect` also doesn't recognize
     /// `remember` as a facade, so the lookup fell all the way through to
@@ -479,7 +517,7 @@ mod tests {
             let prefixed = format!("remote__{tool}");
             assert!(
                 dlq_unsafe(&prefixed, None),
-                "{prefixed} must canonicalize to {tool} and stay unsafe to replay"
+                "{prefixed} must stay unsafe without remote replay authority"
             );
         }
     }
@@ -526,7 +564,6 @@ mod tests {
     #[test]
     fn f1098_previously_classified_read_only_actions_are_preserved() {
         for (tool, action) in [
-            ("tachi_memory", "search"),
             ("tachi_memory", "get"),
             ("tachi_memory", "briefing"),
             ("tachi_memory", "doctor_scan"),
@@ -539,6 +576,7 @@ mod tests {
             ("tachi_gh", "issue_read"),
             ("tachi_gh", "pr_status"),
             ("tachi_shell", "status"),
+            ("tachi_component", "list"),
         ] {
             assert!(
                 !dlq_unsafe(tool, Some(action)),
@@ -550,6 +588,7 @@ mod tests {
     #[test]
     fn f1098_previously_flagged_mutating_actions_stay_unsafe() {
         for (tool, action) in [
+            ("tachi_memory", "search"),
             ("tachi_memory", "save"),
             ("tachi_memory", "delete"),
             ("tachi_event", "emit"),
