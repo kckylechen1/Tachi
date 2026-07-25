@@ -33,14 +33,74 @@ jobs:
             echo 'build-seat setup verifies tools, not dependency or advisory data readiness' >&2
             exit 1
           fi
-          if grep -hE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[[:alnum:]_.-]+/[[:alnum:]_.-]+@' .github/workflows/ci.yml .github/actions/setup-rust/action.yml \
-            | grep -Ev 'uses:[[:space:]]+[^@]+@[0-9a-f]{40}[[:space:]]+#[[:space:]]+[^[:space:]]+'; then
+
+          workflow_files=()
+          while IFS= read -r file; do
+            workflow_files+=("${file}")
+          done < <(git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')
+          policy_files=()
+          while IFS= read -r file; do
+            policy_files+=("${file}")
+          done < <(git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml' '.github/actions/**/action.yml' '.github/actions/**/action.yaml')
+          if ((${#workflow_files[@]} == 0 || ${#policy_files[@]} == 0)); then
+            echo 'supply-chain policy found no checked-in workflows or composite actions' >&2
+            exit 1
+          fi
+
+          remote_action_pattern="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+['\"]?[[:alnum:]][[:alnum:]_.-]*/[[:alnum:]][[:alnum:]_.-]*([^@[:space:]'\"]*)@"
+          pinned_action_pattern="uses:[[:space:]]+['\"]?[^@'\"]+@[0-9a-f]{40}['\"]?[[:space:]]+#[[:space:]]+[^[:space:]]+"
+          cargo_install_pattern='^[[:space:]]*(run:[[:space:]]+)?(sudo[[:space:]]+)?cargo([[:space:]]+\+[^[:space:]]+)?[[:space:]]+install[[:space:]]+'
+          pinned_cargo_pattern='--version [0-9]+\.[0-9]+\.[0-9]+ .*--locked([[:space:]]|$)'
+          docker_action_pattern='uses:[[:space:]]+.*docker://'
+          image_reference_pattern='^[[:space:]]*(image|container):[[:space:]]+[^[:space:]#]+'
+          digest_pattern='@sha256:[0-9a-f]{64}'
+
+          if ! printf '%s\n' '      - uses: actions/checkout@v5' | grep -Eq "${remote_action_pattern}" \
+            || printf '%s\n' '      - uses: actions/checkout@v5' | grep -Eq "${pinned_action_pattern}" \
+            || ! printf '%s\n' '    uses: owner/repo/.github/workflows/reuse.yml@main' | grep -Eq "${remote_action_pattern}" \
+            || ! printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5' | grep -Eq "${pinned_action_pattern}"; then
+            echo 'remote-action policy self-test failed' >&2
+            exit 1
+          fi
+          if ! printf '%s\n' '      run: cargo install cargo-audit --quiet' | grep -Eq "${cargo_install_pattern}" \
+            || printf '%s\n' '      run: cargo install cargo-audit --quiet' | grep -Eq -- "${pinned_cargo_pattern}" \
+            || ! printf '%s\n' '      run: cargo install cargo-audit --version 0.22.2 --locked --quiet' | grep -Eq -- "${pinned_cargo_pattern}"; then
+            echo 'cargo-install policy self-test failed' >&2
+            exit 1
+          fi
+          digest_fixture="$(printf 'a%.0s' {1..64})"
+          docker_tag_fixture='      uses: docker:/''/alpine:3.20'
+          docker_digest_fixture="      uses: docker:/""/alpine@sha256:${digest_fixture}"
+          image_tag_fixture='        image: alpine:3.20'
+          image_digest_fixture="        image: alpine@sha256:${digest_fixture}"
+          if ! printf '%s\n' "${docker_tag_fixture}" | grep -Eq "${docker_action_pattern}" \
+            || printf '%s\n' "${docker_tag_fixture}" | grep -Eq "${digest_pattern}" \
+            || ! printf '%s\n' "${docker_digest_fixture}" | grep -Eq "${digest_pattern}" \
+            || ! printf '%s\n' "${image_tag_fixture}" | grep -Eq "${image_reference_pattern}" \
+            || printf '%s\n' "${image_tag_fixture}" | grep -Eq "${digest_pattern}" \
+            || ! printf '%s\n' "${image_digest_fixture}" | grep -Eq "${digest_pattern}"; then
+            echo 'Docker digest policy self-test failed' >&2
+            exit 1
+          fi
+
+          if grep -hE "${remote_action_pattern}" "${policy_files[@]}" \
+            | grep -Ev "${pinned_action_pattern}"; then
             echo 'remote GitHub actions require an immutable SHA and version comment' >&2
             exit 1
           fi
-          if grep -hE '^[[:space:]]*cargo install ' .github/workflows/ci.yml .github/actions/setup-rust/action.yml \
-            | grep -Ev -- '--version [0-9]+\.[0-9]+\.[0-9]+ .*--locked([[:space:]]|$)'; then
+          if grep -hE "${cargo_install_pattern}" "${policy_files[@]}" \
+            | grep -Ev -- "${pinned_cargo_pattern}"; then
             echo 'cargo installs require an exact version and --locked' >&2
+            exit 1
+          fi
+          if grep -hE "${docker_action_pattern}" "${workflow_files[@]}" \
+            | grep -Ev "${digest_pattern}"; then
+            echo 'docker:// actions require an immutable sha256 digest' >&2
+            exit 1
+          fi
+          if grep -hE "${image_reference_pattern}" "${workflow_files[@]}" \
+            | grep -Ev "${digest_pattern}"; then
+            echo 'workflow container images require an immutable sha256 digest' >&2
             exit 1
           fi
           if ! grep -Eq '^[[:space:]]*run: npm audit --audit-level=high[[:space:]]*$' .github/workflows/ci.yml; then
@@ -65,10 +125,14 @@ jobs:
             '#!/bin/sh' \
             'if [ -n "${SIMULATE_MISSING_COMPONENT:-}" ] && [ "${1:-}" = "${SIMULATE_MISSING_COMPONENT}" ]; then exit 1; fi' \
             'exit 0' >"${setup_stub_dir}/cargo"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'printf "%s\n" "${SIMULATE_NODE_VERSION:-v20.0.0}"' >"${setup_stub_dir}/node"
           chmod +x "${setup_stub_dir}"/*
 
           run_fake_setup() {
             SIMULATE_MISSING_COMPONENT="${1:-}" \
+              SIMULATE_NODE_VERSION="${2:-v20.0.0}" \
               CARGO_HOME="${setup_test_root}/cargo-home" \
               PATH="${setup_stub_dir}" \
               /bin/bash .agents/setup >"${setup_test_root}/output" 2>&1
@@ -94,6 +158,16 @@ jobs:
             fi
             grep -F "${component}" "${setup_test_root}/output"
           done
+
+          if run_fake_setup "" v19.99.0; then
+            echo 'setup accepted unsupported Node v19' >&2
+            exit 1
+          fi
+          grep -F 'node>=20(found:v19.99.0)' "${setup_test_root}/output"
+          if ! run_fake_setup "" v20.0.0; then
+            echo 'setup rejected supported Node v20' >&2
+            exit 1
+          fi
 
   rust:
     name: Rust workspace
