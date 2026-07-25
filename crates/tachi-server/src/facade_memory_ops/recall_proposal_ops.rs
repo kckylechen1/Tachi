@@ -1890,27 +1890,6 @@ fn is_sha256_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[cfg(test)]
-mod recall_receipt_bound_tests {
-    use super::*;
-
-    #[test]
-    fn recall_receipt_bounds_accept_exact_limits_and_refuse_one_byte_over() {
-        assert!(validate_recall_receipt_bounds(
-            MAX_RECALL_CONFIG_ENV_BYTES - MAX_RECALL_APPEND_PAYLOAD_BYTES,
-            MAX_RECALL_APPEND_PAYLOAD_BYTES,
-        )
-        .is_ok());
-        assert!(validate_recall_receipt_bounds(
-            MAX_RECALL_CONFIG_ENV_BYTES - MAX_RECALL_APPEND_PAYLOAD_BYTES,
-            MAX_RECALL_APPEND_PAYLOAD_BYTES + 1,
-        )
-        .is_err());
-        assert!(validate_recall_receipt_bounds(MAX_RECALL_CONFIG_ENV_BYTES + 1, 0).is_err());
-        assert!(validate_recall_receipt_bounds(MAX_RECALL_CONFIG_ENV_BYTES, 1).is_err());
-    }
-}
-
 fn recall_append_progress(
     source: &str,
     expected_before_revision: &str,
@@ -2437,4 +2416,25 @@ fn format_recall_proposals_markdown(response: &Value) -> String {
         }
     }
     out.join("\n")
+}
+
+#[cfg(test)]
+mod recall_receipt_bound_tests {
+    use super::*;
+
+    #[test]
+    fn recall_receipt_bounds_accept_exact_limits_and_refuse_one_byte_over() {
+        assert!(validate_recall_receipt_bounds(
+            MAX_RECALL_CONFIG_ENV_BYTES - MAX_RECALL_APPEND_PAYLOAD_BYTES,
+            MAX_RECALL_APPEND_PAYLOAD_BYTES,
+        )
+        .is_ok());
+        assert!(validate_recall_receipt_bounds(
+            MAX_RECALL_CONFIG_ENV_BYTES - MAX_RECALL_APPEND_PAYLOAD_BYTES,
+            MAX_RECALL_APPEND_PAYLOAD_BYTES + 1,
+        )
+        .is_err());
+        assert!(validate_recall_receipt_bounds(MAX_RECALL_CONFIG_ENV_BYTES + 1, 0).is_err());
+        assert!(validate_recall_receipt_bounds(MAX_RECALL_CONFIG_ENV_BYTES, 1).is_err());
+    }
 }
