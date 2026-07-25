@@ -468,6 +468,45 @@ fn validate_action_eligibility_shape(
     Ok(())
 }
 
+/// Proposal-generator invariant: every endpoint is an active, unsuperseded,
+/// unprotected row, and a snapshot cannot forge the derived protection tag.
+fn validate_generator_endpoint_invariants(
+    proposal_id: &str,
+    endpoint_label: &str,
+    endpoint: &LifecycleEndpointSnapshot,
+) -> Result<(), MemoryError> {
+    let recomputed_protected_reason = protection_reason_from_fields(
+        &endpoint.path,
+        endpoint.archived,
+        &endpoint.tier,
+        endpoint.is_wiki,
+        endpoint.retention_policy.as_deref(),
+    )
+    .map(str::to_string);
+    if endpoint.protected_reason != recomputed_protected_reason {
+        return Err(MemoryError::InvalidArg(format!(
+            "v2 lifecycle proposal {proposal_id} {endpoint_label} protected_reason mismatch: snapshot={:?}, recomputed={recomputed_protected_reason:?}",
+            endpoint.protected_reason
+        )));
+    }
+    if endpoint.archived {
+        return Err(MemoryError::InvalidArg(format!(
+            "v2 lifecycle proposal {proposal_id} {endpoint_label} must be active (archived=false)"
+        )));
+    }
+    if endpoint.superseded_by.is_some() {
+        return Err(MemoryError::InvalidArg(format!(
+            "v2 lifecycle proposal {proposal_id} {endpoint_label} must be active (superseded_by=None)"
+        )));
+    }
+    if let Some(reason) = endpoint.protected_reason.as_deref() {
+        return Err(MemoryError::InvalidArg(format!(
+            "v2 lifecycle proposal {proposal_id} {endpoint_label} must be eligible (protected_reason=None; found '{reason}')"
+        )));
+    }
+    Ok(())
+}
+
 /// Build a v2 apply payload from the source/target entries and the action
 /// name. Used by the proposal generators.
 pub fn build_apply_payload(
@@ -515,10 +554,11 @@ pub fn is_legacy_v1_proposal(value: &serde_json::Value) -> bool {
     value.get("schema_version").and_then(|v| v.as_u64()) != Some(LIFECYCLE_SCHEMA_VERSION as u64)
 }
 
-/// Validate immutable execution and human-review fields duplicated at the
-/// proposal top level against its typed apply payload, then verify that the
-/// stored identity hashes that payload. Review and apply both call this guard
-/// so neither execution nor display fields can be tampered after proposal.
+/// Validate action shape and generator endpoint invariants, cross-check
+/// immutable execution and human-review fields duplicated at the proposal top
+/// level, then verify that the stored identity hashes that payload. Review and
+/// apply both call this guard so malformed endpoint semantics and tampered
+/// execution/display fields are refused at the same shared boundary.
 pub fn validate_lifecycle_proposal(
     proposal_id: &str,
     proposal: &serde_json::Value,
@@ -552,6 +592,7 @@ pub fn validate_lifecycle_proposal(
         "source",
         &payload.source,
     )?;
+    validate_generator_endpoint_invariants(proposal_id, "source", &payload.source)?;
     if let Some(target) = payload.target.as_ref() {
         validate_action_eligibility_shape(
             proposal_id,
@@ -559,6 +600,13 @@ pub fn validate_lifecycle_proposal(
             "target",
             target,
         )?;
+        validate_generator_endpoint_invariants(proposal_id, "target", target)?;
+        if payload.source.id == target.id {
+            return Err(MemoryError::InvalidArg(format!(
+                "v2 lifecycle proposal {proposal_id} action '{}' requires distinct source and target ids",
+                payload.lifecycle_action
+            )));
+        }
     }
 
     let expected_target_id =
@@ -974,11 +1022,14 @@ fn apply_lifecycle_proposal_once(
                 ))
             })?;
             let now = lifecycle_now_iso();
+            // An existing supersession edge is immutable: install A -> B only
+            // from NULL, never replace a concurrent or pre-existing A -> C.
+            // The edge guard is part of the same revision/archive CAS.
             let changed = tx.execute(
                 "UPDATE memories SET archived = 1, superseded_by = ?1,
                  valid_until = COALESCE(valid_until, ?2), updated_at = ?2, revision = revision + 1
                  WHERE id = ?3 AND revision = ?4 AND archived = 0
-                 AND (superseded_by IS NULL OR superseded_by != ?1)",
+                 AND superseded_by IS NULL",
                 params![target, now, source_id, source_revision],
             )?;
             if changed == 0 {
@@ -1039,13 +1090,17 @@ fn apply_lifecycle_proposal_once(
             {
                 db::upsert_within_tx(&tx, &survivor, store.vec_available, None)?;
             }
-            // Combined supersede + archive on the source with revision CAS.
+            // An existing supersession edge is immutable: this source UPDATE
+            // may install A -> B only from NULL, never replace a concurrent or
+            // pre-existing A -> C. Keep that edge guard inside the same
+            // revision/archive CAS and transaction as the merge fold, so a
+            // failed source mutation rolls the target fold back too.
             let now = lifecycle_now_iso();
             let changed = tx.execute(
                 "UPDATE memories SET archived = 1, superseded_by = ?1,
                  valid_until = COALESCE(valid_until, ?2), updated_at = ?2, revision = revision + 1
                  WHERE id = ?3 AND revision = ?4 AND archived = 0
-                 AND (superseded_by IS NULL OR superseded_by != ?1)",
+                 AND superseded_by IS NULL",
                 params![target, now, source_id, source_revision],
             )?;
             if changed == 0 {
@@ -1149,6 +1204,41 @@ mod tests {
             "apply_payload": payload,
         });
         (proposal_id, proposal)
+    }
+
+    fn assert_payload_rejected_before_review(
+        store: &MemoryStore,
+        payload: &LifecycleApplyPayload,
+        expected_detail: &str,
+    ) -> String {
+        let (proposal_id, proposal) = proposal_from_payload(payload);
+        let expected_error =
+            format!("Invalid argument: v2 lifecycle proposal {proposal_id} {expected_detail}");
+        let validation_error = validate_lifecycle_proposal(&proposal_id, &proposal)
+            .expect_err("malformed lifecycle payload must fail shared validation");
+        assert_eq!(validation_error.to_string(), expected_error);
+
+        let proposal_raw = serde_json::to_string(&proposal).expect("serialize proposal");
+        store
+            .set_state(LIFECYCLE_PROPOSAL_NS, &proposal_id, &proposal_raw)
+            .expect("persist pending malformed proposal");
+        let proposal_before = store
+            .get_state_kv(LIFECYCLE_PROPOSAL_NS, &proposal_id)
+            .expect("load pending malformed proposal")
+            .expect("pending malformed proposal exists");
+        let review_error =
+            review_lifecycle_proposal(store, &proposal_id, LifecycleReviewDecision::Approved, None)
+                .expect_err("shared validation must run before pending can become approved");
+        assert_eq!(review_error.to_string(), expected_error);
+        assert_eq!(
+            store
+                .get_state_kv(LIFECYCLE_PROPOSAL_NS, &proposal_id)
+                .expect("reload refused proposal")
+                .expect("refused proposal remains"),
+            proposal_before,
+            "review refusal must preserve the exact pending row and version"
+        );
+        proposal_id
     }
 
     #[test]
@@ -1685,6 +1775,223 @@ mod tests {
             assert_eq!(target_after.archived, target.archived);
             assert_eq!(target_after.revision, target.revision);
             assert_eq!(target_after.tier, target.tier);
+        }
+    }
+
+    #[test]
+    fn validation_and_review_reject_pre_superseded_source_without_overwriting_edge() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let source = seed(&mut store, "pre-superseded-source-a", "source A", &[]);
+        let target_b = seed(&mut store, "pre-superseded-target-b", "target B", &[]);
+        seed(&mut store, "pre-superseded-target-c", "target C", &[]);
+        let closing_at = "2026-07-25T01:00:00.000Z";
+        assert_eq!(
+            store
+                .mark_superseded_closing_validity(
+                    &source.id,
+                    "pre-superseded-target-c",
+                    closing_at,
+                )
+                .expect("install A -> C"),
+            1
+        );
+        let source_state_before = store
+            .connection()
+            .query_row(
+                "SELECT archived, superseded_by, valid_until, revision FROM memories WHERE id = ?1",
+                [&source.id],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("capture A -> C");
+        assert_eq!(
+            source_state_before.1.as_deref(),
+            Some("pre-superseded-target-c")
+        );
+        assert_eq!(source_state_before.2.as_deref(), Some(closing_at));
+        assert_eq!(source_state_before.3, source.revision);
+
+        let mut payload = build_apply_payload(ACTION_SUPERSEDE, &source, Some(&target_b));
+        payload.source.superseded_by = Some("pre-superseded-target-c".into());
+        payload.source.valid_until = Some(closing_at.into());
+        assert_payload_rejected_before_review(
+            &store,
+            &payload,
+            "source must be active (superseded_by=None)",
+        );
+
+        let source_state_after = store
+            .connection()
+            .query_row(
+                "SELECT archived, superseded_by, valid_until, revision FROM memories WHERE id = ?1",
+                [&source.id],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("reload A -> C");
+        assert_eq!(
+            source_state_after, source_state_before,
+            "review refusal must not replace A -> C with A -> B"
+        );
+        let target_b_after = store
+            .get(&target_b.id)
+            .expect("reload target B")
+            .expect("target B remains");
+        assert!(!target_b_after.archived);
+        assert_eq!(target_b_after.revision, target_b.revision);
+    }
+
+    #[test]
+    fn validation_and_review_reject_pre_superseded_target_without_mutation() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let source = seed(&mut store, "active-source-a", "source A", &[]);
+        let target_b = seed(&mut store, "pre-superseded-survivor-b", "target B", &[]);
+        seed(&mut store, "canonical-target-c", "target C", &[]);
+        let closing_at = "2026-07-25T01:01:00.000Z";
+        assert_eq!(
+            store
+                .mark_superseded_closing_validity(&target_b.id, "canonical-target-c", closing_at)
+                .expect("install B -> C"),
+            1
+        );
+        let target_state_before = store
+            .connection()
+            .query_row(
+                "SELECT archived, superseded_by, valid_until, revision FROM memories WHERE id = ?1",
+                [&target_b.id],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("capture B -> C");
+        assert_eq!(target_state_before.1.as_deref(), Some("canonical-target-c"));
+        assert_eq!(target_state_before.2.as_deref(), Some(closing_at));
+        assert_eq!(target_state_before.3, target_b.revision);
+
+        let mut payload = build_apply_payload(ACTION_MERGE_INTO, &source, Some(&target_b));
+        let target_snapshot = payload.target.as_mut().expect("merge target snapshot");
+        target_snapshot.superseded_by = Some("canonical-target-c".into());
+        target_snapshot.valid_until = Some(closing_at.into());
+        assert_payload_rejected_before_review(
+            &store,
+            &payload,
+            "target must be active (superseded_by=None)",
+        );
+
+        let target_state_after = store
+            .connection()
+            .query_row(
+                "SELECT archived, superseded_by, valid_until, revision FROM memories WHERE id = ?1",
+                [&target_b.id],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("reload B -> C");
+        assert_eq!(target_state_after, target_state_before);
+        let source_after = store
+            .get(&source.id)
+            .expect("reload source A")
+            .expect("source A remains");
+        assert!(!source_after.archived);
+        assert_eq!(source_after.revision, source.revision);
+    }
+
+    #[test]
+    fn validation_and_review_reject_self_target_for_every_target_bearing_action() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let source = seed(&mut store, "self-target-source", "same endpoint", &[]);
+        for action in [ACTION_MERGE_INTO, ACTION_SUPERSEDE, ACTION_NEAR_DUP_MERGE] {
+            let payload = build_apply_payload(action, &source, Some(&source));
+            assert_payload_rejected_before_review(
+                &store,
+                &payload,
+                &format!("action '{action}' requires distinct source and target ids"),
+            );
+        }
+        let source_after = store
+            .get(&source.id)
+            .expect("reload self-target source")
+            .expect("self-target source remains");
+        assert!(!source_after.archived);
+        assert_eq!(source_after.revision, source.revision);
+        assert_eq!(source_after.tier, source.tier);
+    }
+
+    #[test]
+    fn validation_and_review_fail_closed_on_endpoint_protection_invariants() {
+        let safe_source = MemoryEntry {
+            id: "forged-protection-source".into(),
+            ..test_entry()
+        };
+        let mut forged_protection = build_apply_payload(ACTION_ARCHIVE, &safe_source, None);
+        forged_protection.source.protected_reason = Some("pattern_tier".into());
+
+        let archived_source = MemoryEntry {
+            id: "archived-source".into(),
+            archived: true,
+            ..test_entry()
+        };
+        let archived = build_apply_payload(ACTION_ARCHIVE, &archived_source, None);
+
+        let protected_source = MemoryEntry {
+            id: "protected-pattern-source".into(),
+            tier: "pattern".into(),
+            ..test_entry()
+        };
+        let protected = build_apply_payload(ACTION_ARCHIVE, &protected_source, None);
+
+        let active_source = MemoryEntry {
+            id: "active-source-for-archived-target".into(),
+            ..test_entry()
+        };
+        let archived_target = MemoryEntry {
+            id: "archived-target".into(),
+            archived: true,
+            ..test_entry()
+        };
+        let archived_target_payload =
+            build_apply_payload(ACTION_SUPERSEDE, &active_source, Some(&archived_target));
+
+        let store = MemoryStore::open_in_memory().expect("open test store");
+        for (payload, expected_detail) in [
+            (
+                forged_protection,
+                "source protected_reason mismatch: snapshot=Some(\"pattern_tier\"), recomputed=None",
+            ),
+            (archived, "source must be active (archived=false)"),
+            (
+                protected,
+                "source must be eligible (protected_reason=None; found 'pattern_tier')",
+            ),
+            (
+                archived_target_payload,
+                "target must be active (archived=false)",
+            ),
+        ] {
+            assert_payload_rejected_before_review(&store, &payload, expected_detail);
         }
     }
 
