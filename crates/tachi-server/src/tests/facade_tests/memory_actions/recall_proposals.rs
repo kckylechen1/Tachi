@@ -642,6 +642,89 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6
     );
 }
 
+/// A persisted receipt is not authority to bless arbitrary bytes. Even when
+/// its forged after_digest equals the live third-party source, recovery must
+/// reject a receipt suffix that omits the separator required by the approved
+/// no-final-newline source.
+#[tokio::test]
+async fn recall_apply_forged_after_digest_cannot_finalize_third_party_source() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1";
+    std::fs::write(&config_env_path, source).expect("seed approved source");
+    seed_recall_pair(&server, "forged-after-digest");
+
+    let proposal = generate_recall_source_proposal(&server, "forged-after-digest").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let append_payload =
+        "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n";
+    let third_party = format!("{source}{append_payload}");
+    std::fs::write(&config_env_path, &third_party).expect("write third-party source");
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|err| err.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["status"] = json!("applying");
+            value["applying_receipt"] = json!({
+                "attempt_id": "forged-after-digest-fixture",
+                "before_digest": test_config_env_digest(source),
+                "after_digest": test_config_env_digest(&third_party),
+                "before_len": source.len(),
+                "append_payload": append_payload,
+                "updated_keys": [
+                    "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
+                    "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR",
+                ],
+                "started_at": "2026-07-25T00:00:00Z",
+            });
+            store
+                .set_state(
+                    "recall_config_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize forged receipt"),
+                )
+                .map_err(|err| err.to_string())
+        })
+        .expect("persist forged receipt");
+    let applying_row = read_recall_row(&server, &proposal_id);
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("forged after_digest must not authorize third-party bytes");
+    assert!(
+        err.contains("invalid_applying_receipt"),
+        "unexpected forged-receipt refusal: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        applying_row,
+        "refusal must leave the applying receipt recoverable"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read third-party source"),
+        third_party,
+        "recovery refusal must not rewrite third-party bytes"
+    );
+}
+
 /// Discrimination: a recall-config apply that crashed BEFORE the rename
 /// recovers by redoing the file write against the known-clean before state
 /// (safe retry); a recall-config apply whose file drifted to anything other
@@ -2226,6 +2309,67 @@ async fn recall_apply_creates_missing_config_env_privately() {
             "new config.env must be owner-only"
         );
     }
+}
+
+/// If another writer creates config.env after the approved missing-file check
+/// but before our exclusive create, its bytes and permissions are outside the
+/// approved lifecycle. Losing O_EXCL must refuse instead of reopening it.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_missing_file_create_race_refuses_competitor_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    assert!(
+        !config_env_path.exists(),
+        "fixture requires missing config.env"
+    );
+    seed_recall_pair(&server, "missing-create-race");
+
+    let proposal = generate_recall_source_proposal(&server, "missing-create-race").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve missing-file proposal");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    apply.metadata = Some(json!({
+        "test_create_config_env_before_exclusive_create": true,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("losing exclusive create must refuse the competitor file");
+    assert!(
+        err.contains("third_party_drift"),
+        "unexpected create-race refusal: {err}"
+    );
+    assert_eq!(
+        std::fs::read(&config_env_path).expect("read competitor file"),
+        b"",
+        "competitor-created bytes must remain untouched"
+    );
+    assert_eq!(
+        std::fs::metadata(&config_env_path)
+            .expect("competitor metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644,
+        "apply must not normalize or replace competitor permissions"
+    );
+    let (raw, _) = read_recall_row(&server, &proposal_id);
+    let row: Value = serde_json::from_str(&raw).expect("applying row JSON");
+    assert_eq!(row["status"], json!("applying"));
+    assert!(row["applying_receipt"].is_object());
 }
 
 /// A crash can leave only a prefix of the receipt-bound append on disk. The

@@ -148,6 +148,46 @@ fn run_recall_apply_pre_append_test_hook(
     })
 }
 
+#[cfg(all(test, unix))]
+fn run_recall_apply_missing_create_test_hook(
+    params: &TachiMemoryParams,
+    config_env_path: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("test_create_config_env_before_exclusive_create"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    std::fs::write(config_env_path, "").map_err(|err| {
+        format!(
+            "test hook create competing config.env {}: {err}",
+            config_env_path.display()
+        )
+    })?;
+    std::fs::set_permissions(config_env_path, std::fs::Permissions::from_mode(0o644)).map_err(
+        |err| {
+            format!(
+                "test hook set competing config.env mode {}: {err}",
+                config_env_path.display()
+            )
+        },
+    )
+}
+
+#[cfg(any(not(test), not(unix)))]
+fn run_recall_apply_missing_create_test_hook(
+    _params: &TachiMemoryParams,
+    _config_env_path: &Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(not(test))]
 fn run_recall_apply_pre_append_test_hook(
     _params: &TachiMemoryParams,
@@ -657,9 +697,18 @@ fn drive_recall_apply_state_machine(
                     receipt.before_digest
                 ));
             }
-            let observed = compute_recall_digest(config_env_path)?;
-            if observed == receipt.after_digest {
-                // Append already landed before the crash; finalize idempotently.
+            let source = read_config_env_body(config_env_path)?;
+            let observed = digest_config_env_source(&source);
+            let append_progress = validate_recall_receipt_source_projection(
+                &source,
+                &bound_source_revision,
+                &patch,
+                &receipt,
+            )?;
+            if append_progress == Some(receipt.append_payload.len()) {
+                // Append already landed before the crash. The validator above
+                // proved exact length, approved prefix digest, exact suffix,
+                // and receipt-bound whole-source digest before finalization.
                 let outcome = RecallApplyOutcome::FinalizedExisting {
                     attempt_id: receipt.attempt_id.to_string(),
                 };
@@ -671,14 +720,7 @@ fn drive_recall_apply_state_machine(
                     receipt.after_digest,
                     config_env_path,
                 )
-            } else if recall_append_progress(
-                &read_config_env_body(config_env_path)?,
-                receipt.before_digest,
-                receipt.before_len,
-                receipt.append_payload,
-            )
-            .is_some()
-            {
+            } else if append_progress.is_some() {
                 // The append did not land or only a receipt-bound prefix
                 // landed before a crash. Resume only the missing suffix.
                 append_recall_config_env(
@@ -689,10 +731,17 @@ fn drive_recall_apply_state_machine(
                     receipt.append_payload,
                     params,
                 )?;
-                let observed_after = compute_recall_digest(config_env_path)?;
-                if observed_after != receipt.after_digest {
+                let source_after = read_config_env_body(config_env_path)?;
+                let observed_after = digest_config_env_source(&source_after);
+                let progress_after = validate_recall_receipt_source_projection(
+                    &source_after,
+                    &bound_source_revision,
+                    &patch,
+                    &receipt,
+                )?;
+                if progress_after != Some(receipt.append_payload.len()) {
                     return Err(format!(
-                        "recall config proposal {proposal_id} retry produced digest {observed_after} that does not match the receipt's after_digest {}; refusing to finalize an unexpected file",
+                        "recall config proposal {proposal_id} retry produced incomplete or structurally unexpected config.env digest {observed_after}; refusing to finalize against receipt after_digest {}",
                         receipt.after_digest
                     ));
                 }
@@ -713,7 +762,7 @@ fn drive_recall_apply_state_machine(
                 // touched the recall keys between the receipt and now; refuse
                 // loudly rather than silently clobbering it.
                 Err(format!(
-                    "third_party_drift: recall config proposal {proposal_id} applying_receipt observed config.env digest {observed} that matches neither the receipt's before_digest nor its after_digest; refusing to finalize — operator must reconcile the config file"
+                    "third_party_drift: recall config proposal {proposal_id} applying_receipt observed config.env digest {observed} whose bytes are not the approved before-state plus a valid prefix of the exact approved append; refusing to write or finalize — operator must reconcile the config file"
                 ))
             }
         }
@@ -1746,6 +1795,76 @@ fn recall_append_progress(
         .then_some(landed.len())
 }
 
+fn validate_recall_receipt_source_projection(
+    source: &str,
+    approved_before_digest: &str,
+    patch: &BTreeMap<String, String>,
+    receipt: &ValidatedRecallReceipt<'_>,
+) -> Result<Option<usize>, String> {
+    if receipt.before_digest != approved_before_digest {
+        return Err(format!(
+            "invalid_applying_receipt: before_digest {} does not match proposal-approved source digest {approved_before_digest}",
+            receipt.before_digest
+        ));
+    }
+    let Some(landed_len) = recall_append_progress(
+        source,
+        receipt.before_digest,
+        receipt.before_len,
+        receipt.append_payload,
+    ) else {
+        return Ok(None);
+    };
+
+    let before_source = source.get(..receipt.before_len).ok_or_else(|| {
+        "invalid_applying_receipt: before_len does not end on a config.env character boundary"
+            .to_string()
+    })?;
+    let approved_append_payload = recall_config_append_payload(before_source, patch)?;
+    if receipt.append_payload != approved_append_payload {
+        return Err(
+            "invalid_applying_receipt: append_payload is not the exact append derived from the proposal-approved source and recall values"
+                .to_string(),
+        );
+    }
+
+    let mut projected_hasher = Sha256::new();
+    projected_hasher.update(before_source.as_bytes());
+    projected_hasher.update(receipt.append_payload.as_bytes());
+    let projected_after_digest = hex_lower(&projected_hasher.finalize());
+    if projected_after_digest != receipt.after_digest {
+        return Err(format!(
+            "invalid_applying_receipt: before_digest, before_len, and append_payload project after_digest {projected_after_digest}, not persisted {}",
+            receipt.after_digest
+        ));
+    }
+
+    if landed_len == receipt.append_payload.len() {
+        let expected_len = receipt
+            .before_len
+            .checked_add(receipt.append_payload.len())
+            .ok_or_else(|| {
+                "applying_receipt_too_large: completed append length overflows".to_string()
+            })?;
+        let exact_suffix = source
+            .as_bytes()
+            .get(receipt.before_len..)
+            .is_some_and(|suffix| suffix == receipt.append_payload.as_bytes());
+        let observed_after_digest = digest_config_env_source(source);
+        if source.len() != expected_len
+            || !exact_suffix
+            || observed_after_digest != receipt.after_digest
+        {
+            return Err(format!(
+                "third_party_drift: completed recall append does not structurally match approved prefix plus exact receipt suffix; observed digest {observed_after_digest}, receipt after_digest {}",
+                receipt.after_digest
+            ));
+        }
+    }
+
+    Ok(Some(landed_len))
+}
+
 // Reads the BOUND apply payload (`identity_payload.apply_payload.config_env`),
 // not the unbound top-level `proposal.config_env` display field. Callers must
 // pass the `identity_payload` sub-value (already digest-validated by the
@@ -1800,6 +1919,7 @@ fn append_recall_config_env(
     let mut file = match open_recall_config_leaf_at(&anchored, libc::O_RDWR | libc::O_APPEND, 0) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            run_recall_apply_missing_create_test_hook(params, path)?;
             match open_recall_config_leaf_at(
                 &anchored,
                 libc::O_RDWR | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL,
@@ -1807,8 +1927,10 @@ fn append_recall_config_env(
             ) {
                 Ok(file) => file,
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    open_recall_config_leaf_at(&anchored, libc::O_RDWR | libc::O_APPEND, 0)
-                        .map_err(|err| map_recall_leaf_open_error(path, err))?
+                    return Err(format!(
+                        "third_party_drift: config.env {} appeared after the approved missing-file observation and won exclusive creation; refusing to reopen or modify it",
+                        path.display()
+                    ));
                 }
                 Err(err) => return Err(map_recall_leaf_open_error(path, err)),
             }
