@@ -244,21 +244,44 @@ mod tests {
     #[cfg(unix)]
     use crate::db_ownership::set_ownership_inject_for_test;
     use crate::manifest::DbEntry;
-    use rusqlite::params;
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let app_home = dir.path().join(".tachi");
         std::fs::create_dir_all(&app_home).unwrap();
         let db_path = dir.path().join(memcore::MEMORY_DB_FILENAME);
-        let store = MemoryStore::open(&db_path.to_string_lossy()).unwrap();
+        let mut store = MemoryStore::open(&db_path.to_string_lossy()).unwrap();
         for id in ["winner", "loser"] {
             store
-                .connection()
-                .execute(
-                    "INSERT INTO memories(id,path,text,timestamp,created_at,updated_at,retention_policy) VALUES(?1,'/same','duplicate','2026-01-01','2026-01-01','2026-01-01',?2)",
-                    params![id, (id == "winner").then_some("permanent")],
-                )
+                .upsert(&memcore::MemoryEntry {
+                    id: id.into(),
+                    path: "/same".into(),
+                    summary: String::new(),
+                    text: "duplicate".into(),
+                    importance: 0.7,
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    valid_from: String::new(),
+                    valid_until: None,
+                    category: "fact".into(),
+                    topic: String::new(),
+                    keywords: Vec::new(),
+                    persons: Vec::new(),
+                    entities: Vec::new(),
+                    location: String::new(),
+                    source: "test".into(),
+                    scope: "general".into(),
+                    archived: false,
+                    access_count: 0,
+                    last_access: None,
+                    revision: 1,
+                    vector: None,
+                    retention_policy: (id == "winner").then_some("permanent".into()),
+                    domain: None,
+                    metadata: serde_json::json!({}),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".into(),
+                })
                 .unwrap();
         }
         let identity = std::fs::canonicalize(&db_path)
