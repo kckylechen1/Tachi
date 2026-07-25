@@ -1088,6 +1088,7 @@ async fn assert_proposal_persistence_precedes_writer(
     let hook_writer_completed_before_persist = Rc::clone(&writer_completed_before_persist);
     let writer_source_id = source_id.to_string();
     let writer_target_id = writer_target_id.to_string();
+    let writer_target_id_for_writer = writer_target_id.clone();
 
     let writer = std::thread::spawn(move || {
         let proposal_id = start_writer_rx
@@ -1102,7 +1103,7 @@ async fn assert_proposal_persistence_precedes_writer(
                     store
                         .mark_superseded_closing_validity(
                             &writer_source_id,
-                            &writer_target_id,
+                            &writer_target_id_for_writer,
                             "2026-07-25T00:00:03.000Z",
                         )
                         .map_err(|e| e.to_string())?,
@@ -1126,7 +1127,7 @@ async fn assert_proposal_persistence_precedes_writer(
                         .map_err(|e| e.to_string())?;
                     let first_attempt = store.mark_superseded_closing_validity(
                         &writer_source_id,
-                        &writer_target_id,
+                        &writer_target_id_for_writer,
                         "2026-07-25T00:00:03.000Z",
                     );
                     store
@@ -1164,7 +1165,7 @@ async fn assert_proposal_persistence_precedes_writer(
                                 store
                                     .mark_superseded_closing_validity(
                                         &writer_source_id,
-                                        &writer_target_id,
+                                        &writer_target_id_for_writer,
                                         "2026-07-25T00:00:03.000Z",
                                     )
                                     .map_err(|e| e.to_string())?,
@@ -1437,6 +1438,7 @@ async fn consolidate_review_refuses_tampered_display_copies_without_mutation() {
             .expect("seed review display tamper pair");
 
         let mut propose = tachi_memory_params("consolidate");
+        propose.format = Some("json".to_string());
         propose.path_prefix = Some("/scratch/tamper/display-review".to_string());
         let proposed: Value = serde_json::from_str(
             &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
@@ -1535,6 +1537,7 @@ async fn consolidate_apply_refuses_tampered_display_copies_without_mutation() {
             .expect("seed apply display tamper pair");
 
         let mut propose = tachi_memory_params("consolidate");
+        propose.format = Some("json".to_string());
         propose.path_prefix = Some("/scratch/tamper/display-apply".to_string());
         let proposed: Value = serde_json::from_str(
             &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
