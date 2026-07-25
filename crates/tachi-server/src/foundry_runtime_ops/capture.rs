@@ -260,6 +260,67 @@ pub(super) fn search_similar_capture_entries(
     }
 }
 
+struct PreparedCaptureReferenceWrite {
+    entry: MemoryEntry,
+    metadata_patch: serde_json::Map<String, Value>,
+    mutations: Vec<memcore::db::ValidatedReferenceMutation>,
+}
+
+fn prepare_capture_reference_write(
+    entry: &MemoryEntry,
+    context: &str,
+) -> Result<PreparedCaptureReferenceWrite, String> {
+    // Foundry capture metadata is assembled only by server handlers. Pull its
+    // lineage out before persistence so reserved fields reach memcore solely
+    // through the shape-validated append channel.
+    let mut entry = entry.clone();
+    let raw_refs = entry
+        .metadata
+        .as_object_mut()
+        .and_then(|metadata| metadata.remove("source_refs"));
+    let appends = match raw_refs {
+        None => Vec::new(),
+        Some(Value::Array(values)) => values
+            .into_iter()
+            .map(|value| {
+                let object = value
+                    .as_object()
+                    .ok_or_else(|| format!("{context} capture source_ref must be an object"))?;
+                let string_field =
+                    |key: &str| object.get(key).and_then(Value::as_str).map(str::to_string);
+                memcore::db::ValidatedReferenceMutation::capture_source(
+                    string_field("ref_type").unwrap_or_default(),
+                    string_field("ref_id").unwrap_or_default(),
+                    string_field("revision"),
+                )
+                .map_err(|error| format!("{context} capture source_ref invalid: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err(format!("{context} capture source_refs must be an array")),
+    };
+    let metadata_patch = entry.metadata.as_object().cloned().unwrap_or_default();
+    Ok(PreparedCaptureReferenceWrite {
+        entry,
+        metadata_patch,
+        mutations: appends,
+    })
+}
+
+pub(super) fn insert_capture_entry_if_absent(
+    store: &mut MemoryStore,
+    entry: &MemoryEntry,
+    context: &str,
+) -> Result<memcore::db::InsertMemoryResult, String> {
+    let prepared = prepare_capture_reference_write(entry, context)?;
+    store
+        .insert_if_absent_with_validated_reference_mutations(
+            &prepared.entry,
+            &prepared.metadata_patch,
+            &prepared.mutations,
+        )
+        .map_err(|error| format!("{context}: {error}"))
+}
+
 pub(super) fn persist_capture_entry(
     server: &MemoryServer,
     target_db: DbScope,
@@ -267,43 +328,16 @@ pub(super) fn persist_capture_entry(
     db_path: Option<&std::path::PathBuf>,
     entry: &MemoryEntry,
 ) -> Result<(), String> {
-    fn persist(
-        store: &mut MemoryStore,
-        entry: &mut MemoryEntry,
-        context: &str,
-    ) -> Result<(), String> {
-        // Foundry capture metadata is assembled only by server handlers. Pull
-        // its lineage out before persistence so reserved fields reach memcore
-        // solely through the shape-validated append channel.
-        let raw_refs = entry
-            .metadata
-            .as_object_mut()
-            .and_then(|metadata| metadata.remove("source_refs"));
-        let appends = match raw_refs {
-            None => Vec::new(),
-            Some(Value::Array(values)) => values
-                .into_iter()
-                .map(|value| {
-                    let object = value
-                        .as_object()
-                        .ok_or_else(|| format!("{context} capture source_ref must be an object"))?;
-                    let string_field =
-                        |key: &str| object.get(key).and_then(Value::as_str).map(str::to_string);
-                    memcore::db::ValidatedReferenceMutation::capture_source(
-                        string_field("ref_type").unwrap_or_default(),
-                        string_field("ref_id").unwrap_or_default(),
-                        string_field("revision"),
-                    )
-                    .map_err(|error| format!("{context} capture source_ref invalid: {error}"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            Some(_) => return Err(format!("{context} capture source_refs must be an array")),
-        };
-        let patch = entry.metadata.as_object().cloned().unwrap_or_default();
-        let (_, metadata) = store
-            .upsert_with_validated_reference_mutations(entry, None, &patch, &appends)
+    fn persist(store: &mut MemoryStore, entry: &MemoryEntry, context: &str) -> Result<(), String> {
+        let prepared = prepare_capture_reference_write(entry, context)?;
+        store
+            .upsert_with_validated_reference_mutations(
+                &prepared.entry,
+                None,
+                &prepared.metadata_patch,
+                &prepared.mutations,
+            )
             .map_err(|error| format!("{context}: {error}"))?;
-        entry.metadata = metadata;
         Ok(())
     }
 
@@ -318,7 +352,7 @@ pub(super) fn persist_capture_entry(
         server.with_named_project_store(project_name, |store| {
             persist(
                 store,
-                &mut entry,
+                &entry,
                 &format!("Failed to save session capture to '{project_name}'"),
             )
         })
@@ -332,7 +366,7 @@ pub(super) fn persist_capture_entry(
         server.with_path_store(db_path, |store| {
             persist(
                 store,
-                &mut entry,
+                &entry,
                 &format!("Failed to save captured memory to {}", db_path.display()),
             )
         })
@@ -341,7 +375,7 @@ pub(super) fn persist_capture_entry(
             DbScope::Global => Some(server.global_db_path_buf()),
             DbScope::Project => server.project_db_path_buf(),
         };
-        let mut entry_to_write = if let Some(dest) = dest_path {
+        let entry_to_write = if let Some(dest) = dest_path {
             let mut e = entry.clone();
             e.metadata =
                 crate::provenance::restamp_provenance_for_destination(e.metadata, &dest, target_db);
@@ -350,7 +384,7 @@ pub(super) fn persist_capture_entry(
             entry.clone()
         };
         server.with_store_for_scope(target_db, |store| {
-            persist(store, &mut entry_to_write, "Failed to save captured memory")
+            persist(store, &entry_to_write, "Failed to save captured memory")
         })
     }
 }

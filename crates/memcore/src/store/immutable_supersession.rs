@@ -22,6 +22,7 @@ use crate::{
 pub struct ImmutableSupersessionTransaction<'tx> {
     tx: Transaction<'tx>,
     vec_available: bool,
+    reserved_reference_write: db::ReservedReferenceWriteFlag,
 }
 
 impl<'tx> ImmutableSupersessionTransaction<'tx> {
@@ -56,6 +57,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         metadata_patch: &Map<String, Value>,
         mutations: &[db::ValidatedReferenceMutation],
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::upsert_with_validated_reference_mutations_within_tx(
             &self.tx,
             entry,
@@ -113,6 +116,7 @@ impl MemoryStore {
         mut operation: impl FnMut(&mut ImmutableSupersessionTransaction<'_>) -> Result<T, MemoryError>,
     ) -> Result<T, MemoryError> {
         let db_label = self.db_label.clone();
+        let reserved_reference_write = self.reserved_reference_write.clone();
         db::retry_memory_locked("immutable_supersession", &db_label, || {
             let tx = self
                 .conn
@@ -120,6 +124,7 @@ impl MemoryStore {
             let mut replacement = ImmutableSupersessionTransaction {
                 tx,
                 vec_available: self.vec_available,
+                reserved_reference_write: reserved_reference_write.clone(),
             };
             let result = operation(&mut replacement)?;
             replacement.tx.commit()?;

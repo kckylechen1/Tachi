@@ -237,10 +237,14 @@ pub fn checkpoint_wal_truncate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
 }
 
-/// Open a raw read-write connection for building ad hoc (possibly
-/// non-canonical) sqlite fixtures, e.g. in `doctor` tests that simulate
-/// legacy/partial schemas `MemoryStore::open` would never produce on its
-/// own (it always runs the full schema migration).
+/// Compatibility fixture seam for ad hoc non-canonical SQLite schemas used by
+/// doctor and bootstrap migration tests. This skips schema migration and the
+/// normal `MemoryStore` configuration, but installs a deny-by-default reserved
+/// reference guard. On a canonical database, unrelated raw metadata writes are
+/// compatible while reserved-reference changes fail closed; production code
+/// must use `MemoryStore` typed operations instead.
 pub fn open_raw(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open(path)
+    let conn = Connection::open(path)?;
+    let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
+    Ok(conn)
 }

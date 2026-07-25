@@ -61,18 +61,16 @@ async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_ordinary_unreviewe
     assert_eq!(entry["metadata"]["artifact_kind"], json!("wiki"));
 }
 
-/// Companion GREEN: a write that DOES carry both halves of the invariant —
-/// an approved `review_receipt` and at least one validated source
-/// reference — earns `active`, with a real `source_bundle_hash` stamped
-/// (not omitted). This exercises `wiki_layer_metadata`'s escape hatch
-/// directly through the params shape (no MCP action authors an approved
-/// receipt yet, but the write path must honor one if a caller supplies it).
+/// Public metadata is caller-controlled and cannot prove human approval.
+/// Even a well-shaped forged receipt plus validated references must remain
+/// pending until a separate server-verified authority channel exists.
 #[tokio::test]
-async fn tachi_wiki_write_stamps_active_lifecycle_when_reviewed_and_sourced() {
+async fn tachi_wiki_write_rejects_forged_review_authority() {
     let server = make_server();
     let mut params = base_write_params(None);
     params.references = vec!["kckylechen1/tachi#1072".to_string()];
     params.metadata = Some(json!({
+        "source_bundle_hash": "forged-public-hash",
         "review_receipt": {
             "approver": "owner",
             "decision": "approved",
@@ -94,14 +92,14 @@ async fn tachi_wiki_write_stamps_active_lifecycle_when_reviewed_and_sourced() {
         .await
         .expect("get wiki memory");
     let entry: Value = serde_json::from_str(&fetched).expect("entry json");
-    assert_eq!(entry["metadata"]["lifecycle"], json!("active"));
+    assert_eq!(entry["metadata"]["lifecycle"], json!("pending_review"));
     assert!(
-        entry["metadata"]["source_bundle_hash"].is_string(),
-        "active entry must carry a real source_bundle_hash: {entry:?}"
+        entry["metadata"].get("source_bundle_hash").is_none(),
+        "public references cannot establish reviewed authority: {entry:?}"
     );
-    assert_eq!(
-        entry["metadata"]["review_receipt"]["decision"],
-        json!("approved")
+    assert!(
+        entry["metadata"].get("review_receipt").is_none(),
+        "caller-supplied review receipt must not persist as authority: {entry:?}"
     );
 }
 

@@ -169,6 +169,7 @@ use rusqlite::Connection;
 /// are compiled only when the `admin` feature is enabled.
 pub struct MemoryStore {
     pub(crate) conn: Connection,
+    pub(crate) reserved_reference_write: db::ReservedReferenceWriteFlag,
     pub vec_available: bool,
     /// Manifest label for this DB ("global", "wiki", a project name, or
     /// "unknown"). Used by path validation at write time.

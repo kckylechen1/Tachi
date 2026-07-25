@@ -25,38 +25,23 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
 /// write shape (canon doc §7.1). Legacy `metadata.source_refs: string[]` remains
 /// a read fallback for existing entries but is not written here.
 ///
-/// Cross-vendor review fix (#1215, BUG 1): `lifecycle` NO LONGER defaults to
-/// `active` for every non-draft path. Canon doc §7's invariant is
-/// `Active ⇒ validated sources + approval` — a write with no caller-supplied
-/// `review_receipt` and no source references is, by definition, neither
-/// reviewed nor sourced, so it must land as `pending_review` regardless of
-/// path. This also restores the frozen contract's own top sentence: wiki
-/// "cannot become project truth by retention or model output" — an ordinary
-/// `tachi_wiki_write` call (agent-authored, no receipt) is model output.
+/// Public `tachi_wiki_write` input cannot establish human review authority.
+/// Metadata and references are caller-controlled, so every write through this
+/// boundary remains `pending_review` regardless of path or supplied receipt.
+/// References are retained only as provenance. A future approval flow must use
+/// a separate server-verified typed authority channel.
+///
 /// `/wiki/drafts/...` stays `pending_review` unconditionally (the one
 /// draft-path convention this leaf's own writer is aware of;
 /// `foundry_runtime_ops::wiki_evolver`'s weekly REM synthesis writes drafts
 /// through a *different* path — `tachi_save` directly — and stamps its own
 /// `metadata.review_status = "pending"` marker after the fact; the read-side
 /// gate (`derive_wiki_lifecycle`) honors both origins).
-///
-/// A write becomes `active` only when `caller_metadata` carries an
-/// `approved` `review_receipt` (canon doc §7's `WikiReviewReceiptV1`) AND at
-/// least one validated source reference is present — both halves of the
-/// invariant, not just one. When both hold, `source_bundle_hash` is stamped
-/// from the references (a real, checkable hash — see canon doc's
-/// `KnowledgeArtifactV1.source_bundle_hash`), not left `None`/omitted. No
-/// live caller in this leaf currently supplies an approved `review_receipt`
-/// (there is no review/approval MCP action yet) — that is intentional: it
-/// means every write through this leaf's `tachi_wiki_write` lands
-/// `pending_review` until a future leaf builds the approval surface, exactly
-/// matching "cannot become project truth by ... model output."
 pub(in crate::copilot_ops) fn wiki_layer_metadata(
     path: &str,
     scope: &str,
     project: Option<&str>,
     references: &[String],
-    caller_metadata: Option<&Value>,
 ) -> Value {
     let is_guide = path == "/guide" || path.starts_with("/guide/");
     let layer = if is_guide { "guide" } else { "wiki" };
@@ -71,18 +56,7 @@ pub(in crate::copilot_ops) fn wiki_layer_metadata(
         WikiAuthorityV1::Advisory
     };
     let is_draft_path = path == "/wiki/drafts" || path.starts_with("/wiki/drafts/");
-    let has_validated_sources = !references.is_empty();
-    let approved_review_receipt: Option<WikiReviewReceiptV1> = caller_metadata
-        .and_then(|meta| meta.get("review_receipt"))
-        .and_then(|value| serde_json::from_value::<WikiReviewReceiptV1>(value.clone()).ok())
-        .filter(|receipt| receipt.decision.eq_ignore_ascii_case("approved"));
-    let lifecycle = if is_draft_path {
-        WikiLifecycleV1::PendingReview
-    } else if has_validated_sources && approved_review_receipt.is_some() {
-        WikiLifecycleV1::Active
-    } else {
-        WikiLifecycleV1::PendingReview
-    };
+    let lifecycle = WikiLifecycleV1::PendingReview;
     let artifact_kind = if is_guide {
         WikiArtifactKindV1::Guide
     } else if is_draft_path {
@@ -90,9 +64,6 @@ pub(in crate::copilot_ops) fn wiki_layer_metadata(
     } else {
         WikiArtifactKindV1::Wiki
     };
-    let source_bundle_hash = (lifecycle == WikiLifecycleV1::Active && has_validated_sources)
-        .then(|| canonical_json_sha256(&json!(references)).ok())
-        .flatten();
     let mut obj = serde_json::Map::new();
     obj.insert("layer".to_string(), json!(layer));
     obj.insert("scope".to_string(), json!(scope));
@@ -104,17 +75,6 @@ pub(in crate::copilot_ops) fn wiki_layer_metadata(
     obj.insert("lifecycle".to_string(), json!(lifecycle.as_str()));
     obj.insert("artifact_kind".to_string(), json!(artifact_kind.as_str()));
     obj.insert("source_ref".to_string(), json!(references.first().cloned()));
-    if let Some(hash) = source_bundle_hash {
-        obj.insert("source_bundle_hash".to_string(), json!(hash));
-    }
-    if let Some(receipt) = &approved_review_receipt {
-        if lifecycle == WikiLifecycleV1::Active {
-            obj.insert(
-                "review_receipt".to_string(),
-                serde_json::to_value(receipt).unwrap_or(Value::Null),
-            );
-        }
-    }
     Value::Object(obj)
 }
 

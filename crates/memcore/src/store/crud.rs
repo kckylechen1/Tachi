@@ -62,14 +62,19 @@ impl MemoryStore {
         Ok(map.remove(id))
     }
 
-    /// Low-level access for bindings that need raw Connection reference.
+    /// Compatibility access for diagnostics and typed helpers that operate on
+    /// non-memory tables. `rusqlite::Connection` is inherently write-capable
+    /// even through `&Connection`, so this is not a read-only capability.
+    /// Canonical schema triggers prevent callers from changing reserved memory
+    /// reference metadata through this handle.
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
 
-    /// Mutable low-level access for bindings that need to open a transaction
-    /// (`Connection::transaction` requires `&mut`). Used by the exec-env lease
-    /// reclaim path (#894 S1), whose flip is a single atomic transaction.
+    /// Compatibility access for typed helpers that need a transaction on
+    /// non-memory tables (`Connection::transaction` requires `&mut`), notably
+    /// exec-env/resource/claim and recall-proposal operations. Canonical schema
+    /// triggers prevent raw mutation of reserved memory reference metadata.
     pub fn connection_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }

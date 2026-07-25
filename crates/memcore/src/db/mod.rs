@@ -113,7 +113,9 @@ pub use memory_crud::{
     search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, supersede_memory, symbolic_trigram_select_sql,
     sync_memories_symbolic_fts, try_claim_event, update_enrichment_fields, update_with_revision,
-    IdlessUpsertResult, InsertMemoryResult, ValidatedReferenceMutation,
+    IdlessUpsertResult, InsertMemoryResult, ValidatedReferenceMutation, MAX_REFERENCE_BYTES,
+    MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES,
+    MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 /// Caller-transaction upsert seam for lifecycle-apply: runs the full upsert
@@ -130,8 +132,9 @@ pub use open::lock_retry_backoff_count;
 /// Public: see `open::sqlite_error_is_locked`'s doc comment.
 pub use open::sqlite_error_is_locked;
 pub(crate) use open::{
-    acquire_startup_lock, configure_connection, open_read_only, open_read_write,
-    retry_memory_locked,
+    acquire_startup_lock, authorize_reserved_reference_write, configure_connection,
+    ensure_reserved_reference_write_guard, open_read_only, open_read_write,
+    register_reserved_reference_write_guard, retry_memory_locked, ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
@@ -145,6 +148,7 @@ pub use sandbox::{
     list_sandbox_exec_audit, list_sandbox_policies, list_sandbox_rules_for_role,
     path_matches_pattern, set_sandbox_policy, set_sandbox_rule,
 };
+pub(crate) use schema::install_reserved_reference_guard;
 pub use schema::{init_schema, init_schema_with_label_mut};
 pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;

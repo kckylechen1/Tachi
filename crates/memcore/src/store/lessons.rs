@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use rusqlite::TransactionBehavior;
 use serde_json::json;
 
 use crate::{error::MemoryError, MemoryStore};
@@ -25,10 +26,41 @@ fn lesson_task_matches(text: &str, expected_task: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
+struct LessonDedupPause {
+    entry_id: String,
+    arrived: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static LESSON_DEDUP_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<LessonDedupPause>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn pause_after_lesson_candidate_read(entry_id: &str) {
+    let pause = LESSON_DEDUP_PAUSE.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|pause| pause.entry_id == entry_id)
+            .map(|pause| {
+                (
+                    std::sync::Arc::clone(&pause.arrived),
+                    std::sync::Arc::clone(&pause.release),
+                )
+            })
+    });
+    if let Some((arrived, release)) = pause {
+        arrived.wait();
+        release.wait();
+    }
+}
+
 impl MemoryStore {
     /// Find a recent lesson duplicate and update its seen count in one store boundary.
     pub fn record_lesson_dedup_seen(
-        &self,
+        &mut self,
         expected_task: &str,
         outcome: &str,
         skills_used: &[String],
@@ -39,9 +71,12 @@ impl MemoryStore {
             return Ok(None);
         }
 
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let skills_set: HashSet<&str> = skills_used.iter().map(String::as_str).collect();
         let candidate = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = tx.prepare(
                 "SELECT id, text, metadata FROM memories \
                  WHERE path LIKE '/eval/lessons/%' \
                    AND id NOT LIKE 'foundry:%' \
@@ -79,18 +114,32 @@ impl MemoryStore {
             candidate
         };
 
-        let Some((id, mut metadata)) = candidate else {
+        let Some((id, metadata)) = candidate else {
+            tx.commit()?;
             return Ok(None);
         };
 
+        #[cfg(test)]
+        pause_after_lesson_candidate_read(&id);
+
         let count = metadata.get("count").and_then(|v| v.as_u64()).unwrap_or(1) + 1;
-        metadata["count"] = json!(count);
-        metadata["last_seen"] = json!(last_seen);
-        let metadata_json = serde_json::to_string(&metadata)?;
-        self.conn.execute(
-            "UPDATE memories SET metadata = ?1 WHERE id = ?2",
-            rusqlite::params![metadata_json, id],
+        let count_sql = i64::try_from(count).map_err(|_| {
+            MemoryError::InvalidArg("lesson dedup count exceeds SQLite integer range".to_string())
+        })?;
+        tx.execute(
+            "UPDATE memories
+             SET metadata = json_set(
+                 CASE
+                     WHEN json_valid(metadata) AND json_type(metadata) = 'object' THEN metadata
+                     ELSE '{}'
+                 END,
+                 '$.count', ?1,
+                 '$.last_seen', ?2
+             )
+             WHERE id = ?3",
+            rusqlite::params![count_sql, last_seen, id],
         )?;
+        tx.commit()?;
 
         Ok(Some(LessonDedupUpdate { id, count }))
     }
@@ -100,6 +149,9 @@ impl MemoryStore {
 mod tests {
     use super::*;
     use crate::types::MemoryEntry;
+    use serde_json::Map;
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
 
     fn test_entry(id: &str, text: &str, metadata: serde_json::Value) -> MemoryEntry {
         MemoryEntry {
@@ -131,6 +183,91 @@ mod tests {
             query_diversity: 0,
             tier: "raw".to_string(),
         }
+    }
+
+    fn evidence(reference: &str) -> crate::db::ValidatedReferenceMutation {
+        crate::db::ValidatedReferenceMutation::evidence(
+            reference.to_string(),
+            "2026-07-25T00:00:00Z".to_string(),
+            None,
+        )
+        .expect("validated evidence")
+    }
+
+    #[test]
+    fn lesson_dedup_serializes_with_trusted_reference_append() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let mut lesson_store = MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let mut trusted_store = MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let lesson = test_entry(
+            "lesson-race",
+            "Task: preserve provenance\nOutcome: failure",
+            json!({
+                "outcome": "failure",
+                "skills_used": ["rust"],
+                "count": 1,
+            }),
+        );
+        let patch = lesson.metadata.as_object().cloned().unwrap_or_default();
+        trusted_store
+            .upsert_with_validated_reference_mutations(&lesson, None, &patch, &[evidence("#100")])
+            .unwrap();
+
+        let arrived = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let slot = LESSON_DEDUP_PAUSE.get_or_init(|| std::sync::Mutex::new(None));
+        *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(LessonDedupPause {
+            entry_id: lesson.id.clone(),
+            arrived: Arc::clone(&arrived),
+            release: Arc::clone(&release),
+        });
+
+        let lesson_thread = std::thread::spawn(move || {
+            lesson_store.record_lesson_dedup_seen(
+                "preserve provenance",
+                "failure",
+                &["rust".to_string()],
+                "2026-07-25T01:00:00Z",
+                30,
+            )
+        });
+        arrived.wait();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let trusted_lesson = lesson.clone();
+        let append_thread = std::thread::spawn(move || {
+            let result = trusted_store.upsert_with_validated_reference_mutations(
+                &trusted_lesson,
+                None,
+                &Map::new(),
+                &[evidence("#101")],
+            );
+            done_tx.send(()).unwrap();
+            result
+        });
+        let append_finished_during_dedup = done_rx.recv_timeout(Duration::from_millis(300)).is_ok();
+        release.wait();
+
+        let update = lesson_thread.join().unwrap().unwrap().unwrap();
+        append_thread.join().unwrap().unwrap();
+        *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        assert!(
+            !append_finished_during_dedup,
+            "trusted append committed between lesson read and metadata update"
+        );
+        let stored = MemoryStore::open(&path.to_string_lossy())
+            .unwrap()
+            .get(&lesson.id)
+            .unwrap()
+            .unwrap();
+        let refs = stored.metadata["evidence_refs_v1"].as_array().unwrap();
+        assert_eq!(
+            refs.iter().map(|value| &value["ref"]).collect::<Vec<_>>(),
+            vec![&json!("#100"), &json!("#101")]
+        );
+        assert_eq!(update.count, 2);
+        assert_eq!(stored.metadata["count"], json!(2));
     }
 
     #[test]

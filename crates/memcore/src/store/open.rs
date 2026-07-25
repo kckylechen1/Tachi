@@ -90,16 +90,22 @@ impl MemoryStore {
         // scattered across every call site that builds a `db_path`.
         db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         let mut conn = db::open_read_write(db_path)?;
+        let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         // Both labelled and unlabelled opens run schema init + data migrations
         // through init_schema_with_label_mut so the pre-migration backup and
         // post-migration fingerprint marker apply uniformly. Previously the
         // path_validation=false branch called init_schema directly, skipping
         // backups for all CLI/open_cli_store paths (#597 CP1).
         let p = std::path::PathBuf::from(db_path);
-        let _ = db::init_schema_with_label_mut(&mut conn, db_label, &p, ctx)?;
+        let migration_authorization =
+            db::authorize_reserved_reference_write(&reserved_reference_write)?;
+        let schema_result = db::init_schema_with_label_mut(&mut conn, db_label, &p, ctx);
+        drop(migration_authorization);
+        let _ = schema_result?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
+            reserved_reference_write,
             vec_available,
             db_label: db_label.to_string(),
             path_validation,
@@ -130,10 +136,12 @@ impl MemoryStore {
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let conn = db::open_read_only(db_path)?;
+        let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
+            reserved_reference_write,
             vec_available,
             db_label: "unknown".to_string(),
             path_validation: false,
@@ -141,7 +149,9 @@ impl MemoryStore {
     }
 
     /// Open an existing database for a narrowly-scoped maintenance write.
-    /// This never creates a file, initializes schema, or runs migrations.
+    /// This never creates a file, initializes schema, or runs migrations; it
+    /// does refresh the reserved-reference safety triggers before exposing a
+    /// write-capable connection.
     pub fn open_existing_read_write(db_path: &str) -> Result<Self, MemoryError> {
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
@@ -149,6 +159,7 @@ impl MemoryStore {
         let conn =
             Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         db::configure_connection(&conn)?;
+        let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
             return Err(MemoryError::InvalidArg(format!(
@@ -168,6 +179,7 @@ impl MemoryStore {
                 "exact-dedupe apply requires current memories schema: {error}"
             ))
         })?;
+        db::install_reserved_reference_guard(&conn)?;
         // Registration above makes vec0 available to this connection, but a
         // maintenance open must not create its virtual table. Preparing a
         // read-only query proves the already-existing table and module are
@@ -176,6 +188,7 @@ impl MemoryStore {
         let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
         Ok(Self {
             conn,
+            reserved_reference_write,
             vec_available,
             db_label: "unknown".to_string(),
             path_validation: false,
@@ -189,10 +202,16 @@ impl MemoryStore {
         db::register_sqlite_vec();
         let conn = Connection::open_in_memory()?;
         db::configure_connection(&conn)?;
-        db::init_schema(&conn)?;
+        let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
+        let migration_authorization =
+            db::authorize_reserved_reference_write(&reserved_reference_write)?;
+        let schema_result = db::init_schema(&conn);
+        drop(migration_authorization);
+        schema_result?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
+            reserved_reference_write,
             vec_available,
             db_label: "unknown".to_string(),
             path_validation: false,
@@ -282,6 +301,51 @@ mod exact_dedupe_open_tests {
             )
             .unwrap();
         assert_eq!(table_count, 0);
+    }
+
+    #[test]
+    fn existing_read_write_refreshes_reserved_reference_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("current.db");
+        let mut store = MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let entry: MemoryEntry = serde_json::from_value(serde_json::json!({
+            "id": "maintenance-guard",
+            "text": "maintenance guard fixture",
+            "timestamp": "2026-07-25T00:00:00Z"
+        }))
+        .unwrap();
+        let reference = db::ValidatedReferenceMutation::evidence(
+            "#100".to_string(),
+            "2026-07-25T00:00:00Z".to_string(),
+            None,
+        )
+        .unwrap();
+        store
+            .upsert_with_validated_reference_mutations(
+                &entry,
+                None,
+                &serde_json::Map::new(),
+                &[reference],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute_batch(
+                "DROP TRIGGER memories_reserved_refs_insert_guard;
+                 DROP TRIGGER memories_reserved_refs_update_guard;",
+            )
+            .unwrap();
+        drop(store);
+
+        let maintenance = MemoryStore::open_existing_read_write(&path.to_string_lossy()).unwrap();
+        let erase = maintenance.connection().execute(
+            "UPDATE memories SET metadata = '{}' WHERE id = 'maintenance-guard'",
+            [],
+        );
+        assert!(
+            erase.is_err(),
+            "maintenance open left reserved refs unguarded"
+        );
     }
 
     #[test]

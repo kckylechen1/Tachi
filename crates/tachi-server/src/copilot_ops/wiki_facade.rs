@@ -54,13 +54,8 @@ pub(crate) async fn handle_tachi_wiki_write(
     } else {
         Vec::new()
     };
-    let layer_metadata = wiki_layer_metadata(
-        &path,
-        &params.scope,
-        target_project.as_deref(),
-        &references,
-        params.metadata.as_ref(),
-    );
+    let layer_metadata =
+        wiki_layer_metadata(&path, &params.scope, target_project.as_deref(), &references);
     let mut wiki_metadata = params.metadata.clone().unwrap_or_else(|| json!({}));
     if !wiki_metadata.is_object() {
         return Err("metadata must be a JSON object when supplied for wiki write".to_string());
@@ -70,6 +65,8 @@ pub(crate) async fn handle_tachi_wiki_write(
         // top-level reference shape. Nested source_refs belong to their
         // containing metadata and are intentionally unaffected.
         obj.remove("source_refs");
+        obj.remove("review_receipt");
+        obj.remove("source_bundle_hash");
         obj.insert("wiki".to_string(), json!(true));
         obj.insert("wiki_title".to_string(), json!(params.title.clone()));
         obj.insert("user_force".to_string(), json!(params.force));

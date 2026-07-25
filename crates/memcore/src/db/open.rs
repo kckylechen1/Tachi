@@ -1,6 +1,7 @@
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::error::MemoryError;
@@ -23,6 +24,60 @@ const READ_CACHE_SIZE_KIB: i64 = -16_000;
 const READ_MMAP_SIZE_BYTES: i64 = 256 * 1024 * 1024;
 
 static SQLITE_STARTUP_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) type ReservedReferenceWriteFlag = Arc<AtomicBool>;
+
+pub(crate) struct ReservedReferenceWriteAuthorization {
+    flag: ReservedReferenceWriteFlag,
+}
+
+impl Drop for ReservedReferenceWriteAuthorization {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn register_reserved_reference_write_guard(
+    conn: &Connection,
+) -> rusqlite::Result<ReservedReferenceWriteFlag> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let function_flag = Arc::clone(&flag);
+    conn.create_scalar_function(
+        "tachi_reserved_reference_write_enabled",
+        0,
+        FunctionFlags::SQLITE_UTF8,
+        move |_| Ok(i64::from(function_flag.load(Ordering::SeqCst))),
+    )?;
+    Ok(flag)
+}
+
+pub(crate) fn ensure_reserved_reference_write_guard(conn: &Connection) -> Result<(), MemoryError> {
+    if conn
+        .query_row(
+            "SELECT tachi_reserved_reference_write_enabled()",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .is_err()
+    {
+        let _deny_by_default = register_reserved_reference_write_guard(conn)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn authorize_reserved_reference_write(
+    flag: &ReservedReferenceWriteFlag,
+) -> Result<ReservedReferenceWriteAuthorization, MemoryError> {
+    flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| {
+            MemoryError::InvalidArg(
+                "reserved reference write authorization is already active".to_string(),
+            )
+        })?;
+    Ok(ReservedReferenceWriteAuthorization {
+        flag: Arc::clone(flag),
+    })
+}
 
 /// Process-wide count of explicit application-level lock-retry backoffs —
 /// i.e. how many times `retry_memory_locked` observed a BUSY/LOCKED error and

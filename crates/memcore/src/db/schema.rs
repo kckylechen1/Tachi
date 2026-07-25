@@ -37,6 +37,7 @@ mod ddl;
 /// with concurrent writers must switch to [`init_schema_with_label_mut`]'s
 /// transactional entry instead.
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
+    super::ensure_reserved_reference_write_guard(conn)?;
     apply_connection_pragmas(conn)?;
     init_schema_inner(conn)
 }
@@ -75,6 +76,7 @@ pub fn init_schema_with_label_mut(
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
 ) -> Result<crate::db::migrations::MigrationReport, MemoryError> {
+    super::ensure_reserved_reference_write_guard(conn)?;
     crate::db::migrations::check_schema_version_gate(conn)?;
     // #1119: typed migration gate. Runs BEFORE any backup/DDL/migration/stamp
     // mutates the DB — an unauthorized `OpenExisting + Deny` open of a
@@ -315,12 +317,19 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // triggers during that migration. The trigger is the cross-process cache
     // authority; drift is an open failure, never a silently stale cache hit.
     crate::db::search_generation::ensure_search_generation_schema(conn)?;
+    // Table rebuilds above drop triggers. Install the reserved-reference guard
+    // only after the final canonical `memories` table exists.
+    install_reserved_reference_guard(conn)?;
 
     ensure_optimization_indexes(conn);
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
     Ok(())
+}
+
+pub(crate) fn install_reserved_reference_guard(conn: &Connection) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::RESERVED_REFERENCE_GUARD_SQL)
 }
 
 fn ensure_optimization_indexes(conn: &Connection) {

@@ -341,6 +341,13 @@ pub struct ValidatedReferenceMutation {
     operation: ReservedReferenceOperation,
 }
 
+pub const MAX_REFERENCE_BYTES: usize = 4_096;
+pub const MAX_REFERENCE_ID_BYTES: usize = 1_024;
+pub const MAX_REFERENCE_KIND_BYTES: usize = 64;
+pub const MAX_REFERENCE_TIMESTAMP_BYTES: usize = 64;
+pub const MAX_REFERENCE_HASH_BYTES: usize = 1_024;
+pub const MAX_REFERENCE_SECTION_BYTES: usize = 4_096;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReservedReferenceOperation {
     Append {
@@ -372,16 +379,17 @@ impl ValidatedReferenceMutation {
         captured_at: String,
         target_kind: Option<String>,
     ) -> Result<Self, MemoryError> {
-        let reference = reference.trim().to_string();
-        if reference.is_empty() || captured_at.trim().is_empty() {
-            return Err(MemoryError::InvalidArg(
-                "validated evidence refs require non-empty ref and captured_at".into(),
-            ));
-        }
-        let captured_at = normalize_utc_iso(captured_at.trim())?;
+        let reference = normalize_required_bounded(reference, "evidence ref", MAX_REFERENCE_BYTES)?;
+        let captured_at = normalize_timestamp(captured_at, "evidence captured_at")?;
         let target_kind = target_kind
-            .map(|kind| kind.trim().to_ascii_lowercase())
-            .filter(|kind| !kind.is_empty());
+            .map(|kind| {
+                normalize_required_lower_bounded(
+                    kind,
+                    "evidence target_kind",
+                    MAX_REFERENCE_KIND_BYTES,
+                )
+            })
+            .transpose()?;
         if let Some(kind) = target_kind.as_deref() {
             if !matches!(
                 kind,
@@ -427,7 +435,11 @@ impl ValidatedReferenceMutation {
         commit_sha: Option<String>,
         section_or_span: Option<String>,
     ) -> Result<Self, MemoryError> {
-        let relation = normalize_required_lower(relation, "source ref relation")?;
+        let relation = normalize_required_lower_bounded(
+            relation,
+            "source ref relation",
+            MAX_REFERENCE_KIND_BYTES,
+        )?;
         if !matches!(
             relation.as_str(),
             "derived_from" | "supports" | "contradicts" | "supersedes" | "applies_to"
@@ -436,7 +448,11 @@ impl ValidatedReferenceMutation {
                 "unsupported source ref relation: {relation}"
             )));
         }
-        let target_kind = normalize_required_lower(target_kind, "source ref target_kind")?;
+        let target_kind = normalize_required_lower_bounded(
+            target_kind,
+            "source ref target_kind",
+            MAX_REFERENCE_KIND_BYTES,
+        )?;
         if !matches!(
             target_kind.as_str(),
             "issue" | "comment" | "pr" | "commit" | "canonical_doc" | "verification"
@@ -445,14 +461,49 @@ impl ValidatedReferenceMutation {
                 "unsupported source ref target_kind: {target_kind}"
             )));
         }
-        let target_ref = normalize_required(target_ref, "source ref target_ref")?;
-        let comment_id = normalize_optional(comment_id);
-        let updated_at = updated_at
-            .map(|value| normalize_utc_iso(value.trim()))
-            .transpose()?;
-        let body_hash = normalize_optional(body_hash);
-        let commit_sha = normalize_optional(commit_sha);
-        let section_or_span = normalize_optional(section_or_span);
+        let target_ref =
+            normalize_required_bounded(target_ref, "source ref target_ref", MAX_REFERENCE_BYTES)?;
+        let comment_id = normalize_optional_bounded(
+            comment_id,
+            "source ref comment_id",
+            MAX_REFERENCE_ID_BYTES,
+        )?;
+        let updated_at = normalize_optional_timestamp(updated_at, "source ref updated_at")?;
+        let body_hash = normalize_optional_bounded(
+            body_hash,
+            "source ref body_hash",
+            MAX_REFERENCE_HASH_BYTES,
+        )?;
+        let commit_sha = normalize_optional_bounded(
+            commit_sha,
+            "source ref commit_sha",
+            MAX_REFERENCE_HASH_BYTES,
+        )?;
+        let section_or_span = normalize_optional_bounded(
+            section_or_span,
+            "source ref section_or_span",
+            MAX_REFERENCE_SECTION_BYTES,
+        )?;
+        if target_kind == "comment" && comment_id.is_none() {
+            return Err(MemoryError::InvalidArg(
+                "comment source ref requires comment_id".to_string(),
+            ));
+        }
+        match target_kind.as_str() {
+            "commit" if commit_sha.is_none() => {
+                return Err(MemoryError::InvalidArg(
+                    "commit source ref requires commit_sha".to_string(),
+                ));
+            }
+            "comment" | "issue" | "pr" | "canonical_doc" | "verification"
+                if body_hash.is_none() =>
+            {
+                return Err(MemoryError::InvalidArg(format!(
+                    "{target_kind} source ref requires body_hash"
+                )));
+            }
+            _ => {}
+        }
         let mut object = Map::new();
         object.insert("relation".to_string(), Value::String(relation));
         object.insert("target_kind".to_string(), Value::String(target_kind));
@@ -481,9 +532,23 @@ impl ValidatedReferenceMutation {
         ref_id: String,
         revision: Option<String>,
     ) -> Result<Self, MemoryError> {
-        let ref_type = normalize_required_lower(ref_type, "capture source ref_type")?;
-        let ref_id = normalize_required(ref_id, "capture source ref_id")?;
-        let revision = normalize_optional(revision);
+        let ref_type = normalize_required_lower_bounded(
+            ref_type,
+            "capture source ref_type",
+            MAX_REFERENCE_KIND_BYTES,
+        )?;
+        if !matches!(ref_type.as_str(), "turn" | "compact_window") {
+            return Err(MemoryError::InvalidArg(format!(
+                "unsupported capture source ref_type: {ref_type}"
+            )));
+        }
+        let ref_id =
+            normalize_required_bounded(ref_id, "capture source ref_id", MAX_REFERENCE_ID_BYTES)?;
+        let revision = normalize_optional_bounded(
+            revision,
+            "capture source revision",
+            MAX_REFERENCE_ID_BYTES,
+        )?;
         let mut object = Map::new();
         object.insert("ref_type".to_string(), Value::String(ref_type));
         object.insert("ref_id".to_string(), Value::String(ref_id));
@@ -515,24 +580,60 @@ impl ValidatedReferenceMutation {
     }
 }
 
-fn normalize_required(value: String, field: &str) -> Result<String, MemoryError> {
+fn normalize_required_bounded(
+    value: String,
+    field: &str,
+    max_bytes: usize,
+) -> Result<String, MemoryError> {
     let value = value.trim().to_string();
     if value.is_empty() {
         return Err(MemoryError::InvalidArg(format!(
             "{field} must be non-empty"
         )));
     }
+    if value.len() > max_bytes {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} exceeds {max_bytes} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} contains control characters"
+        )));
+    }
     Ok(value)
 }
 
-fn normalize_required_lower(value: String, field: &str) -> Result<String, MemoryError> {
-    normalize_required(value, field).map(|value| value.to_ascii_lowercase())
+fn normalize_required_lower_bounded(
+    value: String,
+    field: &str,
+    max_bytes: usize,
+) -> Result<String, MemoryError> {
+    normalize_required_bounded(value, field, max_bytes).map(|value| value.to_ascii_lowercase())
 }
 
-fn normalize_optional(value: Option<String>) -> Option<String> {
+fn normalize_optional_bounded(
+    value: Option<String>,
+    field: &str,
+    max_bytes: usize,
+) -> Result<Option<String>, MemoryError> {
     value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .map(|value| normalize_required_bounded(value, field, max_bytes))
+        .transpose()
+}
+
+fn normalize_timestamp(value: String, field: &str) -> Result<String, MemoryError> {
+    let value = normalize_required_bounded(value, field, MAX_REFERENCE_TIMESTAMP_BYTES)?;
+    normalize_utc_iso(&value)
+}
+
+fn normalize_optional_timestamp(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>, MemoryError> {
+    value
+        .map(|value| normalize_timestamp(value, field))
+        .transpose()
 }
 
 /// Result of an atomic insert-only memory write.
@@ -645,7 +746,9 @@ impl crate::MemoryStore {
 
         let db_label = self.db_label.clone();
         let vec_available = self.vec_available;
+        let authorization = self.reserved_reference_write.clone();
         crate::db::retry_memory_locked("upsert_validated_reference_mutations", &db_label, || {
+            let _authorization = crate::db::authorize_reserved_reference_write(&authorization)?;
             upsert_with_validated_reference_mutations(
                 &mut self.conn,
                 entry,
@@ -655,6 +758,43 @@ impl crate::MemoryStore {
                 mutations,
             )
         })
+    }
+
+    /// Insert-only counterpart to [`Self::upsert_with_validated_reference_mutations`].
+    /// Construction validates shape only; the server remains responsible for
+    /// deciding whether the source is authorized before calling this method.
+    pub fn insert_if_absent_with_validated_reference_mutations(
+        &mut self,
+        entry: &MemoryEntry,
+        metadata_patch: &Map<String, Value>,
+        mutations: &[ValidatedReferenceMutation],
+    ) -> Result<InsertMemoryResult, MemoryError> {
+        if self.path_validation && !atomic_evidence_path_validation_disabled() {
+            let allow_cross = entry
+                .metadata
+                .get("allow_cross_project")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            crate::path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
+                .map_err(|error| MemoryError::InvalidArg(error.to_string()))?;
+        }
+        let db_label = self.db_label.clone();
+        let vec_available = self.vec_available;
+        let authorization = self.reserved_reference_write.clone();
+        crate::db::retry_memory_locked(
+            "insert_if_absent_validated_reference_mutations",
+            &db_label,
+            || {
+                let _authorization = crate::db::authorize_reserved_reference_write(&authorization)?;
+                insert_if_absent_with_reference_mutations(
+                    &mut self.conn,
+                    entry,
+                    vec_available,
+                    Some(metadata_patch),
+                    mutations,
+                )
+            },
+        )
     }
 }
 
@@ -909,6 +1049,8 @@ mod reserved_reference_tests {
         let (_dir, mut store) = open_store();
         let clean = entry("legacy-preserve", json!({ "before": true }));
         store.upsert(&clean).unwrap();
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
         store
             .connection()
             .execute(
@@ -923,6 +1065,7 @@ mod reserved_reference_tests {
                 ],
             )
             .unwrap();
+        drop(_authorization);
         let update = entry("legacy-preserve", json!({ "after": true }));
         store.upsert(&update).unwrap();
 
@@ -998,6 +1141,183 @@ mod reserved_reference_tests {
     }
 
     #[test]
+    fn validated_reference_mutations_reject_oversized_and_unknown_fields() {
+        assert!(ValidatedReferenceMutation::evidence(
+            "r".repeat(MAX_REFERENCE_BYTES + 1),
+            "2026-07-25T00:00:00Z".to_string(),
+            Some("issue".to_string()),
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::evidence(
+            "#100".to_string(),
+            "2026-07-25T00:00:00Z".to_string(),
+            Some("invented_kind".to_string()),
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::evidence(
+            "#100".to_string(),
+            "t".repeat(MAX_REFERENCE_TIMESTAMP_BYTES + 1),
+            None,
+        )
+        .is_err());
+
+        let precedent = |relation: &str,
+                         target_kind: &str,
+                         target_ref: String,
+                         comment_id: Option<String>,
+                         updated_at: Option<String>,
+                         body_hash: Option<String>,
+                         commit_sha: Option<String>,
+                         section_or_span: Option<String>| {
+            ValidatedReferenceMutation::precedent_source(
+                relation.to_string(),
+                target_kind.to_string(),
+                target_ref,
+                comment_id,
+                updated_at,
+                body_hash,
+                commit_sha,
+                section_or_span,
+            )
+        };
+        assert!(precedent(
+            "invented_relation",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            None,
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "invented_kind",
+            "#100".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "r".repeat(MAX_REFERENCE_BYTES + 1),
+            Some("42".to_string()),
+            None,
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("c".repeat(MAX_REFERENCE_ID_BYTES + 1)),
+            None,
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            Some("not-a-timestamp".to_string()),
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            None,
+            Some("h".repeat(MAX_REFERENCE_HASH_BYTES + 1)),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            None,
+            Some("hash".to_string()),
+            None,
+            Some("s".repeat(MAX_REFERENCE_SECTION_BYTES + 1)),
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            None,
+            None,
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "commit",
+            "deadbeef".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+
+        assert!(ValidatedReferenceMutation::capture_source(
+            "invented_capture_kind".to_string(),
+            "capture-id".to_string(),
+            None,
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::capture_source(
+            "k".repeat(MAX_REFERENCE_KIND_BYTES + 1),
+            "capture-id".to_string(),
+            None,
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::capture_source(
+            "turn".to_string(),
+            "i".repeat(MAX_REFERENCE_ID_BYTES + 1),
+            None,
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::capture_source(
+            "turn".to_string(),
+            "capture-id".to_string(),
+            Some("r".repeat(MAX_REFERENCE_ID_BYTES + 1)),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn insert_if_absent_strips_hostile_reserved_metadata() {
         let (_dir, mut store) = open_store();
         let hostile = entry(
@@ -1064,6 +1384,89 @@ mod reserved_reference_tests {
         assert!(stored.metadata.get("evidence_refs_v1").is_none());
         assert!(stored.metadata.get("source_refs").is_none());
     }
+
+    #[test]
+    fn raw_connections_cannot_erase_or_forge_reserved_reference_metadata() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let mut store = crate::MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let clean = entry("raw-guard", json!({ "kept": true }));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .unwrap();
+
+        let erase = store.connection().execute(
+            "UPDATE memories SET metadata = '{}' WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(erase.is_err(), "raw store connection erased reserved refs");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories
+                 SET metadata = json_set(metadata, '$.ordinary_patch', 1)
+                 WHERE id = ?1",
+                params![clean.id],
+            )
+            .expect("unrelated raw metadata patch preserves reserved refs");
+
+        let raw = crate::db::open_raw(&path).unwrap();
+        raw.execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.raw_ordinary_patch', 1)
+             WHERE id = ?1",
+            params![clean.id],
+        )
+        .expect("open_raw unrelated metadata patch preserves reserved refs");
+        let forge = raw.execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.evidence_refs_v1', json('[{\"ref\":\"#999\"}]'))
+             WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(forge.is_err(), "open_raw forged reserved refs");
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100"]);
+        assert_eq!(stored.metadata["ordinary_patch"], json!(1));
+        assert_eq!(stored.metadata["raw_ordinary_patch"], json!(1));
+    }
+
+    #[test]
+    fn revision_checked_full_metadata_update_preserves_reserved_references() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("revision-metadata-guard", json!({ "before": true }));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .unwrap();
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert!(store
+            .update_with_revision(
+                &stored.id,
+                "updated content",
+                "updated summary",
+                &stored.source,
+                &json!({ "after": true }),
+                None,
+                stored.revision,
+            )
+            .unwrap());
+
+        let updated = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&updated), vec!["#100"]);
+        assert_eq!(updated.metadata["after"], json!(true));
+        assert!(updated.metadata.get("before").is_none());
+    }
 }
 
 /// Insert `entry` only when its id is absent. The existence decision and all
@@ -1073,6 +1476,16 @@ pub(crate) fn insert_if_absent(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
+) -> Result<InsertMemoryResult, MemoryError> {
+    insert_if_absent_with_reference_mutations(conn, entry, vec_available, None, &[])
+}
+
+fn insert_if_absent_with_reference_mutations(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    metadata_patch: Option<&Map<String, Value>>,
+    mutations: &[ValidatedReferenceMutation],
 ) -> Result<InsertMemoryResult, MemoryError> {
     if entry.id.trim().is_empty() || entry.id.starts_with("anchor:") {
         return Err(MemoryError::InvalidArg(
@@ -1113,13 +1526,18 @@ pub(crate) fn insert_if_absent(
         .map(normalize_utc_iso)
         .transpose()?;
     let write_time_utc = now_utc_iso();
-    let mut metadata = strip_untrusted_reserved_metadata(&entry.metadata);
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut metadata = match metadata_patch {
+        Some(metadata_patch) => {
+            merge_validated_reference_metadata(&tx, &entry.id, metadata_patch, mutations)?
+        }
+        None => strip_untrusted_reserved_metadata(&entry.metadata),
+    };
     let path = crate::types::apply_location_relocation(&path, &entry.location, &mut metadata);
     let metadata_json = serde_json::to_string(&metadata)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let e_json = canonical_entities_json(entry)?;
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let rows_changed = tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance, timestamp, valid_from, valid_until,

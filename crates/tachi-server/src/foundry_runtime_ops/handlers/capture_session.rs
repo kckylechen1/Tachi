@@ -1,4 +1,4 @@
-use super::super::capture::queue_capture_enrichment;
+use super::super::capture::{insert_capture_entry_if_absent, queue_capture_enrichment};
 use super::super::helpers::{
     build_entry_path, build_openclaw_agent_root, dedup_strings, normalize_category, normalize_scope,
 };
@@ -1098,21 +1098,27 @@ pub(crate) async fn handle_capture_session(
     for captured in &entries {
         let result = if let Some(project) = captured.named_project.as_deref() {
             server.with_named_project_store(project, |store| {
-                store
-                    .insert_if_absent(&captured.entry)
-                    .map_err(|e| e.to_string())
+                insert_capture_entry_if_absent(
+                    store,
+                    &captured.entry,
+                    "Failed to insert named-project session capture",
+                )
             })
         } else if let Some(path) = db_path.as_ref() {
             server.with_path_store(path, |store| {
-                store
-                    .insert_if_absent(&captured.entry)
-                    .map_err(|e| e.to_string())
+                insert_capture_entry_if_absent(
+                    store,
+                    &captured.entry,
+                    "Failed to insert path-routed session capture",
+                )
             })
         } else {
             server.with_store_for_scope(captured.target_db, |store| {
-                store
-                    .insert_if_absent(&captured.entry)
-                    .map_err(|e| e.to_string())
+                insert_capture_entry_if_absent(
+                    store,
+                    &captured.entry,
+                    "Failed to insert session capture",
+                )
             })
         }?;
         if result == memcore::InsertMemoryResult::Existing {
