@@ -26,28 +26,52 @@ const READ_MMAP_SIZE_BYTES: i64 = 256 * 1024 * 1024;
 
 static SQLITE_STARTUP_LOCK: Mutex<()> = Mutex::new(());
 
-pub(crate) type ReservedReferenceWriteFlag = Arc<AtomicBool>;
+pub(crate) struct ConnectionAuthorizationState {
+    typed_dml: AtomicBool,
+    schema_migration: AtomicBool,
+}
+
+pub(crate) type ReservedReferenceWriteFlag = Arc<ConnectionAuthorizationState>;
+
+enum AuthorizationKind {
+    TypedDml,
+    SchemaMigration,
+}
 
 pub(crate) struct ReservedReferenceWriteAuthorization {
     flag: ReservedReferenceWriteFlag,
+    kind: AuthorizationKind,
 }
 
 impl Drop for ReservedReferenceWriteAuthorization {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
+        match self.kind {
+            AuthorizationKind::TypedDml => self.flag.typed_dml.store(false, Ordering::SeqCst),
+            AuthorizationKind::SchemaMigration => {
+                self.flag.schema_migration.store(false, Ordering::SeqCst)
+            }
+        }
     }
 }
 
 pub(crate) fn register_reserved_reference_write_guard(
     conn: &Connection,
 ) -> rusqlite::Result<ReservedReferenceWriteFlag> {
-    let flag = Arc::new(AtomicBool::new(false));
+    let flag = Arc::new(ConnectionAuthorizationState {
+        typed_dml: AtomicBool::new(false),
+        schema_migration: AtomicBool::new(false),
+    });
     let function_flag = Arc::clone(&flag);
     conn.create_scalar_function(
         "tachi_reserved_reference_write_enabled",
         0,
         FunctionFlags::SQLITE_UTF8,
-        move |_| Ok(i64::from(function_flag.load(Ordering::SeqCst))),
+        move |_| {
+            Ok(i64::from(
+                function_flag.typed_dml.load(Ordering::SeqCst)
+                    || function_flag.schema_migration.load(Ordering::SeqCst),
+            ))
+        },
     )?;
     Ok(flag)
 }
@@ -62,7 +86,7 @@ fn sqlite_identifier_eq(raw: *const c_char, expected: &[u8]) -> bool {
         .eq_ignore_ascii_case(expected)
 }
 
-fn protected_reference_trigger(raw: *const c_char) -> bool {
+fn expected_reference_trigger(raw: *const c_char) -> bool {
     sqlite_identifier_eq(raw, b"memories_reserved_refs_insert_guard")
         || sqlite_identifier_eq(raw, b"memories_reserved_refs_update_guard")
 }
@@ -101,19 +125,20 @@ unsafe extern "C" fn reserved_reference_authorizer(
     action: c_int,
     arg1: *const c_char,
     arg2: *const c_char,
-    _database: *const c_char,
-    _accessor: *const c_char,
+    database: *const c_char,
+    accessor: *const c_char,
 ) -> c_int {
-    let authorized = if state.is_null() {
-        false
+    let (typed_dml, schema_migration) = if state.is_null() {
+        (false, false)
     } else {
-        // MemoryStore owns this AtomicBool for longer than its Connection. Raw
+        // MemoryStore owns this state for longer than its Connection. Raw
         // fixture handles pass null and therefore remain permanently denied.
-        unsafe { &*state.cast::<AtomicBool>() }.load(Ordering::SeqCst)
+        let state = unsafe { &*state.cast::<ConnectionAuthorizationState>() };
+        (
+            state.typed_dml.load(Ordering::SeqCst),
+            state.schema_migration.load(Ordering::SeqCst),
+        )
     };
-    if authorized {
-        return rusqlite::ffi::SQLITE_OK;
-    }
 
     let trigger_ddl = matches!(
         action,
@@ -121,7 +146,27 @@ unsafe extern "C" fn reserved_reference_authorizer(
             | rusqlite::ffi::SQLITE_CREATE_TEMP_TRIGGER
             | rusqlite::ffi::SQLITE_DROP_TRIGGER
             | rusqlite::ffi::SQLITE_DROP_TEMP_TRIGGER
-    ) && protected_reference_trigger(arg1);
+    );
+    if trigger_ddl {
+        let canonical_migration_trigger = schema_migration
+            && matches!(
+                action,
+                rusqlite::ffi::SQLITE_CREATE_TRIGGER | rusqlite::ffi::SQLITE_DROP_TRIGGER
+            )
+            && expected_reference_trigger(arg1)
+            && sqlite_identifier_eq(arg2, b"memories")
+            && sqlite_identifier_eq(database, b"main");
+        return if canonical_migration_trigger {
+            rusqlite::ffi::SQLITE_OK
+        } else {
+            rusqlite::ffi::SQLITE_DENY
+        };
+    }
+
+    if schema_migration {
+        return rusqlite::ffi::SQLITE_OK;
+    }
+
     let protected_memory_write = (action == rusqlite::ffi::SQLITE_INSERT
         && sqlite_identifier_eq(arg1, b"memories"))
         || (action == rusqlite::ffi::SQLITE_UPDATE
@@ -137,12 +182,15 @@ unsafe extern "C" fn reserved_reference_authorizer(
         rusqlite::ffi::SQLITE_ATTACH | rusqlite::ffi::SQLITE_DETACH
     );
 
-    if trigger_ddl
-        || protected_memory_write
-        || protected_memory_schema
-        || unsafe_pragma
-        || attached_schema
-    {
+    if protected_memory_write {
+        // A direct typed statement may mutate protected fields. SQL executed
+        // indirectly by a trigger never inherits that authority.
+        if typed_dml && accessor.is_null() {
+            rusqlite::ffi::SQLITE_OK
+        } else {
+            rusqlite::ffi::SQLITE_DENY
+        }
+    } else if protected_memory_schema || unsafe_pragma || attached_schema {
         rusqlite::ffi::SQLITE_DENY
     } else {
         rusqlite::ffi::SQLITE_OK
@@ -173,6 +221,67 @@ pub(crate) fn install_reserved_reference_authorizer(
     }
 }
 
+fn normalize_trigger_sql(sql: &str) -> String {
+    sql.trim_end_matches(|ch: char| ch == ';' || ch.is_whitespace())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn validate_persistent_trigger_inventory(
+    conn: &Connection,
+    require_complete: bool,
+) -> Result<(), MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT name, tbl_name, sql
+         FROM main.sqlite_schema
+         WHERE type = 'trigger'
+         ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut found = std::collections::HashSet::new();
+    for row in rows {
+        let (name, table, sql) = row?;
+        let Some((canonical_name, canonical_sql)) =
+            crate::db::schema::expected_reserved_reference_trigger(&name)
+        else {
+            return Err(MemoryError::InvalidArg(format!(
+                "unsafe persistent trigger inventory: unexpected trigger '{name}' on table '{table}'"
+            )));
+        };
+        if name != canonical_name
+            || table != "memories"
+            || sql.as_deref().map(normalize_trigger_sql)
+                != Some(normalize_trigger_sql(canonical_sql))
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "unsafe persistent trigger inventory: trigger '{name}' does not match the canonical '{canonical_name}' definition"
+            )));
+        }
+        found.insert(canonical_name);
+    }
+
+    if require_complete {
+        for expected in [
+            "memories_reserved_refs_insert_guard",
+            "memories_reserved_refs_update_guard",
+        ] {
+            if !found.contains(expected) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "unsafe persistent trigger inventory: required trigger '{expected}' is missing"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_reserved_reference_write_guard(conn: &Connection) -> Result<(), MemoryError> {
     if conn
         .query_row(
@@ -190,7 +299,8 @@ pub(crate) fn ensure_reserved_reference_write_guard(conn: &Connection) -> Result
 pub(crate) fn authorize_reserved_reference_write(
     flag: &ReservedReferenceWriteFlag,
 ) -> Result<ReservedReferenceWriteAuthorization, MemoryError> {
-    flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+    flag.typed_dml
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| {
             MemoryError::InvalidArg(
                 "reserved reference write authorization is already active".to_string(),
@@ -198,6 +308,21 @@ pub(crate) fn authorize_reserved_reference_write(
         })?;
     Ok(ReservedReferenceWriteAuthorization {
         flag: Arc::clone(flag),
+        kind: AuthorizationKind::TypedDml,
+    })
+}
+
+pub(crate) fn authorize_schema_migration(
+    flag: &ReservedReferenceWriteFlag,
+) -> Result<ReservedReferenceWriteAuthorization, MemoryError> {
+    flag.schema_migration
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| {
+            MemoryError::InvalidArg("schema migration authorization is already active".to_string())
+        })?;
+    Ok(ReservedReferenceWriteAuthorization {
+        flag: Arc::clone(flag),
+        kind: AuthorizationKind::SchemaMigration,
     })
 }
 

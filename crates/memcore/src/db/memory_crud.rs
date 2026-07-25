@@ -1563,6 +1563,226 @@ mod reserved_reference_tests {
     }
 
     #[test]
+    fn raw_triggers_cannot_launder_typed_write_authority() {
+        for (label, create_trigger) in [
+            (
+                "main",
+                "CREATE TRIGGER malicious_memory_update
+                 AFTER UPDATE ON memories
+                 BEGIN
+                   UPDATE memories
+                   SET path = '/wiki/trigger-forged',
+                       metadata = json_set(metadata, '$.source_refs', json('[\"#trigger\"]'))
+                   WHERE id = NEW.id;
+                 END;",
+            ),
+            (
+                "temp-case-variant",
+                "CREATE TEMP TRIGGER MaLiCiOuS_MeMoRy_UpDaTe
+                 AFTER UPDATE ON main.memories
+                 BEGIN
+                   UPDATE memories
+                   SET source = 'wiki',
+                       metadata = json_set(metadata, '$.source_refs', json('[\"#temp-trigger\"]'))
+                   WHERE id = NEW.id;
+                 END;",
+            ),
+        ] {
+            let (_dir, mut store) = open_store();
+            let seed = entry(&format!("trigger-{label}"), json!({ "kept": true }));
+            store.upsert(&seed).expect("seed ordinary row");
+            let baseline = store.get(&seed.id).unwrap().unwrap();
+
+            let create = store.connection().execute_batch(create_trigger);
+            let mut typed_update = baseline.clone();
+            typed_update.text.push_str(" typed update");
+            store
+                .upsert(&typed_update)
+                .expect("legitimate typed update");
+            let stored = store.get(&seed.id).unwrap().unwrap();
+
+            assert!(
+                create.is_err(),
+                "raw {label} trigger inherited typed authority: path={}, source={}, metadata={}",
+                stored.path,
+                stored.source,
+                stored.metadata
+            );
+            assert_eq!(stored.path, baseline.path);
+            assert_eq!(stored.source, baseline.source);
+            assert!(stored.metadata.get("source_refs").is_none());
+        }
+    }
+
+    #[test]
+    fn raw_trigger_drop_is_denied_for_arbitrary_main_and_temp_triggers() {
+        let (dir, store) = open_store();
+        let path = dir.path().join("memory.db");
+        let offline = rusqlite::Connection::open(&path).expect("open offline trigger fixture");
+        offline
+            .execute_batch(
+                "CREATE TRIGGER MixedCaseAuxTrigger
+                 AFTER INSERT ON access_history BEGIN SELECT 1; END;",
+            )
+            .expect("plant persistent trigger after protected open");
+        drop(offline);
+
+        assert!(
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER mixedcaseauxtrigger")
+                .is_err(),
+            "raw handle dropped an arbitrary persistent trigger"
+        );
+        store
+            .connection()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS raw_drop_probe(value INTEGER NOT NULL);
+                 INSERT INTO raw_drop_probe(value) VALUES (1);",
+            )
+            .expect("unrelated auxiliary-table DML remains available");
+
+        let temp = rusqlite::Connection::open_in_memory().expect("open temp trigger fixture");
+        temp.execute_batch(
+            "CREATE TABLE auxiliary(value INTEGER);
+             CREATE TEMP TRIGGER TempAuxTrigger
+             AFTER INSERT ON auxiliary BEGIN SELECT 1; END;",
+        )
+        .expect("seed temp trigger before protection");
+        crate::db::install_reserved_reference_authorizer(&temp, None)
+            .expect("install connection authorizer");
+        assert!(
+            temp.execute_batch("DROP TRIGGER temp.TempAuxTrigger")
+                .is_err(),
+            "protected raw handle dropped an arbitrary temp trigger"
+        );
+    }
+
+    #[test]
+    fn raw_auxiliary_trigger_cannot_chain_into_typed_search_write() {
+        let (_dir, mut store) = open_store();
+        let seed = entry("trigger-access-history", json!({ "kept": true }));
+        store.upsert(&seed).expect("seed searchable row");
+
+        let create = store.connection().execute_batch(
+            "CREATE TRIGGER malicious_access_history_insert
+             AFTER INSERT ON access_history
+             BEGIN
+               UPDATE memories
+               SET category = 'wiki', path = '/wiki/aux-trigger-forged'
+               WHERE id = NEW.memory_id;
+             END;",
+        );
+        let results = store
+            .search(
+                "reserved reference boundary fixture trigger access history",
+                None,
+            )
+            .expect("legitimate typed search");
+        assert!(
+            results.iter().any(|result| result.entry.id == seed.id),
+            "fixture must exercise access recording"
+        );
+        let stored = store.get(&seed.id).unwrap().unwrap();
+
+        assert!(
+            create.is_err(),
+            "raw auxiliary trigger inherited typed search authority: path={}, category={}",
+            stored.path,
+            stored.category
+        );
+        assert_eq!(stored.path, seed.path);
+        assert_eq!(stored.category, seed.category);
+    }
+
+    #[test]
+    fn typed_dml_and_schema_scopes_do_not_authorize_arbitrary_trigger_ddl() {
+        let (_dir, store) = open_store();
+        let typed = crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+            .expect("authorize typed DML");
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TRIGGER typed_dml_ddl_bypass
+                     AFTER UPDATE ON memories BEGIN SELECT 1; END;"
+                )
+                .is_err(),
+            "typed DML scope authorized trigger DDL"
+        );
+        drop(typed);
+
+        let migration = crate::db::authorize_schema_migration(&store.reserved_reference_write)
+            .expect("authorize schema migration");
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TRIGGER migration_ddl_bypass
+                     AFTER UPDATE ON memories BEGIN SELECT 1; END;"
+                )
+                .is_err(),
+            "schema migration scope authorized an unknown trigger"
+        );
+        crate::db::install_reserved_reference_guard(store.connection())
+            .expect("schema migration may reinstall exact canonical guards");
+        drop(migration);
+        crate::db::validate_persistent_trigger_inventory(store.connection(), true)
+            .expect("canonical guard inventory remains exact");
+    }
+
+    #[test]
+    fn private_authorization_scopes_reset_after_database_errors() {
+        let (_dir, store) = open_store();
+
+        let typed_error = (|| -> Result<(), crate::error::MemoryError> {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)?;
+            store.connection().execute_batch(
+                "CREATE TRIGGER typed_scope_error
+                     AFTER UPDATE ON memories BEGIN SELECT 1; END;",
+            )?;
+            Ok(())
+        })();
+        assert!(
+            typed_error.is_err(),
+            "typed DML scope must not permit trigger DDL"
+        );
+        let typed_retry =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("typed DML scope must release after an error");
+        drop(typed_retry);
+
+        let migration_error = (|| -> Result<(), crate::error::MemoryError> {
+            let _authorization =
+                crate::db::authorize_schema_migration(&store.reserved_reference_write)?;
+            store
+                .connection()
+                .execute_batch("CREATE TABLE memories(id TEXT PRIMARY KEY);")?;
+            Ok(())
+        })();
+        assert!(
+            migration_error.is_err(),
+            "fixture must make schema migration fail"
+        );
+        let migration_retry =
+            crate::db::authorize_schema_migration(&store.reserved_reference_write)
+                .expect("schema migration scope must release after an error");
+        drop(migration_retry);
+
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TRIGGER authorization_leak
+                     AFTER UPDATE ON memories BEGIN SELECT 1; END;"
+                )
+                .is_err(),
+            "a failed private scope leaked trigger DDL authority"
+        );
+    }
+
+    #[test]
     fn revision_checked_full_metadata_update_preserves_reserved_references() {
         let (_dir, mut store) = open_store();
         let clean = entry("revision-metadata-guard", json!({ "before": true }));

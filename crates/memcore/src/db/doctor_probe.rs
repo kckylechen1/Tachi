@@ -248,5 +248,12 @@ pub fn open_raw(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
     super::install_reserved_reference_authorizer(&conn, None)?;
+    super::validate_persistent_trigger_inventory(&conn, false).map_err(|error| match error {
+        crate::error::MemoryError::Sqlite(error) => error,
+        other => rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
+            Some(other.to_string()),
+        ),
+    })?;
     Ok(conn)
 }

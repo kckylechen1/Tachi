@@ -132,10 +132,11 @@ pub use open::lock_retry_backoff_count;
 /// Public: see `open::sqlite_error_is_locked`'s doc comment.
 pub use open::sqlite_error_is_locked;
 pub(crate) use open::{
-    acquire_startup_lock, authorize_reserved_reference_write, configure_connection,
-    ensure_reserved_reference_write_guard, install_reserved_reference_authorizer, open_read_only,
-    open_read_write, register_reserved_reference_write_guard, retry_memory_locked,
-    ReservedReferenceWriteFlag,
+    acquire_startup_lock, authorize_reserved_reference_write, authorize_schema_migration,
+    configure_connection, ensure_reserved_reference_write_guard,
+    install_reserved_reference_authorizer, open_read_only, open_read_write,
+    register_reserved_reference_write_guard, retry_memory_locked,
+    validate_persistent_trigger_inventory, ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,

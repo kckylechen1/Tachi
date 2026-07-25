@@ -91,18 +91,19 @@ impl MemoryStore {
         db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         let mut conn = db::open_read_write(db_path)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::validate_persistent_trigger_inventory(&conn, false)?;
         // Both labelled and unlabelled opens run schema init + data migrations
         // through init_schema_with_label_mut so the pre-migration backup and
         // post-migration fingerprint marker apply uniformly. Previously the
         // path_validation=false branch called init_schema directly, skipping
         // backups for all CLI/open_cli_store paths (#597 CP1).
         let p = std::path::PathBuf::from(db_path);
-        let migration_authorization =
-            db::authorize_reserved_reference_write(&reserved_reference_write)?;
+        let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
         let schema_result = db::init_schema_with_label_mut(&mut conn, db_label, &p, ctx);
         drop(migration_authorization);
         let _ = schema_result?;
-        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::validate_persistent_trigger_inventory(&conn, true)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
@@ -138,8 +139,9 @@ impl MemoryStore {
         db::register_sqlite_vec();
         let conn = db::open_read_only(db_path)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
-        db::migrations::check_schema_version_gate(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::migrations::check_schema_version_gate(&conn)?;
+        db::validate_persistent_trigger_inventory(&conn, true)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
@@ -162,6 +164,8 @@ impl MemoryStore {
             Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::validate_persistent_trigger_inventory(&conn, false)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
             return Err(MemoryError::InvalidArg(format!(
@@ -181,8 +185,11 @@ impl MemoryStore {
                 "exact-dedupe apply requires current memories schema: {error}"
             ))
         })?;
-        db::install_reserved_reference_guard(&conn)?;
-        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
+        let guard_result = db::install_reserved_reference_guard(&conn);
+        drop(migration_authorization);
+        guard_result?;
+        db::validate_persistent_trigger_inventory(&conn, true)?;
         // Registration above makes vec0 available to this connection, but a
         // maintenance open must not create its virtual table. Preparing a
         // read-only query proves the already-existing table and module are
@@ -206,12 +213,13 @@ impl MemoryStore {
         let conn = Connection::open_in_memory()?;
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
-        let migration_authorization =
-            db::authorize_reserved_reference_write(&reserved_reference_write)?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::validate_persistent_trigger_inventory(&conn, false)?;
+        let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
         let schema_result = db::init_schema(&conn);
         drop(migration_authorization);
         schema_result?;
-        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::validate_persistent_trigger_inventory(&conn, true)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
@@ -358,6 +366,82 @@ mod exact_dedupe_open_tests {
             erase.is_err(),
             "maintenance open left reserved refs unguarded"
         );
+    }
+
+    #[test]
+    fn open_refuses_unknown_or_spoofed_persistent_triggers() {
+        for (label, trigger_sql) in [
+            (
+                "unknown-auxiliary",
+                "CREATE TRIGGER malicious_access_chain
+                 AFTER INSERT ON access_history
+                 BEGIN
+                   UPDATE memories SET path = '/wiki/persistent-forged';
+                 END;",
+            ),
+            (
+                "spoofed-guard-case",
+                "DROP TRIGGER memories_reserved_refs_update_guard;
+                 CREATE TRIGGER MeMoRiEs_ReSeRvEd_ReFs_UpDaTe_GuArD
+                 AFTER UPDATE ON memories
+                 BEGIN
+                   UPDATE memories SET source = 'wiki' WHERE id = NEW.id;
+                 END;",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("{label}.db"));
+            drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+            let offline = Connection::open(&path).unwrap();
+            offline.execute_batch(trigger_sql).unwrap();
+            drop(offline);
+
+            let error = match MemoryStore::open(&path.to_string_lossy()) {
+                Ok(_) => panic!("persistent trigger {label} was exposed on reopen"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsafe persistent trigger inventory"),
+                "unexpected {label} refusal: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_schema_initialization_installs_only_canonical_reference_triggers() {
+        let store = MemoryStore::open_in_memory().expect("initialize fresh store");
+        let triggers: Vec<(String, String)> = store
+            .connection()
+            .prepare(
+                "SELECT name, tbl_name
+                 FROM main.sqlite_schema
+                 WHERE type = 'trigger'
+                 ORDER BY name",
+            )
+            .expect("prepare trigger inventory")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query trigger inventory")
+            .collect::<Result<_, _>>()
+            .expect("read trigger inventory");
+        assert_eq!(
+            triggers,
+            vec![
+                (
+                    "memories_reserved_refs_insert_guard".to_string(),
+                    "memories".to_string(),
+                ),
+                (
+                    "memories_reserved_refs_update_guard".to_string(),
+                    "memories".to_string(),
+                ),
+            ],
+            "fresh schema initialization must install only repository trigger definitions"
+        );
+        db::validate_persistent_trigger_inventory(store.connection(), true)
+            .expect("fresh schema trigger inventory must be canonical");
     }
 
     #[test]

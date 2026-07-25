@@ -332,6 +332,24 @@ pub(crate) fn install_reserved_reference_guard(conn: &Connection) -> Result<(), 
     execute_batch_retry(conn, ddl::RESERVED_REFERENCE_GUARD_SQL)
 }
 
+pub(crate) fn expected_reserved_reference_trigger(
+    name: &str,
+) -> Option<(&'static str, &'static str)> {
+    if name.eq_ignore_ascii_case(ddl::RESERVED_REFERENCE_INSERT_TRIGGER_NAME) {
+        Some((
+            ddl::RESERVED_REFERENCE_INSERT_TRIGGER_NAME,
+            ddl::RESERVED_REFERENCE_INSERT_TRIGGER_SQL,
+        ))
+    } else if name.eq_ignore_ascii_case(ddl::RESERVED_REFERENCE_UPDATE_TRIGGER_NAME) {
+        Some((
+            ddl::RESERVED_REFERENCE_UPDATE_TRIGGER_NAME,
+            ddl::RESERVED_REFERENCE_UPDATE_TRIGGER_SQL,
+        ))
+    } else {
+        None
+    }
+}
+
 fn ensure_optimization_indexes(conn: &Connection) {
     if has_column(conn, "memories", "superseded_by").unwrap_or(false) {
         let _ = conn.execute(

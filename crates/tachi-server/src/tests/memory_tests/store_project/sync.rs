@@ -12,23 +12,31 @@ async fn sync_memories_errors_if_agent_state_persist_fails() {
         })
         .expect("failed to seed memory");
 
-    server
-        .with_global_store(|store| {
+    let global_db: String = server
+        .with_global_store_read(|store| {
             store
                 .connection()
-                .execute_batch(
-                    r#"
-                    DROP TRIGGER IF EXISTS block_agent_known_state_insert;
-                    CREATE TRIGGER block_agent_known_state_insert
-                    BEFORE INSERT ON agent_known_state
-                    BEGIN
-                        SELECT RAISE(FAIL, 'blocked by test');
-                    END;
-                    "#,
+                .query_row(
+                    "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                    [],
+                    |row| row.get(0),
                 )
-                .map_err(|e| format!("trigger setup failed: {e}"))
+                .map_err(|error| error.to_string())
         })
-        .expect("failed to install blocking trigger");
+        .expect("resolve global DB path");
+    let offline =
+        rusqlite::Connection::open(global_db).expect("open sync failure fixture connection");
+    offline
+        .execute_batch(
+            r#"
+            INSERT INTO agent_known_state (agent_id, memory_id, revision, synced_at)
+            VALUES ('agent-sync-test', 'sync-state-blocker', 0, '');
+            CREATE UNIQUE INDEX block_agent_known_state_insert
+                ON agent_known_state (agent_id);
+            "#,
+        )
+        .expect("failed to install blocking constraint");
+    drop(offline);
 
     let params = SyncMemoriesParams {
         agent_id: "agent-sync-test".to_string(),
