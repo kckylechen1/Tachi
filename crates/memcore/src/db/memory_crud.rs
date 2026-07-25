@@ -1649,6 +1649,13 @@ mod reserved_reference_tests {
             refs(&after_drop)
         );
         assert!(
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER memory_search_generation_after_update")
+                .is_err(),
+            "raw store handle dropped the canonical search-generation trigger"
+        );
+        assert!(
             overwrite_after_drop.is_err(),
             "raw overwrite succeeded after rejected DROP"
         );
@@ -1781,6 +1788,11 @@ mod reserved_reference_tests {
             raw.execute_batch("DROP TRIGGER memories_reserved_refs_update_guard")
                 .is_err(),
             "open_raw dropped the canonical guard"
+        );
+        assert!(
+            raw.execute_batch("DROP TRIGGER memory_search_generation_after_update")
+                .is_err(),
+            "open_raw dropped the canonical search-generation trigger"
         );
         assert!(
             raw.execute(
@@ -1930,7 +1942,7 @@ mod reserved_reference_tests {
     }
 
     #[test]
-    fn typed_dml_and_schema_scopes_do_not_authorize_arbitrary_trigger_ddl() {
+    fn schema_migration_scope_allows_only_canonical_trigger_ddl() {
         let (_dir, store) = open_store();
         let typed = crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
             .expect("authorize typed DML");
@@ -1958,11 +1970,19 @@ mod reserved_reference_tests {
                 .is_err(),
             "schema migration scope authorized an unknown trigger"
         );
+        store
+            .connection()
+            .execute_batch("DROP TRIGGER memory_search_generation_after_update")
+            .expect("schema migration may remove a canonical search-generation trigger");
+        crate::db::search_generation::ensure_search_generation_schema(store.connection())
+            .expect("schema migration may restore canonical search-generation triggers");
         crate::db::install_reserved_reference_guard(store.connection())
             .expect("schema migration may reinstall exact canonical guards");
         drop(migration);
         crate::db::validate_persistent_trigger_inventory(store.connection(), true)
             .expect("canonical guard inventory remains exact");
+        crate::db::search_generation(store.connection())
+            .expect("canonical search-generation inventory remains usable");
     }
 
     #[test]

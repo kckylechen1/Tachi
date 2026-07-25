@@ -150,6 +150,33 @@ pub(crate) fn ensure_search_generation_schema(conn: &Connection) -> Result<(), M
     validate_search_generation_schema(conn).map(|_| ())
 }
 
+/// The private schema-migration authorizer permits DDL only for this fixed
+/// trigger inventory. Keeping the name-to-table mapping here makes the DDL
+/// gate and post-open validation share the search-generation contract.
+pub(crate) fn is_expected_search_generation_trigger_target(name: &str, table: &str) -> bool {
+    matches!(
+        (name, table),
+        (INSERT_TRIGGER, "memories")
+            | (UPDATE_TRIGGER, "memories")
+            | (DELETE_TRIGGER, "memories")
+            | (EDGE_INSERT_TRIGGER, "memory_edges")
+            | (EDGE_UPDATE_TRIGGER, "memory_edges")
+            | (EDGE_DELETE_TRIGGER, "memory_edges")
+            | (ACCESS_INSERT_TRIGGER, "access_history")
+            | (ACCESS_UPDATE_TRIGGER, "access_history")
+            | (ACCESS_DELETE_TRIGGER, "access_history")
+    )
+}
+
+pub(crate) fn is_canonical_search_generation_trigger(
+    name: &str,
+    table: &str,
+    sql: Option<&str>,
+) -> bool {
+    is_expected_search_generation_trigger_target(name, table)
+        && sql.is_some_and(|sql| normalizes_to_expected_trigger(name, sql))
+}
+
 fn migrate_previous_memory_update_trigger(conn: &Connection) -> Result<(), MemoryError> {
     let existing = conn
         .query_row(
@@ -388,12 +415,19 @@ mod tests {
             "access_count changes ranking and must advance cache generation"
         );
 
+        let archive_authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize archive fixture mutation");
         store
             .connection()
             .execute("UPDATE memories SET archived = 1 WHERE id = 'upsert'", [])
             .expect("archive update");
+        drop(archive_authorization);
         assert_eq!(store.search_generation().expect("after archive"), 3);
 
+        let rollback_authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize rollback fixture memory write");
         let tx = store
             .connection_mut()
             .transaction()
@@ -404,6 +438,7 @@ mod tests {
         )
         .expect("insert inside transaction");
         tx.rollback().expect("rollback generation probe");
+        drop(rollback_authorization);
         assert_eq!(
             store.search_generation().expect("after rollback"),
             3,
@@ -420,10 +455,14 @@ mod tests {
     #[test]
     fn missing_or_drifted_trigger_refuses_generation_read() {
         let store = MemoryStore::open_in_memory().expect("open in-memory store");
+        let migration_authorization =
+            crate::db::authorize_schema_migration(&store.reserved_reference_write)
+                .expect("authorize missing-trigger fixture");
         store
             .connection()
             .execute_batch("DROP TRIGGER memory_search_generation_after_update")
             .expect("drop trigger");
+        drop(migration_authorization);
 
         let error = store
             .search_generation()
@@ -447,6 +486,9 @@ mod tests {
             )
             .expect("set exhaustion fixture");
 
+        let write_authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize exhaustion fixture memory write");
         let error = store
             .connection()
             .execute(
@@ -454,6 +496,7 @@ mod tests {
                 [],
             )
             .expect_err("overflow must abort the write rather than wrap generation");
+        drop(write_authorization);
         assert!(
             error
                 .to_string()

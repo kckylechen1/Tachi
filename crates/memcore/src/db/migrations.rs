@@ -2013,17 +2013,24 @@ mod tests {
 
         let verify = Connection::open(&path).expect("verify refused DB");
         assert_eq!(read_schema_version(&verify).unwrap(), 23);
-        let trigger_count: i64 = verify
+        let guard_trigger_count: i64 = verify
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger'",
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name IN (
+                       'memories_reserved_refs_insert_guard',
+                       'memories_reserved_refs_update_guard'
+                   )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(
-            trigger_count, 0,
-            "refusal must not repair trigger inventory"
+            guard_trigger_count, 0,
+            "refusal must not repair the missing evidence-guard inventory"
         );
+        crate::db::search_generation(&verify)
+            .expect("refusal must preserve the canonical search-generation trigger inventory");
     }
 
     /// #1331 BUG 4: after a legacy path rewrite in the same upgrade, symbolic

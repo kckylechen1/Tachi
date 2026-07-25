@@ -97,6 +97,16 @@ fn expected_reference_trigger(raw: *const c_char) -> bool {
         || sqlite_identifier_eq(raw, b"memories_reserved_refs_update_guard")
 }
 
+fn expected_search_generation_trigger(raw_name: *const c_char, raw_table: *const c_char) -> bool {
+    if raw_name.is_null() || raw_table.is_null() {
+        return false;
+    }
+    // SQLite owns these NUL-terminated strings for this authorizer callback.
+    let name = unsafe { CStr::from_ptr(raw_name) }.to_str();
+    let table = unsafe { CStr::from_ptr(raw_table) }.to_str();
+    matches!((name, table), (Ok(name), Ok(table)) if crate::db::search_generation::is_expected_search_generation_trigger_target(name, table))
+}
+
 fn schema_mutation(action: c_int) -> bool {
     matches!(
         action,
@@ -187,8 +197,8 @@ unsafe extern "C" fn reserved_reference_authorizer(
                 action,
                 rusqlite::ffi::SQLITE_CREATE_TRIGGER | rusqlite::ffi::SQLITE_DROP_TRIGGER
             )
-            && expected_reference_trigger(arg1)
-            && sqlite_identifier_eq(arg2, b"memories")
+            && ((expected_reference_trigger(arg1) && sqlite_identifier_eq(arg2, b"memories"))
+                || expected_search_generation_trigger(arg1, arg2))
             && sqlite_identifier_eq(database, b"main");
         return if canonical_migration_trigger {
             rusqlite::ffi::SQLITE_OK
@@ -292,6 +302,13 @@ pub(crate) fn validate_persistent_trigger_inventory(
     let mut found = std::collections::HashSet::new();
     for row in rows {
         let (name, table, sql) = row?;
+        if crate::db::search_generation::is_canonical_search_generation_trigger(
+            &name,
+            &table,
+            sql.as_deref(),
+        ) {
+            continue;
+        }
         let Some((canonical_name, canonical_sql)) =
             crate::db::schema::expected_reserved_reference_trigger(&name)
         else {

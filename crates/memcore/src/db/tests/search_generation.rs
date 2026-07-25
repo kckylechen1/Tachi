@@ -51,6 +51,9 @@ fn edge(source_id: &str, target_id: &str, weight: f64) -> MemoryEdge {
 fn rollback_does_not_publish_search_generation() {
     let mut store = MemoryStore::open_in_memory().expect("open store");
     let initial = store.search_generation().expect("initial generation");
+    let write_authorization =
+        crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+            .expect("authorize rollback fixture memory write");
     let tx = store.connection_mut().transaction().expect("transaction");
     tx.execute(
         "INSERT INTO memories (id, path, text, timestamp) VALUES ('rolled-back', '/scratch/generation/rollback', 'rolled back', '2026-07-25T00:00:00Z')",
@@ -59,6 +62,7 @@ fn rollback_does_not_publish_search_generation() {
     .expect("memory insert");
     crate::db::bump_search_generation(&tx).expect("projection bump");
     tx.rollback().expect("rollback");
+    drop(write_authorization);
 
     assert_eq!(store.search_generation().expect("after rollback"), initial);
 }
@@ -66,10 +70,14 @@ fn rollback_does_not_publish_search_generation() {
 #[test]
 fn missing_trigger_refuses_search_generation() {
     let store = MemoryStore::open_in_memory().expect("open store");
+    let migration_authorization =
+        crate::db::authorize_schema_migration(&store.reserved_reference_write)
+            .expect("authorize missing-trigger fixture");
     store
         .connection()
         .execute_batch("DROP TRIGGER memory_edge_search_generation_after_update")
         .expect("drop trigger");
+    drop(migration_authorization);
 
     let error = store
         .search_generation()
@@ -234,6 +242,9 @@ fn every_memory_entry_column_and_access_history_mutation_is_generation_covered()
     );
 
     let before_access_fields = store.search_generation().expect("before access fields");
+    let write_authorization =
+        crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+            .expect("authorize result-visible access fixture mutation");
     store
         .connection()
         .execute(
@@ -246,6 +257,7 @@ fn every_memory_entry_column_and_access_history_mutation_is_generation_covered()
             [],
         )
         .expect("update result-visible access fields");
+    drop(write_authorization);
     assert_eq!(
         store.search_generation().expect("after access fields"),
         before_access_fields + 1
@@ -280,6 +292,9 @@ fn every_memory_entry_column_and_access_history_mutation_is_generation_covered()
 #[test]
 fn known_previous_memory_update_trigger_migrates_to_all_column_coverage() {
     let store = MemoryStore::open_in_memory().expect("open store");
+    let migration_authorization =
+        crate::db::authorize_schema_migration(&store.reserved_reference_write)
+            .expect("authorize previous-trigger migration fixture");
     store
         .connection()
         .execute_batch(
@@ -302,6 +317,7 @@ fn known_previous_memory_update_trigger_migrates_to_all_column_coverage() {
 
     super::super::search_generation::ensure_search_generation_schema(store.connection())
         .expect("known previous trigger must migrate");
+    drop(migration_authorization);
 
     let sql: String = store
         .connection()
