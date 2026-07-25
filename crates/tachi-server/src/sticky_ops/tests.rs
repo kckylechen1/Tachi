@@ -216,8 +216,10 @@ fn try_claim_sticky_is_cas_not_naive_upsert() {
 // illusion.
 #[test]
 fn concurrent_claim_smoke_single_winner_under_load() {
-    let db_path =
-        crate::utils::test_fixture_path(format!("sticky-claim-race-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-claim-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let db_path_str = db_path.to_string_lossy().to_string();
 
     // Seed the DB once so schema exists before concurrent opens.
@@ -314,8 +316,10 @@ fn concurrent_claim_smoke_single_winner_under_load() {
 /// the actual cleanup off this field).
 #[test]
 fn claim_write_carries_a_ninety_day_hard_state_ttl() {
-    let db_path =
-        crate::utils::test_fixture_path(format!("sticky-claim-ttl-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-claim-ttl-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let server = test_server(db_path.clone());
 
     server
@@ -378,8 +382,10 @@ fn is_claimed_reflects_successful_claim() {
 // the same renderer `handle_memory_briefing` calls in production).
 #[tokio::test]
 async fn sticky_leave_scrubs_secrets_in_storage_and_briefing_render() {
-    let db_path =
-        crate::utils::test_fixture_path(format!("sticky-cp4-scrub-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-cp4-scrub-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let server = test_server(db_path.clone());
 
     let raw_secret_text =
@@ -634,8 +640,10 @@ async fn briefing_claims_sticky_exactly_once_then_absent() {
 
 #[tokio::test]
 async fn addressed_sticky_invisible_to_leader_and_other_seats() {
-    let db_path =
-        crate::utils::test_fixture_path(format!("sticky-addressing-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-addressing-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let server = test_server(db_path.clone());
 
     server
@@ -1145,8 +1153,10 @@ async fn sticky_leave_accepts_explicit_agent_id_for_one_shot_channels() {
 // paths use).
 #[tokio::test]
 async fn sticky_leave_clamps_ttl_days_to_thirty_day_ceiling() {
-    let db_path =
-        crate::utils::test_fixture_path(format!("sticky-ttl-clamp-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-ttl-clamp-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let server = test_server(db_path.clone());
 
     let result = handle_sticky_leave(

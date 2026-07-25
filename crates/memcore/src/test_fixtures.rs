@@ -188,7 +188,10 @@ mod tests {
         let now = mtime + TEST_FIXTURE_MAX_AGE + std::time::Duration::from_secs(5);
         let removed = gc_stale_test_fixtures(suite, TEST_FIXTURE_MAX_AGE, now, None);
         assert_eq!(removed, 1, "only the dead-pid run dir should be removed");
-        assert!(live.exists(), "live-pid run dir must survive even when mtime-old");
+        assert!(
+            live.exists(),
+            "live-pid run dir must survive even when mtime-old"
+        );
         assert!(live.join("held.txt").exists());
         assert!(!dead.exists(), "dead-pid run dir must be GC'd");
     }
