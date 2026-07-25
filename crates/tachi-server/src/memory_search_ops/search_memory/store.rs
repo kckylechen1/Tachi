@@ -5,6 +5,28 @@ use memcore::{MemoryStore, RecallConfig};
 use memory_server_runtime::ReadPoolCheckoutReceipt;
 use std::path::Path;
 
+/// Physical stores read by pipeline row augmentation. Both the row producer
+/// and recall-cache generation planner consume this list; adding a source
+/// therefore requires an exhaustive match in both places.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PipelineRuleReadSource {
+    BoundProject,
+    Global,
+}
+
+pub(super) fn pipeline_rule_read_sources(server: &MemoryServer) -> Vec<PipelineRuleReadSource> {
+    if !server.pipeline_enabled {
+        return Vec::new();
+    }
+
+    let mut sources = Vec::with_capacity(2);
+    if server.has_project_db() {
+        sources.push(PipelineRuleReadSource::BoundProject);
+    }
+    sources.push(PipelineRuleReadSource::Global);
+    sources
+}
+
 fn search_store(
     store: &mut MemoryStore,
     params: &SearchMemoryParams,

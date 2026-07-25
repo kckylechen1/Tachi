@@ -868,6 +868,105 @@ async fn access_feedback_in_one_store_invalidates_another_servers_warm_ranking()
     );
 }
 
+async fn pipeline_named_project_search_tracks_bound_rule_generation(inferred: bool) {
+    let _cache = RecallCacheTestOverride::enabled();
+    let (bootstrap, temp_home) = make_server_with_temp_home();
+    let global_db = bootstrap.global_db_path_buf();
+    drop(bootstrap);
+
+    let bound_db = temp_home.temp_home.join("bound-workspace/.tachi/memory.db");
+    std::fs::create_dir_all(bound_db.parent().expect("bound project DB parent"))
+        .expect("create bound project DB parent");
+    memcore::MemoryStore::open(bound_db.to_str().expect("bound project DB path"))
+        .expect("create bound project DB");
+
+    let project_name = format!("pipeline_generation_{}", uuid::Uuid::new_v4().simple());
+    let named_db = crate::path_utils::plan_c_global_db_path(&project_name);
+    std::fs::create_dir_all(named_db.parent().expect("named project DB parent"))
+        .expect("create named project DB parent");
+    let needle = format!(
+        "PipelineRuleGenerationNeedle{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let seed_id = format!("pipeline-named-seed-{}", uuid::Uuid::new_v4());
+    let mut seed = make_entry(&seed_id);
+    seed.path = "/scratch/cache-generation/pipeline-named-seed".to_string();
+    seed.text = format!("{needle} named project search seed for {project_name}");
+    seed.summary = seed.text.clone();
+    memcore::MemoryStore::open_with_label(
+        named_db.to_str().expect("named project DB path"),
+        &project_name,
+    )
+    .expect("create named project DB")
+    .upsert(&seed)
+    .expect("seed named project DB");
+
+    let mut reader =
+        crate::server_state::MemoryServer::new(global_db.clone(), Some(bound_db.clone()))
+            .expect("independent pipeline reader");
+    let mut writer = crate::server_state::MemoryServer::new(global_db, Some(bound_db))
+        .expect("independent pipeline writer");
+    reader.pipeline_enabled = true;
+    writer.pipeline_enabled = true;
+
+    let mut params = json_search_params(&format!("{needle} {project_name}"));
+    if !inferred {
+        params.project = Some(project_name);
+    }
+    let warmed = search_rows_with_params(&reader, params.clone()).await;
+    assert!(
+        warmed.iter().any(|row| row["id"] == seed_id),
+        "named-project row must make the pipeline search cacheable: {warmed:#?}"
+    );
+    let cache_entries = global_recall_cache_entries(&reader);
+    assert!(cache_entries > 0, "pipeline search must warm the cache");
+    let hits_before = reader
+        .with_global_store_read(|store| {
+            store
+                .recall_cache_stats()
+                .map_err(|error| error.to_string())
+        })
+        .expect("cache stats before hit")
+        .total_hits;
+    let unchanged = search_rows_with_params(&reader, params.clone()).await;
+    assert_eq!(
+        unchanged, warmed,
+        "unchanged pipeline search must be stable"
+    );
+    wait_for_cache_hit(&reader, hits_before).await;
+
+    let rule_id = format!("pipeline-bound-rule-{}", uuid::Uuid::new_v4());
+    let mut rule = make_entry(&rule_id);
+    rule.path = "/behavior/global_rules".to_string();
+    rule.text = "Bound project rule added after the named-project cache was warmed".to_string();
+    rule.summary = rule.text.clone();
+    rule.metadata = serde_json::json!({"state": "ACTIVE"});
+    writer
+        .with_project_store(|store| store.upsert(&rule).map_err(|error| error.to_string()))
+        .expect("write bound-project global rule through independent store");
+
+    assert_eq!(
+        global_recall_cache_entries(&reader),
+        cache_entries,
+        "raw bound-project mutation must prove generation validation, not manual eviction"
+    );
+    let refreshed = search_rows_with_params(&reader, params).await;
+    assert!(
+        refreshed.iter().any(|row| row["id"] == rule_id),
+        "bound-project rule committed after warming must invalidate the named-project pipeline result: {refreshed:#?}"
+    );
+}
+
+#[tokio::test]
+async fn explicit_named_project_pipeline_cache_tracks_bound_project_rules() {
+    pipeline_named_project_search_tracks_bound_rule_generation(false).await;
+}
+
+#[tokio::test]
+async fn inferred_named_project_pipeline_cache_tracks_bound_project_rules() {
+    pipeline_named_project_search_tracks_bound_rule_generation(true).await;
+}
+
 #[tokio::test]
 async fn mutation_after_cache_lookup_is_observed_by_generation_validation() {
     let (writer, _temp_home) = make_server_with_temp_home();

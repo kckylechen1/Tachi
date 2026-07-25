@@ -7,7 +7,10 @@ use super::filters::{
     lesson_candidate_recall_opted_in, project_filter_name, project_scope_allows_memory_with_config,
     training_recall_opted_in,
 };
-use super::store::{with_global_search, with_named_project_search, with_project_search};
+use super::store::{
+    pipeline_rule_read_sources, with_global_search, with_named_project_search, with_project_search,
+    PipelineRuleReadSource,
+};
 use crate::memory_search_ops::auto_link::is_training_seed;
 use crate::memory_search_ops::search_helpers::{
     apply_guide_context_boosts, dedup_search_results, infer_search_project,
@@ -199,8 +202,6 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             }
         }
     }
-
-    let pipeline_enabled = server.pipeline_enabled;
 
     let mut combined_results: Vec<(memcore::SearchResult, DbScope)> = Vec::new();
 
@@ -517,42 +518,41 @@ pub(crate) async fn search_memory_rows_with_recall_config(
         .collect();
     annotate_exact_token_matches(&mut output, &params.query);
 
-    if pipeline_enabled {
+    let pipeline_rule_sources = pipeline_rule_read_sources(server);
+    if !pipeline_rule_sources.is_empty() {
         let mut existing_ids: HashSet<String> = deduped_results
             .iter()
             .map(|(r, _)| r.entry.id.clone())
             .collect();
 
-        if server.has_project_db() {
-            let project_rules = server.with_project_store_read(|store| {
-                Ok(store
-                    .list_by_path("/behavior/global_rules", 50, false)
-                    .unwrap_or_default())
-            })?;
-            for rule in project_rules {
+        for source in pipeline_rule_sources {
+            let (rules, scope) = match source {
+                PipelineRuleReadSource::BoundProject => (
+                    server.with_project_store_read(|store| {
+                        Ok(store
+                            .list_by_path("/behavior/global_rules", 50, false)
+                            .unwrap_or_default())
+                    })?,
+                    DbScope::Project,
+                ),
+                PipelineRuleReadSource::Global => (
+                    server.with_global_store_read(|store| {
+                        Ok(store
+                            .list_by_path("/behavior/global_rules", 50, false)
+                            .unwrap_or_default())
+                    })?,
+                    DbScope::Global,
+                ),
+            };
+            for rule in rules {
                 if !is_active_global_rule(&rule) {
                     continue;
                 }
                 if !existing_ids.insert(rule.id.clone()) {
                     continue;
                 }
-                output.push(slim_l0_rule(&rule, DbScope::Project));
+                output.push(slim_l0_rule(&rule, scope));
             }
-        }
-
-        let global_rules = server.with_global_store_read(|store| {
-            Ok(store
-                .list_by_path("/behavior/global_rules", 50, false)
-                .unwrap_or_default())
-        })?;
-        for rule in global_rules {
-            if !is_active_global_rule(&rule) {
-                continue;
-            }
-            if !existing_ids.insert(rule.id.clone()) {
-                continue;
-            }
-            output.push(slim_l0_rule(&rule, DbScope::Global));
         }
     }
 

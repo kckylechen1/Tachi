@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::store::{pipeline_rule_read_sources, PipelineRuleReadSource};
+
 pub(super) fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
     memcore::path_prefix_opts_into_recall_cache(path_prefix)
 }
@@ -323,6 +325,21 @@ fn search_database_targets(
                     targets.push(bound);
                 }
             }
+        }
+    }
+
+    // Pipeline row augmentation reads these stores independently of request
+    // routing. Consume the same source enumeration as rows.rs so explicit or
+    // inferred named-project searches cannot omit bound/global rules from the
+    // authoritative generation vector.
+    for source in pipeline_rule_read_sources(server) {
+        match source {
+            PipelineRuleReadSource::BoundProject => {
+                if let Some(bound) = bound() {
+                    targets.push(bound);
+                }
+            }
+            PipelineRuleReadSource::Global => targets.push(global()),
         }
     }
 
