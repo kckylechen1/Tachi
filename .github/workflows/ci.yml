@@ -50,21 +50,10 @@ jobs:
 
           ruby .github/scripts/validate_action_pins.rb --self-test --repo-root . "${policy_files[@]}"
 
-          image_reference_pattern='^[[:space:]]*(image|container):[[:space:]]+[^[:space:]#]+'
-          digest_pattern='@sha256:[0-9a-f]{64}'
           direct_toolchain_action_pattern='^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+.*(rust-toolchain|setup-rust-toolchain)@'
           toolchain_input_pattern='^[[:space:]]*toolchain:[[:space:]]+'
           moving_rustup_pattern='^[[:space:]]*(run:[[:space:]]+)?(sudo[[:space:]]+)?rustup.*(^|[^[:alnum:]_.-])(stable|beta|nightly)([^[:alnum:]_.-]|$)'
 
-          digest_fixture="$(printf 'a%.0s' {1..64})"
-          image_tag_fixture='        image: alpine:3.20'
-          image_digest_fixture="        image: alpine@sha256:${digest_fixture}"
-          if ! printf '%s\n' "${image_tag_fixture}" | grep -Eq "${image_reference_pattern}" \
-            || printf '%s\n' "${image_tag_fixture}" | grep -Eq "${digest_pattern}" \
-            || ! printf '%s\n' "${image_digest_fixture}" | grep -Eq "${digest_pattern}"; then
-            echo 'Docker digest policy self-test failed' >&2
-            exit 1
-          fi
           if ! printf '%s\n' '      uses: dtolnay/rust-toolchain@0123456789abcdef0123456789abcdef01234567 # v1' | grep -Eq "${direct_toolchain_action_pattern}" \
             || ! printf '%s\n' '        toolchain: stable' | grep -Eq "${toolchain_input_pattern}" \
             || ! printf '%s\n' '        toolchain: 1.97.0' | grep -Eq "${toolchain_input_pattern}" \
@@ -84,11 +73,6 @@ jobs:
             exit 1
           fi
 
-          if grep -hE "${image_reference_pattern}" "${policy_files[@]}" \
-            | grep -Ev "${digest_pattern}"; then
-            echo 'workflow and action container images require an immutable sha256 digest' >&2
-            exit 1
-          fi
           if grep -hE "${direct_toolchain_action_pattern}" "${policy_files[@]}"; then
             echo 'workflows must use the local Rust action backed by rust-toolchain.toml' >&2
             exit 1

@@ -1,7 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require "base64"
 require "open3"
 require "pathname"
 require "psych"
@@ -31,6 +30,8 @@ AUDITED_PINS = [
 AUDITED_CARGO_INSTALLS = {
   "cargo install cargo-audit --version 0.22.2 --locked --quiet" => 1
 }.freeze
+
+IMMUTABLE_IMAGE = /\A[^@[:space:]]+@sha256:[0-9a-f]{64}\z/
 
 class RepoInventory
   attr_reader :root, :tracked_files
@@ -210,6 +211,15 @@ class ActionPolicy
         elsif key.is_a?(Psych::Nodes::Scalar) && key.value == "run"
           require_scalar!(value, path, "run")
           validate_run(value, path)
+        elsif key.is_a?(Psych::Nodes::Scalar) && key.value == "container"
+          validate_container(value, path)
+          walk(value, path, lines)
+        elsif key.is_a?(Psych::Nodes::Scalar) && key.value == "services"
+          validate_services(value, path)
+          walk(value, path, lines)
+        elsif key.is_a?(Psych::Nodes::Scalar) && key.value == "image"
+          require_scalar!(value, path, "image")
+          validate_image(value.value, path)
         else
           walk(value, path, lines)
         end
@@ -225,6 +235,40 @@ class ActionPolicy
     raise PolicyError, "#{path}: #{key} must have a scalar value"
   end
 
+  def validate_container(node, path)
+    if node.is_a?(Psych::Nodes::Scalar)
+      validate_image(node.value, path)
+      return
+    end
+    unless node.is_a?(Psych::Nodes::Mapping)
+      raise PolicyError, "#{path}: container must be an image scalar or mapping"
+    end
+
+    image_keys = node.children.each_slice(2).select do |key, _value|
+      key.is_a?(Psych::Nodes::Scalar) && key.value == "image"
+    end
+    raise PolicyError, "#{path}: container mapping requires image" if image_keys.empty?
+  end
+
+  def validate_services(node, path)
+    raise PolicyError, "#{path}: services must be a mapping" unless node.is_a?(Psych::Nodes::Mapping)
+
+    node.children.each_slice(2) do |_service_name, service|
+      raise PolicyError, "#{path}: service must be a mapping with image" unless service.is_a?(Psych::Nodes::Mapping)
+
+      has_image = service.children.each_slice(2).any? do |key, _value|
+        key.is_a?(Psych::Nodes::Scalar) && key.value == "image"
+      end
+      raise PolicyError, "#{path}: service mapping requires image" unless has_image
+    end
+  end
+
+  def validate_image(value, path)
+    return if value.match?(IMMUTABLE_IMAGE)
+
+    raise PolicyError, "#{path}: container image requires an immutable sha256 digest: #{value.inspect}"
+  end
+
   def validate_use(node, path, lines)
     value = node.value
     @uses_count += 1
@@ -236,7 +280,7 @@ class ActionPolicy
     end
 
     if value.start_with?("docker://")
-      unless value.match?(/\Adocker:\/\/[^@[:space:]]+@sha256:[0-9a-f]{64}\z/)
+      unless value.delete_prefix("docker://").match?(IMMUTABLE_IMAGE)
         raise PolicyError, "#{path}: docker action requires an immutable sha256 digest: #{value}"
       end
       return
@@ -261,7 +305,7 @@ class ActionPolicy
     end
 
     if encoded_cargo_installer?(value) || dynamic_cargo_installer?(value)
-      raise PolicyError, "#{path}: no known dynamic/encoded cargo installer invocation: #{value.inspect}"
+      raise PolicyError, "#{path}: no known dynamic/encoded installer or transformer-to-shell construction: #{value.inspect}"
     end
     return unless cargo_install_occurrence?(value)
 
@@ -270,16 +314,16 @@ class ActionPolicy
 
   def encoded_cargo_installer?(value)
     ansi_expanded = expand_ansi_c_strings(value)
+    return true if transformer_to_shell?(ansi_expanded)
+
     if ansi_expanded != value && cargo_install_occurrence?(decode_shell_escapes(ansi_expanded))
       return true
     end
 
-    if printf_pipe_to_shell?(value) || shell_c_command?(value)
+    if shell_c_command?(value)
       decoded = decode_shell_escapes(ansi_expanded)
       return true if cargo_install_occurrence?(decoded)
     end
-
-    decoded_pipeline_payloads(value).any? { |payload| cargo_install_occurrence?(payload) }
   end
 
   def expand_ansi_c_strings(value)
@@ -310,25 +354,18 @@ class ActionPolicy
     value.match?(%r{(?:\A|[;&|()[:space:]])(?:[^;&|()[:space:]]*/)?(?:bash|sh)[[:space:]]+-[A-Za-z]*c[A-Za-z]*(?:[[:space:]]|\z)})
   end
 
-  def printf_pipe_to_shell?(value)
-    value.match?(%r{(?:\A|[;&|()[:space:]])printf(?:[[:space:]]|\z).*\|[[:space:]]*(?:[^;&|()[:space:]]*/)?(?:bash|sh)(?:[[:space:];&|]|\z)}m)
-  end
+  def transformer_to_shell?(value)
+    transformer = %r{(?:\A|[;&|()[:space:]])(?:[^;&|()[:space:]]*/)?(?:printf|base64|xxd)(?:[[:space:];&|()]|\z)}
+    command_text = value.gsub(/\\\r?\n/, " ")
+    command_text.split(/[;\r\n]+/).any? do |segment|
+      next false unless segment.match?(transformer)
 
-  def decoded_pipeline_payloads(value)
-    return [] unless value.match?(%r{\|[[:space:]]*(?:[^;&|()[:space:]]*/)?(?:bash|sh)(?:[[:space:];&|]|\z)})
-
-    payloads = []
-    if value.match?(/\bbase64[[:space:]]+(?:-[A-Za-z]*d[A-Za-z]*|--decode)\b/)
-      value.scan(/[A-Za-z0-9+\/_-]{12,}={0,2}/).each do |encoded|
-        payloads << Base64.strict_decode64(encoded.tr("-_", "+/"))
-      rescue ArgumentError
-        next
-      end
+      piped_to_shell = segment.match?(%r{\|[[:space:]]*(?:[^;&|()[:space:]]*/)?(?:bash|sh)(?:[[:space:];&|()]|\z)})
+      eval_sink = segment.match?(%r{(?:\A|[;&|()[:space:]])(?:[^;&|()[:space:]]*/)?eval(?:[[:space:]]|\z)})
+      command_substitution = segment.match?(/\$\([^)]*(?:printf|base64|xxd)[^)]*\)/) ||
+        segment.match?(/`[^`]*(?:printf|base64|xxd)[^`]*`/)
+      piped_to_shell || shell_c_command?(segment) || eval_sink || command_substitution
     end
-    if value.match?(/\bxxd[[:space:]]+-[^;&|[:space:]]*r[^;&|[:space:]]*(?:[[:space:]]+-[^;&|[:space:]]*p[^;&|[:space:]]*)?\b/)
-      value.scan(/\b[0-9a-fA-F]{16,}\b/).each { |encoded| payloads << [encoded].pack("H*") }
-    end
-    payloads
   end
 
   def dynamic_cargo_installer?(value)
@@ -494,7 +531,13 @@ def self_test!
     "cargo-bash-c-ansi" => "run: |\n  bash -c $'\\x63\\x61\\x72\\x67\\x6f\\x20install cargo-audit'\n",
     "cargo-sh-c-encoded-printf" => "run: |\n  sh -c \"$(printf '\\x63\\x61\\x72\\x67\\x6f\\x20install cargo-audit')\"\n",
     "cargo-base64-pipe" => "run: |\n  printf 'Y2FyZ28gaW5zdGFsbCBjYXJnby1hdWRpdA==' | base64 --decode | sh\n",
-    "cargo-xxd-pipe" => "run: |\n  printf '636172676f20696e7374616c6c20636172676f2d6175646974' | xxd -r -p | bash\n"
+    "cargo-xxd-pipe" => "run: |\n  printf '636172676f20696e7374616c6c20636172676f2d6175646974' | xxd -r -p | bash\n",
+    "printf-path-hex" => "run: |\n  /usr/bin/printf '\\x65\\x63\\x68\\x6f ok' | /bin/sh\n",
+    "base64-split-payload" => "run: |\n  printf '%s' 'ZWNoby' 'Bvaw==' | /usr/bin/base64 --decode | bash\n",
+    "xxd-split-payload" => "run: |\n  printf '%s' '6563686f' '206f6b' | /usr/bin/xxd -r -p | sh\n",
+    "transformer-shell-c" => "run: |\n  bash -c \"$(printf echo)\"\n",
+    "transformer-eval" => "run: |\n  eval \"$(base64 --decode <<< ZWNobyBvaw==)\"\n",
+    "transformer-command-substitution" => "run: |\n  $(xxd -r -p <<< 6563686f)\n"
   }
   encoded_fixtures.each do |name, source|
     expect_rejected(name) do
@@ -505,6 +548,37 @@ def self_test!
     sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - run: FOO=bar #{audited}\n"}
     validate_virtual(sources, cargo_installs: AUDITED_CARGO_INSTALLS)
   end
+
+  digest = "a" * 64
+  docker_fixtures = {
+    "docker-container-comment-digest" => "jobs:\n  test:\n    container: alpine:3.20 # @sha256:#{digest}\n",
+    "docker-container-quoted-tag" => "jobs: {test: {container: \"alpine:3.20\"}}\n",
+    "docker-container-flow-image-tag" => "jobs: {test: {container: {image: alpine:3.20}}}\n",
+    "docker-service-image-tag" => "jobs:\n  test:\n    services: {db: {image: postgres:16}}\n",
+    "docker-folded-image-tag" => "jobs:\n  test:\n    container:\n      image: >-\n        alpine:3.20\n",
+    "docker-action-image-tag" => "runs:\n  using: docker\n  image: alpine:3.20\n",
+    "docker-uses-comment-digest" => "uses: docker://alpine:3.20 # @sha256:#{digest}\n"
+  }
+  docker_fixtures.each do |name, source|
+    expect_rejected(name) do
+      validate_virtual(root => source)
+    end
+  end
+
+  valid_docker = <<~YAML
+    jobs:
+      scalar:
+        container: "alpine@sha256:#{digest}"
+        services: {db: {image: "postgres@sha256:#{digest}"}}
+      mapping:
+        container:
+          image: >-
+            ubuntu@sha256:#{digest}
+        steps:
+          - uses: docker://alpine@sha256:#{digest}
+  YAML
+  validate_virtual(root => valid_docker)
+  puts "fixture ACCEPTED docker-digests docker-uses scalar-container mapping-container service-image quoted-flow-folded"
 
   valid_sources = {
     root => "on: push\nsteps:\n  - \"uses\": ./custom/action\n  - run: #{audited}\n",
