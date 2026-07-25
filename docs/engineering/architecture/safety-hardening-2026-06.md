@@ -6,7 +6,7 @@ Reference for the post–Gemini review hardening batch released in v1.5.4. Opera
 
 | Area | Problem | Mitigation |
 |---|---|---|
-| DLQ replay | Mutating tool failures could be retried and double-apply side effects | Enqueue only when `should_enqueue_dlq()`; `dlq_retry` rejects native + non-idempotent tools |
+| DLQ replay | Mutating tool failures could be retried and double-apply side effects | Admit replay only when `dlq_replay_is_explicitly_safe()` finds explicit typed `ReadOnly` + `Safe` authority; unclassified and proxy-qualified routes fail closed |
 | Dispatch dedupe | Identical bare dispatches (no `flow_id`) could spawn duplicate workers | Fingerprint lock under `~/.tachi/runs/.dispatch-dedupe/` |
 | Dispatch recovery | Daemon crash left orphaned in-flight runs | `recover_orphaned_dispatch_runs()` on startup |
 | Foundry queue | `queue_agent_evolution` minted random job ids → duplicate synthesis | Deterministic job id + active/terminal dedupe + stale `running` reclaim (30 min) |
@@ -17,11 +17,13 @@ Reference for the post–Gemini review hardening batch released in v1.5.4. Opera
 
 ## DLQ semantics
 
-**Safe to enqueue / retry (examples):** read-only search, `get_memory`, idempotent status probes.
+Replay authority is positive, never inferred. `action_effect::dlq_replay_metadata()` must return `ActionEffectMetadata` whose `ActionEffectMetadata::permits_dlq_replay()` accepts an explicit `ReplaySafety::Safe`; `shared_defs::dlq_replay_is_explicitly_safe()` is the production gate used by `should_enqueue_dlq()` and retry paths. Missing metadata denies replay.
 
-**Not safe (skipped):** `hub_call`, write tools (`save_memory`, `post_card`, …), mutating facade actions (`tachi_save`, `tachi_dispatch`, `tachi_task` writes, …).
+Proxy-qualified `server__tool` names always receive no local metadata from `dlq_replay_metadata()`. A remote alias therefore cannot borrow the effect classification of a similarly named native facade and is denied unless a future server-owned per-remote-tool authority is added.
 
-Implementation: `shared_defs.rs` — `dlq_mutation_is_unsafe()`, `should_enqueue_dlq()`.
+`search_memory` and `tachi_memory(action="search")` are non-replayable because their production paths record access telemetry. `STANDALONE_UNSAFE_ROUTES` and `facade_action_effect()` classify them accordingly; explicitly safe reads such as `tachi_event(action="metrics")` retain replay authority.
+
+The `f1098_live_action_inventory_has_explicit_effect_metadata()` ratchet enumerates `native_route_definitions()` and each schema action enum through `action_inventory_from_live_schema()`, then requires every advertised action to have independent `facade_action_effect()` metadata. Newly advertised or invented actions without that mapping remain unclassified and fail closed.
 
 ## Dispatch dedupe
 
