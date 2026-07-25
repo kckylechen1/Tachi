@@ -105,6 +105,72 @@ fn revalidate_run_dir_at_read_time(run_dir: &Path) -> Option<PathBuf> {
     canonical_dir_within(run_dir, &tachi_home().join("runs"))
 }
 
+/// Resolve a linked-run file through every path component and retain it only
+/// when the final leaf remains a regular file inside the dispatch runs root.
+///
+/// `canonical_dir_within` protects the run directory itself, but a later
+/// `status.json` or `result.md` symlink can still escape that directory. The
+/// full candidate path must therefore be canonicalized immediately before the
+/// read, not just its parent directory.
+fn canonical_regular_file_within(candidate: &Path, root: &Path) -> Result<Option<PathBuf>, String> {
+    let canonical_root = root.canonicalize().map_err(|err| {
+        format!(
+            "containment root {} cannot be resolved: {err}",
+            root.display()
+        )
+    })?;
+    let canonical_candidate = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(format!(
+                "path {} cannot be resolved: {err}",
+                candidate.display()
+            ));
+        }
+    };
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(format!(
+            "path {} resolves outside containment root {}",
+            canonical_candidate.display(),
+            canonical_root.display()
+        ));
+    }
+    let metadata = canonical_candidate.metadata().map_err(|err| {
+        format!(
+            "resolved path {} cannot be inspected: {err}",
+            canonical_candidate.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "resolved path {} is not a regular file",
+            canonical_candidate.display()
+        ));
+    }
+    Ok(Some(canonical_candidate))
+}
+
+fn linked_run_file_at_read_time(
+    dispatch_id: &str,
+    run_dir: &Path,
+    file_name: &str,
+) -> Option<PathBuf> {
+    let candidate = run_dir.join(file_name);
+    match canonical_regular_file_within(&candidate, &tachi_home().join("runs")) {
+        Ok(path) => path,
+        Err(reason) => {
+            tracing::warn!(
+                dispatch_id,
+                path = %candidate.display(),
+                reason = %reason,
+                "refusing linked dispatch file read after containment validation failed"
+            );
+            None
+        }
+    }
+}
+
 pub(super) fn dispatch_response_summary(response: &Value) -> Value {
     json!({
         "dispatch_id": response.get("dispatch_id").cloned().unwrap_or(Value::Null),
@@ -203,9 +269,9 @@ pub(super) fn compact_mission_status(status: &Value) -> Value {
 fn read_linked_dispatch_status(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<Value> {
     let run_dir = dispatch_run_dir(dispatch_id, run_dir_hint)?;
     let run_dir = revalidate_run_dir_at_read_time(&run_dir)?;
-    let status_path = run_dir.join("status.json");
+    let status_path = linked_run_file_at_read_time(dispatch_id, &run_dir, "status.json")?;
     let status = read_json_file(&status_path).ok()?;
-    let result_written = run_dir.join("result.md").exists();
+    let result_written = linked_run_file_at_read_time(dispatch_id, &run_dir, "result.md").is_some();
     Some(json!({
         "dispatch_id": dispatch_id,
         "state": status.get("state").cloned().unwrap_or(Value::Null),
@@ -228,7 +294,8 @@ pub(super) fn read_linked_dispatch_result(
 ) -> Option<String> {
     let run_dir = dispatch_run_dir(dispatch_id, run_dir_hint)?;
     let run_dir = revalidate_run_dir_at_read_time(&run_dir)?;
-    let raw = std::fs::read_to_string(run_dir.join("result.md")).ok()?;
+    let result_path = linked_run_file_at_read_time(dispatch_id, &run_dir, "result.md")?;
+    let raw = std::fs::read_to_string(result_path).ok()?;
     if raw.trim().is_empty() {
         None
     } else {
@@ -564,6 +631,60 @@ mod dispatch_run_dir_gate_tests {
         assert!(dispatch_run_dir(id, None).is_none());
         assert!(read_linked_dispatch_status(id, None).is_none());
         assert!(read_linked_dispatch_result(id, None).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_status_reader_refuses_outward_final_leaf_symlink() {
+        let home = set_home();
+        let id = "abc123";
+        let run_dir = home.root.join("runs").join(id);
+        let outside = home.root.join("outside_target");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(run_dir.join("status.json"), r#"{"state":"completed"}"#).unwrap();
+        std::fs::write(outside.join("status.json"), r#"{"state":"outside"}"#).unwrap();
+
+        let ordinary = read_linked_dispatch_status(id, None).expect("ordinary status file");
+        assert_eq!(ordinary.get("state"), Some(&json!("completed")));
+
+        std::fs::remove_file(run_dir.join("status.json")).unwrap();
+        std::os::unix::fs::symlink(outside.join("status.json"), run_dir.join("status.json"))
+            .unwrap();
+
+        assert!(
+            read_linked_dispatch_status(id, None).is_none(),
+            "status reader must refuse a final leaf that resolves outside the runs root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_result_reader_refuses_outward_final_leaf_symlink() {
+        let home = set_home();
+        let id = "abc123";
+        let run_dir = home.root.join("runs").join(id);
+        let outside = home.root.join("outside_target");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(run_dir.join("status.json"), r#"{"state":"completed"}"#).unwrap();
+        std::fs::write(run_dir.join("result.md"), "ordinary result").unwrap();
+        std::fs::write(outside.join("result.md"), "outside result").unwrap();
+
+        assert_eq!(
+            read_linked_dispatch_result(id, None).as_deref(),
+            Some("ordinary result")
+        );
+
+        std::fs::remove_file(run_dir.join("result.md")).unwrap();
+        std::os::unix::fs::symlink(outside.join("result.md"), run_dir.join("result.md")).unwrap();
+
+        let status = read_linked_dispatch_status(id, None).expect("contained status file");
+        assert_eq!(status.get("result_written"), Some(&json!(false)));
+        assert!(
+            read_linked_dispatch_result(id, None).is_none(),
+            "result reader must refuse a final leaf that resolves outside the runs root"
+        );
     }
 
     #[cfg(unix)]

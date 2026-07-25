@@ -58,6 +58,51 @@ fn is_safe_relative_path(path: &str) -> bool {
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
+/// Canonicalize a complete file path and require every component, including
+/// the final leaf, to resolve below `root`. A lexical relative-path check does
+/// not constrain a symlinked parent or final artifact leaf.
+fn canonical_regular_file_within(
+    candidate: &Path,
+    root: &Path,
+) -> Result<Option<(PathBuf, std::fs::Metadata)>, String> {
+    let canonical_root = root.canonicalize().map_err(|err| {
+        format!(
+            "containment root {} cannot be resolved: {err}",
+            root.display()
+        )
+    })?;
+    let canonical_candidate = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(format!(
+                "path {} cannot be resolved: {err}",
+                candidate.display()
+            ));
+        }
+    };
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(format!(
+            "path {} resolves outside containment root {}",
+            canonical_candidate.display(),
+            canonical_root.display()
+        ));
+    }
+    let metadata = canonical_candidate.metadata().map_err(|err| {
+        format!(
+            "resolved path {} cannot be inspected: {err}",
+            canonical_candidate.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "resolved path {} is not a regular file",
+            canonical_candidate.display()
+        ));
+    }
+    Ok(Some((canonical_candidate, metadata)))
+}
+
 /// Evaluate a (possibly absent) completion predicate.
 ///
 /// * `pred`    — the declared predicate, or `None` (→ [`PredicateVerdict::Unverified`]).
@@ -87,15 +132,17 @@ pub(crate) fn evaluate_completion_predicate(
                 None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             };
             let full = base.join(path);
-            match std::fs::metadata(&full) {
-                Ok(meta) if meta.is_file() && meta.len() > 0 => PredicateVerdict::Pass,
-                Ok(meta) if meta.is_file() => PredicateVerdict::Fail(format!(
+            match canonical_regular_file_within(&full, &base) {
+                Ok(Some((_, meta))) if meta.len() > 0 => PredicateVerdict::Pass,
+                Ok(Some(_)) => PredicateVerdict::Fail(format!(
                     "expected artifact '{path}' exists but is empty"
                 )),
-                Ok(_) => PredicateVerdict::Fail(format!(
-                    "expected artifact '{path}' is not a regular file"
+                Ok(None) => {
+                    PredicateVerdict::Fail(format!("expected artifact '{path}' is missing"))
+                }
+                Err(reason) => PredicateVerdict::Fail(format!(
+                    "refusing completion artifact predicate '{path}': {reason}"
                 )),
-                Err(_) => PredicateVerdict::Fail(format!("expected artifact '{path}' is missing")),
             }
         }
         CompletionPredicate::OutputMatches { pattern } => match regex::Regex::new(pattern) {
@@ -302,6 +349,53 @@ mod tests {
             evaluate_completion_predicate(Some(&pred), dir.path(), Some(dir.path()), ""),
             PredicateVerdict::Pass
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_predicate_refuses_outward_final_leaf_symlink() {
+        let dir = td();
+        let outside = td();
+        std::fs::create_dir_all(dir.path().join("out")).unwrap();
+        std::fs::write(dir.path().join("out/report.md"), "ordinary report").unwrap();
+        std::fs::write(outside.path().join("report.md"), "outside report").unwrap();
+        let pred = CompletionPredicate::ArtifactNonEmpty {
+            path: "out/report.md".to_string(),
+        };
+
+        assert_eq!(
+            evaluate_completion_predicate(Some(&pred), dir.path(), Some(dir.path()), ""),
+            PredicateVerdict::Pass
+        );
+
+        std::fs::remove_file(dir.path().join("out/report.md")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("report.md"),
+            dir.path().join("out/report.md"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            evaluate_completion_predicate(Some(&pred), dir.path(), Some(dir.path()), ""),
+            PredicateVerdict::Fail(reason) if reason.contains("refusing")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_predicate_refuses_outward_symlinked_parent_component() {
+        let dir = td();
+        let outside = td();
+        std::fs::write(outside.path().join("report.md"), "outside report").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("out")).unwrap();
+        let pred = CompletionPredicate::ArtifactNonEmpty {
+            path: "out/report.md".to_string(),
+        };
+
+        assert!(matches!(
+            evaluate_completion_predicate(Some(&pred), dir.path(), Some(dir.path()), ""),
+            PredicateVerdict::Fail(reason) if reason.contains("refusing")
+        ));
     }
 
     #[test]
