@@ -13,6 +13,94 @@ use memcore::{
 use napi_derive::napi;
 use std::sync::{Arc, Mutex};
 
+const DEFAULT_GET_ALL_LIMIT: usize = 200;
+const MAX_GET_ALL_LIMIT: usize = 500;
+const MIN_SEARCH_TOP_K: usize = 1;
+const MAX_SEARCH_TOP_K: usize = 100;
+const DEFAULT_SEARCH_CANDIDATES_PER_CHANNEL: usize = 20;
+const MAX_SEARCH_CANDIDATES_PER_CHANNEL: usize = 500;
+
+/// Mirrors the portable service limits before a JavaScript number can reach
+/// memcore's result collection or SQLite limit binding.
+fn clamp_u64_to_usize(value: u64, maximum: usize) -> usize {
+    let maximum = u64::try_from(maximum).expect("usize must fit into u64");
+    value.min(maximum) as usize
+}
+
+fn normalized_top_k(value: u64) -> usize {
+    // A zero result limit still returns the smallest meaningful search page.
+    clamp_u64_to_usize(value, MAX_SEARCH_TOP_K).max(MIN_SEARCH_TOP_K)
+}
+
+fn normalized_candidates_per_channel(value: Option<u64>, top_k: usize) -> usize {
+    // An explicit zero keeps the default candidate pool rather than disabling search channels.
+    let requested = match value {
+        Some(0) | None => DEFAULT_SEARCH_CANDIDATES_PER_CHANNEL,
+        Some(value) => clamp_u64_to_usize(value, MAX_SEARCH_CANDIDATES_PER_CHANNEL),
+    };
+    requested.max(top_k).min(MAX_SEARCH_CANDIDATES_PER_CHANNEL)
+}
+
+fn search_options_from_json(options_json: Option<&str>) -> SearchOptions {
+    let mut opts = SearchOptions::default();
+    if let Some(json_str) = options_json {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+            let requested_top_k = val.get("top_k").and_then(|v| v.as_u64());
+            let requested_candidates = val.get("candidates").and_then(|v| v.as_u64());
+            if requested_top_k.is_some() || requested_candidates.is_some() {
+                opts.top_k = requested_top_k
+                    .map(normalized_top_k)
+                    .unwrap_or_else(|| opts.top_k.clamp(MIN_SEARCH_TOP_K, MAX_SEARCH_TOP_K));
+                opts.candidates_per_channel =
+                    normalized_candidates_per_channel(requested_candidates, opts.top_k);
+            }
+            if let Some(p) = val.get("path_prefix").and_then(|v| v.as_str()) {
+                if !p.is_empty() {
+                    opts.path_prefix = Some(p.to_string());
+                }
+            }
+            if let Some(ra) = val.get("record_access").and_then(|v| v.as_bool()) {
+                opts.record_access = ra;
+            }
+            if val.get("mmr_threshold").is_some() {
+                opts.mmr_threshold = val.get("mmr_threshold").and_then(|v| v.as_f64());
+            }
+            if let Some(arr) = val.get("query_vec").and_then(|v| v.as_array()) {
+                let mut qv = Vec::with_capacity(arr.len());
+                for item in arr {
+                    if let Some(num) = item.as_f64() {
+                        qv.push(num as f32);
+                    }
+                }
+                if !qv.is_empty() {
+                    opts.query_vec = Some(qv);
+                }
+            }
+            if let Some(w) = val.get("weights").and_then(|v| v.as_object()) {
+                if let Some(s) = w.get("semantic").and_then(|v| v.as_f64()) {
+                    opts.weights.semantic = s;
+                }
+                if let Some(f) = w.get("fts").and_then(|v| v.as_f64()) {
+                    opts.weights.fts = f;
+                }
+                if let Some(sym) = w.get("symbolic").and_then(|v| v.as_f64()) {
+                    opts.weights.symbolic = sym;
+                }
+                if let Some(d) = w.get("decay").and_then(|v| v.as_f64()) {
+                    opts.weights.decay = d;
+                }
+            }
+        }
+    }
+    opts
+}
+
+fn get_all_limit(limit: Option<u32>) -> usize {
+    limit
+        .map(|value| value.min(MAX_GET_ALL_LIMIT as u32) as usize)
+        .unwrap_or(DEFAULT_GET_ALL_LIMIT)
+}
+
 /// Thread-safe wrapper around the Rust MemoryStore.
 #[napi]
 pub struct JsMemoryStore {
@@ -47,53 +135,7 @@ impl JsMemoryStore {
     /// }
     #[napi]
     pub fn search(&self, query: String, options_json: Option<String>) -> napi::Result<String> {
-        let mut opts = SearchOptions::default();
-        if let Some(json_str) = options_json {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                if let Some(k) = val.get("top_k").and_then(|v| v.as_u64()) {
-                    opts.top_k = k as usize;
-                }
-                if let Some(c) = val.get("candidates").and_then(|v| v.as_u64()) {
-                    opts.candidates_per_channel = c as usize;
-                }
-                if let Some(p) = val.get("path_prefix").and_then(|v| v.as_str()) {
-                    if !p.is_empty() {
-                        opts.path_prefix = Some(p.to_string());
-                    }
-                }
-                if let Some(ra) = val.get("record_access").and_then(|v| v.as_bool()) {
-                    opts.record_access = ra;
-                }
-                if val.get("mmr_threshold").is_some() {
-                    opts.mmr_threshold = val.get("mmr_threshold").and_then(|v| v.as_f64());
-                }
-                if let Some(arr) = val.get("query_vec").and_then(|v| v.as_array()) {
-                    let mut qv = Vec::with_capacity(arr.len());
-                    for item in arr {
-                        if let Some(num) = item.as_f64() {
-                            qv.push(num as f32);
-                        }
-                    }
-                    if !qv.is_empty() {
-                        opts.query_vec = Some(qv);
-                    }
-                }
-                if let Some(w) = val.get("weights").and_then(|v| v.as_object()) {
-                    if let Some(s) = w.get("semantic").and_then(|v| v.as_f64()) {
-                        opts.weights.semantic = s;
-                    }
-                    if let Some(f) = w.get("fts").and_then(|v| v.as_f64()) {
-                        opts.weights.fts = f;
-                    }
-                    if let Some(sym) = w.get("symbolic").and_then(|v| v.as_f64()) {
-                        opts.weights.symbolic = sym;
-                    }
-                    if let Some(d) = w.get("decay").and_then(|v| v.as_f64()) {
-                        opts.weights.decay = d;
-                    }
-                }
-            }
-        }
+        let opts = search_options_from_json(options_json.as_deref());
 
         let store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let results = store
@@ -143,10 +185,11 @@ impl JsMemoryStore {
         }
     }
 
-    /// Get most recent entries up to `limit`. Returns JSON string of MemoryEntry[].
+    /// Get most recent entries up to `limit`. Zero returns an empty list; positive
+    /// values are capped at this binding's named ceiling. Returns JSON string of MemoryEntry[].
     #[napi]
     pub fn get_all(&self, limit: Option<u32>) -> napi::Result<String> {
-        let lim = limit.unwrap_or(200) as usize;
+        let lim = get_all_limit(limit);
         let entries = self
             .inner
             .lock()
@@ -317,4 +360,40 @@ pub fn is_noise(text: String) -> bool {
 #[napi]
 pub fn should_skip(query: String) -> bool {
     should_skip_query(&query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_options_cap_u64_bounds_before_the_core_search() {
+        let options = search_options_from_json(Some(
+            r#"{"top_k":18446744073709551615,"candidates":18446744073709551615}"#,
+        ));
+
+        assert_eq!(options.top_k, MAX_SEARCH_TOP_K);
+        assert_eq!(
+            options.candidates_per_channel,
+            MAX_SEARCH_CANDIDATES_PER_CHANNEL
+        );
+    }
+
+    #[test]
+    fn search_options_define_zero_bounds() {
+        let options = search_options_from_json(Some(r#"{"top_k":0,"candidates":0}"#));
+
+        assert_eq!(options.top_k, MIN_SEARCH_TOP_K);
+        assert_eq!(
+            options.candidates_per_channel,
+            DEFAULT_SEARCH_CANDIDATES_PER_CHANNEL
+        );
+    }
+
+    #[test]
+    fn get_all_limit_is_bounded_and_zero_is_empty() {
+        assert_eq!(get_all_limit(None), DEFAULT_GET_ALL_LIMIT);
+        assert_eq!(get_all_limit(Some(0)), 0);
+        assert_eq!(get_all_limit(Some(u32::MAX)), MAX_GET_ALL_LIMIT);
+    }
 }
