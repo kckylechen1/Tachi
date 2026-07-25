@@ -4,7 +4,9 @@ use super::cache::{
 };
 #[cfg(test)]
 use super::cache::{run_recall_cache_race_hook, RecallCacheRacePoint};
-use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
+use super::rows::{
+    auto_query_embedding_would_run, query_with_context_symbols, search_memory_rows_with_access,
+};
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
@@ -56,13 +58,17 @@ pub(crate) async fn handle_search_memory_with_access(
     // that record access are ineligible: access_count/history participate in
     // production ranking, so skipping their writes on a hit would change the
     // search contract and recording them on a miss would immediately advance
-    // the authoritative generation.
+    // the authoritative generation. Auto-generated embeddings are also
+    // ineligible because provider success versus lexical degradation is not a
+    // caller-bound representation. Explicit finite query vectors remain keyed
+    // by their full contents and are cacheable.
     let sandboxed_search = params
         .agent_role
         .as_deref()
         .is_some_and(|role| !role.trim().is_empty());
+    let auto_query_embedding = auto_query_embedding_would_run(server, &params);
     let cache_eligible = recall_cache_read_enabled()
-        && params.query_vec.is_none()
+        && !auto_query_embedding
         && !sandboxed_search
         && !record_access
         && !memcore::should_skip_query(&params.query);

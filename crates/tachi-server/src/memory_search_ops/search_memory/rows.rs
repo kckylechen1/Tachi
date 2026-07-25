@@ -121,6 +121,43 @@ pub(super) fn query_with_context_symbols(query: &str, context_symbols: &[String]
     }
 }
 
+/// Whether production row search will ask the embedding provider to create a
+/// query representation. Such requests are not cache-safe before the provider
+/// call: success, lexical degradation, model, and provider state are not
+/// represented by the caller's parameters. Explicit query vectors and paths
+/// where no vector-capable store participates remain deterministic.
+pub(super) fn auto_query_embedding_would_run(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+) -> bool {
+    if params.query_vec.is_some()
+        || parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
+    {
+        return false;
+    }
+
+    let named_project_vec_available = params.project.as_deref().is_some_and(|project_name| {
+        server
+            .with_named_project_store_read(project_name, |store| Ok(store.vec_available))
+            .unwrap_or(false)
+    });
+    let wiki_path_prefix = params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
+    let default_wiki_vec_available =
+        params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") && {
+            server
+                .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
+                .unwrap_or(false)
+        };
+
+    server.global_vec_available()
+        || server.project_vec_available()
+        || named_project_vec_available
+        || default_wiki_vec_available
+}
+
 pub(crate) async fn search_memory_rows(
     server: &MemoryServer,
     params: SearchMemoryParams,
@@ -157,22 +194,6 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     params.top_k = top_k;
     params.candidates_per_channel = params.normalized_candidates_per_channel();
 
-    let named_project_vec_available = if let Some(ref project_name) = params.project {
-        server
-            .with_named_project_store_read(project_name, |store| Ok(store.vec_available))
-            .unwrap_or(false)
-    } else {
-        false
-    };
-    let default_wiki_vec_available =
-        if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
-            server
-                .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
     let mut searched_default_wiki = false;
     let routing_config = server.routing_config().get();
 
@@ -181,13 +202,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     // readable `recall_quality.degraded = "lexical_only: <reason>"` marker.
     let mut embed_degraded: Option<String> = None;
 
-    if params.query_vec.is_none()
-        && !parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
-        && (server.global_vec_available()
-            || server.project_vec_available()
-            || named_project_vec_available
-            || default_wiki_vec_available)
-    {
+    if auto_query_embedding_would_run(server, &params) {
         server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
         let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
         match server.llm.embed_voyage(&scrubbed_query, "query").await {

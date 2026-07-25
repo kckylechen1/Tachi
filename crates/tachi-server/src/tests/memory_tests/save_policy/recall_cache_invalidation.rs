@@ -20,8 +20,105 @@ use crate::memory_search_ops::{
     handle_save_memory, handle_search_memory, handle_search_memory_with_access,
     RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
 };
+use crate::test_support::EnvRestore;
 use crate::tool_params::{ArchiveMemoryParams, DeleteMemoryParams};
 use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+#[derive(Clone, Copy)]
+enum MockEmbeddingOutcome {
+    Available,
+    Unavailable,
+}
+
+#[derive(Clone)]
+struct MockEmbeddingProvider {
+    outcomes: Arc<Vec<MockEmbeddingOutcome>>,
+    calls: Arc<AtomicUsize>,
+}
+
+async fn mock_embedding_response(
+    axum::extract::State(provider): axum::extract::State<MockEmbeddingProvider>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let call = provider.calls.fetch_add(1, Ordering::SeqCst);
+    let outcome = provider
+        .outcomes
+        .get(call)
+        .copied()
+        .unwrap_or(MockEmbeddingOutcome::Unavailable);
+    match outcome {
+        MockEmbeddingOutcome::Available => {
+            let mut embedding = vec![0.0_f32; 1024];
+            embedding[0] = 1.0;
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "data": [{"index": 0, "embedding": embedding}]
+                })),
+            )
+                .into_response()
+        }
+        MockEmbeddingOutcome::Unavailable => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "provider unavailable"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn spawn_mock_embedding_provider(
+    outcomes: Vec<MockEmbeddingOutcome>,
+) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new()
+        .route(
+            "/v1/embeddings",
+            axum::routing::post(mock_embedding_response),
+        )
+        .with_state(MockEmbeddingProvider {
+            outcomes: Arc::new(outcomes),
+            calls: calls.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock embedding provider");
+    let address = listener.local_addr().expect("mock provider address");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve mock embedding provider");
+    });
+    (format!("http://{address}"), calls, task)
+}
+
+fn enter_isolated_cache_transition_test(child_env: &str, test_name: &str) -> bool {
+    if std::env::var_os(child_env).is_some() {
+        return true;
+    }
+    let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .arg(test_name)
+        .arg("--nocapture")
+        .env(child_env, "1")
+        .status()
+        .expect("spawn isolated cache transition test");
+    assert!(
+        status.success(),
+        "isolated transition test failed: {status}"
+    );
+    false
+}
+
+fn has_lexical_degradation(rows: &[Value]) -> bool {
+    rows.iter().any(|row| {
+        row.get("recall_quality")
+            .and_then(|quality| quality.get("degraded"))
+            .and_then(Value::as_str)
+            .is_some_and(|marker| marker.starts_with("lexical_only"))
+    })
+}
 
 fn save_params(path: &str, text: &str) -> SaveMemoryParams {
     SaveMemoryParams {
@@ -110,6 +207,148 @@ async fn wait_for_cache_hit(server: &crate::server_state::MemoryServer, previous
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("unchanged search did not record a recall-cache hit");
+}
+
+async fn assert_auto_embedding_transition(
+    outcomes: Vec<MockEmbeddingOutcome>,
+    first_degraded: bool,
+    second_degraded: bool,
+) {
+    let _cache = RecallCacheTestOverride::enabled();
+    let server = make_server();
+    assert!(
+        server.global_vec_available(),
+        "provider transition requires sqlite-vec query embedding support"
+    );
+
+    let mut vector = vec![0.0_f32; 1024];
+    vector[0] = 1.0;
+    let needle = format!("EmbeddingCacheTransition{}", uuid::Uuid::new_v4().simple());
+    let row_id = format!("embedding-transition-{}", uuid::Uuid::new_v4());
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry(&row_id);
+            entry.path = "/scratch/cache-generation/embedding-transition".to_string();
+            entry.text = format!("{needle} provider transition row");
+            entry.summary = entry.text.clone();
+            entry.vector = Some(vector);
+            store.upsert(&entry).map_err(|error| error.to_string())
+        })
+        .expect("seed embedding transition row");
+
+    let (base_url, calls, provider_task) = spawn_mock_embedding_provider(outcomes).await;
+    let _base = EnvRestore::set("VOYAGE_BASE_URL", &base_url);
+    let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
+    let _timeout = EnvRestore::set("TACHI_RECALL_PROVIDER_TIMEOUT_SECS", "2");
+    let _embedding = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "0");
+
+    let params = json_search_params(&needle);
+    let first = search_rows_with_params(&server, params.clone()).await;
+    assert!(first.iter().any(|row| row["id"] == row_id));
+    assert_eq!(
+        has_lexical_degradation(&first),
+        first_degraded,
+        "first response used the wrong embedding outcome: {first:#?}"
+    );
+
+    let second = search_rows_with_params(&server, params).await;
+    assert!(second.iter().any(|row| row["id"] == row_id));
+    assert_eq!(
+        has_lexical_degradation(&second),
+        second_degraded,
+        "second response replayed the prior provider state: {second:#?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "each auto-embedding request must observe the provider instead of hitting a representation-ambiguous cache entry"
+    );
+    assert_eq!(
+        global_recall_cache_entries(&server),
+        0,
+        "auto-generated and degraded query representations must bypass recall cache"
+    );
+    provider_task.abort();
+}
+
+#[tokio::test]
+async fn provider_recovery_does_not_replay_cached_lexical_fallback() {
+    const CHILD_ENV: &str = "TACHI_CACHE_PROVIDER_RECOVERY_CHILD";
+    if !enter_isolated_cache_transition_test(
+        CHILD_ENV,
+        "provider_recovery_does_not_replay_cached_lexical_fallback",
+    ) {
+        return;
+    }
+    assert_auto_embedding_transition(
+        vec![
+            MockEmbeddingOutcome::Unavailable,
+            MockEmbeddingOutcome::Available,
+        ],
+        true,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn provider_failure_does_not_replay_cached_semantic_result() {
+    const CHILD_ENV: &str = "TACHI_CACHE_PROVIDER_FAILURE_CHILD";
+    if !enter_isolated_cache_transition_test(
+        CHILD_ENV,
+        "provider_failure_does_not_replay_cached_semantic_result",
+    ) {
+        return;
+    }
+    assert_auto_embedding_transition(
+        vec![
+            MockEmbeddingOutcome::Available,
+            MockEmbeddingOutcome::Unavailable,
+        ],
+        false,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn explicit_query_vector_remains_cacheable_and_hits_when_unchanged() {
+    let _cache = RecallCacheTestOverride::enabled();
+    let server = make_server();
+    let needle = format!("ExplicitVectorCache{}", uuid::Uuid::new_v4().simple());
+    let row_id = format!("explicit-vector-cache-{}", uuid::Uuid::new_v4());
+    let mut vector = vec![0.0_f32; 1024];
+    vector[0] = 1.0;
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry(&row_id);
+            entry.path = "/scratch/cache-generation/explicit-vector".to_string();
+            entry.text = format!("{needle} stable explicit query vector");
+            entry.summary = entry.text.clone();
+            entry.vector = Some(vector.clone());
+            store.upsert(&entry).map_err(|error| error.to_string())
+        })
+        .expect("seed explicit vector row");
+
+    let mut params = json_search_params(&needle);
+    params.query_vec = Some(vector);
+    let first = search_rows_with_params(&server, params.clone()).await;
+    assert!(first.iter().any(|row| row["id"] == row_id));
+    assert!(
+        global_recall_cache_entries(&server) > 0,
+        "an explicitly bound finite query vector must populate recall cache"
+    );
+    let hits_before = server
+        .with_global_store_read(|store| {
+            store
+                .recall_cache_stats()
+                .map_err(|error| error.to_string())
+        })
+        .expect("cache stats before explicit-vector hit")
+        .total_hits;
+    let second = search_rows_with_params(&server, params).await;
+    assert_eq!(second, first);
+    wait_for_cache_hit(&server, hits_before).await;
 }
 
 // ── T1: cache masking — pre-fix must be RED ────────────────────────────────
