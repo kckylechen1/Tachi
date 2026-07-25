@@ -1,4 +1,4 @@
-use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
+use crate::memory_search_ops::search_memory_rows;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{
     build_evidence_refs_v1, canonical_json_sha256, HybridWeightsParam, ProgressCheckParams,

@@ -2,7 +2,7 @@ use super::helpers::{dedup_strings, round3};
 use crate::server_state::{DbScope, MemoryServer};
 use chrono::Utc;
 use memcore::{HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 
 fn merge_text(existing: &str, incoming: &str) -> String {
@@ -267,6 +267,46 @@ pub(super) fn persist_capture_entry(
     db_path: Option<&std::path::PathBuf>,
     entry: &MemoryEntry,
 ) -> Result<(), String> {
+    fn persist(
+        store: &mut MemoryStore,
+        entry: &mut MemoryEntry,
+        context: &str,
+    ) -> Result<(), String> {
+        // Foundry capture metadata is assembled only by server handlers. Pull
+        // its lineage out before persistence so reserved fields reach memcore
+        // solely through the shape-validated append channel.
+        let raw_refs = entry
+            .metadata
+            .as_object_mut()
+            .and_then(|metadata| metadata.remove("source_refs"));
+        let appends = match raw_refs {
+            None => Vec::new(),
+            Some(Value::Array(values)) => values
+                .into_iter()
+                .map(|value| {
+                    let object = value
+                        .as_object()
+                        .ok_or_else(|| format!("{context} capture source_ref must be an object"))?;
+                    let string_field =
+                        |key: &str| object.get(key).and_then(Value::as_str).map(str::to_string);
+                    memcore::db::ValidatedReferenceMutation::capture_source(
+                        string_field("ref_type").unwrap_or_default(),
+                        string_field("ref_id").unwrap_or_default(),
+                        string_field("revision"),
+                    )
+                    .map_err(|error| format!("{context} capture source_ref invalid: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err(format!("{context} capture source_refs must be an array")),
+        };
+        let patch = entry.metadata.as_object().cloned().unwrap_or_default();
+        let (_, metadata) = store
+            .upsert_with_validated_reference_mutations(entry, None, &patch, &appends)
+            .map_err(|error| format!("{context}: {error}"))?;
+        entry.metadata = metadata;
+        Ok(())
+    }
+
     if let Some(project_name) = named_project {
         let dest_path = MemoryServer::resolve_named_project_db_path(project_name)?;
         let mut entry = entry.clone();
@@ -276,9 +316,11 @@ pub(super) fn persist_capture_entry(
             DbScope::Project,
         );
         server.with_named_project_store(project_name, |store| {
-            store
-                .upsert(&entry)
-                .map_err(|e| format!("Failed to save session capture to '{project_name}': {e}"))
+            persist(
+                store,
+                &mut entry,
+                &format!("Failed to save session capture to '{project_name}'"),
+            )
         })
     } else if let Some(db_path) = db_path {
         let mut entry = entry.clone();
@@ -288,19 +330,18 @@ pub(super) fn persist_capture_entry(
             target_db,
         );
         server.with_path_store(db_path, |store| {
-            store.upsert(&entry).map_err(|e| {
-                format!(
-                    "Failed to save captured memory to {}: {e}",
-                    db_path.display()
-                )
-            })
+            persist(
+                store,
+                &mut entry,
+                &format!("Failed to save captured memory to {}", db_path.display()),
+            )
         })
     } else {
         let dest_path = match target_db {
             DbScope::Global => Some(server.global_db_path_buf()),
             DbScope::Project => server.project_db_path_buf(),
         };
-        let entry_to_write = if let Some(dest) = dest_path {
+        let mut entry_to_write = if let Some(dest) = dest_path {
             let mut e = entry.clone();
             e.metadata =
                 crate::provenance::restamp_provenance_for_destination(e.metadata, &dest, target_db);
@@ -309,9 +350,7 @@ pub(super) fn persist_capture_entry(
             entry.clone()
         };
         server.with_store_for_scope(target_db, |store| {
-            store
-                .upsert(&entry_to_write)
-                .map_err(|e| format!("Failed to save captured memory: {e}"))
+            persist(store, &mut entry_to_write, "Failed to save captured memory")
         })
     }
 }

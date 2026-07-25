@@ -8,6 +8,7 @@
 //! rolls every earlier mutation back.
 
 use rusqlite::{Transaction, TransactionBehavior};
+use serde_json::{Map, Value};
 
 use crate::{
     db,
@@ -45,6 +46,25 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     /// Persist an entry inside the replacement transaction.
     pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
         db::upsert_within_tx(&self.tx, entry, self.vec_available, None).map(|_| ())
+    }
+
+    /// Persist an entry with server-authorized, shape-validated reference
+    /// appends inside the same replacement transaction.
+    pub fn upsert_with_validated_reference_mutations(
+        &mut self,
+        entry: &MemoryEntry,
+        metadata_patch: &Map<String, Value>,
+        mutations: &[db::ValidatedReferenceMutation],
+    ) -> Result<(), MemoryError> {
+        db::upsert_with_validated_reference_mutations_within_tx(
+            &self.tx,
+            entry,
+            self.vec_available,
+            None,
+            metadata_patch,
+            mutations,
+        )
+        .map(|_| ())
     }
 
     /// Archive a source after its supersession claim has succeeded.

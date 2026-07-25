@@ -3,9 +3,9 @@ use crate::memory_search_ops::contradiction::apply_auto_contradiction_detection;
 use crate::{DbScope, MemoryServer};
 use memcore::{db::IdlessUpsertResult, MemoryEntry, MemoryStore};
 
-pub(super) struct AtomicEvidenceWrite {
+pub(super) struct AtomicReferenceWrite {
     pub metadata_patch: serde_json::Map<String, serde_json::Value>,
-    pub append_refs: Vec<memcore::db::TypedEvidenceRefAppend>,
+    pub mutations: Vec<memcore::db::ValidatedReferenceMutation>,
 }
 
 /// Return the id of an active row with the same normalized path and exact
@@ -63,15 +63,15 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
     entry: &mut MemoryEntry,
     target_db: DbScope,
     named_project: Option<&str>,
-    evidence_write: &AtomicEvidenceWrite,
+    evidence_write: &AtomicReferenceWrite,
 ) -> Result<(), String> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
         let (_, metadata) = store
-            .upsert_with_atomic_evidence_refs(
+            .upsert_with_validated_reference_mutations(
                 entry,
                 None,
                 &evidence_write.metadata_patch,
-                &evidence_write.append_refs,
+                &evidence_write.mutations,
             )
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
         entry.metadata = metadata;
@@ -90,15 +90,15 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
     identity: &str,
     target_db: DbScope,
     named_project: Option<&str>,
-    evidence_write: &AtomicEvidenceWrite,
+    evidence_write: &AtomicReferenceWrite,
 ) -> Result<IdlessUpsertResult, String> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
         let (result, metadata) = store
-            .upsert_with_atomic_evidence_refs(
+            .upsert_with_validated_reference_mutations(
                 entry,
                 Some(identity),
                 &evidence_write.metadata_patch,
-                &evidence_write.append_refs,
+                &evidence_write.mutations,
             )
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
         entry.metadata = metadata;

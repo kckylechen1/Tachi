@@ -90,8 +90,6 @@ pub(in crate::copilot_ops) fn wiki_layer_metadata(
     } else {
         WikiArtifactKindV1::Wiki
     };
-    let captured_at = Utc::now().to_rfc3339();
-    let evidence_refs_v1 = build_evidence_refs_v1(references, &captured_at);
     let source_bundle_hash = (lifecycle == WikiLifecycleV1::Active && has_validated_sources)
         .then(|| canonical_json_sha256(&json!(references)).ok())
         .flatten();
@@ -106,7 +104,6 @@ pub(in crate::copilot_ops) fn wiki_layer_metadata(
     obj.insert("lifecycle".to_string(), json!(lifecycle.as_str()));
     obj.insert("artifact_kind".to_string(), json!(artifact_kind.as_str()));
     obj.insert("source_ref".to_string(), json!(references.first().cloned()));
-    obj.insert("evidence_refs_v1".to_string(), json!(evidence_refs_v1));
     if let Some(hash) = source_bundle_hash {
         obj.insert("source_bundle_hash".to_string(), json!(hash));
     }

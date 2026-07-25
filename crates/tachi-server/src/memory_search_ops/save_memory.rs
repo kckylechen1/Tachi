@@ -8,6 +8,7 @@ mod response;
 mod validation;
 pub(crate) mod write_affinity;
 
+pub(crate) use handler::handle_save_memory_with_authorized_reference_mutations;
 pub(crate) use handler::{handle_save_memory, handle_save_memory_with_references};
 #[cfg(test)]
 pub(crate) use handler::{install_pre_upsert_barrier, install_pre_upsert_pause};
@@ -22,4 +23,15 @@ pub(crate) async fn save_eval_memory(
     params: crate::tool_params::SaveMemoryParams,
 ) -> Result<String, String> {
     handler::handle_save_memory(server, params).await
+}
+
+/// Internal server-authorized reference path. The memcore value validates
+/// shape only; this boundary is responsible for deciding the producer is
+/// allowed to mutate reserved provenance metadata.
+pub(crate) async fn save_eval_memory_with_authorized_reference_mutations(
+    server: &crate::MemoryServer,
+    params: crate::tool_params::SaveMemoryParams,
+    mutations: Vec<memcore::db::ValidatedReferenceMutation>,
+) -> Result<String, String> {
+    handler::handle_save_memory_with_authorized_reference_mutations(server, params, mutations).await
 }

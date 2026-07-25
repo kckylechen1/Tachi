@@ -331,27 +331,57 @@ pub enum IdlessUpsertResult {
     Duplicate { id: String },
 }
 
-/// Evidence append accepted by the atomic metadata merge. Construction checks
-/// the serialized typed-ref shape so the database API never accepts an
-/// arbitrary caller-provided JSON value as trusted evidence.
+/// Shape-validated reserved-reference mutation accepted by the atomic merge.
+///
+/// Construction proves only that the value has a normalized supported wire
+/// shape. It does not confer authority; callers must authorize the source at
+/// their own boundary before selecting this mutation API.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedEvidenceRefAppend {
-    reference: String,
-    captured_at: String,
-    target_kind: Option<String>,
+pub struct ValidatedReferenceMutation {
+    operation: ReservedReferenceOperation,
 }
 
-impl TypedEvidenceRefAppend {
-    pub fn new(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReservedReferenceOperation {
+    Append {
+        target: ReservedReferenceTarget,
+        value: Value,
+    },
+    EnsureEmptyEvidenceRefsV1,
+    TombstoneLegacySourceRefs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservedReferenceTarget {
+    EvidenceRefsV1,
+    SourceRefs,
+}
+
+impl ReservedReferenceTarget {
+    fn metadata_key(self) -> &'static str {
+        match self {
+            Self::EvidenceRefsV1 => "evidence_refs_v1",
+            Self::SourceRefs => "source_refs",
+        }
+    }
+}
+
+impl ValidatedReferenceMutation {
+    pub fn evidence(
         reference: String,
         captured_at: String,
         target_kind: Option<String>,
     ) -> Result<Self, MemoryError> {
-        if reference.trim().is_empty() || captured_at.trim().is_empty() {
+        let reference = reference.trim().to_string();
+        if reference.is_empty() || captured_at.trim().is_empty() {
             return Err(MemoryError::InvalidArg(
                 "validated evidence refs require non-empty ref and captured_at".into(),
             ));
         }
+        let captured_at = normalize_utc_iso(captured_at.trim())?;
+        let target_kind = target_kind
+            .map(|kind| kind.trim().to_ascii_lowercase())
+            .filter(|kind| !kind.is_empty());
         if let Some(kind) = target_kind.as_deref() {
             if !matches!(
                 kind,
@@ -372,25 +402,137 @@ impl TypedEvidenceRefAppend {
                 )));
             }
         }
+        let mut object = Map::new();
+        object.insert("ref".to_string(), Value::String(reference));
+        object.insert("captured_at".to_string(), Value::String(captured_at));
+        if let Some(kind) = target_kind {
+            object.insert("target_kind".to_string(), Value::String(kind));
+        }
         Ok(Self {
-            reference,
-            captured_at,
-            target_kind,
+            operation: ReservedReferenceOperation::Append {
+                target: ReservedReferenceTarget::EvidenceRefsV1,
+                value: Value::Object(object),
+            },
         })
     }
 
-    fn to_value(&self) -> Value {
-        let mut object = Map::new();
-        object.insert("ref".to_string(), Value::String(self.reference.clone()));
-        object.insert(
-            "captured_at".to_string(),
-            Value::String(self.captured_at.clone()),
-        );
-        if let Some(kind) = self.target_kind.as_ref() {
-            object.insert("target_kind".to_string(), Value::String(kind.clone()));
+    #[allow(clippy::too_many_arguments)]
+    pub fn precedent_source(
+        relation: String,
+        target_kind: String,
+        target_ref: String,
+        comment_id: Option<String>,
+        updated_at: Option<String>,
+        body_hash: Option<String>,
+        commit_sha: Option<String>,
+        section_or_span: Option<String>,
+    ) -> Result<Self, MemoryError> {
+        let relation = normalize_required_lower(relation, "source ref relation")?;
+        if !matches!(
+            relation.as_str(),
+            "derived_from" | "supports" | "contradicts" | "supersedes" | "applies_to"
+        ) {
+            return Err(MemoryError::InvalidArg(format!(
+                "unsupported source ref relation: {relation}"
+            )));
         }
-        Value::Object(object)
+        let target_kind = normalize_required_lower(target_kind, "source ref target_kind")?;
+        if !matches!(
+            target_kind.as_str(),
+            "issue" | "comment" | "pr" | "commit" | "canonical_doc" | "verification"
+        ) {
+            return Err(MemoryError::InvalidArg(format!(
+                "unsupported source ref target_kind: {target_kind}"
+            )));
+        }
+        let target_ref = normalize_required(target_ref, "source ref target_ref")?;
+        let comment_id = normalize_optional(comment_id);
+        let updated_at = updated_at
+            .map(|value| normalize_utc_iso(value.trim()))
+            .transpose()?;
+        let body_hash = normalize_optional(body_hash);
+        let commit_sha = normalize_optional(commit_sha);
+        let section_or_span = normalize_optional(section_or_span);
+        let mut object = Map::new();
+        object.insert("relation".to_string(), Value::String(relation));
+        object.insert("target_kind".to_string(), Value::String(target_kind));
+        object.insert("target_ref".to_string(), Value::String(target_ref));
+        for (key, value) in [
+            ("comment_id", comment_id),
+            ("updated_at", updated_at),
+            ("body_hash", body_hash),
+            ("commit_sha", commit_sha),
+            ("section_or_span", section_or_span),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.to_string(), Value::String(value));
+            }
+        }
+        Ok(Self {
+            operation: ReservedReferenceOperation::Append {
+                target: ReservedReferenceTarget::SourceRefs,
+                value: Value::Object(object),
+            },
+        })
     }
+
+    pub fn capture_source(
+        ref_type: String,
+        ref_id: String,
+        revision: Option<String>,
+    ) -> Result<Self, MemoryError> {
+        let ref_type = normalize_required_lower(ref_type, "capture source ref_type")?;
+        let ref_id = normalize_required(ref_id, "capture source ref_id")?;
+        let revision = normalize_optional(revision);
+        let mut object = Map::new();
+        object.insert("ref_type".to_string(), Value::String(ref_type));
+        object.insert("ref_id".to_string(), Value::String(ref_id));
+        if let Some(revision) = revision {
+            object.insert("revision".to_string(), Value::String(revision));
+        }
+        Ok(Self {
+            operation: ReservedReferenceOperation::Append {
+                target: ReservedReferenceTarget::SourceRefs,
+                value: Value::Object(object),
+            },
+        })
+    }
+
+    /// Trusted wiki migration marker: establish the canonical typed field
+    /// when no evidence values exist yet.
+    pub fn ensure_empty_evidence_refs_v1() -> Self {
+        Self {
+            operation: ReservedReferenceOperation::EnsureEmptyEvidenceRefsV1,
+        }
+    }
+
+    /// Trusted wiki migration marker: retain the historical explicit null
+    /// tombstone so readers cannot fall back to stale legacy provenance.
+    pub fn tombstone_legacy_source_refs() -> Self {
+        Self {
+            operation: ReservedReferenceOperation::TombstoneLegacySourceRefs,
+        }
+    }
+}
+
+fn normalize_required(value: String, field: &str) -> Result<String, MemoryError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} must be non-empty"
+        )));
+    }
+    Ok(value)
+}
+
+fn normalize_required_lower(value: String, field: &str) -> Result<String, MemoryError> {
+    normalize_required(value, field).map(|value| value.to_ascii_lowercase())
+}
+
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Result of an atomic insert-only memory write.
@@ -401,12 +543,66 @@ pub enum InsertMemoryResult {
 }
 
 /// Insert or update a memory entry (and its embedding vector if provided).
-pub fn upsert(
+pub(crate) fn upsert(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
 ) -> Result<(), MemoryError> {
     upsert_with_idless_identity(conn, entry, vec_available, None).map(|_| ())
+}
+
+const RESERVED_REFERENCE_KEYS: [&str; 2] = ["evidence_refs_v1", "source_refs"];
+
+fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
+    let Some(mut object) = metadata.as_object().cloned() else {
+        return metadata.clone();
+    };
+    for key in RESERVED_REFERENCE_KEYS {
+        object.remove(key);
+    }
+    Value::Object(object)
+}
+
+fn read_existing_metadata(
+    tx: &rusqlite::Transaction<'_>,
+    entry_id: &str,
+) -> Result<Option<Value>, MemoryError> {
+    tx.query_row(
+        "SELECT metadata FROM memories WHERE id = ?1",
+        params![entry_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|raw| serde_json::from_str::<Value>(&raw))
+    .transpose()
+    .map_err(Into::into)
+}
+
+fn merge_ordinary_reserved_metadata(
+    tx: &rusqlite::Transaction<'_>,
+    entry_id: &str,
+    incoming: &Value,
+) -> Result<Value, MemoryError> {
+    let mut sanitized = strip_untrusted_reserved_metadata(incoming);
+    let Some(existing) = read_existing_metadata(tx, entry_id)? else {
+        return Ok(sanitized);
+    };
+    let Some(existing_object) = existing.as_object() else {
+        return Ok(sanitized);
+    };
+    let reserved = RESERVED_REFERENCE_KEYS
+        .into_iter()
+        .filter_map(|key| existing_object.get(key).cloned().map(|value| (key, value)))
+        .collect::<Vec<_>>();
+    if reserved.is_empty() {
+        return Ok(sanitized);
+    }
+    let mut object = sanitized.as_object().cloned().unwrap_or_default();
+    for (key, value) in reserved {
+        object.insert(key.to_string(), value);
+    }
+    sanitized = Value::Object(object);
+    Ok(sanitized)
 }
 
 fn atomic_evidence_path_validation_disabled() -> bool {
@@ -420,15 +616,15 @@ fn atomic_evidence_path_validation_disabled() -> bool {
 
 impl crate::MemoryStore {
     /// Save through the normal upsert body while atomically preserving and
-    /// extending typed evidence metadata. The trusted refs and metadata patch
-    /// are separate arguments so caller-controlled metadata cannot impersonate
-    /// validated evidence.
-    pub fn upsert_with_atomic_evidence_refs(
+    /// mutating reserved reference metadata. The validated mutations and
+    /// metadata patch are separate arguments so caller-controlled metadata
+    /// cannot impersonate an authorized server reference write.
+    pub fn upsert_with_validated_reference_mutations(
         &mut self,
         entry: &MemoryEntry,
         idless_identity: Option<&str>,
         metadata_patch: &Map<String, Value>,
-        append_refs: &[TypedEvidenceRefAppend],
+        mutations: &[ValidatedReferenceMutation],
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
         if self.path_validation && !atomic_evidence_path_validation_disabled() {
             let allow_cross = entry
@@ -449,95 +645,431 @@ impl crate::MemoryStore {
 
         let db_label = self.db_label.clone();
         let vec_available = self.vec_available;
-        crate::db::retry_memory_locked("upsert_atomic_evidence_refs", &db_label, || {
-            upsert_with_atomic_evidence_refs(
+        crate::db::retry_memory_locked("upsert_validated_reference_mutations", &db_label, || {
+            upsert_with_validated_reference_mutations(
                 &mut self.conn,
                 entry,
                 vec_available,
                 idless_identity,
                 metadata_patch,
-                append_refs,
+                mutations,
             )
         })
     }
 }
 
-fn typed_evidence_ref_key(value: &Value) -> Option<&str> {
-    let object = value.as_object()?;
-    let reference = object.get("ref")?.as_str()?.trim();
-    let captured_at = object.get("captured_at")?.as_str()?.trim();
-    (!reference.is_empty() && !captured_at.is_empty()).then_some(reference)
+fn normalized_append_key(target: ReservedReferenceTarget, value: &Value) -> Option<String> {
+    match target {
+        ReservedReferenceTarget::EvidenceRefsV1 => value
+            .as_object()?
+            .get("ref")?
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        ReservedReferenceTarget::SourceRefs => serde_json::to_string(value).ok(),
+    }
 }
 
-fn merge_atomic_evidence_metadata(
+fn merge_validated_reference_metadata(
     tx: &rusqlite::Transaction<'_>,
     entry_id: &str,
     metadata_patch: &Map<String, Value>,
-    append_refs: &[TypedEvidenceRefAppend],
+    mutations: &[ValidatedReferenceMutation],
 ) -> Result<Value, MemoryError> {
-    let existing_metadata = tx
-        .query_row(
-            "SELECT metadata FROM memories WHERE id = ?1",
-            params![entry_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .map(|raw| serde_json::from_str::<Value>(&raw))
-        .transpose()?;
+    let existing_metadata = read_existing_metadata(tx, entry_id)?;
     let mut merged = existing_metadata
         .as_ref()
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let mut evidence_refs = merged
-        .remove("evidence_refs_v1")
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|value| typed_evidence_ref_key(value).is_some())
-        .collect::<Vec<_>>();
-    merged.remove("source_refs");
-
     for (key, value) in metadata_patch {
         if key != "evidence_refs_v1" && key != "source_refs" {
             merged.insert(key.clone(), value.clone());
         }
     }
-    for new_ref in append_refs {
-        if !evidence_refs
-            .iter()
-            .any(|existing| typed_evidence_ref_key(existing) == Some(new_ref.reference.as_str()))
-        {
-            evidence_refs.push(new_ref.to_value());
+    for mutation in mutations {
+        match &mutation.operation {
+            ReservedReferenceOperation::Append { target, value } => {
+                let key = target.metadata_key();
+                let refs = match merged.get(key) {
+                    Some(Value::Array(values)) => values.clone(),
+                    Some(_) => {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "cannot append validated reference to malformed existing metadata.{key}"
+                        )))
+                    }
+                    None => Vec::new(),
+                };
+                let append_key = normalized_append_key(*target, value).ok_or_else(|| {
+                    MemoryError::InvalidArg("invalid normalized reference append".into())
+                })?;
+                if !refs.iter().any(|existing| {
+                    normalized_append_key(*target, existing).as_deref() == Some(append_key.as_str())
+                }) {
+                    let mut refs = refs;
+                    refs.push(value.clone());
+                    merged.insert(key.to_string(), Value::Array(refs));
+                }
+            }
+            ReservedReferenceOperation::EnsureEmptyEvidenceRefsV1 => {
+                merged
+                    .entry("evidence_refs_v1".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+            }
+            ReservedReferenceOperation::TombstoneLegacySourceRefs => {
+                merged.insert("source_refs".to_string(), Value::Null);
+            }
         }
-    }
-    if !evidence_refs.is_empty() {
-        merged.insert("evidence_refs_v1".to_string(), Value::Array(evidence_refs));
     }
     Ok(Value::Object(merged))
 }
 
-fn upsert_with_atomic_evidence_refs(
+fn upsert_with_validated_reference_mutations(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
     idless_identity: Option<&str>,
     metadata_patch: &Map<String, Value>,
-    append_refs: &[TypedEvidenceRefAppend],
+    mutations: &[ValidatedReferenceMutation],
 ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = upsert_with_validated_reference_mutations_within_tx(
+        &tx,
+        entry,
+        vec_available,
+        idless_identity,
+        metadata_patch,
+        mutations,
+    )?;
+    tx.commit()?;
+    Ok(result)
+}
+
+pub(crate) fn upsert_with_validated_reference_mutations_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+    metadata_patch: &Map<String, Value>,
+    mutations: &[ValidatedReferenceMutation],
+) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let mut merged_entry = entry.clone();
     merged_entry.metadata =
-        merge_atomic_evidence_metadata(&tx, &entry.id, metadata_patch, append_refs)?;
-    let result = upsert_within_tx(&tx, &merged_entry, vec_available, idless_identity)?;
-    tx.commit()?;
+        merge_validated_reference_metadata(tx, &entry.id, metadata_patch, mutations)?;
+    let result = upsert_prepared_within_tx(tx, &merged_entry, vec_available, idless_identity)?;
     Ok((result, merged_entry.metadata))
+}
+
+#[cfg(test)]
+mod reserved_reference_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn entry(id: &str, metadata: Value) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: format!("/audit/reserved-reference/{id}"),
+            summary: "reserved reference boundary".to_string(),
+            text: format!("reserved reference boundary fixture {id}"),
+            importance: 0.7,
+            timestamp: "2026-07-25T00:00:00Z".to_string(),
+            valid_from: "2026-07-25T00:00:00Z".to_string(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    fn open_store() -> (tempfile::TempDir, crate::MemoryStore) {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let store = crate::MemoryStore::open(&path.to_string_lossy()).expect("open memory store");
+        (dir, store)
+    }
+
+    fn append(reference: &str, captured_at: &str) -> ValidatedReferenceMutation {
+        ValidatedReferenceMutation::evidence(reference.to_string(), captured_at.to_string(), None)
+            .expect("typed append")
+    }
+
+    fn refs(entry: &MemoryEntry) -> Vec<&str> {
+        entry.metadata["evidence_refs_v1"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|value| value["ref"].as_str().expect("typed ref"))
+            .collect()
+    }
+
+    #[test]
+    fn ordinary_store_upsert_strips_hostile_reserved_metadata_on_create() {
+        let (_dir, mut store) = open_store();
+        let hostile = entry(
+            "hostile-create",
+            json!({
+                "kept": true,
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": [{ "target_ref": "#998" }]
+            }),
+        );
+        store.upsert(&hostile).expect("ordinary create");
+
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["kept"], json!(true));
+        assert!(stored.metadata.get("evidence_refs_v1").is_none());
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn ordinary_store_upsert_cannot_replace_trusted_evidence_on_update() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("hostile-update", json!({}));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .expect("trusted seed");
+        let hostile = entry(
+            "hostile-update",
+            json!({
+                "kept": true,
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": ["#998"]
+            }),
+        );
+        store.upsert(&hostile).expect("ordinary hostile update");
+
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100"]);
+        assert_eq!(stored.metadata["kept"], json!(true));
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn stale_ordinary_store_upsert_cannot_erase_later_trusted_append() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let mut stale_store = crate::MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let mut trusted_store = crate::MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let clean = entry("stale-writer", json!({ "owner": "ordinary" }));
+        trusted_store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .expect("trusted seed");
+        let mut stale = stale_store.get(&clean.id).unwrap().unwrap();
+        stale.metadata["stale_patch"] = json!(true);
+        trusted_store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#101", "2026-07-25T00:01:00Z")],
+            )
+            .expect("trusted concurrent append");
+
+        stale_store.upsert(&stale).expect("stale ordinary update");
+        let stored = stale_store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100", "#101"]);
+        assert_eq!(stored.metadata["stale_patch"], json!(true));
+    }
+
+    #[test]
+    fn ordinary_store_upsert_preserves_existing_legacy_source_refs() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("legacy-preserve", json!({ "before": true }));
+        store.upsert(&clean).unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+                params![
+                    json!({
+                        "before": true,
+                        "source_refs": [{ "target_ref": "#100" }]
+                    })
+                    .to_string(),
+                    clean.id
+                ],
+            )
+            .unwrap();
+        let update = entry("legacy-preserve", json!({ "after": true }));
+        store.upsert(&update).unwrap();
+
+        let stored = store.get(&update.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["after"], json!(true));
+        assert_eq!(
+            stored.metadata["source_refs"][0]["target_ref"],
+            json!("#100")
+        );
+    }
+
+    #[test]
+    fn trusted_append_normalizes_before_dedupe_and_validates_timestamp() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("normalized-append", json!({}));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[
+                    append("#100", "2026-07-25T00:00:00Z"),
+                    append(" #100 ", "2026-07-25T08:00:00+08:00"),
+                ],
+            )
+            .expect("trusted normalized append");
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100"]);
+        assert!(ValidatedReferenceMutation::evidence(
+            "#101".to_string(),
+            "not-a-timestamp".to_string(),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn precedent_source_append_normalizes_before_dedupe() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("precedent-source-normalized", json!({}));
+        let source = |target_ref: &str, updated_at: &str| {
+            ValidatedReferenceMutation::precedent_source(
+                " SUPPORTS ".to_string(),
+                " COMMENT ".to_string(),
+                target_ref.to_string(),
+                Some(" 42 ".to_string()),
+                Some(updated_at.to_string()),
+                Some(" hash-42 ".to_string()),
+                None,
+                Some(" lines 1-2 ".to_string()),
+            )
+            .expect("precedent source mutation")
+        };
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[
+                    source(" #100 ", "2026-07-25T08:00:00+08:00"),
+                    source("#100", "2026-07-25T00:00:00Z"),
+                ],
+            )
+            .expect("normalized precedent source append");
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        let refs = stored.metadata["source_refs"].as_array().unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0]["relation"], json!("supports"));
+        assert_eq!(refs[0]["target_kind"], json!("comment"));
+        assert_eq!(refs[0]["target_ref"], json!("#100"));
+        assert_eq!(refs[0]["updated_at"], json!("2026-07-25T00:00:00.000Z"));
+    }
+
+    #[test]
+    fn insert_if_absent_strips_hostile_reserved_metadata() {
+        let (_dir, mut store) = open_store();
+        let hostile = entry(
+            "insert-hostile",
+            json!({
+                "kept": true,
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": ["#998"]
+            }),
+        );
+        assert_eq!(
+            store.insert_if_absent(&hostile).unwrap(),
+            InsertMemoryResult::Inserted
+        );
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["kept"], json!(true));
+        assert!(stored.metadata.get("evidence_refs_v1").is_none());
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn idless_upsert_strips_hostile_reserved_metadata() {
+        let (_dir, mut store) = open_store();
+        let hostile = entry(
+            "idless-hostile",
+            json!({
+                "kept": true,
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": ["#998"]
+            }),
+        );
+        assert_eq!(
+            store.upsert_idless(&hostile, "hostile-identity").unwrap(),
+            IdlessUpsertResult::Saved
+        );
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["kept"], json!(true));
+        assert!(stored.metadata.get("evidence_refs_v1").is_none());
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn raw_db_upsert_strips_hostile_reserved_metadata() {
+        let (_dir, mut store) = open_store();
+        let hostile = entry(
+            "raw-hostile",
+            json!({
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": ["#998"]
+            }),
+        );
+        let vec_available = store.vec_available;
+        super::upsert(store.connection_mut(), &hostile, vec_available).unwrap();
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert!(stored.metadata.get("evidence_refs_v1").is_none());
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
 }
 
 /// Insert `entry` only when its id is absent. The existence decision and all
 /// main/FTS/vector writes share the same transaction, so an `Existing` result
 /// never mutates any representation of the winning row.
-pub fn insert_if_absent(
+pub(crate) fn insert_if_absent(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
@@ -581,13 +1113,13 @@ pub fn insert_if_absent(
         .map(normalize_utc_iso)
         .transpose()?;
     let write_time_utc = now_utc_iso();
-    let mut metadata = entry.metadata.clone();
+    let mut metadata = strip_untrusted_reserved_metadata(&entry.metadata);
     let path = crate::types::apply_location_relocation(&path, &entry.location, &mut metadata);
     let metadata_json = serde_json::to_string(&metadata)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let e_json = canonical_entities_json(entry)?;
 
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let rows_changed = tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance, timestamp, valid_from, valid_until,
@@ -656,7 +1188,7 @@ pub fn insert_if_absent(
 
 /// Insert an id-less entry once. A unique modern identity chooses one winner
 /// without rewriting legacy rows that predate the constraint.
-pub fn upsert_idless(
+pub(crate) fn upsert_idless(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
@@ -699,7 +1231,7 @@ fn upsert_with_idless_identity(
     // can run the full upsert (main row + FTS + vectors + idless semantics)
     // inside a caller-owned `BEGIN IMMEDIATE` transaction alongside
     // archive/supersede and the proposal-state CAS.
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let result = upsert_within_tx(&tx, entry, vec_available, idless_identity)?;
     tx.commit()?;
     Ok(result)
@@ -714,6 +1246,17 @@ fn upsert_with_idless_identity(
 /// vectors, idless semantics) is byte-for-byte identical because both paths
 /// execute this same body; only the commit site differs.
 pub(crate) fn upsert_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+) -> Result<IdlessUpsertResult, MemoryError> {
+    let mut sanitized = entry.clone();
+    sanitized.metadata = merge_ordinary_reserved_metadata(tx, &entry.id, &entry.metadata)?;
+    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity)
+}
+
+fn upsert_prepared_within_tx(
     tx: &rusqlite::Transaction<'_>,
     entry: &MemoryEntry,
     vec_available: bool,

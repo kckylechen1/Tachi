@@ -29,6 +29,10 @@ pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;
 pub(crate) use save_memory::handle_save_memory_with_references;
 pub(crate) use save_memory::save_eval_memory;
+pub(crate) use save_memory::{
+    handle_save_memory_with_authorized_reference_mutations,
+    save_eval_memory_with_authorized_reference_mutations,
+};
 pub(crate) use search_helpers::client_project_precedence;
 pub(crate) use search_helpers::explicit_workspace_project;
 pub(crate) use search_helpers::list_available_named_projects;

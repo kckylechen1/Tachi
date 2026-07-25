@@ -2,7 +2,7 @@ use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
     find_exact_path_text_duplicate, lookup_existing_entry, spawn_save_contradiction_detection,
-    upsert_idless_save_entry, upsert_save_entry, AtomicEvidenceWrite,
+    upsert_idless_save_entry, upsert_save_entry, AtomicReferenceWrite,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
@@ -15,11 +15,15 @@ use blake2::{Blake2s256, Digest};
 use chrono::Utc;
 use serde_json::json;
 
-struct TrustedEvidenceRefs(Vec<memcore::db::TypedEvidenceRefAppend>);
+pub(super) struct AuthorizedReferenceMutations(Vec<memcore::db::ValidatedReferenceMutation>);
 
-impl TrustedEvidenceRefs {
-    fn empty() -> Self {
+impl AuthorizedReferenceMutations {
+    pub(super) fn empty() -> Self {
         Self(Vec::new())
+    }
+
+    pub(super) fn from_authorized(mutations: Vec<memcore::db::ValidatedReferenceMutation>) -> Self {
+        Self(mutations)
     }
 
     fn validate(references: &[String]) -> Result<Self, String> {
@@ -34,7 +38,7 @@ impl TrustedEvidenceRefs {
                     .transpose()
                     .map_err(|error| format!("serialize trusted evidence target kind: {error}"))?
                     .and_then(|value| value.as_str().map(str::to_string));
-                memcore::db::TypedEvidenceRefAppend::new(
+                memcore::db::ValidatedReferenceMutation::evidence(
                     reference.target_ref,
                     reference.captured_at,
                     target_kind,
@@ -230,7 +234,7 @@ pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
     params: SaveMemoryParams,
 ) -> Result<String, String> {
-    handle_save_memory_impl(server, params, TrustedEvidenceRefs::empty()).await
+    handle_save_memory_impl(server, params, AuthorizedReferenceMutations::empty()).await
 }
 
 pub(crate) async fn handle_save_memory_with_references(
@@ -238,14 +242,27 @@ pub(crate) async fn handle_save_memory_with_references(
     params: SaveMemoryParams,
     references: Vec<String>,
 ) -> Result<String, String> {
-    let evidence_refs = TrustedEvidenceRefs::validate(&references)?;
+    let evidence_refs = AuthorizedReferenceMutations::validate(&references)?;
     handle_save_memory_impl(server, params, evidence_refs).await
+}
+
+pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+    mutations: Vec<memcore::db::ValidatedReferenceMutation>,
+) -> Result<String, String> {
+    handle_save_memory_impl(
+        server,
+        params,
+        AuthorizedReferenceMutations::from_authorized(mutations),
+    )
+    .await
 }
 
 async fn handle_save_memory_impl(
     server: &MemoryServer,
     mut params: SaveMemoryParams,
-    evidence_refs: TrustedEvidenceRefs,
+    evidence_refs: AuthorizedReferenceMutations,
 ) -> Result<String, String> {
     strip_reserved_reference_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
@@ -441,13 +458,13 @@ async fn handle_save_memory_impl(
 
     #[cfg(test)]
     let trusted_append = !evidence_refs.0.is_empty();
-    let evidence_write = AtomicEvidenceWrite {
+    let evidence_write = AtomicReferenceWrite {
         metadata_patch: atomic_evidence_metadata_patch(
             existing_entry.as_ref().map(|existing| &existing.metadata),
             &entry.metadata,
             &explicit_metadata_keys,
         ),
-        append_refs: evidence_refs.0,
+        mutations: evidence_refs.0,
     };
 
     #[cfg(test)]
