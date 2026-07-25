@@ -151,9 +151,9 @@ fn plan_c_split_brain_or_refuse(
 ) -> Result<Option<crate::path_utils::PlanCSplitBrain>, RepairError> {
     match crate::path_utils::inspect_plan_c_alias_for_local_db(local_db) {
         crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => Ok(Some(issue)),
-        crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
-            Err(RepairError::Io(std::io::Error::other(issue.warning_message())))
-        }
+        crate::path_utils::PlanCAliasInspection::Integrity(issue) => Err(RepairError::Io(
+            std::io::Error::other(issue.warning_message()),
+        )),
         crate::path_utils::PlanCAliasInspection::Absent
         | crate::path_utils::PlanCAliasInspection::MatchingSymlink => Ok(None),
     }

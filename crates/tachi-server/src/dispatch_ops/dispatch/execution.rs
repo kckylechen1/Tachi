@@ -869,6 +869,7 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
     })
 }
 
+#[cfg(test)]
 fn resolved_completion_terminal_state(
     run_dir: &std::path::Path,
 ) -> Result<Option<&'static str>, String> {
