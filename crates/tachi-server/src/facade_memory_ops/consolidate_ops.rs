@@ -608,6 +608,61 @@ struct ProposalGeneration {
     scope: ConsolidationScope,
 }
 
+#[cfg(test)]
+struct ProposalPersistenceTestHook {
+    after_build: Option<Box<dyn FnOnce(&[Value])>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot, per-calling-thread synchronization seam. Unlike a process
+    /// global hook, parallel tests cannot observe or consume another test's
+    /// callbacks. The guard below also clears an unconsumed hook on unwind.
+    static PROPOSAL_PERSISTENCE_TEST_HOOK:
+        std::cell::RefCell<Option<ProposalPersistenceTestHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct ProposalPersistenceTestHookGuard;
+
+#[cfg(test)]
+impl Drop for ProposalPersistenceTestHookGuard {
+    fn drop(&mut self) {
+        PROPOSAL_PERSISTENCE_TEST_HOOK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_proposal_persistence_test_hook(
+    after_build: impl FnOnce(&[Value]) + 'static,
+) -> ProposalPersistenceTestHookGuard {
+    PROPOSAL_PERSISTENCE_TEST_HOOK.with(|slot| {
+        let previous = slot.borrow_mut().replace(ProposalPersistenceTestHook {
+            after_build: Some(Box::new(after_build)),
+        });
+        assert!(
+            previous.is_none(),
+            "proposal persistence test hook already installed"
+        );
+    });
+    ProposalPersistenceTestHookGuard
+}
+
+#[cfg(test)]
+fn run_proposal_persistence_test_after_build(proposals: &[Value]) {
+    let callback = PROPOSAL_PERSISTENCE_TEST_HOOK.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .and_then(|mut hook| hook.after_build.take())
+    });
+    if let Some(callback) = callback {
+        callback(proposals);
+    }
+}
+
 fn generate_and_persist_proposals(
     server: &MemoryServer,
     params: &TachiMemoryParams,
@@ -656,6 +711,9 @@ fn generate_and_persist_proposals(
         if proposals.is_empty() {
             return Ok(ProposalGeneration { proposals, scope });
         }
+
+        #[cfg(test)]
+        run_proposal_persistence_test_after_build(&proposals);
 
         for proposal in &proposals {
             let id = proposal["proposal_id"]

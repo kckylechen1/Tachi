@@ -6,6 +6,8 @@
 
 use super::*;
 use chrono::{Duration, Utc};
+use std::sync::mpsc;
+use std::time::Duration as StdDuration;
 
 fn seed_scratch(id: &str, path: &str, text: &str, days_ago: i64) -> memcore::MemoryEntry {
     let mut e = make_entry(id);
@@ -959,6 +961,172 @@ async fn consolidate_propose_excludes_preexisting_superseded_rows_from_all_endpo
             })),
         "scope accounting must explain why the row was excluded: {parsed}"
     );
+}
+
+/// Discriminates the single exclusive census/build/persist gate from the old
+/// 297e6b72 two-gate topology. The test-only callback runs after proposal
+/// construction but before persistence. Under the old topology that point is
+/// between the released read gate and the not-yet-acquired write gate, so the
+/// writer completes first. Under the production topology it is still inside
+/// the exclusive gate, so persistence is ordered before writer completion.
+#[tokio::test(flavor = "current_thread")]
+async fn consolidate_proposal_persistence_blocks_same_server_writer_until_visible() {
+    let server = make_server();
+    let source = seed_scratch(
+        "life-gate-order-source",
+        "/scratch/gate-order/pair",
+        "older active release checklist awaiting the newer baseline",
+        10,
+    );
+    let target_b = seed_scratch(
+        "life-gate-order-target-b",
+        "/scratch/gate-order/pair",
+        "newer active release checklist selected as proposal target B",
+        1,
+    );
+    let target_c = seed_scratch(
+        "life-gate-order-target-c",
+        "/scratch/gate-order/canonical",
+        "canonical C selected by a concurrent same-server writer",
+        0,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&source).map_err(|e| e.to_string())?;
+            store.upsert(&target_b).map_err(|e| e.to_string())?;
+            store.upsert(&target_c).map_err(|e| e.to_string())
+        })
+        .expect("seed gate-order rows");
+
+    let writer_server = (*server).clone();
+    let (start_writer_tx, start_writer_rx) = mpsc::channel::<String>();
+    let (writer_attempted_tx, writer_attempted_rx) = mpsc::channel();
+    let (writer_acquired_tx, writer_acquired_rx) = mpsc::channel();
+    let (writer_done_tx, writer_done_rx) = mpsc::channel::<bool>();
+    let (writer_entered_early_tx, writer_entered_early_rx) = mpsc::channel::<bool>();
+
+    let writer = std::thread::spawn(move || {
+        let proposal_id = start_writer_rx
+            .recv_timeout(StdDuration::from_secs(2))
+            .expect("proposal hook must release the writer");
+        writer_attempted_tx
+            .send(())
+            .expect("proposal hook must observe writer attempt");
+        let proposal_was_visible = writer_server
+            .with_global_store(|store| {
+                writer_acquired_tx
+                    .send(())
+                    .expect("proposal hook must observe writer gate entry");
+                let proposal_was_visible = store
+                    .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                    .map_err(|e| e.to_string())?
+                    .is_some();
+                assert_eq!(
+                    store
+                        .mark_superseded_closing_validity(
+                            "life-gate-order-source",
+                            "life-gate-order-target-c",
+                            "2026-07-25T00:00:03.000Z",
+                        )
+                        .map_err(|e| e.to_string())?,
+                    1,
+                    "same-server writer must apply its final A -> C effect"
+                );
+                Ok(proposal_was_visible)
+            })
+            .expect("same-server writer");
+        writer_done_tx
+            .send(proposal_was_visible)
+            .expect("test must observe writer completion");
+    });
+
+    let _hook_guard =
+        crate::facade_memory_ops::consolidate_ops::install_proposal_persistence_test_hook(
+            move |proposals| {
+                let proposal_id = proposals
+                    .iter()
+                    .find(|proposal| proposal["source_id"] == json!("life-gate-order-source"))
+                    .expect("build source proposal before synchronization")["proposal_id"]
+                    .as_str()
+                    .expect("proposal id")
+                    .to_string();
+                start_writer_tx
+                    .send(proposal_id)
+                    .expect("start same-server writer");
+                writer_attempted_rx
+                    .recv_timeout(StdDuration::from_secs(2))
+                    .expect("writer must reach the store gate");
+                // The attempted handshake occurs immediately before the real
+                // gate call. This timeout only bounds the expected block so a
+                // broken gate cannot deadlock the test process.
+                let entered_early = match writer_acquired_rx.recv_timeout(StdDuration::from_secs(1))
+                {
+                    Ok(()) => true,
+                    Err(mpsc::RecvTimeoutError::Timeout) => false,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        panic!("writer disconnected before entering the store gate")
+                    }
+                };
+                writer_entered_early_tx
+                    .send(entered_early)
+                    .expect("record writer gate ordering");
+            },
+        );
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch/gate-order".to_string());
+    let parsed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+            .await
+            .expect("propose through the real facade/store gate"),
+    )
+    .expect("proposal json");
+
+    let proposal_was_visible_to_writer = writer_done_rx
+        .recv_timeout(StdDuration::from_secs(2))
+        .expect("writer must complete after proposal persistence releases the gate");
+    writer.join().expect("same-server writer thread");
+
+    assert!(
+        !writer_entered_early_rx
+            .recv_timeout(StdDuration::from_secs(2))
+            .expect("proposal hook must record gate ordering"),
+        "same-server writer entered after build but before proposal persistence"
+    );
+    assert!(
+        proposal_was_visible_to_writer,
+        "persisted proposal must be visible before the same-server writer enters and completes"
+    );
+
+    let generated = parsed["generated"].as_array().expect("generated proposals");
+    let proposal_id = generated
+        .iter()
+        .find(|proposal| proposal["source_id"] == json!("life-gate-order-source"))
+        .expect("source proposal persisted before writer completion")["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    server
+        .with_global_store_read(|store| {
+            let (raw, _) = store
+                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal must be visible");
+            assert_eq!(
+                serde_json::from_str::<Value>(&raw).unwrap()["status"],
+                json!("pending")
+            );
+            assert_eq!(
+                store
+                    .supersession_target("life-gate-order-source")
+                    .map_err(|e| e.to_string())?,
+                Some(Some("life-gate-order-target-c".to_string())),
+                "writer's final A -> C effect must land after persistence"
+            );
+            Ok(())
+        })
+        .expect("verify persisted proposal and final writer effect");
 }
 
 #[tokio::test]
