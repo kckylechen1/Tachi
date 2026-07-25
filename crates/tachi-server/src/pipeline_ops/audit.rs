@@ -1,55 +1,13 @@
 use chrono::Utc;
 use memcore::MemoryStore;
-use rusqlite::OptionalExtension;
 
 use crate::server_state::{DbScope, MemoryServer};
-use crate::shared_defs::{push_dead_letter_with_limits, DeadLetter};
 use crate::utils::stable_hash;
 
 const INGEST_CLAIM_LEASE_SECS: i64 = 5 * 60;
 
-pub(crate) fn enqueue_dead_letter(
-    server: &MemoryServer,
-    tool_name: &str,
-    arguments: Option<serde_json::Map<String, serde_json::Value>>,
-    error: String,
-) {
-    let dl = DeadLetter {
-        id: uuid::Uuid::new_v4().to_string(),
-        tool_name: tool_name.to_string(),
-        arguments,
-        error,
-        error_category: "internal".to_string(),
-        timestamp: Utc::now().to_rfc3339(),
-        retry_count: 0,
-        max_retries: 3,
-        status: "pending".to_string(),
-    };
-    let mut dlq = server.dead_letters_lock();
-    push_dead_letter_with_limits(&mut dlq, dl, Utc::now());
-}
-
-pub(crate) fn insert_ingest_audit(server: &MemoryServer, label: &str, event_hash: &str) {
-    if let Err(error) = server.with_global_store(|store| {
-        store
-            .audit_log_insert(
-                &Utc::now().to_rfc3339(),
-                "ingest",
-                label,
-                event_hash,
-                true,
-                0,
-                None,
-            )
-            .map_err(|e| format!("audit insert: {e}"))
-    }) {
-        tracing::warn!(
-            label,
-            event_hash,
-            error = %error,
-            "failed to write ingest audit log"
-        );
-    }
+pub(crate) struct RetryableIngestClaim {
+    owner_token: String,
 }
 
 pub(crate) fn ingest_audit_key(
@@ -91,6 +49,7 @@ pub(crate) fn fail_retryable_ingest_event(
     label: &str,
     event_hash: &str,
     worker: &str,
+    claim: &RetryableIngestClaim,
     audit_key: &str,
     error_kind: &str,
     error: String,
@@ -98,7 +57,7 @@ pub(crate) fn fail_retryable_ingest_event(
     let audit_error =
         insert_required_ingest_audit(server, label, audit_key, false, Some(error_kind)).err();
     let release_error =
-        release_retryable_ingest_claim(server, target_db, project, worker, event_hash).err();
+        release_retryable_ingest_claim(server, target_db, project, worker, event_hash, claim).err();
 
     match (audit_error, release_error) {
         (None, None) => error,
@@ -117,9 +76,9 @@ pub(crate) fn insert_ingest_skip_audit(
     label: &str,
     reason: &str,
     context: &str,
-) {
+) -> Result<(), String> {
     let args_hash = stable_hash(&format!("{label}:{reason}:{context}"));
-    if let Err(error) = server.with_global_store(|store| {
+    server.with_global_store(|store| {
         store
             .audit_log_insert(
                 &Utc::now().to_rfc3339(),
@@ -130,37 +89,8 @@ pub(crate) fn insert_ingest_skip_audit(
                 0,
                 Some(reason),
             )
-            .map_err(|e| format!("audit insert: {e}"))
-    }) {
-        tracing::warn!(
-            label,
-            reason,
-            args_hash,
-            error = %error,
-            "failed to write skipped ingest audit log"
-        );
-    }
-}
-
-pub(crate) fn claim_ingest_event(
-    server: &MemoryServer,
-    target_db: DbScope,
-    project: Option<&str>,
-    worker: &str,
-    event_hash: &str,
-    event_id: &str,
-) -> Result<bool, String> {
-    let action = |store: &mut MemoryStore| {
-        store
-            .try_claim_event(event_hash, event_id, worker)
-            .map_err(|e| format!("Failed to claim event: {e}"))
-    };
-
-    if let Some(project_name) = project {
-        server.with_named_project_store(project_name, action)
-    } else {
-        server.with_store_for_scope(target_db, action)
-    }
+            .map_err(|e| format!("required ingest skip audit insert: {e}"))
+    })
 }
 
 pub(crate) fn claim_retryable_ingest_event(
@@ -172,27 +102,46 @@ pub(crate) fn claim_retryable_ingest_event(
     worker: &str,
     event_hash: &str,
     event_id: &str,
-) -> Result<bool, String> {
-    if ingest_success_audit_exists(server, label, audit_key)? {
-        return Ok(false);
+) -> Result<Option<RetryableIngestClaim>, String> {
+    if ingest_success_audit_exists(server, label, audit_key, event_hash)? {
+        return Ok(None);
     }
 
-    if try_claim_ingest_event(server, target_db, project, worker, event_hash, event_id)? {
-        return Ok(true);
-    }
+    let claim = RetryableIngestClaim {
+        owner_token: format!("{event_id}:{}", uuid::Uuid::new_v4()),
+    };
+    let stale_modifier = format!("-{INGEST_CLAIM_LEASE_SECS} seconds");
+    let action = |store: &mut MemoryStore| {
+        store
+            .connection()
+            .execute(
+                "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                 VALUES (?1, ?2, ?3, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')) \
+                 ON CONFLICT(event_hash, worker) DO UPDATE SET \
+                     event_id = excluded.event_id, \
+                     created_at = excluded.created_at \
+                 WHERE processed_events.created_at = '' \
+                    OR julianday(processed_events.created_at) IS NULL \
+                    OR julianday(processed_events.created_at) <= julianday('now', ?4)",
+                rusqlite::params![event_hash, claim.owner_token, worker, stale_modifier],
+            )
+            .map(|rows_changed| rows_changed == 1)
+            .map_err(|error| format!("atomically claim ingest event: {error}"))
+    };
+    let claimed = if let Some(project_name) = project {
+        server.with_named_project_store(project_name, action)?
+    } else {
+        server.with_store_for_scope(target_db, action)?
+    };
 
-    if !ingest_claim_is_expired(server, target_db, project, worker, event_hash)? {
-        return Ok(false);
-    }
-
-    release_retryable_ingest_claim(server, target_db, project, worker, event_hash)?;
-    try_claim_ingest_event(server, target_db, project, worker, event_hash, event_id)
+    Ok(claimed.then_some(claim))
 }
 
 fn ingest_success_audit_exists(
     server: &MemoryServer,
     label: &str,
     audit_key: &str,
+    legacy_event_hash: &str,
 ) -> Result<bool, String> {
     server.with_global_store_read(|store| {
         store
@@ -200,9 +149,10 @@ fn ingest_success_audit_exists(
             .query_row(
                 "SELECT EXISTS(\
                     SELECT 1 FROM audit_log \
-                    WHERE server_id = 'ingest' AND tool_name = ?1 AND args_hash = ?2 AND success = 1\
+                    WHERE server_id = 'ingest' AND tool_name = ?1 \
+                      AND args_hash IN (?2, ?3) AND success = 1\
                 )",
-                rusqlite::params![label, audit_key],
+                rusqlite::params![label, audit_key, legacy_event_hash],
                 |row| row.get::<_, i64>(0),
             )
             .map(|count| count != 0)
@@ -210,79 +160,36 @@ fn ingest_success_audit_exists(
     })
 }
 
-fn try_claim_ingest_event(
+pub(crate) fn refresh_retryable_ingest_claim(
     server: &MemoryServer,
     target_db: DbScope,
     project: Option<&str>,
     worker: &str,
     event_hash: &str,
-    event_id: &str,
-) -> Result<bool, String> {
+    claim: &RetryableIngestClaim,
+) -> Result<(), String> {
     let action = |store: &mut MemoryStore| {
         store
-            .try_claim_event(event_hash, event_id, worker)
-            .map_err(|e| format!("Failed to claim event: {e}"))
-    };
-
-    if let Some(project_name) = project {
-        server.with_named_project_store(project_name, action)
-    } else {
-        server.with_store_for_scope(target_db, action)
-    }
-}
-
-fn ingest_claim_is_expired(
-    server: &MemoryServer,
-    target_db: DbScope,
-    project: Option<&str>,
-    worker: &str,
-    event_hash: &str,
-) -> Result<bool, String> {
-    let cutoff = Utc::now() - chrono::Duration::seconds(INGEST_CLAIM_LEASE_SECS);
-    let action = |store: &mut MemoryStore| {
-        let created_at: Option<String> = store
             .connection()
-            .query_row(
-                "SELECT created_at FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
-                rusqlite::params![event_hash, worker],
-                |row| row.get(0),
+            .execute(
+                "UPDATE processed_events \
+                 SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE event_hash = ?1 AND worker = ?2 AND event_id = ?3",
+                rusqlite::params![event_hash, worker, claim.owner_token],
             )
-            .optional()
-            .map_err(|e| format!("read ingest claim: {e}"))?;
-
-        match created_at {
-            Some(created_at) => chrono::DateTime::parse_from_rfc3339(&created_at)
-                .map(|created_at| created_at.with_timezone(&Utc) <= cutoff)
-                .map_err(|e| format!("parse ingest claim timestamp: {e}")),
-            None => Ok(false),
-        }
+            .map_err(|error| format!("refresh ingest claim: {error}"))
+    };
+    let rows_changed = if let Some(project_name) = project {
+        server.with_named_project_store(project_name, action)?
+    } else {
+        server.with_store_for_scope(target_db, action)?
     };
 
-    if let Some(project_name) = project {
-        server.with_named_project_store(project_name, action)
+    if rows_changed == 1 {
+        Ok(())
     } else {
-        server.with_store_for_scope(target_db, action)
+        Err("ingest claim ownership was lost before durable completion".to_string())
     }
-}
-
-pub(crate) fn release_ingest_claim(
-    server: &MemoryServer,
-    target_db: DbScope,
-    project: Option<&str>,
-    worker: &str,
-    event_hash: &str,
-) {
-    let action = |store: &mut MemoryStore| {
-        store
-            .release_event_claim(event_hash, worker)
-            .map_err(|e| format!("{e}"))
-    };
-
-    let _ = if let Some(project_name) = project {
-        server.with_named_project_store(project_name, action)
-    } else {
-        server.with_store_for_scope(target_db, action)
-    };
 }
 
 pub(crate) fn release_retryable_ingest_claim(
@@ -291,16 +198,134 @@ pub(crate) fn release_retryable_ingest_claim(
     project: Option<&str>,
     worker: &str,
     event_hash: &str,
+    claim: &RetryableIngestClaim,
 ) -> Result<(), String> {
     let action = |store: &mut MemoryStore| {
         store
-            .release_event_claim(event_hash, worker)
-            .map_err(|e| format!("release ingest claim: {e}"))
+            .connection()
+            .execute(
+                "DELETE FROM processed_events \
+                 WHERE event_hash = ?1 AND worker = ?2 AND event_id = ?3",
+                rusqlite::params![event_hash, worker, claim.owner_token],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("release owned ingest claim: {error}"))
     };
 
     if let Some(project_name) = project {
         server.with_named_project_store(project_name, action)
     } else {
         server.with_store_for_scope(target_db, action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_owner_cannot_release_a_reclaimed_ingest_claim() {
+        let server = crate::tests::make_server();
+        let event_hash = "owner-token-event";
+        let audit_key = ingest_audit_key("ingest_event", DbScope::Global, None, event_hash);
+
+        let first = claim_retryable_ingest_event(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_event",
+            &audit_key,
+            "ingest",
+            event_hash,
+            "owner-a",
+        )
+        .expect("first claim")
+        .expect("first claim must be acquired");
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE processed_events \
+                         SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes') \
+                         WHERE event_hash = ?1 AND worker = 'ingest'",
+                        [event_hash],
+                    )
+                    .map_err(|error| format!("age first claim with database time: {error}"))?;
+                Ok(())
+            })
+            .expect("age first claim");
+
+        let second = claim_retryable_ingest_event(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_event",
+            &audit_key,
+            "ingest",
+            event_hash,
+            "owner-b",
+        )
+        .expect("stale claim takeover")
+        .expect("stale claim must be acquired");
+
+        release_retryable_ingest_claim(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest",
+            event_hash,
+            &first,
+        )
+        .expect("old owner release attempt");
+
+        let current_owner = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT event_id FROM processed_events WHERE event_hash = ?1 AND worker = 'ingest'",
+                        [event_hash],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| format!("read current claim owner: {error}"))
+            })
+            .expect("replacement claim must remain");
+        assert_eq!(current_owner, second.owner_token);
+    }
+
+    #[test]
+    fn legacy_success_audit_prevents_reprocessing_after_upgrade() {
+        let server = crate::tests::make_server();
+        let event_hash = "legacy-completed-event";
+        server
+            .with_global_store(|store| {
+                store
+                    .audit_log_insert(
+                        &Utc::now().to_rfc3339(),
+                        "ingest",
+                        "ingest_source",
+                        event_hash,
+                        true,
+                        0,
+                        None,
+                    )
+                    .map_err(|error| format!("seed legacy success audit: {error}"))
+            })
+            .expect("seed pre-upgrade ingest completion");
+
+        let audit_key = ingest_audit_key("ingest_source", DbScope::Global, None, event_hash);
+        let claim = claim_retryable_ingest_event(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            &audit_key,
+            "ingest_source",
+            event_hash,
+            "/legacy/source",
+        )
+        .expect("check legacy completion");
+        assert!(claim.is_none(), "legacy success must remain deduplicated");
     }
 }

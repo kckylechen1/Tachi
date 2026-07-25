@@ -105,7 +105,14 @@ impl MemoryServer {
                     &cap_def,
                     arguments.as_ref(),
                     &result,
-                );
+                )
+                .await
+                .map_err(|error| {
+                    rmcp::ErrorData::internal_error(
+                        format!("MCP result auto-ingest failed: {error}"),
+                        None,
+                    )
+                })?;
             }
             return Ok(result);
         }
@@ -349,22 +356,38 @@ impl MemoryServer {
         // 6. Process result, update circuit breaker, log audit
         let (final_result, sandbox_decision, sandbox_error_kind) = match result {
             Ok(Ok(r)) => {
+                // The MCP transport succeeded regardless of the optional ingest outcome.
+                {
+                    let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+                    state
+                        .circuits
+                        .insert(server_name.to_string(), (CircuitState::Closed, 0));
+                }
                 if !r.is_error.unwrap_or(false) {
-                    crate::pipeline_ops::schedule_auto_ingest_from_mcp(
+                    if let Err(error) = crate::pipeline_ops::schedule_auto_ingest_from_mcp(
                         self,
                         &server_id,
                         tool_name,
                         &cap_def,
                         arguments.as_ref(),
                         &r,
-                    );
+                    )
+                    .await
+                    {
+                        (
+                            Err(rmcp::ErrorData::internal_error(
+                                format!("MCP result auto-ingest failed: {error}"),
+                                None,
+                            )),
+                            "failed",
+                            Some("auto_ingest_failed"),
+                        )
+                    } else {
+                        (Ok(r), "allowed", None)
+                    }
+                } else {
+                    (Ok(r), "allowed", None)
                 }
-                // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
-                let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
-                state
-                    .circuits
-                    .insert(server_name.to_string(), (CircuitState::Closed, 0));
-                (Ok(r), "allowed", None)
             }
             Ok(Err(e)) => {
                 // Transport/protocol error — increment circuit breaker

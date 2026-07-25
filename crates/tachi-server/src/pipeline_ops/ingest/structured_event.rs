@@ -1,6 +1,6 @@
 use super::super::audit::{
     claim_retryable_ingest_event, fail_retryable_ingest_event, ingest_audit_key,
-    insert_required_ingest_audit,
+    insert_ingest_skip_audit, insert_required_ingest_audit, refresh_retryable_ingest_claim,
 };
 use super::*;
 
@@ -47,7 +47,7 @@ pub(super) async fn ingest_structured_event(
             "ingest_event",
             "empty_structured_event",
             &format!("{}:{}", params.conversation_id, params.turn_id),
-        );
+        )?;
         return serialize_json(json!({
             "status": "skipped",
             "reason": "No structured event content to persist"
@@ -78,7 +78,7 @@ pub(super) async fn ingest_structured_event(
         named_project.as_deref(),
         &event_hash,
     );
-    let claimed = claim_retryable_ingest_event(
+    let claim = claim_retryable_ingest_event(
         server,
         target_db,
         named_project.as_deref(),
@@ -88,13 +88,13 @@ pub(super) async fn ingest_structured_event(
         &event_hash,
         &event_id,
     )?;
-    if !claimed {
+    let Some(claim) = claim else {
         return serialize_json(json!({
             "status": "skipped",
             "reason": "Event already processed",
             "hash": event_hash
         }));
-    }
+    };
 
     let path_prefix = params.path_prefix.clone().unwrap_or_else(|| {
         default_event_path_prefix(
@@ -137,6 +137,27 @@ pub(super) async fn ingest_structured_event(
             .insert_if_absent(&entry)
             .map_err(|e| format!("Failed to save structured event: {e}"))
     };
+    if let Err(error) = refresh_retryable_ingest_claim(
+        server,
+        target_db,
+        named_project.as_deref(),
+        STRUCTURED_INGEST_WORKER,
+        &event_hash,
+        &claim,
+    ) {
+        return Err(fail_retryable_ingest_event(
+            server,
+            target_db,
+            named_project.as_deref(),
+            "ingest_event",
+            &event_hash,
+            STRUCTURED_INGEST_WORKER,
+            &claim,
+            &audit_key,
+            "claim_ownership_lost",
+            error,
+        ));
+    }
     let save_result = if let Some(project_name) = named_project.as_deref() {
         server.with_named_project_store(project_name, save_action)
     } else {
@@ -151,6 +172,7 @@ pub(super) async fn ingest_structured_event(
             "ingest_event",
             &event_hash,
             STRUCTURED_INGEST_WORKER,
+            &claim,
             &audit_key,
             "durable_write_failed",
             error,
@@ -175,6 +197,27 @@ pub(super) async fn ingest_structured_event(
                 ));
     }
 
+    if let Err(error) = refresh_retryable_ingest_claim(
+        server,
+        target_db,
+        named_project.as_deref(),
+        STRUCTURED_INGEST_WORKER,
+        &event_hash,
+        &claim,
+    ) {
+        return Err(fail_retryable_ingest_event(
+            server,
+            target_db,
+            named_project.as_deref(),
+            "ingest_event",
+            &event_hash,
+            STRUCTURED_INGEST_WORKER,
+            &claim,
+            &audit_key,
+            "claim_ownership_lost",
+            error,
+        ));
+    }
     if let Err(error) = insert_required_ingest_audit(server, "ingest_event", &audit_key, true, None)
     {
         return Err(fail_retryable_ingest_event(
@@ -184,6 +227,7 @@ pub(super) async fn ingest_structured_event(
             "ingest_event",
             &event_hash,
             STRUCTURED_INGEST_WORKER,
+            &claim,
             &audit_key,
             "success_audit_failed",
             format!("structured ingest write completed but success audit failed: {error}"),

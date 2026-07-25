@@ -159,6 +159,13 @@ async fn abandoned_ingest_claim_reopens_retries_and_persists_once() {
         .expect("stale claim must retry synchronously after reopen");
     let response: Value = serde_json::from_str(&completed).expect("completed JSON");
     assert_eq!(response["status"], "completed");
+    let response_object = response.as_object().expect("response object");
+    assert_eq!(
+        response_object.len(),
+        2,
+        "synchronous completion must preserve the status/hash response shape"
+    );
+    assert!(response_object.contains_key("hash"));
 
     let duplicate = crate::pipeline_ops::handle_ingest_event(&reopened, params)
         .await

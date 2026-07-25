@@ -1,6 +1,7 @@
 use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore, SearchOptions};
 use serde_json::json;
+use std::collections::HashSet;
 
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::IngestSourceParams;
@@ -15,7 +16,7 @@ pub(crate) async fn build_similarity_edges(
     project: Option<&str>,
     domain: Option<&str>,
     saved_entries: &[MemoryEntry],
-) {
+) -> Result<(), String> {
     for entry in saved_entries {
         let query = entry.text.chars().take(480).collect::<String>();
         if query.trim().is_empty() {
@@ -40,14 +41,27 @@ pub(crate) async fn build_similarity_edges(
             server.with_named_project_store_read(project_name, search_action)
         } else {
             server.with_store_for_scope_read(target_db, search_action)
+        }
+        .map_err(|error| format!("search source link candidates: {error}"))?;
+        let load_existing = |store: &mut MemoryStore| {
+            store
+                .get_edges(&entry.id, "outgoing", Some("similar_to"))
+                .map(|edges| {
+                    edges
+                        .into_iter()
+                        .map(|edge| edge.target_id)
+                        .collect::<HashSet<_>>()
+                })
+                .map_err(|error| format!("read existing source links: {error}"))
         };
+        let mut existing_targets = if let Some(project_name) = project {
+            server.with_named_project_store_read(project_name, load_existing)
+        } else {
+            server.with_store_for_scope_read(target_db, load_existing)
+        }?;
 
-        let Ok(results) = search_results else {
-            continue;
-        };
-
-        for result in results {
-            if result.entry.id == entry.id {
+        for result in search_results {
+            if result.entry.id == entry.id || existing_targets.contains(&result.entry.id) {
                 continue;
             }
             let edge = memcore::MemoryEdge {
@@ -66,13 +80,16 @@ pub(crate) async fn build_similarity_edges(
             };
             let save_edge =
                 |store: &mut MemoryStore| store.add_edge(&edge).map_err(|e| format!("{e}"));
-            let _ = if let Some(project_name) = project {
+            if let Some(project_name) = project {
                 server.with_named_project_store(project_name, save_edge)
             } else {
                 server.with_store_for_scope(target_db, save_edge)
-            };
+            }
+            .map_err(|error| format!("persist source similarity link: {error}"))?;
+            existing_targets.insert(result.entry.id);
         }
     }
+    Ok(())
 }
 
 pub(crate) fn extract_text_from_tool_result(
@@ -98,24 +115,24 @@ pub(crate) fn extract_text_from_tool_result(
     }
 }
 
-pub(crate) fn schedule_auto_ingest_from_mcp(
+pub(crate) async fn schedule_auto_ingest_from_mcp(
     server: &MemoryServer,
     capability_id: &str,
     tool_name: &str,
     definition: &serde_json::Value,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     result: &rmcp::model::CallToolResult,
-) {
+) -> Result<Option<String>, String> {
     let enabled = definition
         .get("auto_ingest")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
     if !enabled {
-        return;
+        return Ok(None);
     }
 
     let Some(content) = extract_text_from_tool_result(result) else {
-        return;
+        return Ok(None);
     };
 
     let resolved_server = capability_id.strip_prefix("mcp:").unwrap_or(capability_id);
@@ -178,10 +195,5 @@ pub(crate) fn schedule_auto_ingest_from_mcp(
         metadata: Some(metadata),
     };
 
-    let server = server.clone();
-    tokio::spawn(async move {
-        if let Err(error) = handle_ingest_source(&server, params).await {
-            eprintln!("[auto-ingest] MCP result ingest failed: {error}");
-        }
-    });
+    handle_ingest_source(server, params).await.map(Some)
 }

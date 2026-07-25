@@ -1,4 +1,10 @@
+use super::super::audit::{
+    claim_retryable_ingest_event, fail_retryable_ingest_event, ingest_audit_key,
+    insert_ingest_skip_audit, insert_required_ingest_audit, refresh_retryable_ingest_claim,
+};
 use super::*;
+
+const SOURCE_INGEST_WORKER: &str = "ingest_source";
 
 pub(crate) async fn handle_ingest_source(
     server: &MemoryServer,
@@ -24,7 +30,7 @@ pub(crate) async fn handle_ingest_source(
                 .as_deref()
                 .or(params.source_url.as_deref())
                 .unwrap_or("/"),
-        );
+        )?;
         return serialize_json(json!({
             "status": "skipped",
             "reason": "No source content to ingest"
@@ -51,22 +57,30 @@ pub(crate) async fn handle_ingest_source(
         .or_else(|| params.source_url.clone())
         .unwrap_or_else(|| "ingest_source".to_string());
     let event_hash = stable_hash(&format!("{}:{}:{}", source_label, path_prefix, content,));
+    let audit_key = ingest_audit_key(
+        "ingest_source",
+        target_db,
+        named_project.as_deref(),
+        &event_hash,
+    );
 
-    let claimed = claim_ingest_event(
+    let claim = claim_retryable_ingest_event(
         server,
         target_db,
         named_project.as_deref(),
         "ingest_source",
+        &audit_key,
+        SOURCE_INGEST_WORKER,
         &event_hash,
         &path_prefix,
     )?;
-    if !claimed {
+    let Some(claim) = claim else {
         return serialize_json(json!({
             "status": "skipped",
             "reason": "Source already processed",
             "hash": event_hash,
         }));
-    }
+    };
 
     let chunks = if params.auto_chunk {
         chunk_text(content, params.chunk_size_chars, params.chunk_overlap_chars)
@@ -77,10 +91,32 @@ pub(crate) async fn handle_ingest_source(
     let base_metadata = merge_optional_metadata(params.metadata.clone());
     let mut saved_entries: Vec<MemoryEntry> = Vec::new();
 
+    if let Err(error) = refresh_retryable_ingest_claim(
+        server,
+        target_db,
+        named_project.as_deref(),
+        SOURCE_INGEST_WORKER,
+        &event_hash,
+        &claim,
+    ) {
+        return Err(fail_retryable_ingest_event(
+            server,
+            target_db,
+            named_project.as_deref(),
+            "ingest_source",
+            &event_hash,
+            SOURCE_INGEST_WORKER,
+            &claim,
+            &audit_key,
+            "claim_ownership_lost",
+            error,
+        ));
+    }
+
     let persist_result = {
         let action = |store: &mut MemoryStore| {
             for (index, chunk) in chunks.iter().enumerate() {
-                let entry_id = uuid::Uuid::new_v4().to_string();
+                let entry_id = format!("ingest-source:{event_hash}:{index}:{}", stable_hash(chunk));
                 let chunk_path = if chunk_total <= 1 {
                     path_prefix.clone()
                 } else {
@@ -146,7 +182,7 @@ pub(crate) async fn handle_ingest_source(
                     params.auto_summarize,
                 );
                 store
-                    .upsert(&entry)
+                    .insert_if_absent(&entry)
                     .map_err(|e| format!("Failed to save ingested chunk: {e}"))?;
                 saved_entries.push(entry);
             }
@@ -161,14 +197,18 @@ pub(crate) async fn handle_ingest_source(
     };
 
     if let Err(error) = persist_result {
-        release_ingest_claim(
+        return Err(fail_retryable_ingest_event(
             server,
             target_db,
             named_project.as_deref(),
             "ingest_source",
             &event_hash,
-        );
-        return Err(error);
+            SOURCE_INGEST_WORKER,
+            &claim,
+            &audit_key,
+            "durable_write_failed",
+            error,
+        ));
     }
 
     for entry in &saved_entries {
@@ -190,17 +230,67 @@ pub(crate) async fn handle_ingest_source(
     }
 
     if params.auto_link {
-        build_similarity_edges(
+        if let Err(error) = build_similarity_edges(
             server,
             target_db,
             named_project.as_deref(),
             domain.as_deref(),
             &saved_entries,
         )
-        .await;
+        .await
+        {
+            return Err(fail_retryable_ingest_event(
+                server,
+                target_db,
+                named_project.as_deref(),
+                "ingest_source",
+                &event_hash,
+                SOURCE_INGEST_WORKER,
+                &claim,
+                &audit_key,
+                "durable_link_write_failed",
+                error,
+            ));
+        }
     }
 
-    insert_ingest_audit(server, "ingest_source", &event_hash);
+    if let Err(error) = refresh_retryable_ingest_claim(
+        server,
+        target_db,
+        named_project.as_deref(),
+        SOURCE_INGEST_WORKER,
+        &event_hash,
+        &claim,
+    ) {
+        return Err(fail_retryable_ingest_event(
+            server,
+            target_db,
+            named_project.as_deref(),
+            "ingest_source",
+            &event_hash,
+            SOURCE_INGEST_WORKER,
+            &claim,
+            &audit_key,
+            "claim_ownership_lost",
+            error,
+        ));
+    }
+    if let Err(error) =
+        insert_required_ingest_audit(server, "ingest_source", &audit_key, true, None)
+    {
+        return Err(fail_retryable_ingest_event(
+            server,
+            target_db,
+            named_project.as_deref(),
+            "ingest_source",
+            &event_hash,
+            SOURCE_INGEST_WORKER,
+            &claim,
+            &audit_key,
+            "success_audit_failed",
+            format!("source ingest writes completed but success audit failed: {error}"),
+        ));
+    }
 
     let mut response = serde_json::Map::new();
     response.insert("status".into(), json!("completed"));

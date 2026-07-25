@@ -8,10 +8,6 @@ use crate::tool_params::{
 };
 use crate::utils::{stable_hash, value_to_template_text};
 
-use super::audit::{
-    claim_ingest_event, enqueue_dead_letter, insert_ingest_audit, insert_ingest_skip_audit,
-    release_ingest_claim,
-};
 use super::auto_ingest::build_similarity_edges;
 use super::helpers::{
     build_ingest_entry, chunk_text, default_event_path_prefix, default_source_path_prefix,

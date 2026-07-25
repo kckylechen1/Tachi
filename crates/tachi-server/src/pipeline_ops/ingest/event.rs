@@ -1,6 +1,6 @@
 use super::super::audit::{
     claim_retryable_ingest_event, fail_retryable_ingest_event, ingest_audit_key,
-    insert_required_ingest_audit,
+    insert_ingest_skip_audit, insert_required_ingest_audit, refresh_retryable_ingest_claim,
 };
 use super::structured_event::ingest_structured_event;
 use super::*;
@@ -45,7 +45,7 @@ pub(crate) async fn handle_ingest_event(
             "ingest_event",
             "empty_event_content",
             &format!("{}:{}", params.conversation_id, params.turn_id),
-        );
+        )?;
         return serialize_json(serde_json::json!({
             "status": "skipped",
             "reason": "No content to process"
@@ -53,7 +53,7 @@ pub(crate) async fn handle_ingest_event(
     }
 
     let event_id = format!("{}:{}", params.conversation_id, params.turn_id);
-    let claimed = claim_retryable_ingest_event(
+    let claim = claim_retryable_ingest_event(
         server,
         target_db,
         params.project.as_deref(),
@@ -63,13 +63,13 @@ pub(crate) async fn handle_ingest_event(
         &event_hash,
         &event_id,
     )?;
-    if !claimed {
+    let Some(claim) = claim else {
         return serialize_json(serde_json::json!({
             "status": "skipped",
             "reason": "Event already processed",
             "hash": event_hash
         }));
-    }
+    };
 
     let facts = match server.llm.extract_facts(&combined_text).await {
         Ok(facts) => facts,
@@ -81,6 +81,7 @@ pub(crate) async fn handle_ingest_event(
                 "ingest_event",
                 &event_hash,
                 INGEST_WORKER,
+                &claim,
                 &audit_key,
                 "fact_extraction_failed",
                 format!("fact extraction failed for {event_id}: {error}"),
@@ -88,7 +89,45 @@ pub(crate) async fn handle_ingest_event(
         }
     };
 
-    let entries = build_conversation_entries(server, &params, target_db, &event_hash, &facts)?;
+    let entries = match build_conversation_entries(server, &params, target_db, &event_hash, &facts)
+    {
+        Ok(entries) => entries,
+        Err(error) => {
+            return Err(fail_retryable_ingest_event(
+                server,
+                target_db,
+                params.project.as_deref(),
+                "ingest_event",
+                &event_hash,
+                INGEST_WORKER,
+                &claim,
+                &audit_key,
+                "entry_build_failed",
+                error,
+            ));
+        }
+    };
+    if let Err(error) = refresh_retryable_ingest_claim(
+        server,
+        target_db,
+        params.project.as_deref(),
+        INGEST_WORKER,
+        &event_hash,
+        &claim,
+    ) {
+        return Err(fail_retryable_ingest_event(
+            server,
+            target_db,
+            params.project.as_deref(),
+            "ingest_event",
+            &event_hash,
+            INGEST_WORKER,
+            &claim,
+            &audit_key,
+            "claim_ownership_lost",
+            error,
+        ));
+    }
     let saved = match persist_conversation_entries(
         server,
         target_db,
@@ -104,6 +143,7 @@ pub(crate) async fn handle_ingest_event(
                 "ingest_event",
                 &event_hash,
                 INGEST_WORKER,
+                &claim,
                 &audit_key,
                 "durable_write_failed",
                 error,
@@ -111,6 +151,27 @@ pub(crate) async fn handle_ingest_event(
         }
     };
 
+    if let Err(error) = refresh_retryable_ingest_claim(
+        server,
+        target_db,
+        params.project.as_deref(),
+        INGEST_WORKER,
+        &event_hash,
+        &claim,
+    ) {
+        return Err(fail_retryable_ingest_event(
+            server,
+            target_db,
+            params.project.as_deref(),
+            "ingest_event",
+            &event_hash,
+            INGEST_WORKER,
+            &claim,
+            &audit_key,
+            "claim_ownership_lost",
+            error,
+        ));
+    }
     if let Err(error) = insert_required_ingest_audit(server, "ingest_event", &audit_key, true, None)
     {
         return Err(fail_retryable_ingest_event(
@@ -120,6 +181,7 @@ pub(crate) async fn handle_ingest_event(
             "ingest_event",
             &event_hash,
             INGEST_WORKER,
+            &claim,
             &audit_key,
             "success_audit_failed",
             format!("ingest writes completed but success audit failed: {error}"),
@@ -133,7 +195,6 @@ pub(crate) async fn handle_ingest_event(
     serialize_json(serde_json::json!({
         "status": "completed",
         "hash": event_hash,
-        "saved": saved,
     }))
 }
 
