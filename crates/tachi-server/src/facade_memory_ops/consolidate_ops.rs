@@ -663,84 +663,134 @@ fn run_proposal_persistence_test_after_build(proposals: &[Value]) {
     }
 }
 
+/// Hold SQLite's physical-database write reservation across lifecycle
+/// census/build and proposal persistence. Runtime route gates are still useful
+/// for same-route store ownership, but active-project and named-project routes
+/// may own distinct gates while opening the same database file. `BEGIN
+/// IMMEDIATE` is the shared write-ordering boundary those aliases (and
+/// independent writers) cannot bypass.
+fn with_lifecycle_proposal_generation_transaction<T>(
+    store: &mut memcore::MemoryStore,
+    operation: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    store
+        .connection()
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin lifecycle proposal transaction: {e}"))?;
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(store)));
+    match outcome {
+        Ok(Ok(value)) => match store.connection().execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(commit_error) => {
+                let rollback = store.connection().execute_batch("ROLLBACK");
+                let rollback_suffix = rollback
+                    .err()
+                    .map(|e| format!("; rollback after commit failure also failed: {e}"))
+                    .unwrap_or_default();
+                Err(format!(
+                    "commit lifecycle proposal transaction: {commit_error}{rollback_suffix}"
+                ))
+            }
+        },
+        Ok(Err(operation_error)) => {
+            let rollback = store.connection().execute_batch("ROLLBACK");
+            match rollback {
+                Ok(()) => Err(operation_error),
+                Err(rollback_error) => Err(format!(
+                    "{operation_error}; rollback lifecycle proposal transaction: {rollback_error}"
+                )),
+            }
+        }
+        Err(payload) => {
+            if let Err(rollback_error) = store.connection().execute_batch("ROLLBACK") {
+                eprintln!(
+                    "WARNING: rollback lifecycle proposal transaction during panic failed: {rollback_error}"
+                );
+            }
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
+
 fn generate_and_persist_proposals(
     server: &MemoryServer,
     params: &TachiMemoryParams,
     path_prefix: &str,
 ) -> Result<ProposalGeneration, String> {
-    // One exclusive MemoryServer store gate spans list/census, endpoint
-    // snapshot construction, existing-status checks, and persistence. This
-    // closes the production race with same-server writers, including
-    // `mark_superseded_closing_validity`, so a proposal built from A cannot
-    // become visible after that writer has changed A -> C in the gap.
-    //
-    // This gate does not serialize arbitrary external processes that open the
-    // same SQLite database independently. Apply's `BEGIN IMMEDIATE` live-row
-    // revalidation remains the cross-process/database last line of defense.
+    // The selected route's exclusive gate owns its store connection. The
+    // SQLite transaction inside it is the physical-DB ordering boundary: it
+    // spans list/census, endpoint snapshot construction, existing-status
+    // checks, and persistence even when an active-project and named-project
+    // route resolve to the same file through distinct runtime gates. No store
+    // gates are nested. Apply's own `BEGIN IMMEDIATE` live-row revalidation
+    // remains the last line for drift after proposal persistence.
     with_proposal_store(server, params, |store| {
-        let entries = store
-            .list_by_path(path_prefix, 500, false)
-            .map_err(|e| format!("list_by_path: {e}"))?;
+        with_lifecycle_proposal_generation_transaction(store, |store| {
+            let entries = store
+                .list_by_path(path_prefix, 500, false)
+                .map_err(|e| format!("list_by_path: {e}"))?;
 
-        // `list_by_path(..., include_archived=false)` excludes archived rows
-        // but deliberately does not hide a live row whose supersession edge
-        // was written without archiving it. Every lifecycle payload currently
-        // records `superseded_by=None` at propose time, so remove those rows
-        // from the one shared source/target pool before any generator reaches
-        // `snapshot_endpoint`. Keep the exclusion in scope accounting rather
-        // than making a superseded scan look empty.
-        let mut superseded_ids = HashSet::new();
-        for entry in &entries {
-            if store
-                .supersession_target(&entry.id)
-                .map_err(|e| format!("load supersession state for {}: {e}", entry.id))?
-                .flatten()
-                .is_some()
-            {
-                superseded_ids.insert(entry.id.clone());
-            }
-        }
-
-        let scope = ConsolidationScope::from_entries(entries, path_prefix, &superseded_ids);
-        let mut proposals = Vec::new();
-        proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
-        proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
-        proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
-        proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
-
-        if proposals.is_empty() {
-            return Ok(ProposalGeneration { proposals, scope });
-        }
-
-        #[cfg(test)]
-        run_proposal_persistence_test_after_build(&proposals);
-
-        for proposal in &proposals {
-            let id = proposal["proposal_id"]
-                .as_str()
-                .ok_or_else(|| "proposal missing proposal_id".to_string())?;
-            // Do not clobber approved/applied/rejected.
-            if let Some((existing, _)) = store
-                .get_state_kv(lifecycle::LIFECYCLE_PROPOSAL_NS, id)
-                .map_err(|e| format!("load existing proposal: {e}"))?
-            {
-                if let Ok(existing_json) = serde_json::from_str::<Value>(&existing) {
-                    let status = existing_json
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or("pending");
-                    if status != "pending" {
-                        continue;
-                    }
+            // `list_by_path(..., include_archived=false)` excludes archived rows
+            // but deliberately does not hide a live row whose supersession edge
+            // was written without archiving it. Every lifecycle payload currently
+            // records `superseded_by=None` at propose time, so remove those rows
+            // from the one shared source/target pool before any generator reaches
+            // `snapshot_endpoint`. Keep the exclusion in scope accounting rather
+            // than making a superseded scan look empty.
+            let mut superseded_ids = HashSet::new();
+            for entry in &entries {
+                if store
+                    .supersession_target(&entry.id)
+                    .map_err(|e| format!("load supersession state for {}: {e}", entry.id))?
+                    .flatten()
+                    .is_some()
+                {
+                    superseded_ids.insert(entry.id.clone());
                 }
             }
-            let raw =
-                serde_json::to_string(proposal).map_err(|e| format!("serialize proposal: {e}"))?;
-            store
-                .set_state(lifecycle::LIFECYCLE_PROPOSAL_NS, id, &raw)
-                .map_err(|e| format!("persist proposal: {e}"))?;
-        }
-        Ok(ProposalGeneration { proposals, scope })
+
+            let scope = ConsolidationScope::from_entries(entries, path_prefix, &superseded_ids);
+            let mut proposals = Vec::new();
+            proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
+            proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
+            proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
+            proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
+
+            if proposals.is_empty() {
+                return Ok(ProposalGeneration { proposals, scope });
+            }
+
+            #[cfg(test)]
+            run_proposal_persistence_test_after_build(&proposals);
+
+            for proposal in &proposals {
+                let id = proposal["proposal_id"]
+                    .as_str()
+                    .ok_or_else(|| "proposal missing proposal_id".to_string())?;
+                // Do not clobber approved/applied/rejected.
+                if let Some((existing, _)) = store
+                    .get_state_kv(lifecycle::LIFECYCLE_PROPOSAL_NS, id)
+                    .map_err(|e| format!("load existing proposal: {e}"))?
+                {
+                    if let Ok(existing_json) = serde_json::from_str::<Value>(&existing) {
+                        let status = existing_json
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("pending");
+                        if status != "pending" {
+                            continue;
+                        }
+                    }
+                }
+                let raw = serde_json::to_string(proposal)
+                    .map_err(|e| format!("serialize proposal: {e}"))?;
+                store
+                    .set_state(lifecycle::LIFECYCLE_PROPOSAL_NS, id, &raw)
+                    .map_err(|e| format!("persist proposal: {e}"))?;
+            }
+            Ok(ProposalGeneration { proposals, scope })
+        })
     })
 }
 

@@ -6,6 +6,8 @@
 
 use super::*;
 use chrono::{Duration, Utc};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration as StdDuration;
 
@@ -963,12 +965,232 @@ async fn consolidate_propose_excludes_preexisting_superseded_rows_from_all_endpo
     );
 }
 
-/// Discriminates the single exclusive census/build/persist gate from the old
-/// 297e6b72 two-gate topology. The test-only callback runs after proposal
-/// construction but before persistence. Under the old topology that point is
-/// between the released read gate and the not-yet-acquired write gate, so the
-/// writer completes first. Under the production topology it is still inside
-/// the exclusive gate, so persistence is ordered before writer completion.
+enum LifecycleWriterRoute {
+    Global,
+    NamedProject(String),
+}
+
+async fn assert_proposal_persistence_precedes_writer(
+    server: &crate::server_state::MemoryServer,
+    writer_route: LifecycleWriterRoute,
+    source_id: &str,
+    writer_target_id: &str,
+    path_prefix: &str,
+) {
+    let expects_physical_db_probe = matches!(&writer_route, LifecycleWriterRoute::NamedProject(_));
+    let writer_server = server.clone();
+    let (start_writer_tx, start_writer_rx) = mpsc::channel::<String>();
+    let (writer_attempted_tx, writer_attempted_rx) = mpsc::channel();
+    let (writer_probe_tx, writer_probe_rx) = mpsc::channel::<bool>();
+    let (writer_done_tx, writer_done_rx) = mpsc::channel::<bool>();
+    let writer_probe_rx = Rc::new(writer_probe_rx);
+    let hook_writer_probe_rx = Rc::clone(&writer_probe_rx);
+    let writer_completed_before_persist = Rc::new(Cell::new(false));
+    let hook_writer_completed_before_persist = Rc::clone(&writer_completed_before_persist);
+    let writer_source_id = source_id.to_string();
+    let writer_target_id = writer_target_id.to_string();
+
+    let writer = std::thread::spawn(move || {
+        let proposal_id = start_writer_rx
+            .recv_timeout(StdDuration::from_secs(2))
+            .expect("proposal hook must release the writer");
+        writer_attempted_tx
+            .send(())
+            .expect("proposal hook must observe writer attempt");
+        let proposal_was_visible = match writer_route {
+            LifecycleWriterRoute::Global => writer_server.with_global_store(|store| {
+                assert_eq!(
+                    store
+                        .mark_superseded_closing_validity(
+                            &writer_source_id,
+                            &writer_target_id,
+                            "2026-07-25T00:00:03.000Z",
+                        )
+                        .map_err(|e| e.to_string())?,
+                    1,
+                    "same-server writer must apply its final A -> C effect"
+                );
+                let proposal_was_visible = store
+                    .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                    .map_err(|e| e.to_string())?
+                    .is_some();
+                writer_probe_tx
+                    .send(true)
+                    .expect("proposal hook receiver must remain alive through writer completion");
+                Ok(proposal_was_visible)
+            }),
+            LifecycleWriterRoute::NamedProject(project) => {
+                writer_server.with_named_project_store(&project, |store| {
+                    store
+                        .connection()
+                        .busy_timeout(StdDuration::ZERO)
+                        .map_err(|e| e.to_string())?;
+                    let first_attempt = store.mark_superseded_closing_validity(
+                        &writer_source_id,
+                        &writer_target_id,
+                        "2026-07-25T00:00:03.000Z",
+                    );
+                    store
+                        .connection()
+                        .busy_timeout(StdDuration::from_secs(5))
+                        .map_err(|e| e.to_string())?;
+
+                    match first_attempt {
+                        Ok(1) => {
+                            let proposal_was_visible = store
+                                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                                .map_err(|e| e.to_string())?
+                                .is_some();
+                            writer_probe_tx
+                                .send(true)
+                                .expect("report alias writer completed before persistence");
+                            Ok(proposal_was_visible)
+                        }
+                        Ok(affected) => Err(format!(
+                            "alias writer unexpectedly affected {affected} rows on first attempt"
+                        )),
+                        Err(memcore::MemoryError::Sqlite(error))
+                            if matches!(
+                                error.sqlite_error_code(),
+                                Some(
+                                    rusqlite::ErrorCode::DatabaseBusy
+                                        | rusqlite::ErrorCode::DatabaseLocked
+                                )
+                            ) =>
+                        {
+                            writer_probe_tx
+                                .send(false)
+                                .expect("report physical DB transaction contention");
+                            assert_eq!(
+                                store
+                                    .mark_superseded_closing_validity(
+                                        &writer_source_id,
+                                        &writer_target_id,
+                                        "2026-07-25T00:00:03.000Z",
+                                    )
+                                    .map_err(|e| e.to_string())?,
+                                1,
+                                "alias writer must land A -> C after proposal commit"
+                            );
+                            Ok(store
+                                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                                .map_err(|e| e.to_string())?
+                                .is_some())
+                        }
+                        Err(error) => Err(format!(
+                            "alias writer expected SQLite BUSY/LOCKED before persistence: {error}"
+                        )),
+                    }
+                })
+            }
+        }
+        .expect("same-server writer");
+        writer_done_tx
+            .send(proposal_was_visible)
+            .expect("test must observe writer completion");
+    });
+
+    let hook_source_id = source_id.to_string();
+    let _hook_guard =
+        crate::facade_memory_ops::consolidate_ops::install_proposal_persistence_test_hook(
+            move |proposals| {
+                let proposal_id = proposals
+                    .iter()
+                    .find(|proposal| proposal["source_id"] == json!(hook_source_id))
+                    .expect("build source proposal before synchronization")["proposal_id"]
+                    .as_str()
+                    .expect("proposal id")
+                    .to_string();
+                start_writer_tx
+                    .send(proposal_id)
+                    .expect("start same-server writer");
+                writer_attempted_rx
+                    .recv_timeout(StdDuration::from_secs(2))
+                    .expect("writer must reach its real facade/store route");
+                // Named-route discrimination is causal: its zero-busy-wait
+                // SQLite attempt sends false only for BUSY/LOCKED and true if
+                // A -> C completed. The timeout is only a deadlock guard there.
+                // The global same-gate case cannot enter its closure until
+                // release, so its expected timeout remains the original gate
+                // discrimination.
+                let completed_early =
+                    match hook_writer_probe_rx.recv_timeout(StdDuration::from_secs(2)) {
+                        Ok(completed_early) => completed_early,
+                        Err(mpsc::RecvTimeoutError::Timeout) if !expects_physical_db_probe => false,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            panic!("alias writer did not report its SQLite contention result")
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            panic!("writer disconnected before reporting its ordering result")
+                        }
+                    };
+                hook_writer_completed_before_persist.set(completed_early);
+            },
+        );
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some(path_prefix.to_string());
+    let parsed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(server, propose)
+            .await
+            .expect("propose through the real facade/store gate"),
+    )
+    .expect("proposal json");
+
+    let proposal_was_visible_to_writer = writer_done_rx
+        .recv_timeout(StdDuration::from_secs(5))
+        .expect("writer must complete after proposal persistence releases the gate");
+    writer.join().expect("same-server writer thread");
+    // BUG 2 regression: keep the receiver alive until the writer's checked
+    // send and join have both completed.
+    drop(writer_probe_rx);
+
+    assert!(
+        !writer_completed_before_persist.get(),
+        "same-server writer completed A -> C after build but before proposal persistence"
+    );
+    assert!(
+        proposal_was_visible_to_writer,
+        "persisted proposal must be visible before the same-server writer enters and completes"
+    );
+
+    let generated = parsed["generated"].as_array().expect("generated proposals");
+    let proposal_id = generated
+        .iter()
+        .find(|proposal| proposal["source_id"] == json!(source_id))
+        .expect("source proposal persisted before writer completion")["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let verify = |store: &mut memcore::MemoryStore| {
+        let (raw, _) = store
+            .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+            .map_err(|e| e.to_string())?
+            .expect("proposal must be visible");
+        assert_eq!(
+            serde_json::from_str::<Value>(&raw).unwrap()["status"],
+            json!("pending")
+        );
+        assert_eq!(
+            store
+                .supersession_target(source_id)
+                .map_err(|e| e.to_string())?,
+            Some(Some(writer_target_id.to_string())),
+            "writer's final A -> C effect must land after persistence"
+        );
+        Ok(())
+    };
+    if server.has_project_db() {
+        server.with_project_store_read(verify)
+    } else {
+        server.with_global_store_read(verify)
+    }
+    .expect("verify persisted proposal and final writer effect");
+}
+
+/// Discriminates the single census/build/persist boundary from the old
+/// 297e6b72 two-gate topology on the ordinary global route.
 #[tokio::test(flavor = "current_thread")]
 async fn consolidate_proposal_persistence_blocks_same_server_writer_until_visible() {
     let server = make_server();
@@ -998,135 +1220,92 @@ async fn consolidate_proposal_persistence_blocks_same_server_writer_until_visibl
         })
         .expect("seed gate-order rows");
 
-    let writer_server = (*server).clone();
-    let (start_writer_tx, start_writer_rx) = mpsc::channel::<String>();
-    let (writer_attempted_tx, writer_attempted_rx) = mpsc::channel();
-    let (writer_acquired_tx, writer_acquired_rx) = mpsc::channel();
-    let (writer_done_tx, writer_done_rx) = mpsc::channel::<bool>();
-    let (writer_entered_early_tx, writer_entered_early_rx) = mpsc::channel::<bool>();
-
-    let writer = std::thread::spawn(move || {
-        let proposal_id = start_writer_rx
-            .recv_timeout(StdDuration::from_secs(2))
-            .expect("proposal hook must release the writer");
-        writer_attempted_tx
-            .send(())
-            .expect("proposal hook must observe writer attempt");
-        let proposal_was_visible = writer_server
-            .with_global_store(|store| {
-                writer_acquired_tx
-                    .send(())
-                    .expect("proposal hook must observe writer gate entry");
-                let proposal_was_visible = store
-                    .get_state_kv("memory_lifecycle_proposals", &proposal_id)
-                    .map_err(|e| e.to_string())?
-                    .is_some();
-                assert_eq!(
-                    store
-                        .mark_superseded_closing_validity(
-                            "life-gate-order-source",
-                            "life-gate-order-target-c",
-                            "2026-07-25T00:00:03.000Z",
-                        )
-                        .map_err(|e| e.to_string())?,
-                    1,
-                    "same-server writer must apply its final A -> C effect"
-                );
-                Ok(proposal_was_visible)
-            })
-            .expect("same-server writer");
-        writer_done_tx
-            .send(proposal_was_visible)
-            .expect("test must observe writer completion");
-    });
-
-    let _hook_guard =
-        crate::facade_memory_ops::consolidate_ops::install_proposal_persistence_test_hook(
-            move |proposals| {
-                let proposal_id = proposals
-                    .iter()
-                    .find(|proposal| proposal["source_id"] == json!("life-gate-order-source"))
-                    .expect("build source proposal before synchronization")["proposal_id"]
-                    .as_str()
-                    .expect("proposal id")
-                    .to_string();
-                start_writer_tx
-                    .send(proposal_id)
-                    .expect("start same-server writer");
-                writer_attempted_rx
-                    .recv_timeout(StdDuration::from_secs(2))
-                    .expect("writer must reach the store gate");
-                // The attempted handshake occurs immediately before the real
-                // gate call. This timeout only bounds the expected block so a
-                // broken gate cannot deadlock the test process.
-                let entered_early = match writer_acquired_rx.recv_timeout(StdDuration::from_secs(1))
-                {
-                    Ok(()) => true,
-                    Err(mpsc::RecvTimeoutError::Timeout) => false,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        panic!("writer disconnected before entering the store gate")
-                    }
-                };
-                writer_entered_early_tx
-                    .send(entered_early)
-                    .expect("record writer gate ordering");
-            },
-        );
-
-    let mut propose = tachi_memory_params("consolidate");
-    propose.format = Some("json".to_string());
-    propose.path_prefix = Some("/scratch/gate-order".to_string());
-    let parsed: Value = serde_json::from_str(
-        &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
-            .await
-            .expect("propose through the real facade/store gate"),
+    assert_proposal_persistence_precedes_writer(
+        &server,
+        LifecycleWriterRoute::Global,
+        "life-gate-order-source",
+        "life-gate-order-target-c",
+        "/scratch/gate-order",
     )
-    .expect("proposal json");
+    .await;
+}
 
-    let proposal_was_visible_to_writer = writer_done_rx
-        .recv_timeout(StdDuration::from_secs(2))
-        .expect("writer must complete after proposal persistence releases the gate");
-    writer.join().expect("same-server writer thread");
-
-    assert!(
-        !writer_entered_early_rx
-            .recv_timeout(StdDuration::from_secs(2))
-            .expect("proposal hook must record gate ordering"),
-        "same-server writer entered after build but before proposal persistence"
-    );
-    assert!(
-        proposal_was_visible_to_writer,
-        "persisted proposal must be visible before the same-server writer enters and completes"
-    );
-
-    let generated = parsed["generated"].as_array().expect("generated proposals");
-    let proposal_id = generated
-        .iter()
-        .find(|proposal| proposal["source_id"] == json!("life-gate-order-source"))
-        .expect("source proposal persisted before writer completion")["proposal_id"]
+/// Active-project proposal routing and named-project writes can open the same
+/// physical SQLite file through distinct runtime gates. The DB transaction,
+/// rather than either route-local gate, must order persistence before A -> C.
+#[tokio::test(flavor = "current_thread")]
+async fn consolidate_project_alias_writer_waits_for_proposal_persistence() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let root = temp_home.temp_home.join("Lifecycle Alias Route Repo");
+    std::fs::create_dir_all(root.join(".git")).expect("create alias-route fake repo");
+    let initialized = server
+        .tachi_init_project_db(Parameters(InitProjectDbParams {
+            project_root: Some(root.display().to_string()),
+            db_relpath: ".tachi/memory.db".to_string(),
+        }))
+        .await
+        .expect("initialize and activate project DB");
+    let initialized: Value = serde_json::from_str(&initialized).expect("project init JSON");
+    let project = initialized["project"]
         .as_str()
-        .expect("proposal id")
+        .expect("canonical project name")
         .to_string();
+    let active_db = std::fs::canonicalize(
+        server
+            .project_db_path_buf()
+            .expect("active project database path"),
+    )
+    .expect("canonical active project database path");
+    let named_db = std::fs::canonicalize(
+        crate::server_state::MemoryServer::resolve_named_project_db_path(&project)
+            .expect("resolve named-project database path"),
+    )
+    .expect("canonical named-project database path");
+    assert_eq!(
+        active_db, named_db,
+        "test routes must resolve to one physical SQLite database"
+    );
+    // Warm the named write route before the proposal transaction starts so
+    // the discriminator observes write ordering, not attachment/schema-open
+    // initialization waiting on the transaction.
     server
-        .with_global_store_read(|store| {
-            let (raw, _) = store
-                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
-                .map_err(|e| e.to_string())?
-                .expect("proposal must be visible");
-            assert_eq!(
-                serde_json::from_str::<Value>(&raw).unwrap()["status"],
-                json!("pending")
-            );
-            assert_eq!(
-                store
-                    .supersession_target("life-gate-order-source")
-                    .map_err(|e| e.to_string())?,
-                Some(Some("life-gate-order-target-c".to_string())),
-                "writer's final A -> C effect must land after persistence"
-            );
-            Ok(())
+        .with_named_project_store(&project, |_| Ok(()))
+        .expect("warm named-project write route");
+
+    let source = seed_scratch(
+        "life-alias-order-source",
+        "/scratch/alias-gate-order/pair",
+        "older active project checklist awaiting the named-route writer",
+        10,
+    );
+    let target_b = seed_scratch(
+        "life-alias-order-target-b",
+        "/scratch/alias-gate-order/pair",
+        "newer active project checklist selected as proposal target B",
+        1,
+    );
+    let target_c = seed_scratch(
+        "life-alias-order-target-c",
+        "/scratch/alias-gate-order/canonical",
+        "canonical C selected through the named-project alias route",
+        0,
+    );
+    server
+        .with_project_store(|store| {
+            store.upsert(&source).map_err(|e| e.to_string())?;
+            store.upsert(&target_b).map_err(|e| e.to_string())?;
+            store.upsert(&target_c).map_err(|e| e.to_string())
         })
-        .expect("verify persisted proposal and final writer effect");
+        .expect("seed active-project rows");
+
+    assert_proposal_persistence_precedes_writer(
+        &server,
+        LifecycleWriterRoute::NamedProject(project),
+        "life-alias-order-source",
+        "life-alias-order-target-c",
+        "/scratch/alias-gate-order",
+    )
+    .await;
 }
 
 #[tokio::test]
