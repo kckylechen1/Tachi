@@ -23,10 +23,10 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
         let dir = mission_dir(arena_id, &mission_id)?;
         let result_path = dir.join("result.md");
         let plan_path = dir.join("plan.md");
-        let mut status_before = read_json_file(&dir.join("status.json"))?;
+        let mut status_before = read_required_mission_status(arena_id, &mission_id)?;
         refresh_linked_dispatch_fields(&mut status_before);
         let mut artifact_read_errors = Vec::new();
-        let mut result = match read_arena_artifact(&result_path, "arena mission result") {
+        let mut result = match read_mission_result(arena_id, &mission_id) {
             ArenaArtifactRead::Present(raw) => raw,
             ArenaArtifactRead::Missing => String::new(),
             ArenaArtifactRead::Error(err) => {
@@ -64,12 +64,24 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
                 }
             }
         }
-        match read_arena_artifact(&plan_path, "arena mission plan") {
+        match read_mission_plan(arena_id, &mission_id) {
             ArenaArtifactRead::Present(_) | ArenaArtifactRead::Missing => {}
             ArenaArtifactRead::Error(err) => artifact_read_errors.push(err),
         }
-        let result_written = nonempty_file(&result_path);
-        let plan_written = nonempty_file(&plan_path);
+        let result_written = match mission_file_nonempty(arena_id, &mission_id, "result.md") {
+            Ok(written) => written,
+            Err(error) => {
+                artifact_read_errors.push(error);
+                false
+            }
+        };
+        let plan_written = match mission_file_nonempty(arena_id, &mission_id, "plan.md") {
+            Ok(written) => written,
+            Err(error) => {
+                artifact_read_errors.push(error);
+                false
+            }
+        };
         let artifact_read_error = artifact_read_errors.first().cloned();
         let state = if !artifact_read_errors.is_empty() {
             "artifact_read_error"
@@ -92,7 +104,7 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
                     json!(artifact_read_errors.clone())
                 },
                 "completion_draft": if state == "collected" {
-                    completion_draft_for_mission(&status_before, &result_path)
+                    completion_draft_for_mission(&status_before, &result_path, &result)
                 } else {
                     Value::Null
                 },

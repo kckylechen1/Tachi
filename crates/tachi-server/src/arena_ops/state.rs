@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 const ARENA_LINKED_STATUS_MAX_BYTES: usize = 1024 * 1024;
 pub(super) const ARENA_LINKED_RESULT_MAX_BYTES: usize = 1024 * 1024;
+pub(super) const ARENA_MISSION_STATUS_MAX_BYTES: usize = 1024 * 1024;
+pub(super) const ARENA_MISSION_PLAN_MAX_BYTES: usize = 1024 * 1024;
+pub(super) const ARENA_MISSION_RESULT_MAX_BYTES: usize = 1024 * 1024;
 
 fn current_git_root() -> Option<PathBuf> {
     std::process::Command::new("git")
@@ -392,12 +395,6 @@ fn validate_id(id: &str, prefix: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn nonempty_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.len() > 0)
-        .unwrap_or(false)
-}
-
 pub(super) fn arena_dir(arena_id: &str) -> Result<PathBuf, String> {
     validate_arena_id(arena_id)?;
     Ok(arena_root().join(arena_id))
@@ -413,18 +410,100 @@ pub(super) fn read_json_file(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+fn mission_document_path(
+    arena_id: &str,
+    mission_id: &str,
+    document: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let root = arena_root();
+    let path = mission_dir(arena_id, mission_id)?.join(document);
+    Ok((root, path))
+}
+
+pub(super) fn read_mission_status(
+    arena_id: &str,
+    mission_id: &str,
+) -> Result<Option<Value>, String> {
+    let (root, path) = mission_document_path(arena_id, mission_id, "status.json")?;
+    let Some(raw) =
+        crate::dispatch_ops::read_text_file_within(&root, &path, ARENA_MISSION_STATUS_MAX_BYTES)?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|error| format!("read arena mission status {}: {error}", path.display()))
+}
+
+pub(super) fn read_required_mission_status(
+    arena_id: &str,
+    mission_id: &str,
+) -> Result<Value, String> {
+    read_mission_status(arena_id, mission_id)?.ok_or_else(|| {
+        format!(
+            "read arena mission status: status.json is absent for arena_id={arena_id} mission_id={mission_id}"
+        )
+    })
+}
+
 pub(super) enum ArenaArtifactRead {
     Present(String),
     Missing,
     Error(String),
 }
 
-pub(super) fn read_arena_artifact(path: &Path, label: &str) -> ArenaArtifactRead {
-    match crate::utils::read_to_string_allow_missing(path, label) {
+fn read_mission_artifact(
+    arena_id: &str,
+    mission_id: &str,
+    document: &str,
+    label: &str,
+    max_bytes: usize,
+) -> ArenaArtifactRead {
+    let (root, path) = match mission_document_path(arena_id, mission_id, document) {
+        Ok(paths) => paths,
+        Err(error) => return ArenaArtifactRead::Error(error),
+    };
+    match crate::dispatch_ops::read_text_file_within(&root, &path, max_bytes) {
         Ok(Some(raw)) => ArenaArtifactRead::Present(raw),
         Ok(None) => ArenaArtifactRead::Missing,
-        Err(err) => ArenaArtifactRead::Error(err),
+        Err(error) => ArenaArtifactRead::Error(format!("{label}: {error}")),
     }
+}
+
+pub(super) fn read_mission_plan(arena_id: &str, mission_id: &str) -> ArenaArtifactRead {
+    read_mission_artifact(
+        arena_id,
+        mission_id,
+        "plan.md",
+        "arena mission plan",
+        ARENA_MISSION_PLAN_MAX_BYTES,
+    )
+}
+
+pub(super) fn read_mission_result(arena_id: &str, mission_id: &str) -> ArenaArtifactRead {
+    read_mission_artifact(
+        arena_id,
+        mission_id,
+        "result.md",
+        "arena mission result",
+        ARENA_MISSION_RESULT_MAX_BYTES,
+    )
+}
+
+pub(super) fn mission_file_nonempty(
+    arena_id: &str,
+    mission_id: &str,
+    document: &str,
+) -> Result<bool, String> {
+    let (root, path) = mission_document_path(arena_id, mission_id, document)?;
+    crate::dispatch_ops::regular_file_len_within(&root, &path)
+        .map(|length| length.is_some_and(|length| length > 0))
+        .map_err(|error| {
+            format!(
+                "inspect arena mission {document} {}: {error}",
+                path.display()
+            )
+        })
 }
 
 pub(super) fn update_mission_status(
@@ -434,7 +513,7 @@ pub(super) fn update_mission_status(
 ) -> Result<Value, String> {
     let dir = mission_dir(arena_id, mission_id)?;
     let status_path = dir.join("status.json");
-    let mut status = read_json_file(&status_path)?;
+    let mut status = read_required_mission_status(arena_id, mission_id)?;
     if let Some(obj) = status.as_object_mut() {
         if let Some(patch_obj) = patch.as_object() {
             for (key, value) in patch_obj {
@@ -444,11 +523,11 @@ pub(super) fn update_mission_status(
         obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
         obj.insert(
             "plan_written".to_string(),
-            json!(nonempty_file(&dir.join("plan.md"))),
+            json!(mission_file_nonempty(arena_id, mission_id, "plan.md")?),
         );
         obj.insert(
             "result_written".to_string(),
-            json!(nonempty_file(&dir.join("result.md"))),
+            json!(mission_file_nonempty(arena_id, mission_id, "result.md")?),
         );
     }
     refresh_linked_dispatch_fields(&mut status);
@@ -467,18 +546,19 @@ pub(super) fn mission_statuses(arena_id: &str) -> Result<Vec<Value>, String> {
         .map_err(|e| format!("read missions dir {}: {e}", missions_dir.display()))?
     {
         let entry = entry.map_err(|e| format!("read mission dir entry: {e}"))?;
-        let status_path = entry.path().join("status.json");
-        if status_path.exists() {
-            let mut status = read_json_file(&status_path)?;
+        let mission_id = entry.file_name().to_string_lossy().to_string();
+        if validate_mission_id(&mission_id).is_ok() {
+            let Some(mut status) = read_mission_status(arena_id, &mission_id)? else {
+                continue;
+            };
             if let Some(obj) = status.as_object_mut() {
-                let dir = entry.path();
                 obj.insert(
                     "plan_written".to_string(),
-                    json!(nonempty_file(&dir.join("plan.md"))),
+                    json!(mission_file_nonempty(arena_id, &mission_id, "plan.md")?),
                 );
                 obj.insert(
                     "result_written".to_string(),
-                    json!(nonempty_file(&dir.join("result.md"))),
+                    json!(mission_file_nonempty(arena_id, &mission_id, "result.md")?),
                 );
             }
             refresh_linked_dispatch_fields(&mut status);

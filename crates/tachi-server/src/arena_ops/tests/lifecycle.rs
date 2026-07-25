@@ -149,6 +149,167 @@ async fn arena_collect_marks_corrupt_result_as_read_error_instead_of_pending() {
         .as_str()
         .expect("read error should be surfaced");
     assert!(read_error.contains("arena mission result"), "{read_error}");
+    assert!(
+        read_error.contains("refusing descriptor-bound text read"),
+        "{read_error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn arena_collect_refuses_mission_result_leaf_symlink() {
+    let _root = temp_arena_root();
+    let server = server();
+    let mut open = params("open");
+    open.objective = Some("refuse a mission result leaf link".into());
+    let opened: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id.clone());
+    spawn.prompt = Some("write a result".into());
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
+    let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+    let outside = tempfile::tempdir().expect("outside result");
+    let outside_result = outside.path().join("result.md");
+    std::fs::write(&outside_result, "outside result").unwrap();
+    std::os::unix::fs::symlink(&outside_result, mission_dir.join("result.md")).unwrap();
+
+    let mut collect = params("collect");
+    collect.arena_id = Some(arena_id);
+    collect.mission_id = Some(mission_id);
+    let error = handle_tachi_arena(&server, collect)
+        .await
+        .expect_err("mission result leaf symlink must be a loud refusal");
+    assert!(error.contains("refusing descriptor-bound read"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn arena_board_refuses_mission_parent_symlink() {
+    let _root = temp_arena_root();
+    let server = server();
+    let mut open = params("open");
+    open.objective = Some("refuse a mission parent link".into());
+    let opened: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id.clone());
+    spawn.prompt = Some("write a result".into());
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+    let outside = tempfile::tempdir().expect("outside mission");
+    let status = std::fs::read(mission_dir.join("status.json")).unwrap();
+    std::fs::remove_dir_all(&mission_dir).unwrap();
+    std::fs::write(outside.path().join("status.json"), status).unwrap();
+    std::fs::write(outside.path().join("plan.md"), "outside plan").unwrap();
+    std::fs::write(outside.path().join("result.md"), "outside result").unwrap();
+    std::os::unix::fs::symlink(outside.path(), &mission_dir).unwrap();
+
+    let mut board = params("board");
+    board.arena_id = Some(arena_id);
+    let error = handle_tachi_arena(&server, board)
+        .await
+        .expect_err("mission parent symlink must be a loud refusal");
+    assert!(error.contains("outside containment root"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn arena_mission_result_read_keeps_opened_file_across_replacement_race() {
+    let _root = temp_arena_root();
+    let server = server();
+    let mut open = params("open");
+    open.objective = Some("keep the opened result descriptor".into());
+    let opened: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id.clone());
+    spawn.prompt = Some("write a result".into());
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
+    let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+    let result_path = mission_dir.join("result.md");
+    let outside = tempfile::tempdir().expect("outside result");
+    let outside_result = outside.path().join("result.md");
+    std::fs::write(&result_path, "inside result").unwrap();
+    std::fs::write(&outside_result, "outside result").unwrap();
+    crate::dispatch_ops::install_secure_read_hook(
+        crate::dispatch_ops::SecureReadHookStage::AfterOpen,
+        result_path,
+        move |opened| {
+            std::fs::remove_file(opened).unwrap();
+            std::os::unix::fs::symlink(&outside_result, opened).unwrap();
+        },
+    );
+
+    let read = crate::arena_ops::state::read_mission_result(&arena_id, &mission_id);
+    let crate::arena_ops::state::ArenaArtifactRead::Present(result) = read else {
+        panic!("mission result should be read from the original descriptor");
+    };
+    assert_eq!(result, "inside result");
+    assert_ne!(result, "outside result");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn arena_collect_enforces_mission_result_named_byte_limit() {
+    let _root = temp_arena_root();
+    let server = server();
+    let mut open = params("open");
+    open.objective = Some("bound mission result bytes".into());
+    let opened: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id.clone());
+    spawn.prompt = Some("write a bounded result".into());
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
+    let result_path = PathBuf::from(spawned["result_path"].as_str().unwrap());
+    let limit = crate::arena_ops::state::ARENA_MISSION_RESULT_MAX_BYTES;
+
+    std::fs::write(&result_path, vec![b'x'; limit]).unwrap();
+    let mut exact_collect = params("collect");
+    exact_collect.arena_id = Some(arena_id.clone());
+    exact_collect.mission_id = Some(mission_id.clone());
+    let exact: Value = serde_json::from_str(
+        &handle_tachi_arena(&server, exact_collect)
+            .await
+            .expect("exact mission result limit must collect"),
+    )
+    .unwrap();
+    assert_eq!(exact["missions"][0]["state"], json!("collected"));
+    assert_eq!(
+        exact["missions"][0]["result"].as_str().map(str::len),
+        Some(limit)
+    );
+
+    std::fs::write(&result_path, vec![b'x'; limit + 1]).unwrap();
+    let mut over_collect = params("collect");
+    over_collect.arena_id = Some(arena_id);
+    over_collect.mission_id = Some(mission_id);
+    let over: Value = serde_json::from_str(
+        &handle_tachi_arena(&server, over_collect)
+            .await
+            .expect("oversize mission result is reported in mission state"),
+    )
+    .unwrap();
+    assert_eq!(over["missions"][0]["state"], json!("artifact_read_error"));
+    assert!(over["missions"][0]["artifact_read_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("named limit")));
 }
 
 #[cfg(unix)]
