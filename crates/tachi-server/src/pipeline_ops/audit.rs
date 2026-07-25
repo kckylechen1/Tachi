@@ -1,5 +1,6 @@
 use chrono::Utc;
 use memcore::MemoryStore;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{oneshot, watch, Mutex};
@@ -11,6 +12,7 @@ use crate::utils::stable_hash;
 const INGEST_CLAIM_LEASE_SECS: i64 = 5 * 60;
 const INGEST_HEARTBEAT_INTERVAL: Duration =
     Duration::from_secs((INGEST_CLAIM_LEASE_SECS as u64) / 3);
+const INGEST_HEARTBEAT_SQLITE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 pub(crate) struct RetryableIngestClaim {
@@ -28,13 +30,14 @@ pub(crate) struct RetryableIngestLease {
     heartbeat_failure: watch::Receiver<Option<String>>,
     stop_tx: Option<watch::Sender<bool>>,
     heartbeat: Option<JoinHandle<()>>,
-    runtime: tokio::runtime::Handle,
     join_notify: Option<oneshot::Sender<()>>,
 }
 
 struct HeartbeatOptions {
     interval: Duration,
     join_notify: Option<oneshot::Sender<()>>,
+    refresh_notify: Option<oneshot::Sender<()>>,
+    refresh_complete_notify: Option<oneshot::Sender<()>>,
 }
 
 impl RetryableIngestLease {
@@ -76,6 +79,8 @@ impl RetryableIngestLease {
             HeartbeatOptions {
                 interval,
                 join_notify: None,
+                refresh_notify: None,
+                refresh_complete_notify: None,
             },
         )
     }
@@ -102,9 +107,50 @@ impl RetryableIngestLease {
                 HeartbeatOptions {
                     interval,
                     join_notify: Some(join_notify),
+                    refresh_notify: None,
+                    refresh_complete_notify: None,
                 },
             ),
             joined,
+        )
+    }
+
+    #[cfg(test)]
+    fn start_with_heartbeat_receipts(
+        server: &MemoryServer,
+        target_db: DbScope,
+        project: Option<&str>,
+        worker: &str,
+        event_hash: &str,
+        claim: RetryableIngestClaim,
+        interval: Duration,
+    ) -> (
+        Self,
+        oneshot::Receiver<()>,
+        oneshot::Receiver<()>,
+        oneshot::Receiver<()>,
+    ) {
+        let (join_notify, joined) = oneshot::channel();
+        let (refresh_notify, refresh_started) = oneshot::channel();
+        let (refresh_complete_notify, refresh_completed) = oneshot::channel();
+        (
+            Self::start_inner(
+                server,
+                target_db,
+                project,
+                worker,
+                event_hash,
+                claim,
+                HeartbeatOptions {
+                    interval,
+                    join_notify: Some(join_notify),
+                    refresh_notify: Some(refresh_notify),
+                    refresh_complete_notify: Some(refresh_complete_notify),
+                },
+            ),
+            joined,
+            refresh_started,
+            refresh_completed,
         )
     }
 
@@ -120,6 +166,8 @@ impl RetryableIngestLease {
         let HeartbeatOptions {
             interval,
             join_notify,
+            mut refresh_notify,
+            mut refresh_complete_notify,
         } = options;
         let gate = Arc::new(Mutex::new(()));
         let (failure_tx, heartbeat_failure) = watch::channel(None);
@@ -153,14 +201,34 @@ impl RetryableIngestLease {
                 if *stop_rx.borrow() {
                     return;
                 }
-                let refresh = refresh_retryable_ingest_claim(
+                if let Some(refresh_notify) = refresh_notify.take() {
+                    let _ = refresh_notify.send(());
+                }
+                let refresh_path = ingest_claim_db_path(
                     &heartbeat_server,
                     target_db,
                     heartbeat_project.as_deref(),
-                    &heartbeat_worker,
-                    &heartbeat_hash,
-                    &heartbeat_claim,
                 );
+                let refresh_worker = heartbeat_worker.clone();
+                let refresh_hash = heartbeat_hash.clone();
+                let refresh_claim = heartbeat_claim.clone();
+                let refresh = match refresh_path {
+                    Ok(path) => tokio::task::spawn_blocking(move || {
+                        refresh_retryable_ingest_claim_at_path(
+                            &path,
+                            &refresh_worker,
+                            &refresh_hash,
+                            &refresh_claim,
+                        )
+                    })
+                    .await
+                    .map_err(|error| format!("join bounded ingest heartbeat refresh: {error}"))
+                    .and_then(|result| result),
+                    Err(error) => Err(error),
+                };
+                if let Some(refresh_complete_notify) = refresh_complete_notify.take() {
+                    let _ = refresh_complete_notify.send(());
+                }
                 if let Err(error) = refresh {
                     let _ =
                         failure_tx.send(Some(format!("ingest claim heartbeat failed: {error}")));
@@ -182,7 +250,6 @@ impl RetryableIngestLease {
             heartbeat_failure,
             stop_tx: Some(stop_tx),
             heartbeat: Some(heartbeat),
-            runtime: tokio::runtime::Handle::current(),
             join_notify,
         }
     }
@@ -280,6 +347,15 @@ impl RetryableIngestLease {
         }
     }
 
+    pub(crate) async fn finish(mut self) -> Result<(), String> {
+        let gate = Arc::clone(&self.gate);
+        {
+            let _guard = gate.lock().await;
+            self.signal_stop();
+        }
+        self.join_heartbeat().await
+    }
+
     pub(crate) async fn fail(
         mut self,
         label: &str,
@@ -367,13 +443,17 @@ impl Drop for RetryableIngestLease {
         self.signal_stop();
         if let Some(heartbeat) = self.heartbeat.take() {
             let join_notify = self.join_notify.take();
-            let joiner = self.runtime.spawn(async move {
-                let _ = heartbeat.await;
-                if let Some(join_notify) = join_notify {
-                    let _ = join_notify.send(());
-                }
-            });
-            drop(joiner);
+            if let Err(error) = std::thread::Builder::new()
+                .name("ingest-heartbeat-join".to_string())
+                .spawn(move || {
+                    let _ = futures::executor::block_on(heartbeat);
+                    if let Some(join_notify) = join_notify {
+                        let _ = join_notify.send(());
+                    }
+                })
+            {
+                tracing::error!(%error, "failed to start ingest heartbeat joiner");
+            }
         } else {
             self.notify_joined();
         }
@@ -526,6 +606,49 @@ pub(crate) fn refresh_retryable_ingest_claim(
         server.with_store_for_scope(target_db, action)?
     };
 
+    if rows_changed == 1 {
+        Ok(())
+    } else {
+        Err("ingest claim ownership was lost before durable completion".to_string())
+    }
+}
+
+fn ingest_claim_db_path(
+    server: &MemoryServer,
+    target_db: DbScope,
+    project: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(project_name) = project {
+        return MemoryServer::resolve_named_project_db_path(project_name)
+            .map_err(|error| format!("resolve ingest heartbeat project database: {error}"));
+    }
+    match target_db {
+        DbScope::Global => Ok(server.global_db_path_buf()),
+        DbScope::Project => server
+            .project_db_path_buf()
+            .ok_or_else(|| "ingest heartbeat project database is unavailable".to_string()),
+    }
+}
+
+fn refresh_retryable_ingest_claim_at_path(
+    db_path: &std::path::Path,
+    worker: &str,
+    event_hash: &str,
+    claim: &RetryableIngestClaim,
+) -> Result<(), String> {
+    let connection = rusqlite::Connection::open(db_path)
+        .map_err(|error| format!("open ingest heartbeat database: {error}"))?;
+    connection
+        .busy_timeout(INGEST_HEARTBEAT_SQLITE_TIMEOUT)
+        .map_err(|error| format!("bound ingest heartbeat SQLite wait: {error}"))?;
+    let rows_changed = connection
+        .execute(
+            "UPDATE processed_events \
+             SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE event_hash = ?1 AND worker = ?2 AND event_id = ?3",
+            rusqlite::params![event_hash, worker, claim.owner_token],
+        )
+        .map_err(|error| format!("refresh ingest claim: {error}"))?;
     if rows_changed == 1 {
         Ok(())
     } else {
@@ -875,15 +998,16 @@ mod tests {
         )
         .expect("claim A")
         .expect("A owns claim");
-        let lease = RetryableIngestLease::start_with_interval(
-            &server,
-            DbScope::Global,
-            None,
-            "ingest_source",
-            event_hash,
-            claim,
-            std::time::Duration::from_secs(1),
-        );
+        let (lease, _joined, _refresh_started, refresh_completed) =
+            RetryableIngestLease::start_with_heartbeat_receipts(
+                &server,
+                DbScope::Global,
+                None,
+                "ingest_source",
+                event_hash,
+                claim,
+                std::time::Duration::from_secs(1),
+            );
         tokio::task::yield_now().await;
 
         server
@@ -901,7 +1025,9 @@ mod tests {
             })
             .expect("age active claim");
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
+        refresh_completed
+            .await
+            .expect("database-time heartbeat refresh completes");
 
         let takeover = claim_retryable_ingest_event(
             &server,
@@ -1155,6 +1281,169 @@ mod tests {
             .expect("cancel exit join receipt");
     }
 
+    #[tokio::test]
+    async fn contended_heartbeat_refresh_stops_with_bounded_join_and_no_orphan() {
+        let server = crate::tests::make_server();
+        let event_hash = "contended-heartbeat-exit";
+        let audit_key = ingest_audit_key("ingest_source", DbScope::Global, None, event_hash);
+        let claim = claim_retryable_ingest_event(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            &audit_key,
+            "ingest_source",
+            event_hash,
+            event_hash,
+        )
+        .expect("create contended heartbeat claim")
+        .expect("contended heartbeat claim is owned");
+        let created_at = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT created_at FROM processed_events WHERE event_hash = ?1 AND worker = 'ingest_source'",
+                        [event_hash],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read initial claim timestamp");
+        let locker = rusqlite::Connection::open(server.global_db_path_buf())
+            .expect("open independent lock connection");
+        locker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold SQLite writer lock");
+
+        let (lease, joined, refresh_started, _refresh_completed) =
+            RetryableIngestLease::start_with_heartbeat_receipts(
+                &server,
+                DbScope::Global,
+                None,
+                "ingest_source",
+                event_hash,
+                claim,
+                Duration::from_millis(1),
+            );
+        tokio::time::timeout(Duration::from_secs(1), refresh_started)
+            .await
+            .expect("heartbeat reaches contended refresh")
+            .expect("refresh-start receipt");
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(1), joined)
+            .await
+            .expect("contended heartbeat drop reaches terminal join")
+            .expect("contended heartbeat join receipt");
+        locker
+            .execute_batch("ROLLBACK")
+            .expect("release writer lock");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let after = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT created_at FROM processed_events WHERE event_hash = ?1 AND worker = 'ingest_source'",
+                        [event_hash],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read claim timestamp after heartbeat join");
+        assert_eq!(
+            after, created_at,
+            "joined heartbeat must not refresh after drop"
+        );
+    }
+
+    #[test]
+    fn runtime_shutdown_joins_contended_heartbeat_without_orphan_refresh() {
+        let server = crate::tests::make_server();
+        let event_hash = "runtime-shutdown-heartbeat-exit";
+        let audit_key = ingest_audit_key("ingest_source", DbScope::Global, None, event_hash);
+        let claim = claim_retryable_ingest_event(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            &audit_key,
+            "ingest_source",
+            event_hash,
+            event_hash,
+        )
+        .expect("create runtime-shutdown heartbeat claim")
+        .expect("runtime-shutdown heartbeat claim is owned");
+        let created_at = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT created_at FROM processed_events WHERE event_hash = ?1 AND worker = 'ingest_source'",
+                        [event_hash],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read runtime-shutdown claim timestamp");
+        let locker = rusqlite::Connection::open(server.global_db_path_buf())
+            .expect("open runtime-shutdown lock connection");
+        locker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold runtime-shutdown SQLite writer lock");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build heartbeat shutdown runtime");
+        let (lease, joined, refresh_started, _refresh_completed) = runtime.block_on(async {
+            RetryableIngestLease::start_with_heartbeat_receipts(
+                &server,
+                DbScope::Global,
+                None,
+                "ingest_source",
+                event_hash,
+                claim,
+                Duration::from_millis(1),
+            )
+        });
+        let lease_task = runtime.spawn(async move {
+            let _lease = lease;
+            std::future::pending::<()>().await;
+        });
+        drop(lease_task);
+        runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(1), refresh_started).await })
+            .expect("heartbeat reaches contended refresh before runtime shutdown")
+            .expect("runtime-shutdown refresh-start receipt");
+
+        drop(runtime);
+        joined
+            .blocking_recv()
+            .expect("runtime shutdown reaches terminal heartbeat join");
+        locker
+            .execute_batch("ROLLBACK")
+            .expect("release runtime-shutdown writer lock");
+        std::thread::sleep(Duration::from_millis(300));
+        let after = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT created_at FROM processed_events WHERE event_hash = ?1 AND worker = 'ingest_source'",
+                        [event_hash],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read claim timestamp after runtime shutdown");
+        assert_eq!(
+            after, created_at,
+            "runtime shutdown must leave no heartbeat refresh behind"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn lost_heartbeat_fences_stale_graph_observation_after_takeover() {
         let server = crate::tests::make_server();
@@ -1187,15 +1476,16 @@ mod tests {
         )
         .expect("claim A")
         .expect("A owns claim");
-        let lease_a = RetryableIngestLease::start_with_interval(
-            &server,
-            DbScope::Global,
-            None,
-            "ingest_source",
-            event_hash,
-            claim_a,
-            std::time::Duration::from_secs(1),
-        );
+        let (lease_a, _joined, _refresh_started, refresh_completed) =
+            RetryableIngestLease::start_with_heartbeat_receipts(
+                &server,
+                DbScope::Global,
+                None,
+                "ingest_source",
+                event_hash,
+                claim_a,
+                std::time::Duration::from_secs(1),
+            );
         tokio::task::yield_now().await;
         server
             .with_global_store(|store| {
@@ -1211,7 +1501,9 @@ mod tests {
             })
             .expect("install heartbeat fault");
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
+        refresh_completed
+            .await
+            .expect("injected heartbeat failure reaches terminal refresh");
         server
             .with_global_store(|store| {
                 store

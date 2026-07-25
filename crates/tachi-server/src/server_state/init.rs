@@ -23,6 +23,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::mpsc;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_BACKGROUND_WORKERS_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -39,7 +46,9 @@ fn embedded_mcp_facade() -> bool {
 fn background_workers_enabled() -> bool {
     #[cfg(test)]
     {
-        env_truthy("TACHI_TEST_ENABLE_BACKGROUND_WORKERS")
+        TEST_BACKGROUND_WORKERS_OVERRIDE
+            .get()
+            .unwrap_or_else(|| env_truthy("TACHI_TEST_ENABLE_BACKGROUND_WORKERS"))
     }
     #[cfg(not(test))]
     {
@@ -79,6 +88,20 @@ fn parse_auto_lock_secs() -> u64 {
 }
 
 impl MemoryServer {
+    #[cfg(test)]
+    pub(crate) fn new_with_background_workers_for_test(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        enabled: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        TEST_BACKGROUND_WORKERS_OVERRIDE.with(|override_value| {
+            let previous = override_value.replace(Some(enabled));
+            let result = Self::new(global_db_path, project_db_path);
+            override_value.set(previous);
+            result
+        })
+    }
+
     /// Fail-closed constructor: no schema-migration authority
     /// ([`MigrationAuthority::Deny`]). Every existing caller (tests, CLI tools
     /// that are not the deploy daemon) keeps this behavior — a fresh DB
@@ -288,6 +311,12 @@ impl MemoryServer {
             {
                 let foundry_server = server.clone();
                 tokio::spawn(run_foundry_maintenance_worker(foundry_server, foundry_rx));
+            }
+            {
+                let auto_ingest_server = server.clone();
+                tokio::spawn(crate::pipeline_ops::run_auto_ingest_replay_consumer(
+                    auto_ingest_server,
+                ));
             }
 
             // Replay pending foundry jobs from DB (survive process restart)

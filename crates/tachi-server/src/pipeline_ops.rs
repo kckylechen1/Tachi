@@ -5,7 +5,9 @@ mod ingest;
 mod status;
 mod sync;
 
-pub(crate) use auto_ingest::{run_staged_auto_ingest, stage_auto_ingest_from_mcp};
+pub(crate) use auto_ingest::{
+    run_auto_ingest_replay_consumer, run_staged_auto_ingest, stage_auto_ingest_from_mcp,
+};
 pub(crate) use helpers::calculate_promotion_score;
 pub(crate) use ingest::{
     handle_extract_facts, handle_ingest, handle_ingest_event, handle_ingest_source,

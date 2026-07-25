@@ -1,5 +1,6 @@
 use super::{CircuitProbeDecision, CircuitState};
 use crate::server_state::MemoryServer;
+use crate::shared_defs::{push_dead_letter_with_limits, DeadLetter};
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use serde_json::json;
@@ -31,6 +32,25 @@ fn return_with_background_auto_ingest(
         Ok(Some(staged)) => staged,
         Ok(None) => return result,
         Err(error) => {
+            let now = Utc::now();
+            let failure_id = stable_hash(&format!(
+                "mcp-auto-ingest-stage:{capability_id}:{tool_name}:{error}"
+            ));
+            let dead_letter = DeadLetter {
+                id: failure_id.clone(),
+                tool_name: format!("mcp_auto_ingest:{tool_name}"),
+                arguments: arguments.cloned(),
+                error: error.clone(),
+                error_category: "durability".to_string(),
+                timestamp: now.to_rfc3339(),
+                retry_count: 0,
+                max_retries: 0,
+                status: "abandoned".to_string(),
+            };
+            let mut dead_letters = server.dead_letters_lock();
+            dead_letters.retain(|entry| entry.id != failure_id);
+            push_dead_letter_with_limits(&mut dead_letters, dead_letter, now);
+            drop(dead_letters);
             tracing::warn!(
                 error = %error,
                 capability_id,
@@ -595,5 +615,57 @@ mod auto_ingest_response_tests {
             retry_jobs, 1,
             "failed background ingest must remain retryable"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_auto_ingest_staging_is_visible_in_pipeline_status() {
+        let server = crate::tests::make_server();
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute_batch(
+                        "CREATE TRIGGER fail_proxy_auto_ingest_stage \
+                         BEFORE INSERT ON processed_events \
+                         WHEN NEW.worker = 'auto_ingest_job' \
+                         BEGIN SELECT RAISE(FAIL, 'injected auto-ingest stage failure'); END;",
+                    )
+                    .map_err(|error| format!("install auto-ingest stage fault: {error}"))
+            })
+            .expect("install auto-ingest stage fault");
+        let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+            "content": [{"type": "text", "text": "successful MCP payload with failed staging"}],
+            "isError": false
+        }))
+        .expect("successful MCP result fixture");
+        let original = serde_json::to_value(&result).expect("serialize original MCP result");
+        let returned = return_with_background_auto_ingest(
+            &server,
+            "mcp:test-server",
+            "stage-failure-tool",
+            &json!({"auto_ingest": true}),
+            None,
+            result,
+        );
+
+        assert_eq!(
+            serde_json::to_value(&returned).expect("serialize returned MCP result"),
+            original,
+            "staging failure must preserve the successful MCP response"
+        );
+        let status: serde_json::Value = serde_json::from_str(
+            &crate::pipeline_ops::handle_get_pipeline_status(&server)
+                .await
+                .expect("pipeline status remains available"),
+        )
+        .expect("decode pipeline status");
+        assert_eq!(
+            status["dead_letter_queue"]["abandoned"], 1,
+            "staging failure must be independently visible through pipeline status"
+        );
+        let dead_letters = server.dead_letters_lock();
+        let failure = dead_letters.front().expect("structured staging failure");
+        assert_eq!(failure.tool_name, "mcp_auto_ingest:stage-failure-tool");
+        assert!(failure.error.contains("injected auto-ingest stage failure"));
     }
 }
