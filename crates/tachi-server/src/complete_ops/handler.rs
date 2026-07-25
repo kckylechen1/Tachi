@@ -128,6 +128,10 @@ fn persist_resolved_completion_receipt_at(
             "recorded_at": Utc::now().to_rfc3339(),
         }),
     );
+    // A prior lock exhaustion records an explicit recovery marker rather than
+    // claiming final completion. The canonical row is durable now, so replace
+    // that marker in the same atomic status write.
+    status_object.remove("completion_recovery");
     let body = serde_json::to_string_pretty(&status).map_err(|error| {
         format!(
             "cannot serialize resolved completion receipt for dispatch_id={dispatch_id}: {error}"
@@ -136,6 +140,101 @@ fn persist_resolved_completion_receipt_at(
     crate::utils::write_owner_only_file_atomic(&status_path, body.as_bytes()).map_err(|error| {
         format!(
             "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+             write {}: {error}",
+            status_path.display()
+        )
+    })
+}
+
+/// Persist an explicit, idempotent marker when the eval evidence is durable
+/// but the canonical `dispatch_outcomes` row is still pending. This is NOT a
+/// terminal completion receipt: it clears any stale terminal marker so a
+/// watchdog or a later caller cannot mistake local lock exhaustion for a
+/// fully-recorded completion.
+fn persist_pending_completion_recovery_receipt(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    new_state: &str,
+    eval_memory_id: &str,
+    reviewed: bool,
+    dispatch_outcome: &Value,
+) -> Result<(), String> {
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return Err(format!(
+            "cannot persist completion recovery receipt: invalid dispatch_id={dispatch_id:?}"
+        ));
+    }
+    let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
+    persist_pending_completion_recovery_receipt_at(
+        &run_dir,
+        dispatch_id,
+        new_state,
+        eval_memory_id,
+        reviewed,
+        dispatch_outcome,
+    )
+}
+
+fn persist_pending_completion_recovery_receipt_at(
+    run_dir: &std::path::Path,
+    dispatch_id: &str,
+    new_state: &str,
+    eval_memory_id: &str,
+    reviewed: bool,
+    dispatch_outcome: &Value,
+) -> Result<(), String> {
+    let status_path = run_dir.join("status.json");
+    let mut status = match crate::dispatch_ops::read_text_file_within(
+        run_dir,
+        &status_path,
+        COMPLETION_RECEIPT_STATUS_MAX_BYTES,
+    )
+    .map_err(|error| {
+        format!("cannot persist completion recovery receipt for dispatch_id={dispatch_id}: {error}")
+    })? {
+        Some(raw) => serde_json::from_str(&raw).map_err(|error| {
+            format!(
+                "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
+                 parse {}: {error}",
+                status_path.display()
+            )
+        })?,
+        None => json!({ "dispatch_id": dispatch_id }),
+    };
+    let status_object = status.as_object_mut().ok_or_else(|| {
+        format!(
+            "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
+             {} is not a JSON object",
+            status_path.display()
+        )
+    })?;
+    let recovery = json!({
+        "status": "pending_canonical_outcome",
+        "state": new_state,
+        "closure_kind": if new_state == "TASK_STATE_INPUT_REQUIRED" {
+            Value::String("partial".to_string())
+        } else {
+            Value::Null
+        },
+        "eval_ledger_id": eval_memory_id,
+        "reviewed": reviewed,
+        "dispatch_outcome": dispatch_outcome,
+    });
+    if status_object.get("completion_recovery") == Some(&recovery)
+        && !status_object.contains_key("resolved_completion")
+    {
+        return Ok(());
+    }
+    status_object.remove("resolved_completion");
+    status_object.insert("completion_recovery".to_string(), recovery);
+    let body = serde_json::to_string_pretty(&status).map_err(|error| {
+        format!(
+            "cannot serialize completion recovery receipt for dispatch_id={dispatch_id}: {error}"
+        )
+    })?;
+    crate::utils::write_owner_only_file_atomic(&status_path, body.as_bytes()).map_err(|error| {
+        format!(
+            "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
              write {}: {error}",
             status_path.display()
         )
@@ -358,6 +457,83 @@ pub(crate) async fn handle_tachi_complete(
         diff_present,
         &safe_evidence_refs,
     );
+
+    let dispatch_outcome_recorded = dispatch_outcome_status
+        .get("recorded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let (Some(dispatch_id), Some(verdict)) =
+        (completion_dispatch_id, completion_verdict.as_ref())
+    {
+        if !dispatch_outcome_recorded {
+            // The retry in MemoryStore has already exhausted its bounded,
+            // database-only policy. Do not run any derived side effects here:
+            // the supplied delivery evidence remains durable, while this
+            // local recovery may only reconcile the canonical outcome and its
+            // receipt on a later complete call.
+            let recovery_receipt = match persist_pending_completion_recovery_receipt(
+                server,
+                dispatch_id,
+                verdict.new_state,
+                &eval_memory_id,
+                verdict.reviewed_flag,
+                &dispatch_outcome_status,
+            ) {
+                Ok(()) => json!({
+                    "status": "pending_canonical_outcome",
+                    "dispatch_id": dispatch_id,
+                    "state": verdict.new_state,
+                    "eval_memory_id": eval_memory_id,
+                    "reviewed": verdict.reviewed_flag,
+                }),
+                Err(error) => json!({
+                    "status": "recovery_receipt_failed",
+                    "dispatch_id": dispatch_id,
+                    "error": error,
+                }),
+            };
+            let pipeline_status = json!({
+                "dispatch_outcome": dispatch_outcome_status,
+                "completion_receipt": recovery_receipt,
+                "adjudication": "skipped (canonical outcome pending)",
+                "kanban_update": "skipped (canonical outcome pending)",
+                "continuity_events": "skipped (canonical outcome pending)",
+                "pattern_feedback": "skipped (canonical outcome pending)",
+                "distill_trajectory": "skipped (canonical outcome pending)",
+                "skill_evolve": "skipped (canonical outcome pending)",
+                "post_complete_hooks": "skipped (canonical outcome pending)",
+            });
+            let response = shape_complete_response(
+                json!({
+                    "recorded": false,
+                    "task_id": task_id,
+                    "task": safe_task,
+                    "agent": safe_agent,
+                    "path": path,
+                    "outcome": outcome_norm,
+                    "dispatch_id": params.dispatch_id,
+                    "profile": params.profile,
+                    "risk": params.risk,
+                    "quality_score": params.quality_score,
+                    "flow_id": params.flow_id,
+                    "issue_ref": params.issue_ref,
+                    "pr_ref": params.pr_ref,
+                    "evidence_refs": safe_evidence_refs,
+                    "tests_run": safe_tests_run,
+                    "diff_present": diff_present,
+                    "subagent_count": params.subagents.len(),
+                    "subagents": safe_subagents,
+                    "eval_entry": save_json,
+                    "next_steps": ["Canonical dispatch outcome is pending local SQLite recovery; do not replay GitHub delivery."],
+                    "pipeline": pipeline_status,
+                    "secret_redactions": secret_redactions,
+                }),
+                params.format.as_deref(),
+            );
+            return serde_json::to_string(&response)
+                .map_err(|error| format!("Failed to serialize recovery bundle: {error}"));
+        }
+    }
 
     // #1035: when the leader supplies a terminal adjudication, record it
     // linked to the outcome row just written. Fail-safe — never fails the
@@ -876,6 +1052,82 @@ mod tests {
             resolved_completion_run_dir(temp.path(), dispatch_id)
                 .expect("pre-existing confined run directory is accepted"),
             run_dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn pending_completion_recovery_receipt_is_idempotent_and_not_terminal() {
+        let temp = tempfile::tempdir().expect("temporary receipt parent");
+        let dispatch_id = "20260719T000003Z-recovery-receipt";
+        let run_dir = temp.path().join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run directory");
+        let status_path = run_dir.join("status.json");
+        std::fs::write(
+            &status_path,
+            json!({
+                "dispatch_id": dispatch_id,
+                "resolved_completion": {"state": "TASK_STATE_COMPLETED"}
+            })
+            .to_string(),
+        )
+        .expect("seed stale terminal receipt");
+        let outcome = json!({
+            "recorded": false,
+            "error": "dispatch outcome persistence failed after retry_memory_locked(op=dispatch_outcomes_upsert, db_label=global): database is locked"
+        });
+
+        persist_pending_completion_recovery_receipt_at(
+            &run_dir,
+            dispatch_id,
+            "TASK_STATE_COMPLETED",
+            "eval-recovery",
+            false,
+            &outcome,
+        )
+        .expect("persist pending recovery receipt");
+        let first = std::fs::read_to_string(&status_path).expect("read first recovery receipt");
+        let first_json: Value = serde_json::from_str(&first).expect("parse first recovery receipt");
+        assert!(first_json.get("resolved_completion").is_none());
+        assert_eq!(
+            first_json["completion_recovery"]["status"],
+            json!("pending_canonical_outcome")
+        );
+        assert_eq!(
+            first_json["completion_recovery"]["dispatch_outcome"]["recorded"],
+            json!(false)
+        );
+
+        persist_pending_completion_recovery_receipt_at(
+            &run_dir,
+            dispatch_id,
+            "TASK_STATE_COMPLETED",
+            "eval-recovery",
+            false,
+            &outcome,
+        )
+        .expect("repeat pending recovery receipt");
+        assert_eq!(
+            std::fs::read_to_string(&status_path).expect("read repeated recovery receipt"),
+            first,
+            "repeated lock exhaustion must preserve the same explicit recovery receipt"
+        );
+
+        persist_resolved_completion_receipt_at(
+            &run_dir,
+            dispatch_id,
+            "TASK_STATE_COMPLETED",
+            "eval-recovery",
+            false,
+        )
+        .expect("persist terminal receipt after canonical outcome recovery");
+        let resolved: Value = serde_json::from_str(
+            &std::fs::read_to_string(&status_path).expect("read resolved receipt"),
+        )
+        .expect("parse resolved receipt");
+        assert!(resolved.get("completion_recovery").is_none());
+        assert_eq!(
+            resolved["resolved_completion"]["eval_ledger_id"],
+            json!("eval-recovery")
         );
     }
 }

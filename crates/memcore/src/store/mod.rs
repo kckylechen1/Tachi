@@ -26,6 +26,8 @@ pub mod audit;
 pub mod crud;
 pub mod daily_pipeline;
 pub mod derived;
+#[cfg(feature = "admin")]
+pub mod dispatch_outcomes;
 pub mod distill;
 pub mod enrichment;
 pub mod events;

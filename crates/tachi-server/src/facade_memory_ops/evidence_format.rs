@@ -191,6 +191,11 @@ pub(crate) fn shape_complete_response(bundle: Value, format: Option<&str>) -> Va
         return bundle;
     }
     let mut receipt = serde_json::Map::new();
+    // Successful completions keep the compact receipt's long-standing shape,
+    // but a deferred canonical outcome must be unmistakable to callers.
+    if bundle.get("recorded").and_then(Value::as_bool) == Some(false) {
+        receipt.insert("recorded".to_string(), Value::Bool(false));
+    }
     if let Some(count) = bundle.get("subagent_count") {
         receipt.insert("subagent_count".to_string(), count.clone());
     }
@@ -593,6 +598,30 @@ pub(crate) fn parse_evidence_array(raw: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_completion_surfaces_a_pending_canonical_outcome() {
+        let receipt = shape_complete_response(
+            json!({
+                "recorded": false,
+                "subagent_count": 0,
+                "eval_entry": {"id": "eval-pending"},
+                "next_steps": [],
+                "pipeline": {
+                    "dispatch_outcome": {"recorded": false},
+                    "completion_receipt": {"status": "pending_canonical_outcome"}
+                },
+                "secret_redactions": 0,
+            }),
+            None,
+        );
+
+        assert_eq!(receipt["recorded"], json!(false));
+        assert_eq!(
+            receipt["pipeline"]["completion_receipt"],
+            json!("pending_canonical_outcome")
+        );
+    }
 
     #[test]
     fn slim_kanban_marks_stale_working_rows() {
