@@ -31,7 +31,6 @@ mod tests {
         assert!(
             !dispatch_status_needs_recovery(&json!({
                 "state": "TASK_STATE_WORKING",
-                "exit_code": 0,
                 "completion_recovery": {"status": "pending_canonical_outcome"},
             })),
             "a canonical-outcome recovery marker must remain available for replay, not be failed as an orphan"

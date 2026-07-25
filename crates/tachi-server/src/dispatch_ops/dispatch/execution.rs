@@ -1436,4 +1436,29 @@ mod tests {
             "a non-partial outcome carrying a partial marker must be rejected"
         );
     }
+
+    #[test]
+    fn pending_completion_recovery_is_a_watchdog_barrier() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        let status = serde_json::json!({
+            "state": "TASK_STATE_WORKING",
+            "completion_recovery": {
+                "status": "pending_canonical_outcome",
+                "dispatch_outcome": {"recorded": false},
+            },
+        });
+        std::fs::write(temp.path().join("status.json"), status.to_string())
+            .expect("write pending completion recovery status");
+
+        assert_eq!(
+            completion_receipt_state(temp.path()).expect("read recovery receipt"),
+            CompletionReceiptState::PendingRecovery,
+            "the watchdog must stop before predicate or exit-code terminalization"
+        );
+        assert_eq!(
+            pending_recovery_status_state(Some(&status)),
+            "TASK_STATE_WORKING",
+            "the finalizer must retain a non-terminal state while recovery is pending"
+        );
+    }
 }

@@ -422,38 +422,57 @@ pub(crate) fn emit_task_completion_events(
         .and_then(Value::as_str)
         .unwrap_or("agent")
         .to_string();
-    // `dispatch_outcome_id` is the canonical replay identity once a dispatch
-    // outcome exists. Manual completions keep their caller-supplied task id.
-    // Event types and subagent identity remain in the hash so distinct,
-    // legitimate completion facts do not collapse together.
-    let completion_identity = task_payload
+    let canonical_outcome_id = task_payload
         .get("dispatch_outcome_id")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            task_payload
-                .get("dispatch_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-        })
+        .map(str::to_string);
+    // Once the canonical outcome exists it alone owns replay identity. The
+    // handler's fallback task_id and eval path are wall-clock-derived when a
+    // caller omits task_id, so they may remain presentation data but must not
+    // participate in canonical event identity. Without a canonical outcome,
+    // retain the existing dispatch/task fallback behavior.
+    let legacy_completion_identity = task_payload
+        .get("dispatch_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| task_id.clone());
-    let task_event = TachiEventRecord {
-        id: stable_event_payload_id(&[
+    let task_event_id = match canonical_outcome_id.as_deref() {
+        Some(outcome_id) => stable_event_payload_id(&["task.outcome", outcome_id]),
+        None => stable_event_payload_id(&[
             "task.outcome",
-            completion_identity.as_str(),
+            legacy_completion_identity.as_str(),
             task_id.as_str(),
             agent.as_str(),
         ]),
+    };
+    let task_domain = task_payload
+        .get("task_type")
+        .and_then(Value::as_str)
+        .unwrap_or("task")
+        .to_string();
+    let event_session_id = canonical_outcome_id
+        .as_deref()
+        .unwrap_or(task_id.as_str())
+        .to_string();
+    let mut task_event_payload = task_payload;
+    if let (Some(outcome_id), Some(payload)) = (
+        canonical_outcome_id.as_deref(),
+        task_event_payload.as_object_mut(),
+    ) {
+        payload.remove("task_id");
+        payload.remove("eval_memory_id");
+        payload.remove("eval_path");
+        payload.insert("completion_identity".to_string(), json!(outcome_id));
+    }
+    let task_event = TachiEventRecord {
+        id: task_event_id,
         source_repo: "tachi".to_string(),
         adapter: "tachi_complete".to_string(),
         project: target.project_label(project),
-        domain: task_payload
-            .get("task_type")
-            .and_then(Value::as_str)
-            .unwrap_or("task")
-            .to_string(),
-        session_id: task_id.to_string(),
+        domain: task_domain,
+        session_id: event_session_id.clone(),
         actor: agent.to_string(),
         event_type: "task.outcome".to_string(),
         authority: AuthorityLevel::ReviewSignalOnly,
@@ -463,7 +482,7 @@ pub(crate) fn emit_task_completion_events(
             EffectScope::ProjectCycle,
         ],
         projection_hints: vec![ProjectionKind::Outcome, ProjectionKind::ProjectCycle],
-        payload: task_payload,
+        payload: task_event_payload,
         provenance: json!({
             "source": "tachi_complete",
             "note": "task eval bridge from /eval memory into append-only event ledger",
@@ -487,15 +506,37 @@ pub(crate) fn emit_task_completion_events(
             .get("agent")
             .and_then(Value::as_str)
             .unwrap_or("agent");
-        let event = TachiEventRecord {
-            id: stable_event_payload_id(&[
+        let event_id = match canonical_outcome_id.as_deref() {
+            Some(outcome_id) => stable_event_payload_id(&[
                 "subagent.evaluated",
-                completion_identity.as_str(),
+                outcome_id,
+                role,
+                subagent_name,
+                &index.to_string(),
+            ]),
+            None => stable_event_payload_id(&[
+                "subagent.evaluated",
+                legacy_completion_identity.as_str(),
                 task_id.as_str(),
                 role,
                 subagent_name,
                 &index.to_string(),
             ]),
+        };
+        let event_payload = match canonical_outcome_id.as_deref() {
+            Some(outcome_id) => json!({
+                "completion_identity": outcome_id,
+                "parent_agent": agent.clone(),
+                "subagent": subagent,
+            }),
+            None => json!({
+                "task_id": task_id.clone(),
+                "parent_agent": agent.clone(),
+                "subagent": subagent,
+            }),
+        };
+        let event = TachiEventRecord {
+            id: event_id,
             source_repo: "tachi".to_string(),
             adapter: "tachi_complete".to_string(),
             project: target.project_label(project),
@@ -504,17 +545,13 @@ pub(crate) fn emit_task_completion_events(
                 .and_then(Value::as_str)
                 .unwrap_or("subagent")
                 .to_string(),
-            session_id: task_id.to_string(),
+            session_id: event_session_id.clone(),
             actor: subagent_name.to_string(),
             event_type: "subagent.evaluated".to_string(),
             authority: AuthorityLevel::ReviewSignalOnly,
             effects: vec![EffectScope::Scoring, EffectScope::Routing],
             projection_hints: vec![ProjectionKind::DomainProfile, ProjectionKind::ProjectCycle],
-            payload: json!({
-                "task_id": task_id.clone(),
-                "parent_agent": agent.clone(),
-                "subagent": subagent,
-            }),
+            payload: event_payload,
             provenance: json!({
                 "source": "tachi_complete.subagents",
                 "note": "leader-compressed subagent eval; raw transcripts stay out of memory",

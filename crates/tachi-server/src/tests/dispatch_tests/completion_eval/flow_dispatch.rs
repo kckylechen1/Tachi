@@ -102,7 +102,6 @@ async fn repeated_task_complete_reuses_outcome_and_completion_events() {
     let (server, _temp_home) = make_server_with_temp_home();
     let flow_id = "flow_20260726T000001Z-completion-replay";
     let dispatch_id = "20260726T000001Z-completion-replay";
-    let task_id = "eval-completion-replay";
     seed_dispatch_run(&server, dispatch_id);
     crate::task_lifecycle::mark_task_dispatch(
         flow_id,
@@ -112,10 +111,11 @@ async fn repeated_task_complete_reuses_outcome_and_completion_events() {
     .expect("mark dispatch");
 
     let mut params = task_params("complete");
+    params.format = Some("full".to_string());
     params.task = Some("Reconcile a previously interrupted completion".to_string());
     params.agent = Some("codex".to_string());
     params.outcome = Some("success".to_string());
-    params.task_id = Some(task_id.to_string());
+    params.task_id = None;
     params.task_type = Some("fix_request".to_string());
     params.profile = Some("codex_builder".to_string());
     params.dispatch_id = Some(dispatch_id.to_string());
@@ -129,14 +129,26 @@ async fn repeated_task_complete_reuses_outcome_and_completion_events() {
     }];
 
     crate::gh_ops::reset_github_command_runner_call_count();
-    server
+    let first_raw = server
         .tachi_task(rmcp::handler::server::wrapper::Parameters(params.clone()))
         .await
         .expect("first task completion");
-    server
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let second_raw = server
         .tachi_task(rmcp::handler::server::wrapper::Parameters(params))
         .await
         .expect("replayed task completion");
+    let first: Value = serde_json::from_str(&first_raw).expect("first completion JSON");
+    let second: Value = serde_json::from_str(&second_raw).expect("second completion JSON");
+    assert_ne!(
+        first["task_id"], second["task_id"],
+        "the fixture must cross the wall-clock fallback task-id boundary"
+    );
+    assert_eq!(
+        second["pipeline"]["continuity_events"]["status"],
+        json!("saved"),
+        "an idempotent canonical replay must not surface an event collision: {second:#}"
+    );
 
     let outcome_rows: i64 = server
         .with_global_store_read(|store| {
@@ -161,7 +173,6 @@ async fn repeated_task_complete_reuses_outcome_and_completion_events() {
                 store
                     .list_tachi_events(&memcore::TachiEventQuery {
                         event_type: Some(event_type.to_string()),
-                        session_id: Some(task_id.to_string()),
                         limit: 10,
                         ..memcore::TachiEventQuery::default()
                     })
