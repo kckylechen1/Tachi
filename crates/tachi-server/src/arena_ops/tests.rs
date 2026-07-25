@@ -38,7 +38,8 @@ fn temp_arena_root() -> ArenaRootGuard {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let original = std::env::var_os("TACHI_ARENA_ROOT");
-    let path = crate::utils::test_fixture_path(format!("tachi-arena-test-{}", uuid::Uuid::new_v4()));
+    let path =
+        crate::utils::test_fixture_path(format!("tachi-arena-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&path).unwrap();
     // SAFETY: protected by tachi_arena_root_env_lock(); see Drop impl.
     unsafe {

@@ -42,7 +42,8 @@ fn migration_plan_targets_only_legacy_dbs_and_skips_keep_actions() {
 
 #[test]
 fn manifest_update_drops_migrated_sources_and_inserts_target() {
-    let root = crate::utils::test_fixture_path(format!("tachi-tidy-manifest-{}", uuid::Uuid::new_v4()));
+    let root =
+        crate::utils::test_fixture_path(format!("tachi-tidy-manifest-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".tachi")).expect("create .tachi");
     let manifest_path = root.join(".tachi").join("manifest.json");
 
