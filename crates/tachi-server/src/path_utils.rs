@@ -17,11 +17,42 @@ pub(crate) use alias::{
     plan_c_project_root_from_local_db, resolve_project_db_path,
 };
 
-/// Classify a manifest DB leaf without changing non-project path semantics.
-/// Project entries are canonical data files and must never be symlinks;
-/// global and other roles retain their existing target-following `exists` behavior.
+/// Return whether a persisted project identity is safe to address without
+/// lossy normalization. This is shared by named-project routing and manifest
+/// scope parsing so stale manifest roles cannot bypass the project DB guard.
+pub(crate) fn is_canonical_project_identity(project_name: &str) -> bool {
+    !project_name.is_empty()
+        && project_name.trim() == project_name
+        && !project_name.contains('/')
+        && !project_name.contains('\\')
+        && !project_name.contains("..")
+        && !project_name.starts_with('.')
+        && !project_name.eq_ignore_ascii_case("unnamed")
+        && project_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+/// Parse a canonical manifest project scope. Prefix-only or malformed scopes
+/// do not carry project authority.
+pub(crate) fn canonical_project_scope_hint(scope_hint: &str) -> Option<&str> {
+    let project_name = scope_hint.strip_prefix("project:")?;
+    is_canonical_project_identity(project_name).then_some(project_name)
+}
+
+/// Determine whether a manifest entry names a project DB that must be a
+/// canonical regular file. Older manifests can retain `DbRole::Unknown` while
+/// preserving a canonical `project:<identity>` scope.
+pub(crate) fn manifest_db_is_project_protected(entry: &crate::manifest::DbEntry) -> bool {
+    entry.role == crate::manifest::DbRole::Project
+        || canonical_project_scope_hint(&entry.scope_hint).is_some()
+}
+
+/// Classify a manifest DB leaf without changing canonical non-project path
+/// semantics. Project entries are canonical data files and must never be
+/// symlinks; global and runtime roles retain target-following `exists` behavior.
 pub(crate) fn manifest_db_leaf_exists(entry: &crate::manifest::DbEntry) -> Result<bool, String> {
-    if entry.role == crate::manifest::DbRole::Project {
+    if manifest_db_is_project_protected(entry) {
         canonical_db_leaf_exists_without_symlink(std::path::Path::new(&entry.path))
     } else {
         Ok(std::path::Path::new(&entry.path).exists())

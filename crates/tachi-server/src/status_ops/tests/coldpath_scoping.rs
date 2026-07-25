@@ -112,7 +112,7 @@ fn file_identity(path: &std::path::Path) -> (u64, u64) {
 }
 
 #[cfg(unix)]
-fn assert_status_project_symlink_is_structured_error(kind: &str) {
+fn assert_status_project_symlink_is_structured_error(kind: &str, role: DbRole) {
     let dir = tempfile::tempdir().expect("temp dir");
     let app_home = dir.path().join("home");
     let global_db = app_home.join("global.db");
@@ -136,14 +136,13 @@ fn assert_status_project_symlink_is_structured_error(kind: &str) {
     };
     std::os::unix::fs::symlink(&target, &project_link).expect("project symlink");
     let link_identity = file_identity(&project_link);
+    let mut project_entry = entry(&project_link, role);
+    project_entry.scope_hint = "project:test".to_string();
     let manifest = Manifest {
         schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
         generated_at: chrono::Utc::now().to_rfc3339(),
         comment: String::new(),
-        dbs: vec![
-            entry(&global_db, DbRole::Global),
-            entry(&project_link, DbRole::Project),
-        ],
+        dbs: vec![entry(&global_db, DbRole::Global), project_entry],
     };
     manifest
         .save(&app_home.join("manifest.json"))
@@ -174,19 +173,25 @@ fn assert_status_project_symlink_is_structured_error(kind: &str) {
 #[test]
 #[cfg(unix)]
 fn status_project_wrong_target_symlink_is_structured_error() {
-    assert_status_project_symlink_is_structured_error("wrong");
+    assert_status_project_symlink_is_structured_error("wrong", DbRole::Project);
 }
 
 #[test]
 #[cfg(unix)]
 fn status_project_dangling_symlink_is_structured_error() {
-    assert_status_project_symlink_is_structured_error("dangling");
+    assert_status_project_symlink_is_structured_error("dangling", DbRole::Project);
 }
 
 #[test]
 #[cfg(unix)]
 fn status_project_symlink_loop_is_structured_error() {
-    assert_status_project_symlink_is_structured_error("loop");
+    assert_status_project_symlink_is_structured_error("loop", DbRole::Project);
+}
+
+#[test]
+#[cfg(unix)]
+fn status_stale_project_scope_dangling_symlink_is_structured_error() {
+    assert_status_project_symlink_is_structured_error("dangling", DbRole::Unknown);
 }
 
 #[test]

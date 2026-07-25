@@ -1,4 +1,5 @@
 use super::*;
+use crate::manifest::{DbEntry, DbRole};
 use crate::test_support::{CwdRestore, EnvRestore};
 use std::path::{Path, PathBuf};
 
@@ -7,6 +8,83 @@ fn with_env_lock<F: FnOnce()>(f: F) {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     f();
+}
+
+fn manifest_entry(path: &Path, role: DbRole, scope_hint: &str) -> DbEntry {
+    DbEntry {
+        path: path.to_string_lossy().into_owned(),
+        role,
+        owner: "test".into(),
+        schema_kind: "tachi".into(),
+        vec_enabled: false,
+        allow_write: true,
+        last_doctor_at: String::new(),
+        last_classification: "healthy".into(),
+        scope_hint: scope_hint.into(),
+        notes: String::new(),
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn manifest_leaf_protects_valid_project_scope_when_role_is_stale() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let foreign_db = dir.path().join("foreign.db");
+    std::fs::write(&foreign_db, b"foreign").expect("foreign DB");
+    let linked_project = dir.path().join("linked-project.db");
+    std::os::unix::fs::symlink(&foreign_db, &linked_project).expect("linked project DB");
+    let stale_linked = manifest_entry(&linked_project, DbRole::Unknown, "project:test");
+    let linked_error = manifest_db_leaf_exists(&stale_linked)
+        .expect_err("valid project scope must reject a linked project DB");
+    assert!(
+        linked_error.contains("canonical repo DB path"),
+        "{linked_error}"
+    );
+
+    let missing_target = dir.path().join("missing.db");
+    let dangling_project = dir.path().join("dangling-project.db");
+    std::os::unix::fs::symlink(&missing_target, &dangling_project).expect("dangling project DB");
+    let stale_dangling = manifest_entry(&dangling_project, DbRole::Unknown, "project:test");
+    let dangling_error = manifest_db_leaf_exists(&stale_dangling)
+        .expect_err("valid project scope must reject a dangling project DB");
+    assert!(
+        dangling_error.contains("canonical repo DB path"),
+        "{dangling_error}"
+    );
+
+    for scope_hint in [
+        "project:",
+        "project: bad",
+        "project:../test",
+        "project:test/path",
+        "project:test\\path",
+        "project:.hidden",
+        "project:unnamed",
+        "project:test:stale",
+        "project",
+        "projects:test",
+    ] {
+        let entry = manifest_entry(&linked_project, DbRole::Unknown, scope_hint);
+        assert_eq!(
+            manifest_db_leaf_exists(&entry),
+            Ok(true),
+            "non-canonical scope '{scope_hint}' must not become project authority"
+        );
+    }
+
+    for (role, scope_hint) in [
+        (DbRole::Global, "global"),
+        (DbRole::Agent, "runtime"),
+        (DbRole::Foundry, "foundry"),
+        (DbRole::Unknown, "runtime"),
+    ] {
+        let entry = manifest_entry(&linked_project, role, scope_hint);
+        assert_eq!(
+            manifest_db_leaf_exists(&entry),
+            Ok(true),
+            "non-project role/scope '{scope_hint}' must retain target-following behavior"
+        );
+    }
 }
 
 #[test]
@@ -263,11 +341,10 @@ fn plan_c_symlink_eexist_race_regular_file_returns_split_brain() {
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         std::fs::write(&local_db, b"canonical").expect("local DB");
 
-        let outcome = super::symlink::ensure_plan_c_symlink_with_test_hook(
-            &local_db,
-            &repo,
-            |alias_db| std::fs::write(alias_db, b"racing-regular").expect("racing alias"),
-        );
+        let outcome =
+            super::symlink::ensure_plan_c_symlink_with_test_hook(&local_db, &repo, |alias_db| {
+                std::fs::write(alias_db, b"racing-regular").expect("racing alias")
+            });
 
         let PlanCLinkOutcome::SplitBrain(issue) = outcome else {
             panic!("expected split-brain race outcome, got {outcome:?}");
@@ -291,13 +368,10 @@ fn plan_c_symlink_eexist_race_wrong_target_returns_integrity() {
         let wrong_db = tmp.path().join("wrong-target.db");
         std::fs::write(&wrong_db, b"wrong").expect("wrong DB");
 
-        let outcome = super::symlink::ensure_plan_c_symlink_with_test_hook(
-            &local_db,
-            &repo,
-            |alias_db| {
+        let outcome =
+            super::symlink::ensure_plan_c_symlink_with_test_hook(&local_db, &repo, |alias_db| {
                 std::os::unix::fs::symlink(&wrong_db, alias_db).expect("racing wrong symlink")
-            },
-        );
+            });
 
         let PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::WrongTarget {
             alias_db,
@@ -324,14 +398,10 @@ fn plan_c_symlink_eexist_race_matching_target_is_accepted() {
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         std::fs::write(&local_db, b"canonical").expect("local DB");
 
-        let outcome = super::symlink::ensure_plan_c_symlink_with_test_hook(
-            &local_db,
-            &repo,
-            |alias_db| {
-                std::os::unix::fs::symlink(&local_db, alias_db)
-                    .expect("racing matching symlink")
-            },
-        );
+        let outcome =
+            super::symlink::ensure_plan_c_symlink_with_test_hook(&local_db, &repo, |alias_db| {
+                std::os::unix::fs::symlink(&local_db, alias_db).expect("racing matching symlink")
+            });
 
         assert!(matches!(outcome, PlanCLinkOutcome::AlreadyLinked));
         let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");

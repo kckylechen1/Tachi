@@ -337,17 +337,7 @@ impl MemoryServer {
         // into another project's directory. `unnamed` is permanently
         // ambiguous with the historical sanitizer fallback and cannot be
         // auto-assigned safely.
-        if project_name.is_empty()
-            || project_name.trim() != project_name
-            || project_name.contains('/')
-            || project_name.contains('\\')
-            || project_name.contains("..")
-            || project_name.starts_with('.')
-            || project_name.eq_ignore_ascii_case("unnamed")
-            || !project_name
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-        {
+        if !crate::path_utils::is_canonical_project_identity(project_name) {
             return Err(format!(
                 "Invalid project identity '{project_name}': use the exact registered ASCII alias; ambiguous or lossy-normalized names are refused"
             ));

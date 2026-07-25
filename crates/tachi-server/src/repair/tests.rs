@@ -76,6 +76,37 @@ fn db_context_rejects_manifest_project_symlink_without_external_mutation() {
 }
 
 #[test]
+#[cfg(unix)]
+fn db_context_rejects_stale_project_scope_symlink_without_external_mutation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let external_db = dir.path().join("external.db");
+    let connection = fresh_db_at(&external_db, "foreign");
+    drop(connection);
+    let external_identity = repair_file_identity(&external_db);
+    let external_before = std::fs::read(&external_db).expect("external bytes");
+    let project_db = dir.path().join("manifest-project.db");
+    std::os::unix::fs::symlink(&external_db, &project_db).expect("manifest project symlink");
+    let project_identity = repair_file_identity(&project_db);
+    let mut entry = manifest_db_entry(&project_db, crate::manifest::DbRole::Unknown);
+    entry.scope_hint = "project:test".to_string();
+
+    let error = match DbContext::open(&entry) {
+        Err(error) => error,
+        Ok(_) => panic!("stale project scope symlink must refuse repair open"),
+    };
+
+    assert!(
+        error.to_string().contains("canonical repo DB path")
+            && error.to_string().contains("must not be a symlink"),
+        "expected canonical leaf refusal, got: {error}"
+    );
+    assert_eq!(repair_file_identity(&project_db), project_identity);
+    assert_eq!(std::fs::read_link(&project_db).unwrap(), external_db);
+    assert_eq!(repair_file_identity(&external_db), external_identity);
+    assert_eq!(std::fs::read(&external_db).unwrap(), external_before);
+}
+
+#[test]
 fn db_context_opens_regular_manifest_project_db() {
     let dir = tempfile::tempdir().expect("tempdir");
     let project_db = dir.path().join("project.db");
@@ -97,7 +128,8 @@ fn db_context_preserves_global_db_symlink_semantics() {
     drop(connection);
     let global_db = dir.path().join("global.db");
     std::os::unix::fs::symlink(&external_db, &global_db).expect("global DB symlink");
-    let entry = manifest_db_entry(&global_db, crate::manifest::DbRole::Global);
+    let mut entry = manifest_db_entry(&global_db, crate::manifest::DbRole::Global);
+    entry.scope_hint = "global".to_string();
 
     let context = DbContext::open(&entry).expect("global DB symlink remains supported");
 
