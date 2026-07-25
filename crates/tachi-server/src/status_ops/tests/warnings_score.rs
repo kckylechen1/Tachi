@@ -168,6 +168,28 @@ fn build_status_warnings_includes_project_warnings() {
 }
 
 #[test]
+fn build_status_warnings_includes_plan_c_alias_integrity() {
+    let mut snapshot = empty_snapshot(vec![]);
+    snapshot.plan_c_alias_integrity = vec![crate::path_utils::PlanCAliasIntegrity::WrongTarget {
+        alias_db: "/tmp/plan-c/project.db".into(),
+        expected_db: "/repo/.tachi/tachi-memory.db".into(),
+        actual_db: "/foreign/tachi-memory.db".into(),
+    }];
+
+    let warnings = build_status_warnings(&snapshot, &daemon_running());
+
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.contains("Plan C alias integrity failure")
+                && warning.contains("/tmp/plan-c/project.db")
+                && warning.contains("/foreign/tachi-memory.db")
+                && warning.contains("/repo/.tachi/tachi-memory.db")
+        }),
+        "Plan C alias integrity warning should retain all conflicting paths, got: {warnings:?}"
+    );
+}
+
+#[test]
 fn build_status_warnings_lists_db_names_for_failed_jobs() {
     let mut sigil = db_status("sigil", 3, 0, 0.95);
     sigil.latest_failed_job = Some(LatestFailedJob {

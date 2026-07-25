@@ -477,12 +477,13 @@ impl ProjectDbPrecommit {
         }
         match std::fs::OpenOptions::new()
             .create_new(true)
+            .read(true)
             .write(true)
             .open(&self.db_path)
         {
-            Ok(_) => {
+            Ok(file) => {
                 self.created_db_artifacts
-                    .push(OwnedDbArtifact::snapshot(self.db_path.clone())?);
+                    .push(OwnedDbArtifact::from_open_file(self.db_path.clone(), file)?);
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
@@ -508,20 +509,40 @@ impl ProjectDbPrecommit {
     }
 
     fn open_db(&mut self) -> Result<(), String> {
+        self.run_open_attempt(|db_path| {
+            let db_path_str = db_path
+                .to_str()
+                .ok_or_else(|| format!("project DB path is not UTF-8: {}", db_path.display()))?;
+            let store = memcore::MemoryStore::open(db_path_str).map_err(|error| {
+                format!("initialize project DB at {}: {error}", db_path.display())
+            })?;
+            drop(store);
+            Ok(())
+        })
+    }
+
+    fn run_open_attempt<T>(
+        &mut self,
+        attempt: impl FnOnce(&std::path::Path) -> Result<T, String>,
+    ) -> Result<T, String> {
         self.assert_owned_db_artifacts_unchanged()?;
-        let db_path = self
-            .db_path
-            .to_str()
-            .ok_or_else(|| format!("project DB path is not UTF-8: {}", self.db_path.display()))?;
-        let store = memcore::MemoryStore::open(db_path).map_err(|error| {
-            format!(
-                "initialize project DB at {}: {error}",
-                self.db_path.display()
-            )
-        })?;
-        drop(store);
-        self.refresh_owned_db_artifacts_after_our_write()?;
-        Ok(())
+        let result = attempt(&self.db_path);
+        self.finish_open_attempt(result)
+    }
+
+    fn finish_open_attempt<T>(&mut self, result: Result<T, String>) -> Result<T, String> {
+        if !self.created_db() {
+            return result;
+        }
+        let observation = self.refresh_owned_db_artifacts_after_open_attempt();
+        match (result, observation) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(observation_error)) => Err(observation_error),
+            (Err(error), Err(observation_error)) => Err(format!(
+                "{error}; post-open ownership observation also failed: {observation_error}"
+            )),
+        }
     }
 
     fn assert_owned_db_artifacts_unchanged(&self) -> Result<(), String> {
@@ -531,28 +552,33 @@ impl ProjectDbPrecommit {
         Ok(())
     }
 
-    fn refresh_owned_db_artifacts_after_our_write(&mut self) -> Result<(), String> {
-        let mut refreshed = Vec::new();
+    fn refresh_owned_db_artifacts_after_open_attempt(&mut self) -> Result<(), String> {
+        let db_artifact = self
+            .created_db_artifacts
+            .iter_mut()
+            .find(|artifact| artifact.path() == self.db_path)
+            .ok_or_else(|| {
+                format!(
+                    "reserved project DB {} lost its ownership handle during initialization; refusing cleanup",
+                    self.db_path.display()
+                )
+            })?;
+        db_artifact.refresh_same_object_state()?;
+
+        let mut discovered = Vec::new();
         for (path, preexisting) in &self.db_artifacts_preexisting {
-            if *preexisting || !path.exists() {
+            if *preexisting
+                || !path.exists()
+                || self
+                    .created_db_artifacts
+                    .iter()
+                    .any(|artifact| artifact.path() == path)
+            {
                 continue;
             }
-            let snapshot = OwnedDbArtifact::snapshot(path.clone())?;
-            if let Some(previous) = self
-                .created_db_artifacts
-                .iter()
-                .find(|previous| previous.path() == snapshot.path())
-            {
-                if !previous.same_object_identity(&snapshot) {
-                    return Err(format!(
-                        "created DB artifact {} changed identity during initialization; refusing ownership guess",
-                        snapshot.path().display()
-                    ));
-                }
-            }
-            refreshed.push(snapshot);
+            discovered.push(OwnedDbArtifact::snapshot(path.clone())?);
         }
-        self.created_db_artifacts = refreshed;
+        self.created_db_artifacts.extend(discovered);
         Ok(())
     }
 
@@ -658,46 +684,104 @@ fn file_object_identity(metadata: &std::fs::Metadata) -> FileObjectIdentity {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct OwnedFile {
     path: PathBuf,
     object_identity: FileObjectIdentity,
     contents: Vec<u8>,
+    handle: std::fs::File,
 }
 
 impl OwnedFile {
     fn snapshot(path: PathBuf) -> Result<Self, String> {
-        let object_identity = regular_file_identity(&path)?;
-        let contents = std::fs::read(&path)
-            .map_err(|error| format!("read created DB artifact {}: {error}", path.display()))?;
-        let verified_contents = std::fs::read(&path).map_err(|error| {
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .map_err(|error| {
+                format!(
+                    "open created DB artifact {} for ownership: {error}",
+                    path.display()
+                )
+            })?;
+        Self::from_open_file(path, handle)
+    }
+
+    fn from_open_file(path: PathBuf, handle: std::fs::File) -> Result<Self, String> {
+        let object_identity = file_object_identity(&handle.metadata().map_err(|error| {
             format!(
-                "re-read created DB artifact {} to verify ownership snapshot: {error}",
+                "inspect held created DB artifact {}: {error}",
                 path.display()
             )
-        })?;
-        let verified_identity = regular_file_identity(&path)?;
-        if contents != verified_contents || object_identity != verified_identity {
-            return Err(format!(
-                "created DB artifact {} changed while recording ownership; refusing cleanup without a stable snapshot",
-                path.display()
-            ));
-        }
-        Ok(Self {
+        })?);
+        let mut owned = Self {
             path,
             object_identity,
-            contents,
-        })
+            contents: Vec::new(),
+            handle,
+        };
+        owned.refresh_same_object_state()?;
+        Ok(owned)
+    }
+
+    fn stable_current_contents(&self) -> Result<Vec<u8>, String> {
+        let held_identity = file_object_identity(&self.handle.metadata().map_err(|error| {
+            format!(
+                "inspect held created DB artifact {}: {error}",
+                self.path.display()
+            )
+        })?);
+        let path_identity_before = regular_file_identity(&self.path)?;
+        if held_identity != self.object_identity || path_identity_before != self.object_identity {
+            return Err(format!(
+                "created DB artifact {} no longer resolves to this transaction's held object",
+                self.path.display()
+            ));
+        }
+
+        let read_contents = || -> Result<Vec<u8>, String> {
+            use std::io::{Read, Seek};
+
+            let mut reader = self.handle.try_clone().map_err(|error| {
+                format!(
+                    "clone held created DB artifact {} for reading: {error}",
+                    self.path.display()
+                )
+            })?;
+            reader.rewind().map_err(|error| {
+                format!(
+                    "rewind held created DB artifact {}: {error}",
+                    self.path.display()
+                )
+            })?;
+            let mut contents = Vec::new();
+            reader.read_to_end(&mut contents).map_err(|error| {
+                format!(
+                    "read held created DB artifact {}: {error}",
+                    self.path.display()
+                )
+            })?;
+            Ok(contents)
+        };
+        let contents = read_contents()?;
+        let verified_contents = read_contents()?;
+        let path_identity_after = regular_file_identity(&self.path)?;
+        if contents != verified_contents || path_identity_after != self.object_identity {
+            return Err(format!(
+                "created DB artifact {} changed while recording held ownership state",
+                self.path.display()
+            ));
+        }
+        Ok(contents)
+    }
+
+    fn refresh_same_object_state(&mut self) -> Result<(), String> {
+        self.contents = self.stable_current_contents()?;
+        Ok(())
     }
 
     fn assert_unchanged(&self) -> Result<(), String> {
-        match Self::snapshot(self.path.clone()) {
-            Ok(current)
-                if current.object_identity == self.object_identity
-                    && current.contents == self.contents =>
-            {
-                Ok(())
-            }
+        match self.stable_current_contents() {
+            Ok(current) if current == self.contents => Ok(()),
             Ok(_) => Err(format!(
                 "created DB artifact {} no longer matches this transaction's object and contents; preserving foreign data",
                 self.path.display()
@@ -722,13 +806,17 @@ impl OwnedFile {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum OwnedDbArtifact {
     File(OwnedFile),
     Symlink(OwnedSymlink),
 }
 
 impl OwnedDbArtifact {
+    fn from_open_file(path: PathBuf, file: std::fs::File) -> Result<Self, String> {
+        OwnedFile::from_open_file(path, file).map(Self::File)
+    }
+
     fn snapshot(path: PathBuf) -> Result<Self, String> {
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| format!("inspect created DB artifact {}: {error}", path.display()))?;
@@ -751,13 +839,21 @@ impl OwnedDbArtifact {
         }
     }
 
-    fn same_object_identity(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::File(left), Self::File(right)) => left.object_identity == right.object_identity,
-            (Self::Symlink(left), Self::Symlink(right)) => {
-                left.object_identity == right.object_identity
+    fn refresh_same_object_state(&mut self) -> Result<(), String> {
+        match self {
+            Self::File(file) => file.refresh_same_object_state(),
+            Self::Symlink(symlink) => {
+                let current = OwnedSymlink::snapshot(symlink.path.clone())?;
+                if current.object_identity != symlink.object_identity
+                    || current.target != symlink.target
+                {
+                    return Err(format!(
+                        "created DB artifact {} changed identity during initialization; refusing ownership guess",
+                        symlink.path.display()
+                    ));
+                }
+                Ok(())
             }
-            _ => false,
         }
     }
 
@@ -1045,10 +1141,11 @@ pub(crate) async fn handle_tachi_init_project_db(
     let activation = register_repo_local_manifest_entry_then(&db_path, &project_name, || {
         precommit.assert_owned_db_artifacts_unchanged()?;
         let activation = server.activate_project_db(db_path.clone());
-        if activation.is_ok() && precommit.created_db() {
-            precommit.refresh_owned_db_artifacts_after_our_write()?;
+        if precommit.created_db() {
+            precommit.finish_open_attempt(activation)
+        } else {
+            activation
         }
-        activation
     });
     let was_new_activation = match activation {
         Ok(value) => value,
@@ -1207,6 +1304,71 @@ mod resolve_or_register_workspace_root_tests {
             assert_eq!(
                 std::fs::read(&db_path).expect("foreign replacement preserved"),
                 b"foreign replacement"
+            );
+            assert_eq!(file_identity(&db_path), foreign_identity);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_open_failure_removes_owned_sqlite_state() {
+        with_test_home(|root| {
+            let db_path = root.join("Open-Failure-Repo/.tachi/tachi-memory.db");
+            let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+            let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
+            let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+            precommit.reserve_db().expect("reserve transaction DB");
+
+            let failure = precommit
+                .run_open_attempt(|path| {
+                    let store = memcore::MemoryStore::open(path.to_str().expect("UTF-8 DB path"))
+                        .expect("SQLite mutates the reserved DB before the injected failure");
+                    drop(store);
+                    std::fs::write(&wal_path, b"transaction WAL").expect("inject WAL residue");
+                    std::fs::write(&shm_path, b"transaction SHM").expect("inject SHM residue");
+                    Err::<(), _>("injected failure after SQLite mutation".to_string())
+                })
+                .expect_err("injected open failure");
+            let error = precommit.abort(failure);
+
+            assert_eq!(error, "injected failure after SQLite mutation", "{error}");
+            assert!(!db_path.exists(), "owned DB residue must be removed");
+            assert!(!wal_path.exists(), "owned WAL residue must be removed");
+            assert!(!shm_path.exists(), "owned SHM residue must be removed");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_open_failure_preserves_foreign_db_replacement() {
+        with_test_home(|root| {
+            let db_path = root.join("Open-Failure-Replaced-Repo/.tachi/tachi-memory.db");
+            let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+            precommit.reserve_db().expect("reserve transaction DB");
+            let reserved_identity = file_identity(&db_path);
+
+            let mut foreign_identity = None;
+            let failure = precommit
+                .run_open_attempt(|path| {
+                    let store = memcore::MemoryStore::open(path.to_str().expect("UTF-8 DB path"))
+                        .expect("SQLite mutates the reserved DB before the injected failure");
+                    drop(store);
+                    foreign_identity = Some(replace_file_atomically(
+                        path,
+                        b"foreign replacement during failed SQLite open",
+                    ));
+                    Err::<(), _>("injected failure after foreign replacement".to_string())
+                })
+                .expect_err("injected open failure");
+            let foreign_identity = foreign_identity.expect("foreign inode");
+            assert_ne!(reserved_identity, foreign_identity, "replacement inode");
+
+            let error = precommit.abort(failure);
+
+            assert!(error.contains("rollback also reported"), "{error}");
+            assert_eq!(
+                std::fs::read(&db_path).expect("foreign DB preserved"),
+                b"foreign replacement during failed SQLite open"
             );
             assert_eq!(file_identity(&db_path), foreign_identity);
         });
