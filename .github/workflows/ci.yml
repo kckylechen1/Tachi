@@ -34,24 +34,21 @@ jobs:
             exit 1
           fi
 
-          workflow_files=()
-          while IFS= read -r file; do
-            workflow_files+=("${file}")
-          done < <(git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')
           policy_files=()
           while IFS= read -r file; do
             policy_files+=("${file}")
-          done < <(git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml' '.github/actions/**/action.yml' '.github/actions/**/action.yaml')
-          if ((${#workflow_files[@]} == 0 || ${#policy_files[@]} == 0)); then
-            echo 'supply-chain policy found no checked-in workflows or composite actions' >&2
+          done < <(git ls-files | grep -E '(^\.github/workflows/.+\.ya?ml$|(^|/)action\.ya?ml$)')
+          if ((${#policy_files[@]} == 0)); then
+            echo 'supply-chain policy found no checked-in workflow or action roots' >&2
             exit 1
           fi
-          if ! printf '%s\n' "${policy_files[@]}" | grep -Eq '^\.github/actions/.+/action\.ya?ml$'; then
-            echo 'supply-chain policy must include checked-in composite actions' >&2
+          if ! printf '%s\n' "${policy_files[@]}" | grep -Eq '^\.github/workflows/.+\.ya?ml$' \
+            || ! printf '%s\n' "${policy_files[@]}" | grep -Eq '(^|/)action\.ya?ml$'; then
+            echo 'supply-chain policy must include every tracked workflow and action manifest' >&2
             exit 1
           fi
 
-          ruby .github/scripts/validate_action_pins.rb --self-test --repo-root . "${workflow_files[@]}"
+          ruby .github/scripts/validate_action_pins.rb --self-test --repo-root . "${policy_files[@]}"
 
           image_reference_pattern='^[[:space:]]*(image|container):[[:space:]]+[^[:space:]#]+'
           digest_pattern='@sha256:[0-9a-f]{64}'

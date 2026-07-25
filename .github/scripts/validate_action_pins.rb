@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "base64"
 require "open3"
 require "pathname"
 require "psych"
@@ -55,6 +56,14 @@ class RepoInventory
 
   def workflow_files
     tracked_files.grep(%r{\A\.github/workflows/.+\.ya?ml\z}).sort
+  end
+
+  def action_manifest_files
+    tracked_files.grep(%r{(?:\A|/)action\.ya?ml\z}).sort
+  end
+
+  def policy_root_files
+    (workflow_files + action_manifest_files).uniq.sort
   end
 
   def read(relative)
@@ -114,11 +123,11 @@ class ActionPolicy
     normalized = roots.map { |path| Pathname.new(path).cleanpath.to_s }
     raise PolicyError, "workflow roots contain duplicates" unless normalized.uniq.length == normalized.length
 
-    expected = @inventory.workflow_files
+    expected = @inventory.policy_root_files
     missing = expected - normalized
     extra = normalized - expected
     unless missing.empty? && extra.empty?
-      raise PolicyError, "workflow root coverage mismatch: missing=#{missing.join(',')} extra=#{extra.join(',')}"
+      raise PolicyError, "policy root coverage mismatch: missing=#{missing.join(',')} extra=#{extra.join(',')}"
     end
 
     normalized.sort.each { |path| parse_path(path) }
@@ -251,12 +260,75 @@ class ActionPolicy
       return
     end
 
-    if dynamic_cargo_installer?(value)
-      raise PolicyError, "#{path}: no dynamic cargo installer invocation: #{value.inspect}"
+    if encoded_cargo_installer?(value) || dynamic_cargo_installer?(value)
+      raise PolicyError, "#{path}: no known dynamic/encoded cargo installer invocation: #{value.inspect}"
     end
     return unless cargo_install_occurrence?(value)
 
     raise PolicyError, "#{path}: unaudited cargo install command: #{value.inspect}"
+  end
+
+  def encoded_cargo_installer?(value)
+    ansi_expanded = expand_ansi_c_strings(value)
+    if ansi_expanded != value && cargo_install_occurrence?(decode_shell_escapes(ansi_expanded))
+      return true
+    end
+
+    if printf_pipe_to_shell?(value) || shell_c_command?(value)
+      decoded = decode_shell_escapes(ansi_expanded)
+      return true if cargo_install_occurrence?(decoded)
+    end
+
+    decoded_pipeline_payloads(value).any? { |payload| cargo_install_occurrence?(payload) }
+  end
+
+  def expand_ansi_c_strings(value)
+    value.gsub(/\$'((?:\\.|[^'])*)'/m) { decode_shell_escapes(Regexp.last_match(1)) }
+  end
+
+  def decode_shell_escapes(value)
+    value.gsub(/\\(?:x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[abefnrtv\\'\"])/) do |escape|
+      case escape
+      when /\A\\x([0-9a-fA-F]{1,2})\z/
+        [Regexp.last_match(1).to_i(16)].pack("C")
+      when /\A\\([0-7]{1,3})\z/
+        [Regexp.last_match(1).to_i(8)].pack("C")
+      when /\A\\u([0-9a-fA-F]{4})\z/, /\A\\U([0-9a-fA-F]{8})\z/
+        [Regexp.last_match(1).to_i(16)].pack("U")
+      else
+        {
+          "\\a" => "\a", "\\b" => "\b", "\\e" => "\e", "\\f" => "\f", "\\n" => "\n",
+          "\\r" => "\r", "\\t" => "\t", "\\v" => "\v", "\\\\" => "\\", "\\'" => "'", '\\"' => '"'
+        }.fetch(escape)
+      end
+    end
+  rescue RangeError
+    value
+  end
+
+  def shell_c_command?(value)
+    value.match?(%r{(?:\A|[;&|()[:space:]])(?:[^;&|()[:space:]]*/)?(?:bash|sh)[[:space:]]+-[A-Za-z]*c[A-Za-z]*(?:[[:space:]]|\z)})
+  end
+
+  def printf_pipe_to_shell?(value)
+    value.match?(%r{(?:\A|[;&|()[:space:]])printf(?:[[:space:]]|\z).*\|[[:space:]]*(?:[^;&|()[:space:]]*/)?(?:bash|sh)(?:[[:space:];&|]|\z)}m)
+  end
+
+  def decoded_pipeline_payloads(value)
+    return [] unless value.match?(%r{\|[[:space:]]*(?:[^;&|()[:space:]]*/)?(?:bash|sh)(?:[[:space:];&|]|\z)})
+
+    payloads = []
+    if value.match?(/\bbase64[[:space:]]+(?:-[A-Za-z]*d[A-Za-z]*|--decode)\b/)
+      value.scan(/[A-Za-z0-9+\/_-]{12,}={0,2}/).each do |encoded|
+        payloads << Base64.strict_decode64(encoded.tr("-_", "+/"))
+      rescue ArgumentError
+        next
+      end
+    end
+    if value.match?(/\bxxd[[:space:]]+-[^;&|[:space:]]*r[^;&|[:space:]]*(?:[[:space:]]+-[^;&|[:space:]]*p[^;&|[:space:]]*)?\b/)
+      value.scan(/\b[0-9a-fA-F]{16,}\b/).each { |encoded| payloads << [encoded].pack("H*") }
+    end
+    payloads
   end
 
   def dynamic_cargo_installer?(value)
@@ -319,8 +391,11 @@ class ActionPolicy
   end
 end
 
-def virtual_policy(sources, pins: [], cargo_installs: {})
-  ActionPolicy.new(RepoInventory.virtual(sources), pins, cargo_installs)
+def validate_virtual(sources, pins: [], cargo_installs: {}, roots: nil)
+  inventory = RepoInventory.virtual(sources)
+  policy = ActionPolicy.new(inventory, pins, cargo_installs)
+  policy.validate_roots(roots || inventory.policy_root_files)
+  policy
 end
 
 def expect_rejected(name)
@@ -337,30 +412,46 @@ def self_test!
   action = "custom/action/action.yml"
 
   expect_rejected("local-missing") do
-    virtual_policy(root => "uses: ./missing\n").validate_roots([root])
+    validate_virtual(root => "uses: ./missing\n")
   end
   expect_rejected("local-escape") do
-    virtual_policy(root => "uses: ./../outside\n").validate_roots([root])
+    validate_virtual(root => "uses: ./../outside\n")
   end
   expect_rejected("local-ambiguous") do
     sources = {root => "uses: ./custom/action\n", action => "name: a\n", "custom/action/action.yaml" => "name: b\n"}
-    virtual_policy(sources).validate_roots([root])
+    validate_virtual(sources)
   end
   expect_rejected("local-cycle") do
     sources = {root => "uses: ./custom/a\n", "custom/a/action.yml" => "uses: ./custom/b\n", "custom/b/action.yml" => "uses: ./custom/a\n"}
-    virtual_policy(sources).validate_roots([root])
+    validate_virtual(sources)
   end
   expect_rejected("nested-local-remote") do
     sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - uses: unknown/action@#{wrong_sha} # v1\n"}
-    virtual_policy(sources).validate_roots([root])
+    validate_virtual(sources)
   end
   expect_rejected("nested-local-docker") do
     sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - uses: docker://alpine:3.20\n"}
-    virtual_policy(sources).validate_roots([root])
+    validate_virtual(sources)
   end
   expect_rejected("root-coverage") do
     sources = {root => "name: one\n", ".github/workflows/other.yaml" => "name: two\n"}
-    virtual_policy(sources).validate_roots([root])
+    validate_virtual(sources, roots: [root])
+  end
+  expect_rejected("root-coverage-action-omitted") do
+    sources = {root => "name: one\n", action => "name: hidden\n"}
+    validate_virtual(sources, roots: [root])
+  end
+  expect_rejected("unreferenced-action-remote") do
+    sources = {root => "name: one\n", action => "uses: unknown/action@#{wrong_sha} # v1\n"}
+    validate_virtual(sources)
+  end
+  expect_rejected("unreferenced-action-docker") do
+    sources = {root => "name: one\n", action => "uses: docker://alpine:3.20\n"}
+    validate_virtual(sources)
+  end
+  expect_rejected("unreferenced-action-run") do
+    sources = {root => "name: one\n", action => "run: cargo${EMPTY} install cargo-audit\n"}
+    validate_virtual(sources)
   end
 
   audited = AUDITED_CARGO_INSTALLS.keys.first
@@ -389,20 +480,37 @@ def self_test!
   }
   cargo_fixtures.each do |name, source|
     expect_rejected(name) do
-      virtual_policy({root => source}, cargo_installs: AUDITED_CARGO_INSTALLS).validate_roots([root])
+      validate_virtual({root => source}, cargo_installs: AUDITED_CARGO_INSTALLS)
+    end
+  end
+  encoded_fixtures = {
+    "cargo-ansi-c" => "run: |\n  $'\\x63\\x61\\x72\\x67\\x6f' $'\\x69\\x6e\\x73\\x74\\x61\\x6c\\x6c' cargo-audit\n",
+    "cargo-ansi-c-split" => "run: |\n  $'ca'$'rgo' $'in'$'stall' cargo-audit\n",
+    "cargo-ansi-c-inline-split" => "run: |\n  ca$'rg'o in$'st'all cargo-audit\n",
+    "cargo-printf-hex" => "run: |\n  printf '\\x63\\x61\\x72\\x67\\x6f\\x20\\x69\\x6e\\x73\\x74\\x61\\x6c\\x6c cargo-audit' | sh\n",
+    "cargo-printf-octal" => "run: |\n  printf '\\143\\141\\162\\147\\157\\040\\151\\156\\163\\164\\141\\154\\154 cargo-audit' | bash\n",
+    "cargo-printf-escaped" => "run: |\n  printf 'cargo\\040install cargo-audit' | /bin/sh\n",
+    "cargo-printf-percent-b" => "run: |\n  printf '%b' '\\x63\\x61\\x72\\x67\\x6f\\x20install cargo-audit' | bash\n",
+    "cargo-bash-c-ansi" => "run: |\n  bash -c $'\\x63\\x61\\x72\\x67\\x6f\\x20install cargo-audit'\n",
+    "cargo-sh-c-encoded-printf" => "run: |\n  sh -c \"$(printf '\\x63\\x61\\x72\\x67\\x6f\\x20install cargo-audit')\"\n",
+    "cargo-base64-pipe" => "run: |\n  printf 'Y2FyZ28gaW5zdGFsbCBjYXJnby1hdWRpdA==' | base64 --decode | sh\n",
+    "cargo-xxd-pipe" => "run: |\n  printf '636172676f20696e7374616c6c20636172676f2d6175646974' | xxd -r -p | bash\n"
+  }
+  encoded_fixtures.each do |name, source|
+    expect_rejected(name) do
+      validate_virtual({root => source}, cargo_installs: AUDITED_CARGO_INSTALLS)
     end
   end
   expect_rejected("cargo-nested-local") do
     sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - run: FOO=bar #{audited}\n"}
-    virtual_policy(sources, cargo_installs: AUDITED_CARGO_INSTALLS).validate_roots([root])
+    validate_virtual(sources, cargo_installs: AUDITED_CARGO_INSTALLS)
   end
 
   valid_sources = {
     root => "on: push\nsteps:\n  - \"uses\": ./custom/action\n  - run: #{audited}\n",
     action => "runs:\n  using: composite\n  steps:\n    - run: echo ok\n"
   }
-  valid = virtual_policy(valid_sources, cargo_installs: AUDITED_CARGO_INSTALLS)
-  valid.validate_roots([root])
+  valid = validate_virtual(valid_sources, cargo_installs: AUDITED_CARGO_INSTALLS)
   valid.finish!
   raise PolicyError, "valid fixture inventory mismatch" unless valid.uses_count == 1 && valid.run_count == 2
   puts "fixture ACCEPTED complete-roots nested-local exact-cargo-install yaml-1.1-on"
@@ -413,10 +521,10 @@ repo_root_index = ARGV.index("--repo-root")
 repo_root = repo_root_index ? ARGV.delete_at(repo_root_index + 1) : Dir.pwd
 ARGV.delete_at(repo_root_index) if repo_root_index
 self_test! if run_self_test
-raise PolicyError, "no workflow roots supplied" if ARGV.empty?
+raise PolicyError, "no policy roots supplied" if ARGV.empty?
 
 inventory = RepoInventory.actual(repo_root)
 policy = ActionPolicy.new(inventory)
 policy.validate_roots(ARGV)
 policy.finish!
-puts "supply-policy OK workflows=#{ARGV.length} uses=#{policy.uses_count} runs=#{policy.run_count} audited_actions=#{AUDITED_PINS.length}"
+puts "supply-policy OK roots=#{ARGV.length} workflows=#{inventory.workflow_files.length} actions=#{inventory.action_manifest_files.length} uses=#{policy.uses_count} runs=#{policy.run_count} audited_actions=#{AUDITED_PINS.length}"
