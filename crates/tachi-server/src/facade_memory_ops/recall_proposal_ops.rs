@@ -5,11 +5,13 @@ use super::recall_simulate_ops::build_recall_simulation_report;
 use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::{Duration, Utc};
+use memcore::recall_config::MAX_RECALL_CONFIG_ENV_BYTES;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 #[cfg(unix)]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use tachi_dispatch::policy::{
     canonical_json_eq, recall_config_v3_identity_payload, RECALL_CONFIG_PROPOSAL_KIND,
@@ -19,6 +21,7 @@ use tachi_dispatch::policy::{
 
 const RECALL_CONFIG_PROPOSAL_NS: &str = "recall_config_proposals";
 const EPSILON: f64 = 0.000_001;
+const MAX_RECALL_APPEND_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// `true` iff the row's unbound top-level DISPLAY field (`config_env` — the
 /// exact field `handle_recall_config_proposals`/`handle_recall_config_review`
@@ -94,9 +97,19 @@ fn run_recall_apply_pre_append_test_hook(
     else {
         return Ok(());
     };
-    std::fs::write(config_env_path, body).map_err(|e| {
+    let mut replacement = config_env_path.as_os_str().to_os_string();
+    replacement.push(format!(".replacement-{}", uuid::Uuid::new_v4().simple()));
+    let replacement = std::path::PathBuf::from(replacement);
+    std::fs::write(&replacement, body).map_err(|e| {
         format!(
-            "test hook edit config.env {} before recall append: {e}",
+            "test hook write replacement config.env {}: {e}",
+            replacement.display()
+        )
+    })?;
+    std::fs::rename(&replacement, config_env_path).map_err(|e| {
+        let _ = std::fs::remove_file(&replacement);
+        format!(
+            "test hook atomically replace config.env {}: {e}",
             config_env_path.display()
         )
     })
@@ -338,6 +351,7 @@ pub(crate) fn handle_recall_config_apply(
                 .to_string(),
         );
     }
+    ensure_recall_apply_platform_supported()?;
 
     let app_home = crate::cli_client::app_home_from_global_db(&server.global_db_path_buf());
     let config_env_path = app_home.join("config.env");
@@ -376,6 +390,16 @@ outcome: {}",
         apply_result.updated_keys.join(", "),
         outcome.label(),
     ))
+}
+
+#[cfg(unix)]
+fn ensure_recall_apply_platform_supported() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_recall_apply_platform_supported() -> Result<(), String> {
+    Err("unsupported_platform: recall config apply requires Unix descriptor identity and no-follow guarantees; proposal remains approved".to_string())
 }
 
 /// What `drive_recall_apply_state_machine` observed on disk and what it did.
@@ -422,6 +446,14 @@ struct RecallAppendPlan {
     after_digest: String,
 }
 
+struct ValidatedRecallReceipt<'a> {
+    attempt_id: &'a str,
+    before_digest: &'a str,
+    after_digest: &'a str,
+    before_len: usize,
+    append_payload: &'a str,
+}
+
 /// Drive one proposal through the recoverable apply state machine. Returns
 /// the terminal `applied` proposal row, the keys that the proposal updates on
 /// `config.env`, and the outcome that describes which recovery branch was
@@ -451,6 +483,18 @@ fn drive_recall_apply_state_machine(
     })?;
     let proposal: Value = serde_json::from_str(&proposal_json)
         .map_err(|e| format!("parse recall config proposal: {e}"))?;
+    let status = proposal
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("pending");
+    if status == "applying" {
+        let receipt = proposal.get("applying_receipt").ok_or_else(|| {
+            format!(
+                "recall config proposal {proposal_id} is in 'applying' state but carries no applying_receipt; refusing to guess — operator must reconcile the row"
+            )
+        })?;
+        validate_recall_applying_receipt_fields(receipt)?;
+    }
 
     // Legacy refusal: a pre-v3 row carries no content-addressed binding, so
     // its approval does not cover the current config_env payload.
@@ -510,11 +554,6 @@ fn drive_recall_apply_state_machine(
         ));
     }
 
-    let status = proposal
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("pending");
-
     match status {
         "approved" => {
             let observed_source_revision = compute_recall_digest(config_env_path)?;
@@ -570,67 +609,34 @@ fn drive_recall_apply_state_machine(
                     format!(
                         "recall config proposal {proposal_id} is in 'applying' state but carries no applying_receipt; refusing to guess — operator must reconcile the row"
                     )
-                })?
-                .clone();
-            let receipt_attempt_id = receipt
-                .get("attempt_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let receipt_before = receipt
-                .get("before_digest")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let receipt_after = receipt
-                .get("after_digest")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let receipt_before_len = receipt
-                .get("before_len")
-                .and_then(Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok());
-            let receipt_append_payload = receipt
-                .get("append_payload")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            if receipt_attempt_id.is_empty()
-                || receipt_before.is_empty()
-                || receipt_after.is_empty()
-                || receipt_before_len.is_none()
-                || receipt_append_payload.is_none()
-            {
+                })?;
+            let receipt = validate_recall_applying_receipt_fields(receipt)?;
+            validate_receipt_append_payload(&patch, receipt.append_payload)?;
+            if receipt.before_digest != bound_source_revision {
                 return Err(format!(
-                    "recall config proposal {proposal_id} applying_receipt is missing attempt_id/before_digest/after_digest/before_len/append_payload; refusing to guess — operator must reconcile the row"
-                ));
-            }
-            let receipt_before_len = receipt_before_len.expect("checked above");
-            let receipt_append_payload = receipt_append_payload.expect("checked above");
-            validate_receipt_append_payload(&patch, &receipt_append_payload)?;
-            if receipt_before != bound_source_revision {
-                return Err(format!(
-                    "source_revision_mismatch: recall config proposal {proposal_id} applying receipt baseline {receipt_before} does not match its approved bound source revision {bound_source_revision}; refusing recovery"
+                    "source_revision_mismatch: recall config proposal {proposal_id} applying receipt baseline {} does not match its approved bound source revision {bound_source_revision}; refusing recovery",
+                    receipt.before_digest
                 ));
             }
             let observed = compute_recall_digest(config_env_path)?;
-            if observed == receipt_after {
+            if observed == receipt.after_digest {
                 // Append already landed before the crash; finalize idempotently.
-                let outcome =
-                    RecallApplyOutcome::FinalizedExisting { attempt_id: receipt_attempt_id };
+                let outcome = RecallApplyOutcome::FinalizedExisting {
+                    attempt_id: receipt.attempt_id.to_string(),
+                };
                 finalize_recall_apply(
                     server,
                     proposal_id,
                     &outcome,
                     &patch,
-                    &receipt_after,
+                    receipt.after_digest,
                     config_env_path,
                 )
             } else if recall_append_progress(
                 &read_config_env_body(config_env_path)?,
-                &receipt_before,
-                receipt_before_len,
-                &receipt_append_payload,
+                receipt.before_digest,
+                receipt.before_len,
+                receipt.append_payload,
             )
             .is_some()
             {
@@ -638,25 +644,28 @@ fn drive_recall_apply_state_machine(
                 // landed before a crash. Resume only the missing suffix.
                 append_recall_config_env(
                     config_env_path,
-                    &receipt_before,
-                    &receipt_after,
-                    receipt_before_len,
-                    &receipt_append_payload,
+                    receipt.before_digest,
+                    receipt.after_digest,
+                    receipt.before_len,
+                    receipt.append_payload,
                     params,
                 )?;
                 let observed_after = compute_recall_digest(config_env_path)?;
-                if observed_after != receipt_after {
+                if observed_after != receipt.after_digest {
                     return Err(format!(
-                        "recall config proposal {proposal_id} retry produced digest {observed_after} that does not match the receipt's after_digest {receipt_after}; refusing to finalize an unexpected file"
+                        "recall config proposal {proposal_id} retry produced digest {observed_after} that does not match the receipt's after_digest {}; refusing to finalize an unexpected file",
+                        receipt.after_digest
                     ));
                 }
-                let outcome = RecallApplyOutcome::Retried { attempt_id: receipt_attempt_id };
+                let outcome = RecallApplyOutcome::Retried {
+                    attempt_id: receipt.attempt_id.to_string(),
+                };
                 finalize_recall_apply(
                     server,
                     proposal_id,
                     &outcome,
                     &patch,
-                    &receipt_after,
+                    receipt.after_digest,
                     config_env_path,
                 )
             } else {
@@ -1205,7 +1214,7 @@ fn compute_recall_digest(path: &Path) -> Result<String, String> {
 }
 
 /// SHA-256 hex of the complete config.env source at `path` *after* `patch` is
-/// applied as trailing assignments. Both shipped dotenv readers use
+/// applied as trailing assignments. Production `RecallConfig` parsing uses
 /// last-assignment-wins semantics, so the append changes effective recall
 /// values without replacing any pre-existing provider/Vault bytes.
 fn compute_recall_append_plan(
@@ -1214,7 +1223,15 @@ fn compute_recall_append_plan(
 ) -> Result<RecallAppendPlan, String> {
     let mut source = read_config_env_body(path)?;
     let before_len = source.len();
-    let append_payload = recall_config_append_payload(&source, patch);
+    let append_payload = recall_config_append_payload(&source, patch)?;
+    let after_len = before_len
+        .checked_add(append_payload.len())
+        .ok_or_else(|| "config_env_too_large: projected recall config size overflow".to_string())?;
+    if after_len > MAX_RECALL_CONFIG_ENV_BYTES {
+        return Err(format!(
+            "config_env_too_large: projected recall config.env requires {after_len} bytes, maximum is {MAX_RECALL_CONFIG_ENV_BYTES}"
+        ));
+    }
     source.push_str(&append_payload);
     Ok(RecallAppendPlan {
         before_len,
@@ -1228,6 +1245,7 @@ fn read_config_env_body(path: &Path) -> Result<String, String> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             validate_recall_config_metadata(path, &metadata)?;
+            validate_recall_config_size(path, metadata.len())?;
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
         Err(err) => {
@@ -1260,8 +1278,12 @@ fn read_config_env_body(path: &Path) -> Result<String, String> {
             "unsupported_config_type: config.env {} is not a regular file",
             path.display()
         )),
-        Ok(_) => std::fs::read_to_string(path)
-            .map_err(|err| format!("read config.env {}: {err}", path.display())),
+        Ok(metadata) => {
+            validate_recall_config_size(path, metadata.len())?;
+            let mut file = std::fs::File::open(path)
+                .map_err(|err| format!("open config.env {} for read: {err}", path.display()))?;
+            read_recall_config_descriptor(&mut file, path)
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(err) => Err(format!(
             "read config.env metadata {}: {err}",
@@ -1274,9 +1296,30 @@ fn digest_config_env_source(source: &str) -> String {
     hex_lower(&Sha256::digest(source.as_bytes()))
 }
 
-fn recall_config_append_payload(source: &str, values: &BTreeMap<String, String>) -> String {
-    let mut body = String::new();
-    if !source.is_empty() && !source.ends_with('\n') {
+fn recall_config_append_payload(
+    source: &str,
+    values: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let needs_separator = !source.is_empty() && !source.ends_with('\n');
+    let mut payload_len = usize::from(needs_separator);
+    for (key, value) in values {
+        payload_len = payload_len
+            .checked_add(key.len())
+            .and_then(|len| len.checked_add(1))
+            .and_then(|len| len.checked_add(value.len()))
+            .and_then(|len| len.checked_add(1))
+            .ok_or_else(|| {
+                "recall_append_payload_too_large: approved recall assignments overflow size accounting"
+                    .to_string()
+            })?;
+        if payload_len > MAX_RECALL_APPEND_PAYLOAD_BYTES {
+            return Err(format!(
+                "recall_append_payload_too_large: approved recall assignments require {payload_len} bytes, maximum is {MAX_RECALL_APPEND_PAYLOAD_BYTES}"
+            ));
+        }
+    }
+    let mut body = String::with_capacity(payload_len);
+    if needs_separator {
         body.push('\n');
     }
     for (key, value) in values {
@@ -1285,19 +1328,116 @@ fn recall_config_append_payload(source: &str, values: &BTreeMap<String, String>)
         body.push_str(value);
         body.push('\n');
     }
-    body
+    Ok(body)
 }
 
 fn validate_receipt_append_payload(
     values: &BTreeMap<String, String>,
     append_payload: &str,
 ) -> Result<(), String> {
-    let assignments = recall_config_append_payload("", values);
-    if append_payload == assignments || append_payload == format!("\n{assignments}") {
+    let assignments = recall_config_append_payload("", values)?;
+    if append_payload == assignments
+        || append_payload
+            .strip_prefix('\n')
+            .is_some_and(|payload| payload == assignments)
+    {
         return Ok(());
     }
     Err("invalid_applying_receipt: append_payload does not encode exactly the approved recall assignments"
         .to_string())
+}
+
+fn validate_recall_applying_receipt_fields(
+    receipt: &Value,
+) -> Result<ValidatedRecallReceipt<'_>, String> {
+    let attempt_id = receipt
+        .get("attempt_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "malformed_applying_receipt: attempt_id must be a non-empty string".to_string()
+        })?;
+    let before_digest = receipt
+        .get("before_digest")
+        .and_then(Value::as_str)
+        .filter(|value| is_sha256_hex(value))
+        .ok_or_else(|| {
+            "malformed_applying_receipt: before_digest must be 64 lowercase hex bytes".to_string()
+        })?;
+    let after_digest = receipt
+        .get("after_digest")
+        .and_then(Value::as_str)
+        .filter(|value| is_sha256_hex(value))
+        .ok_or_else(|| {
+            "malformed_applying_receipt: after_digest must be 64 lowercase hex bytes".to_string()
+        })?;
+    let before_len_u64 = receipt
+        .get("before_len")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "malformed_applying_receipt: before_len must be an unsigned integer".to_string()
+        })?;
+    let before_len = usize::try_from(before_len_u64).map_err(|_| {
+        "applying_receipt_too_large: before_len cannot fit this platform".to_string()
+    })?;
+    let append_payload = receipt
+        .get("append_payload")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "malformed_applying_receipt: append_payload must be a string".to_string())?;
+    validate_recall_receipt_bounds(before_len, append_payload.len())?;
+    Ok(ValidatedRecallReceipt {
+        attempt_id,
+        before_digest,
+        after_digest,
+        before_len,
+        append_payload,
+    })
+}
+
+fn validate_recall_receipt_bounds(
+    before_len: usize,
+    append_payload_len: usize,
+) -> Result<(), String> {
+    let after_len = before_len.checked_add(append_payload_len).ok_or_else(|| {
+        "applying_receipt_too_large: before_len plus append_payload length overflows".to_string()
+    })?;
+    if before_len > MAX_RECALL_CONFIG_ENV_BYTES
+        || append_payload_len > MAX_RECALL_APPEND_PAYLOAD_BYTES
+        || after_len > MAX_RECALL_CONFIG_ENV_BYTES
+    {
+        return Err(format!(
+            "applying_receipt_too_large: before_len={before_len}, append_payload_bytes={append_payload_len}, maximum config bytes={MAX_RECALL_CONFIG_ENV_BYTES}, maximum append bytes={MAX_RECALL_APPEND_PAYLOAD_BYTES}"
+        ));
+    }
+    Ok(())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod recall_receipt_bound_tests {
+    use super::*;
+
+    #[test]
+    fn recall_receipt_bounds_accept_exact_limits_and_refuse_one_byte_over() {
+        assert!(validate_recall_receipt_bounds(
+            MAX_RECALL_CONFIG_ENV_BYTES - MAX_RECALL_APPEND_PAYLOAD_BYTES,
+            MAX_RECALL_APPEND_PAYLOAD_BYTES,
+        )
+        .is_ok());
+        assert!(validate_recall_receipt_bounds(
+            MAX_RECALL_CONFIG_ENV_BYTES - MAX_RECALL_APPEND_PAYLOAD_BYTES,
+            MAX_RECALL_APPEND_PAYLOAD_BYTES + 1,
+        )
+        .is_err());
+        assert!(validate_recall_receipt_bounds(MAX_RECALL_CONFIG_ENV_BYTES + 1, 0).is_err());
+        assert!(validate_recall_receipt_bounds(MAX_RECALL_CONFIG_ENV_BYTES, 1).is_err());
+    }
 }
 
 fn recall_append_progress(
@@ -1307,9 +1447,8 @@ fn recall_append_progress(
     expected_append_payload: &str,
 ) -> Option<usize> {
     let bytes = source.as_bytes();
-    if bytes.len() < expected_before_len
-        || bytes.len() > expected_before_len + expected_append_payload.len()
-    {
+    let expected_after_len = expected_before_len.checked_add(expected_append_payload.len())?;
+    if bytes.len() < expected_before_len || bytes.len() > expected_after_len {
         return None;
     }
     let before = &bytes[..expected_before_len];
@@ -1421,9 +1560,10 @@ fn append_recall_config_env(
             path.display()
         ));
     };
-    let mut projected = existing.as_bytes()[..expected_before_len].to_vec();
-    projected.extend_from_slice(expected_append_payload.as_bytes());
-    let projected_revision = hex_lower(&Sha256::digest(&projected));
+    let mut projected_hasher = Sha256::new();
+    projected_hasher.update(&existing.as_bytes()[..expected_before_len]);
+    projected_hasher.update(expected_append_payload.as_bytes());
+    let projected_revision = hex_lower(&projected_hasher.finalize());
     if projected_revision != expected_after_revision {
         return Err(format!(
             "projected_digest_mismatch: config.env {} append projects revision {projected_revision}, but applying receipt expects {expected_after_revision}; refusing to write",
@@ -1530,6 +1670,16 @@ fn validate_recall_config_metadata(
     Ok(())
 }
 
+fn validate_recall_config_size(path: &Path, size: u64) -> Result<(), String> {
+    if size > MAX_RECALL_CONFIG_ENV_BYTES as u64 {
+        return Err(format!(
+            "config_env_too_large: config.env {} is {size} bytes, maximum is {MAX_RECALL_CONFIG_ENV_BYTES}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn assert_recall_config_path_identity(
     path: &Path,
@@ -1555,13 +1705,24 @@ fn assert_recall_config_path_identity(
     Ok(())
 }
 
-#[cfg(unix)]
 fn read_recall_config_descriptor(file: &mut std::fs::File, path: &Path) -> Result<String, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|err| format!("read open config.env metadata {}: {err}", path.display()))?;
+    validate_recall_config_size(path, metadata.len())?;
     file.seek(SeekFrom::Start(0))
         .map_err(|err| format!("seek config.env {}: {err}", path.display()))?;
-    let mut source = String::new();
-    file.read_to_string(&mut source)
+    let mut source = String::with_capacity(metadata.len() as usize);
+    Read::by_ref(file)
+        .take((MAX_RECALL_CONFIG_ENV_BYTES + 1) as u64)
+        .read_to_string(&mut source)
         .map_err(|err| format!("read open config.env {}: {err}", path.display()))?;
+    if source.len() > MAX_RECALL_CONFIG_ENV_BYTES {
+        return Err(format!(
+            "config_env_too_large: config.env {} grew beyond {MAX_RECALL_CONFIG_ENV_BYTES} bytes while being read",
+            path.display()
+        ));
+    }
     Ok(source)
 }
 

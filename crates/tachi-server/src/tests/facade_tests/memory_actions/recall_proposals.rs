@@ -891,6 +891,23 @@ async fn generate_recall_source_proposal(
     server: &crate::MemoryServer,
     suffix: &str,
 ) -> serde_json::Value {
+    let proposals = recall_source_proposal_params(suffix);
+    let body = crate::facade_memory_ops::handle_tachi_memory(server, proposals)
+        .await
+        .expect("generate recall proposal");
+    let parsed: Value = serde_json::from_str(&body).expect("recall proposal JSON");
+    parsed["proposals"]
+        .as_array()
+        .and_then(|proposals| {
+            proposals
+                .iter()
+                .find(|proposal| proposal["variant"] == json!("or-fallback-0.6"))
+        })
+        .cloned()
+        .expect("recall source proposal")
+}
+
+fn recall_source_proposal_params(suffix: &str) -> crate::tool_params::TachiMemoryParams {
     let mut proposals = tachi_memory_params("recall_proposals");
     proposals.format = Some("json".to_string());
     proposals.scope = Some("memory".to_string());
@@ -910,19 +927,7 @@ async fn generate_recall_source_proposal(
             },
         }],
     }));
-    let body = crate::facade_memory_ops::handle_tachi_memory(server, proposals)
-        .await
-        .expect("generate recall proposal");
-    let parsed: Value = serde_json::from_str(&body).expect("recall proposal JSON");
-    parsed["proposals"]
-        .as_array()
-        .and_then(|proposals| {
-            proposals
-                .iter()
-                .find(|proposal| proposal["variant"] == json!("or-fallback-0.6"))
-        })
-        .cloned()
-        .expect("recall source proposal")
+    proposals
 }
 
 fn test_recall_content_digest(identity_payload: &Value) -> String {
@@ -1768,10 +1773,10 @@ async fn recall_apply_preserves_private_config_mode() {
     );
 }
 
-/// Discrimination: a provider edit that lands after the apply receipt is
-/// stamped but immediately before the config mutation must not be replaced by
-/// stale whole-file bytes. The append protocol re-reads the same descriptor in
-/// this window and refuses while preserving the external content verbatim.
+/// Discrimination: a provider replacement that lands after the apply receipt
+/// is stamped but immediately before the config mutation must not be replaced
+/// by stale whole-file bytes. The hook atomically renames a new inode over the
+/// final path; apply must refuse identity drift and preserve it verbatim.
 #[tokio::test]
 async fn recall_apply_provider_edit_in_final_window_is_not_overwritten() {
     let (server, temp_home) = make_server_with_temp_home();
@@ -1809,13 +1814,13 @@ async fn recall_apply_provider_edit_in_final_window_is_not_overwritten() {
         .await
         .expect_err("provider edit in the final mutation window must refuse");
     assert!(
-        err.contains("source_state_drift"),
+        err.contains("source_identity_drift"),
         "unexpected final-window error: {err}"
     );
     assert_eq!(
         std::fs::read_to_string(&config_env_path).expect("read raced config"),
         raced_body,
-        "refused apply must preserve the provider writer's bytes verbatim"
+        "identity refusal must preserve the replacement inode's bytes verbatim"
     );
     let (raw, _) = read_recall_row(&server, &proposal_id);
     let row: Value = serde_json::from_str(&raw).expect("applying row JSON");
@@ -1888,9 +1893,95 @@ async fn recall_apply_refuses_symlinked_config_env_loudly() {
     );
 }
 
+/// Non-Unix has no equivalent to the descriptor/no-follow identity protocol.
+/// Refusal must happen before the approved row can be stamped applying.
+#[cfg(not(unix))]
+#[tokio::test]
+async fn recall_apply_non_unix_refuses_before_applying_stamp() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "non-unix-refusal");
+
+    let proposal = generate_recall_source_proposal(&server, "non-unix-refusal").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+    let before_row = read_recall_row(&server, &proposal_id);
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("non-Unix apply must refuse before stamping");
+    assert!(
+        err.contains("unsupported_platform"),
+        "unexpected platform refusal: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        before_row,
+        "platform refusal must leave the approved row byte-identical"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read config"),
+        source,
+        "platform refusal must not mutate config.env"
+    );
+}
+
+/// The complete config source is bounded before hashing or proposal creation.
+/// The exact boundary remains readable; one additional byte refuses loudly.
+#[tokio::test]
+async fn recall_config_env_read_limit_accepts_boundary_and_refuses_over_limit() {
+    let max_config_bytes = memcore::recall_config::MAX_RECALL_CONFIG_ENV_BYTES;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let boundary = format!("#{}\n", "x".repeat(max_config_bytes - 2));
+    assert_eq!(boundary.len(), max_config_bytes);
+    std::fs::write(&config_env_path, &boundary).expect("write boundary config");
+    seed_recall_pair(&server, "config-size-boundary");
+    let _ = generate_recall_source_proposal(&server, "config-size-boundary").await;
+
+    let over_limit = format!("{boundary}x");
+    std::fs::write(&config_env_path, &over_limit).expect("write oversized config");
+    seed_recall_pair(&server, "config-size-over");
+    let err = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        recall_source_proposal_params("config-size-over"),
+    )
+    .await
+    .expect_err("oversized config.env must refuse before proposal persistence");
+    assert!(
+        err.contains("config_env_too_large"),
+        "unexpected oversized-config refusal: {err}"
+    );
+    assert_eq!(
+        std::fs::metadata(&config_env_path)
+            .expect("oversized config metadata")
+            .len() as usize,
+        max_config_bytes + 1,
+        "refusal must not rewrite the oversized source"
+    );
+}
+
 /// Appending recall assignments must handle a source without a final newline
 /// without joining keys, preserve every original byte, and rely on the same
-/// last-declaration-wins dotenv semantics used by the shipped loader.
+/// last-declaration-wins parser used by production RecallConfig loading.
 #[tokio::test]
 async fn recall_apply_appends_after_missing_final_newline_with_last_value_winning() {
     let (server, temp_home) = make_server_with_temp_home();
@@ -1927,22 +2018,12 @@ async fn recall_apply_appends_after_missing_final_newline_with_last_value_winnin
         ),
         "append protocol must preserve the source byte prefix and delimit the new assignments"
     );
-    let effective: std::collections::HashMap<String, String> =
-        dotenvy::from_path_iter(&config_env_path)
-            .expect("open appended config with shipped dotenv parser")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("parse appended config with shipped dotenv parser")
-            .into_iter()
-            .collect();
+    let effective = memcore::RecallConfig::from_config_env_source(&body);
     assert_eq!(
-        effective.get("TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR"),
-        Some(&"0.6".to_string()),
-        "the appended declaration must be the effective dotenv value"
+        effective.or_fallback_fts_score_factor, 0.6,
+        "the appended declaration must be the effective production RecallConfig value"
     );
-    assert_eq!(
-        effective.get("TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS"),
-        Some(&"4".to_string())
-    );
+    assert_eq!(effective.or_fallback_fts_max_terms, 4);
 }
 
 /// Missing config.env is a valid empty source revision. The append protocol
@@ -2087,6 +2168,149 @@ async fn recall_apply_partial_append_recovers_without_replacing_source() {
         std::fs::read_to_string(&config_env_path).expect("read recovered config"),
         after,
         "recovery must preserve the original source and append only the missing receipt-bound suffix"
+    );
+}
+
+/// Persisted recovery receipts are untrusted state. Oversized append payloads
+/// and impossible before lengths must refuse before another file or row write.
+#[tokio::test]
+async fn recall_apply_refuses_oversized_persisted_receipt_without_mutation() {
+    const EXPECTED_MAX_RECALL_APPEND_PAYLOAD_BYTES: usize = 64 * 1024;
+    let max_config_bytes = memcore::recall_config::MAX_RECALL_CONFIG_ENV_BYTES;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "oversized-receipt");
+    let proposal = generate_recall_source_proposal(&server, "oversized-receipt").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let oversized_payload = "x".repeat(EXPECTED_MAX_RECALL_APPEND_PAYLOAD_BYTES + 1);
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["status"] = json!("applying");
+            value["applying_receipt"] = json!({
+                "attempt_id": "oversized-payload-fixture",
+                "before_digest": test_config_env_digest(source),
+                "after_digest": "0".repeat(64),
+                "before_len": source.len(),
+                "append_payload": oversized_payload,
+                "updated_keys": [],
+                "started_at": "2026-07-25T00:00:00Z",
+            });
+            store
+                .set_state(
+                    "recall_config_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize oversized receipt"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("persist oversized receipt");
+    let oversized_row = read_recall_row(&server, &proposal_id);
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("oversized append payload must refuse");
+    assert!(
+        err.contains("applying_receipt_too_large"),
+        "unexpected oversized-receipt refusal: {err}"
+    );
+    assert_eq!(read_recall_row(&server, &proposal_id), oversized_row);
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read unchanged config"),
+        source
+    );
+
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["applying_receipt"]["append_payload"] = json!(
+                "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n"
+            );
+            value["applying_receipt"]["before_len"] = json!(max_config_bytes + 1);
+            store
+                .set_state(
+                    "recall_config_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize oversized length"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("persist oversized before_len");
+    let oversized_len_row = read_recall_row(&server, &proposal_id);
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("oversized before_len must refuse");
+    assert!(
+        err.contains("applying_receipt_too_large"),
+        "unexpected oversized-before_len refusal: {err}"
+    );
+    assert_eq!(read_recall_row(&server, &proposal_id), oversized_len_row);
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read unchanged config"),
+        source
+    );
+
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["applying_receipt"]["before_len"] = json!("not-a-number");
+            store
+                .set_state(
+                    "recall_config_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize malformed length"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("persist malformed before_len");
+    let malformed_row = read_recall_row(&server, &proposal_id);
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("malformed before_len must refuse");
+    assert!(
+        err.contains("malformed_applying_receipt"),
+        "unexpected malformed-receipt refusal: {err}"
+    );
+    assert_eq!(read_recall_row(&server, &proposal_id), malformed_row);
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read unchanged config"),
+        source
     );
 }
 
