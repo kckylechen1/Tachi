@@ -313,8 +313,8 @@ async fn arena_collect_enforces_mission_result_named_byte_limit() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn arena_collect_surfaces_linked_result_symlink_refusal() {
+#[test]
+fn arena_collect_surfaces_linked_result_symlink_refusal() {
     struct TachiHomeRestore(Option<std::ffi::OsString>);
     impl Drop for TachiHomeRestore {
         fn drop(&mut self) {
@@ -339,99 +339,105 @@ async fn arena_collect_surfaces_linked_result_symlink_refusal() {
     }
     let _arena_root = temp_arena_root();
     let server = server();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build current-thread test runtime");
 
-    let mut open = params("open");
-    open.objective = Some("surface linked result refusal".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+    runtime.block_on(async {
+        let mut open = params("open");
+        open.objective = Some("surface linked result refusal".into());
+        let opened: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+        let arena_id = opened["arena_id"].as_str().unwrap().to_string();
 
-    let mut spawn = params("spawn");
-    spawn.arena_id = Some(arena_id.clone());
-    spawn.prompt = Some("collect linked result".into());
-    let spawned: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
-    let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
-    let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+        let mut spawn = params("spawn");
+        spawn.arena_id = Some(arena_id.clone());
+        spawn.prompt = Some("collect linked result".into());
+        let spawned: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+        let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
+        let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
 
-    let dispatch_id = "20260725T200000Z-linked-refusal";
-    let run_dir = tachi_home.path().join("runs").join(dispatch_id);
-    let outside = tempfile::tempdir().expect("outside target");
-    std::fs::create_dir_all(&run_dir).unwrap();
-    std::fs::write(
-        run_dir.join("status.json"),
-        serde_json::json!({"state": "completed"}).to_string(),
-    )
-    .unwrap();
-    std::fs::write(outside.path().join("result.md"), "outside bytes").unwrap();
-    std::os::unix::fs::symlink(outside.path().join("result.md"), run_dir.join("result.md"))
+        let dispatch_id = "20260725T200000Z-linked-refusal";
+        let run_dir = tachi_home.path().join("runs").join(dispatch_id);
+        let outside = tempfile::tempdir().expect("outside target");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({"state": "completed"}).to_string(),
+        )
         .unwrap();
+        std::fs::write(outside.path().join("result.md"), "outside bytes").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("result.md"), run_dir.join("result.md"))
+            .unwrap();
 
-    let status_path = mission_dir.join("status.json");
-    let mut status: Value =
-        serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
-    status["dispatch_id"] = json!(dispatch_id);
-    status["run_dir"] = json!(run_dir);
-    std::fs::write(&status_path, serde_json::to_string_pretty(&status).unwrap()).unwrap();
+        let status_path = mission_dir.join("status.json");
+        let mut status: Value =
+            serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
+        status["dispatch_id"] = json!(dispatch_id);
+        status["run_dir"] = json!(run_dir);
+        std::fs::write(&status_path, serde_json::to_string_pretty(&status).unwrap()).unwrap();
 
-    let mut collect = params("collect");
-    collect.arena_id = Some(arena_id.clone());
-    collect.mission_id = Some(mission_id.clone());
-    let collected: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, collect).await.unwrap()).unwrap();
-    let mission = &collected["missions"][0];
-    assert_eq!(
-        mission["state"],
-        json!("artifact_read_error"),
-        "{mission:#}"
-    );
-    assert_eq!(mission["result_source"], json!("result_read_error"));
-    assert_ne!(mission["state"], json!("pending_result"));
-    assert_eq!(mission["result"], json!(""));
-    let error = mission["artifact_read_error"]
-        .as_str()
-        .expect("caller-visible refusal");
-    assert!(error.contains("refusing descriptor-bound read"), "{error}");
+        let mut collect = params("collect");
+        collect.arena_id = Some(arena_id.clone());
+        collect.mission_id = Some(mission_id.clone());
+        let collected: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, collect).await.unwrap()).unwrap();
+        let mission = &collected["missions"][0];
+        assert_eq!(
+            mission["state"],
+            json!("artifact_read_error"),
+            "{mission:#}"
+        );
+        assert_eq!(mission["result_source"], json!("result_read_error"));
+        assert_ne!(mission["state"], json!("pending_result"));
+        assert_eq!(mission["result"], json!(""));
+        let error = mission["artifact_read_error"]
+            .as_str()
+            .expect("caller-visible refusal");
+        assert!(error.contains("refusing descriptor-bound read"), "{error}");
 
-    std::fs::remove_file(run_dir.join("result.md")).unwrap();
-    std::fs::write(
-        run_dir.join("result.md"),
-        vec![b'x'; crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES],
-    )
-    .unwrap();
-    let mut exact_collect = params("collect");
-    exact_collect.arena_id = Some(arena_id.clone());
-    exact_collect.mission_id = Some(mission_id.clone());
-    let exact: Value = serde_json::from_str(
-        &handle_tachi_arena(&server, exact_collect)
-            .await
-            .expect("exact-limit linked result must be collected"),
-    )
-    .unwrap();
-    assert_eq!(
-        exact["missions"][0]["result"].as_str().map(str::len),
-        Some(crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES)
-    );
+        std::fs::remove_file(run_dir.join("result.md")).unwrap();
+        std::fs::write(
+            run_dir.join("result.md"),
+            vec![b'x'; crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES],
+        )
+        .unwrap();
+        let mut exact_collect = params("collect");
+        exact_collect.arena_id = Some(arena_id.clone());
+        exact_collect.mission_id = Some(mission_id.clone());
+        let exact: Value = serde_json::from_str(
+            &handle_tachi_arena(&server, exact_collect)
+                .await
+                .expect("exact-limit linked result must be collected"),
+        )
+        .unwrap();
+        assert_eq!(
+            exact["missions"][0]["result"].as_str().map(str::len),
+            Some(crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES)
+        );
 
-    std::fs::remove_file(mission_dir.join("result.md")).unwrap();
-    std::fs::write(
-        run_dir.join("result.md"),
-        vec![b'x'; crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES + 1],
-    )
-    .unwrap();
-    let mut over_collect = params("collect");
-    over_collect.arena_id = Some(arena_id);
-    over_collect.mission_id = Some(mission_id);
-    let over: Value = serde_json::from_str(
-        &handle_tachi_arena(&server, over_collect)
-            .await
-            .expect("over-limit refusal is returned as mission state"),
-    )
-    .unwrap();
-    assert_eq!(over["missions"][0]["state"], json!("artifact_read_error"));
-    assert!(over["missions"][0]["artifact_read_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("named limit")));
+        std::fs::remove_file(mission_dir.join("result.md")).unwrap();
+        std::fs::write(
+            run_dir.join("result.md"),
+            vec![b'x'; crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES + 1],
+        )
+        .unwrap();
+        let mut over_collect = params("collect");
+        over_collect.arena_id = Some(arena_id);
+        over_collect.mission_id = Some(mission_id);
+        let over: Value = serde_json::from_str(
+            &handle_tachi_arena(&server, over_collect)
+                .await
+                .expect("over-limit refusal is returned as mission state"),
+        )
+        .unwrap();
+        assert_eq!(over["missions"][0]["state"], json!("artifact_read_error"));
+        assert!(over["missions"][0]["artifact_read_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("named limit")));
+    });
 
     drop(original_home);
 }

@@ -24,6 +24,12 @@ use serde_json::Value;
 const COMPLETION_STATUS_MAX_BYTES: usize = 1024 * 1024;
 const COMPLETION_RESULT_MAX_BYTES: usize = 1024 * 1024;
 
+type CompletionPredicateContext = (
+    Option<PathBuf>,
+    Option<CompletionPredicate>,
+    Option<PathBuf>,
+);
+
 /// Verdict of evaluating a (possibly absent) completion predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PredicateVerdict {
@@ -142,14 +148,7 @@ pub(crate) fn evaluate_completion_predicate(
 pub(crate) fn resolve_completion_predicate_context(
     home: &Path,
     dispatch_id: &str,
-) -> Result<
-    (
-        Option<PathBuf>,
-        Option<CompletionPredicate>,
-        Option<PathBuf>,
-    ),
-    String,
-> {
+) -> Result<CompletionPredicateContext, String> {
     if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
         return Ok((None, None, None));
     }

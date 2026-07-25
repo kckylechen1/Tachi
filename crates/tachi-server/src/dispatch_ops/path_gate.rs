@@ -300,12 +300,11 @@ enum SecureReadHookStage {
 }
 
 #[cfg(test)]
+type SecureReadHook = (SecureReadHookStage, PathBuf, Box<dyn FnOnce(&Path)>);
+
+#[cfg(test)]
 thread_local! {
-    static SECURE_READ_HOOK: std::cell::RefCell<Option<(
-        SecureReadHookStage,
-        PathBuf,
-        Box<dyn FnOnce(&Path)>,
-    )>> = std::cell::RefCell::new(None);
+    static SECURE_READ_HOOK: std::cell::RefCell<Option<SecureReadHook>> = std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
