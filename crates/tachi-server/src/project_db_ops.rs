@@ -145,12 +145,10 @@ impl MemoryServer {
                 );
             }
             crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                tracing::warn!(
-                    target: "tachi::project_db::auto_register",
-                    project = %project_name,
-                    "{}",
-                    issue.warning_message()
-                );
+                return Err(issue.warning_message());
+            }
+            crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
+                return Err(issue.warning_message());
             }
             // Exhaustive on purpose (no `_` catch-all): a future new
             // `PlanCLinkOutcome` variant must force a deliberate decision
@@ -334,8 +332,16 @@ fn preflight_project_identity(
 ) -> Result<bool, String> {
     let resolved = MemoryServer::resolve_existing_named_project_db_path(project_name)?;
     let already_resolved = resolved.is_some();
-    let alias = crate::path_utils::plan_c_alias_db_for_root(project_root)?;
-    let alias_exists = std::fs::symlink_metadata(&alias).is_ok();
+    let alias_exists = match crate::path_utils::inspect_plan_c_alias(db_path, project_root) {
+        crate::path_utils::PlanCAliasInspection::Absent => false,
+        crate::path_utils::PlanCAliasInspection::MatchingSymlink => true,
+        crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
+            return Err(issue.warning_message());
+        }
+        crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
+            return Err(issue.warning_message());
+        }
+    };
     let has_existing_evidence = resolved.is_some() || alias_exists;
     if !has_existing_evidence {
         return Ok(false);
@@ -363,21 +369,6 @@ fn preflight_project_identity(
             return Err(format!(
                 "project identity '{project_name}' resolves to unrelated DB {}; expected {}",
                 existing.display(),
-                expected.display()
-            ));
-        }
-    }
-    if alias_exists {
-        let alias_identity = std::fs::canonicalize(&alias).map_err(|err| {
-            format!(
-                "project alias cannot be canonicalized at {}: {err}",
-                alias.display()
-            )
-        })?;
-        if alias_identity != expected {
-            return Err(format!(
-                "project identity '{project_name}' has divergent alias {}; expected {}",
-                alias.display(),
                 expected.display()
             ));
         }
@@ -449,7 +440,10 @@ pub(crate) async fn handle_tachi_init_project_db(
         {
             match crate::path_utils::ensure_plan_c_symlink(&db_path, &project_root) {
                 crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                    plan_c_note = Some(issue.warning_message());
+                    return Err(issue.warning_message());
+                }
+                crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
+                    return Err(issue.warning_message());
                 }
                 crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
                     plan_c_note = Some(format!(
@@ -901,6 +895,35 @@ mod resolve_or_register_workspace_root_tests {
             assert!(error.contains("refusing ownership guess"), "{error}");
             assert!(!local_db.exists(), "no repo DB may be opened or created");
             assert_eq!(std::fs::read(standalone).unwrap(), b"standalone");
+        });
+    }
+
+    #[test]
+    fn workspace_registration_refuses_ambiguous_alias_identity_before_db_open() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Ambiguous-Alias-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("repo");
+            let current = crate::path_utils::plan_c_dir_name_from_root(&repo)
+                .expect("current identity");
+            let previous = crate::path_utils::plan_c_previous_dir_name_from_root(&repo)
+                .expect("previous identity");
+            assert_ne!(current, previous, "fixture needs distinct alias generations");
+            for (name, contents) in [(&current, b"current".as_slice()), (&previous, b"previous".as_slice())] {
+                let alias = crate::path_utils::plan_c_global_db_path(name);
+                std::fs::create_dir_all(alias.parent().unwrap()).expect("alias parent");
+                std::fs::write(alias, contents).expect("divergent alias DB");
+            }
+            let local_db = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("ambiguous aliases must refuse auto-registration");
+            assert!(error.contains("ambiguous"), "{error}");
+            assert!(
+                !local_db.exists(),
+                "identity refusal must occur before repo-local DB creation"
+            );
         });
     }
 

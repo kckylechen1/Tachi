@@ -233,10 +233,15 @@ fn collect_snapshot_inner(
         .into_iter()
         .map(|warning| warning.message)
         .collect();
-    let plan_c_split_brain = project_db_path
-        .and_then(crate::path_utils::plan_c_split_brain_for_local_db)
-        .into_iter()
-        .collect();
+    let (plan_c_split_brain, plan_c_alias_integrity) = match project_db_path {
+        Some(path) => match crate::path_utils::inspect_plan_c_alias_for_local_db(path) {
+            crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => (vec![issue], Vec::new()),
+            crate::path_utils::PlanCAliasInspection::Integrity(issue) => (Vec::new(), vec![issue]),
+            crate::path_utils::PlanCAliasInspection::Absent
+            | crate::path_utils::PlanCAliasInspection::MatchingSymlink => (Vec::new(), Vec::new()),
+        },
+        None => (Vec::new(), Vec::new()),
+    };
     let health_deductions = status_health::calculate_health_deductions(
         &daemon,
         &dbs,
@@ -261,6 +266,7 @@ fn collect_snapshot_inner(
         provider_probe_cache,
         project_warnings,
         plan_c_split_brain,
+        plan_c_alias_integrity,
         health_deductions,
         health_score,
         disk,

@@ -52,6 +52,7 @@ fn empty_snapshot(dbs: Vec<DbStatus>) -> StatusSnapshot {
         provider_probe_cache: None,
         project_warnings: Vec::new(),
         plan_c_split_brain: Vec::new(),
+        plan_c_alias_integrity: Vec::new(),
         health_deductions: Vec::new(),
         health_score: 95,
         disk: empty_disk_status(),

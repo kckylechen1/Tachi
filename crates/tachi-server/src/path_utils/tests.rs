@@ -188,6 +188,127 @@ fn plan_c_regular_alias_file_reports_split_brain() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn plan_c_wrong_target_symlink_is_refused_without_mutating_alias() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Wrong-Target-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
+
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        let wrong_db = tmp.path().join("wrong-target.db");
+        std::fs::write(&wrong_db, b"wrong target").expect("wrong DB");
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&wrong_db, &alias_db).expect("wrong alias symlink");
+
+        let outcome = ensure_plan_c_symlink(&local_db, &repo);
+        assert!(matches!(
+            outcome,
+            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::WrongTarget { .. })
+        ));
+        assert_eq!(
+            std::fs::canonicalize(&alias_db).expect("alias remains readable"),
+            std::fs::canonicalize(&wrong_db).expect("wrong target remains readable"),
+            "detection must not replace the existing alias"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_matching_symlink_remains_valid() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Matching-Alias-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&local_db, &alias_db).expect("matching alias symlink");
+
+        assert!(matches!(
+            inspect_plan_c_alias(&local_db, &repo),
+            PlanCAliasInspection::MatchingSymlink
+        ));
+        assert!(matches!(
+            ensure_plan_c_symlink(&local_db, &repo),
+            PlanCLinkOutcome::AlreadyLinked
+        ));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_dangling_alias_is_a_typed_integrity_failure() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Dangling-Alias-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(tmp.path().join("missing-target.db"), &alias_db)
+            .expect("dangling alias symlink");
+
+        assert!(matches!(
+            inspect_plan_c_alias(&local_db, &repo),
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+        assert!(matches!(
+            ensure_plan_c_symlink(&local_db, &repo),
+            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+        assert!(alias_db.is_symlink(), "dangling alias must not be replaced");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_looped_alias_is_a_typed_integrity_failure() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Looped-Alias-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&alias_db, &alias_db).expect("looped alias symlink");
+
+        assert!(matches!(
+            inspect_plan_c_alias(&local_db, &repo),
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+        assert!(matches!(
+            ensure_plan_c_symlink(&local_db, &repo),
+            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+    });
+}
+
 #[test]
 fn plan_c_alias_resolution_rejects_divergent_compatibility_candidates() {
     with_env_lock(|| {
@@ -406,14 +527,15 @@ fn plan_c_genuinely_absent_project_resolves_to_fresh_gen4_path() {
         let gen4 = plan_c_dir_name_from_root(&repo).expect("gen-4 identity");
         let resolved = plan_c_alias_db_for_root(&repo).expect("fresh registration path");
         assert_eq!(resolved, plan_c_global_db_path(&gen4));
+        assert!(matches!(
+            inspect_plan_c_alias(&repo.join(".tachi/tachi-memory.db"), &repo),
+            PlanCAliasInspection::Absent
+        ));
     });
 }
 
-/// Hole 2 (#1356 salvage): when compatibility aliases diverge, the identity is
-/// ambiguous. `plan_c_split_brain` must NOT silently report "no split-brain"
-/// (the pre-fix `.ok()?` swallow) — it returns None but the ambiguity is a
-/// hard error at the routing gate `plan_c_alias_db_for_root`, which is exactly
-/// the fail-closed signal the daemon startup path aborts on.
+/// Compatibility aliases that diverge are an alias-integrity finding, never a
+/// fabricated clean split-brain result.
 #[test]
 fn plan_c_split_brain_defers_to_routing_gate_on_ambiguous_identity() {
     with_env_lock(|| {
@@ -444,7 +566,10 @@ fn plan_c_split_brain_defers_to_routing_gate_on_ambiguous_identity() {
             gate.is_err(),
             "ambiguous identity must fail closed at the gate"
         );
-        // ...and the diagnostic surface does not fabricate a clean result.
-        assert!(plan_c_split_brain(&local_db, &repo).is_none());
+        // ...and the diagnostic surface returns the typed integrity failure.
+        assert!(matches!(
+            inspect_plan_c_alias(&local_db, &repo),
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
     });
 }

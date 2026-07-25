@@ -261,9 +261,15 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "vec_available": server.project_vec_available(),
         })
     });
-    let plan_c_split_brain = project_db_path
-        .as_ref()
-        .and_then(|path| crate::path_utils::plan_c_split_brain_for_local_db(path.as_path()));
+    let (plan_c_split_brain, plan_c_alias_integrity) = match project_db_path.as_deref() {
+        Some(path) => match crate::path_utils::inspect_plan_c_alias_for_local_db(path) {
+            crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => (Some(issue), None),
+            crate::path_utils::PlanCAliasInspection::Integrity(issue) => (None, Some(issue)),
+            crate::path_utils::PlanCAliasInspection::Absent
+            | crate::path_utils::PlanCAliasInspection::MatchingSymlink => (None, None),
+        },
+        None => (None, None),
+    };
     let binding = crate::memory_search_ops::library_binding_receipt(server, None);
 
     serde_json::to_string(&json!({
@@ -287,6 +293,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "project": project,
             "single_db_mode": !server.has_project_db(),
             "plan_c_split_brain": plan_c_split_brain,
+            "plan_c_alias_integrity": plan_c_alias_integrity,
         },
         "binding": binding,
         "env": {

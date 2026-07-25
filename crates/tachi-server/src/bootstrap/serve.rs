@@ -567,23 +567,22 @@ async fn run_startup_hygiene(
         explicit_project_db,
     ) {
         if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
-            // Fail-closed (#1228 invariant #5): an ambiguous or unresolvable
-            // Plan C project identity for the daemon's own launch repo must
-            // abort startup, never silently boot with guessed addressing. This
-            // is the ONE `ensure_plan_c_symlink` call site with no preceding
-            // `preflight_project_identity` gate, so the identity check is made
-            // explicit here rather than left to the symlink outcome.
-            if let Err(error) = crate::path_utils::plan_c_alias_db_for_root(root) {
-                return Err(format!(
-                    "Plan C project identity for {} is ambiguous or unresolvable; refusing to \
-                     start with guessed project addressing: {error}",
-                    root.display()
-                )
-                .into());
+            match crate::path_utils::inspect_plan_c_alias(db_path, root) {
+                crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
+                    return Err(issue.warning_message().into());
+                }
+                crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
+                    return Err(issue.warning_message().into());
+                }
+                crate::path_utils::PlanCAliasInspection::Absent
+                | crate::path_utils::PlanCAliasInspection::MatchingSymlink => {}
             }
             match crate::path_utils::ensure_plan_c_symlink(db_path, root) {
                 crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                    eprintln!("[!] {}", issue.warning_message());
+                    return Err(issue.warning_message().into());
+                }
+                crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
+                    return Err(issue.warning_message().into());
                 }
                 // A best-effort symlink syscall failure (identity already
                 // resolved cleanly above) is non-fatal — repo-local/manifest

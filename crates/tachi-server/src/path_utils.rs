@@ -19,9 +19,12 @@ pub(crate) use alias::{
 pub(crate) use home::tachi_home;
 pub(crate) use named::{list_named_projects, named_project_for_db_path, named_project_from_path};
 pub(crate) use symlink::{
-    ensure_plan_c_symlink, plan_c_split_brain, plan_c_split_brain_for_local_db,
+    ensure_plan_c_symlink, inspect_plan_c_alias, inspect_plan_c_alias_for_local_db,
+    plan_c_split_brain, plan_c_split_brain_for_local_db,
 };
-pub(crate) use types::{PlanCLinkOutcome, PlanCSplitBrain};
+pub(crate) use types::{
+    PlanCAliasInspection, PlanCAliasIntegrity, PlanCLinkOutcome, PlanCSplitBrain,
+};
 
 /// Return the process-cached root of the current Git worktree, when available.
 pub(crate) fn cached_git_root() -> Option<&'static std::path::PathBuf> {
