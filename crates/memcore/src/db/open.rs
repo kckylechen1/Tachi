@@ -67,6 +67,35 @@ fn protected_reference_trigger(raw: *const c_char) -> bool {
         || sqlite_identifier_eq(raw, b"memories_reserved_refs_update_guard")
 }
 
+fn protected_memory_authority_column(raw: *const c_char) -> bool {
+    // These columns are consumed by namespace routing, write affinity,
+    // lifecycle protection/CAS, or trusted-state classification. Content and
+    // search-index columns deliberately remain available to compatibility
+    // callers; metadata carries the remaining typed authority markers.
+    [
+        b"id".as_slice(),
+        b"path".as_slice(),
+        b"category".as_slice(),
+        b"topic".as_slice(),
+        b"source".as_slice(),
+        b"scope".as_slice(),
+        b"archived".as_slice(),
+        b"valid_from".as_slice(),
+        b"valid_until".as_slice(),
+        b"revision".as_slice(),
+        b"metadata".as_slice(),
+        b"retention_policy".as_slice(),
+        b"domain".as_slice(),
+        b"superseded_by".as_slice(),
+        b"idless_identity".as_slice(),
+        b"recall_count".as_slice(),
+        b"query_diversity".as_slice(),
+        b"tier".as_slice(),
+    ]
+    .iter()
+    .any(|expected| sqlite_identifier_eq(raw, expected))
+}
+
 unsafe extern "C" fn reserved_reference_authorizer(
     state: *mut c_void,
     action: c_int,
@@ -97,7 +126,7 @@ unsafe extern "C" fn reserved_reference_authorizer(
         && sqlite_identifier_eq(arg1, b"memories"))
         || (action == rusqlite::ffi::SQLITE_UPDATE
             && sqlite_identifier_eq(arg1, b"memories")
-            && sqlite_identifier_eq(arg2, b"metadata"));
+            && protected_memory_authority_column(arg2));
     let protected_memory_schema = (action == rusqlite::ffi::SQLITE_DROP_TABLE
         && sqlite_identifier_eq(arg1, b"memories"))
         || (action == rusqlite::ffi::SQLITE_ALTER_TABLE && sqlite_identifier_eq(arg2, b"memories"));

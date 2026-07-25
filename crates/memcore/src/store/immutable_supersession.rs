@@ -35,6 +35,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         source_id: &str,
         target_id: &str,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let changed = db::supersede_memory(&self.tx, source_id, target_id)?;
         if !changed {
             return Err(MemoryError::InvalidArg(format!(
@@ -74,6 +76,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
 
     /// Archive a source after its supersession claim has succeeded.
     pub fn archive_claimed_source(&mut self, source_id: &str) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         if !db::archive_memory(&self.tx, source_id)? {
             return Err(MemoryError::InvalidArg(format!(
                 "archive claimed source failed for {source_id}"

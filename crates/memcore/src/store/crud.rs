@@ -23,6 +23,8 @@ impl MemoryStore {
     ) -> Result<Vec<SearchResult>, MemoryError> {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         retry_search_locked(&self.db_label, || {
             hybrid_search(&self.conn, query, &options)
         })
@@ -38,6 +40,8 @@ impl MemoryStore {
     ) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let (results, mut receipt) = retry_search_locked(&self.db_label, || {
             hybrid_search_with_receipt(&self.conn, query, &options)
         })?;
@@ -65,10 +69,10 @@ impl MemoryStore {
     /// Compatibility access for diagnostics and typed helpers that operate on
     /// non-memory tables. `rusqlite::Connection` is inherently write-capable
     /// even through `&Connection`, so a connection authorizer denies raw
-    /// memory inserts, metadata-column writes, protected guard DDL, attached
-    /// schemas, and writable-schema mode. Fixed typed store operations use a
-    /// private scoped token; auxiliary tables and non-protected columns remain
-    /// available through this compatibility seam.
+    /// memory inserts, authority-bearing classifier/lifecycle writes,
+    /// protected guard DDL, attached schemas, and writable-schema mode. Fixed
+    /// typed store operations use a private scoped token; auxiliary tables and
+    /// non-protected content columns remain available through this seam.
     pub fn connection(&self) -> &Connection {
         &self.conn
     }

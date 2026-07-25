@@ -907,6 +907,7 @@ fn apply_lifecycle_proposal_once(
     store: &mut MemoryStore,
     proposal_id: &str,
 ) -> Result<LifecycleApplyResult, MemoryError> {
+    let _authorization = db::authorize_reserved_reference_write(&store.reserved_reference_write)?;
     let tx = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)?;

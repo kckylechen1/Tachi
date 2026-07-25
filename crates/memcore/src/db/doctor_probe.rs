@@ -241,9 +241,9 @@ pub fn checkpoint_wal_truncate(conn: &Connection) -> rusqlite::Result<()> {
 /// doctor and bootstrap migration tests. This skips schema migration and the
 /// normal `MemoryStore` configuration, but installs a deny-by-default reserved
 /// reference guard and connection authorizer. On a canonical database, raw
-/// memory inserts and metadata-column writes fail closed; production code must
-/// use `MemoryStore` typed operations instead. Non-memory fixture schemas stay
-/// writable for doctor probes.
+/// memory inserts and authority-bearing classifier/lifecycle writes fail
+/// closed; production code must use `MemoryStore` typed operations instead.
+/// Non-memory fixture schemas stay writable for doctor probes.
 pub fn open_raw(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;

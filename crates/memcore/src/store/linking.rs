@@ -43,6 +43,8 @@ impl MemoryStore {
         superseded_by: &str,
         at: &str,
     ) -> Result<usize, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let affected = self.conn.execute(
             "UPDATE memories SET superseded_by = ?1, updated_at = ?2, valid_until = COALESCE(valid_until, ?2) WHERE id = ?3 AND superseded_by IS NULL",
             rusqlite::params![superseded_by, at, id],

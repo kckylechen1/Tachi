@@ -54,6 +54,8 @@ impl MemoryStore {
 
     /// Archive a memory entry (set archived=1, used after merge).
     pub fn archive_memory(&self, id: &str) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::archive_memory(&self.conn, id)
     }
 
@@ -63,6 +65,8 @@ impl MemoryStore {
         id: &str,
         expected_revision: i64,
     ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::archive_memory_if_revision(&self.conn, id, expected_revision)
     }
 
@@ -72,11 +76,15 @@ impl MemoryStore {
         id: &str,
         expected_revision: i64,
     ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::restore_archived_if_revision(&self.conn, id, expected_revision)
     }
 
     /// Mark a memory as superseded by a newer/canonical memory.
     pub fn supersede_memory(&self, id: &str, superseded_by: &str) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::supersede_memory(&self.conn, id, superseded_by)
     }
 
@@ -84,13 +92,17 @@ impl MemoryStore {
     /// Thresholds are driven by `GcConfig` (replaces previously hardcoded literals).
     pub fn gc_tables(&mut self, cfg: &GcConfig) -> Result<serde_json::Value, MemoryError> {
         let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("gc_tables", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::gc_tables(&mut self.conn, cfg)
         })
     }
 
     /// Archive low-importance memories not accessed in `stale_days`.
     pub fn archive_stale_memories(&self, stale_days: u32) -> Result<u64, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::archive_stale_memories(&self.conn, stale_days)
     }
 }
