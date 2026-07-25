@@ -969,24 +969,37 @@ mod tests {
         }
     }
 
-    async fn spawn_mock_extract_llm(body: serde_json::Value) -> (u16, tokio::task::JoinHandle<()>) {
+    async fn spawn_recording_mock_extract_llm(
+        body: serde_json::Value,
+    ) -> (
+        u16,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
         use axum::{routing::post, Json, Router};
 
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let app = Router::new().route(
             "/chat/completions",
-            post(move || {
+            post({
                 let body = body.clone();
-                async move {
-                    Json(serde_json::json!({
-                        "choices": [{
-                            "message": {
-                                "role": "assistant",
-                                "content": body.to_string()
-                            },
-                            "finish_reason": "stop"
-                        }],
-                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-                    }))
+                let requests = std::sync::Arc::clone(&requests);
+                move |Json(request): Json<serde_json::Value>| {
+                    let body = body.clone();
+                    let requests = std::sync::Arc::clone(&requests);
+                    async move {
+                        requests.lock().expect("record mock request").push(request);
+                        Json(serde_json::json!({
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": body.to_string()
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                        }))
+                    }
                 }
             }),
         );
@@ -999,7 +1012,24 @@ mod tests {
         });
         // Give the server a tick to accept.
         tokio::task::yield_now().await;
+        (port, handle, requests)
+    }
+
+    async fn spawn_mock_extract_llm(body: serde_json::Value) -> (u16, tokio::task::JoinHandle<()>) {
+        let (port, handle, _requests) = spawn_recording_mock_extract_llm(body).await;
         (port, handle)
+    }
+
+    fn assert_mock_saw_keyword_enrichment_request(
+        requests: &std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let requests = requests.lock().expect("read mock requests");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.to_string().contains("Existing keywords:")),
+            "extract mock must receive a keyword-enrichment request; got {requests:?}"
+        );
     }
 
     /// (a) Generated keywords are retrievable through the normal FTS search path.
@@ -1012,7 +1042,7 @@ mod tests {
         let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
         let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
 
-        let (port, mock) = spawn_mock_extract_llm(json!({
+        let (port, mock, requests) = spawn_recording_mock_extract_llm(json!({
             "keywords": ["synapse-recall", "双语检索", "write-side-enrichment"]
         }))
         .await;
@@ -1023,9 +1053,22 @@ mod tests {
         let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
         let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
 
-        // Construct server AFTER extract env is pointed at the mock so the
-        // LlmClient binds the mock extract lane.
-        let server = make_server();
+        let llm = tachi_llm::LlmClient::new().expect("construct mock extract lane");
+        assert_eq!(
+            llm.expand_search_keywords("provider/parser probe", &[])
+                .await
+                .expect("mock keyword response must parse"),
+            vec![
+                "synapse-recall".to_string(),
+                "双语检索".to_string(),
+                "write-side-enrichment".to_string(),
+            ]
+        );
+
+        // Construct server AFTER extract env is pointed at the mock, then
+        // inject the probed client so the flush uses the same extract lane.
+        let mut server = make_server();
+        server.replace_llm(llm);
         let id = format!("kw-search-{}", uuid::Uuid::new_v4());
         // Text deliberately omits the synonym; only enrichment adds it.
         let entry = seed_entry(
@@ -1075,6 +1118,8 @@ mod tests {
         );
         server.flush_enrichment_batch(&mut batch).await;
 
+        assert_mock_saw_keyword_enrichment_request(&requests);
+
         let loaded = server
             .with_global_store(|store| {
                 store
@@ -1083,6 +1128,12 @@ mod tests {
                     .map(|e| e.expect("entry exists"))
             })
             .expect("load");
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("enriched"),
+            "mock response must parse and the keyword stage must succeed: {:?}",
+            loaded.metadata
+        );
         assert!(
             loaded
                 .keywords
@@ -1090,10 +1141,6 @@ mod tests {
                 .any(|k| k.eq_ignore_ascii_case("synapse-recall")),
             "keywords must include expanded synonym: {:?}",
             loaded.keywords
-        );
-        assert_eq!(
-            loaded.metadata["enrichment"]["keywords_status"],
-            json!("enriched")
         );
 
         let after = server
@@ -1171,7 +1218,8 @@ mod tests {
 
         let sentinel = format!("EnrichFlushSentinel{}", uuid::Uuid::new_v4().simple());
 
-        let (port, mock) = spawn_mock_extract_llm(json!({ "keywords": [sentinel.clone()] })).await;
+        let (port, mock, requests) =
+            spawn_recording_mock_extract_llm(json!({ "keywords": [sentinel.clone()] })).await;
         let _base = EnvRestore::set(
             "EXTRACT_BASE_URL",
             &format!("http://127.0.0.1:{port}/chat/completions"),
@@ -1179,9 +1227,18 @@ mod tests {
         let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
         let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
 
-        // Construct server AFTER extract env is pointed at the mock (see the
-        // synonym test above for why).
-        let server = make_server();
+        let llm = tachi_llm::LlmClient::new().expect("construct mock extract lane");
+        assert_eq!(
+            llm.expand_search_keywords("provider/parser probe", &[])
+                .await
+                .expect("mock keyword response must parse"),
+            vec![sentinel.clone()]
+        );
+
+        // Construct server AFTER extract env is pointed at the mock, then
+        // inject the probed client so the flush uses the same extract lane.
+        let mut server = make_server();
+        server.replace_llm(llm);
 
         // Decoy: an unrelated, already-searchable memory that literally
         // contains the sentinel token — warms the cache for `sentinel`
@@ -1250,6 +1307,27 @@ mod tests {
             "flag-on target must request keyword enrichment"
         );
         server.flush_enrichment_batch(&mut batch).await;
+
+        assert_mock_saw_keyword_enrichment_request(&requests);
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&target_id)
+                    .map_err(|e| format!("get enriched target: {e}"))
+                    .map(|entry| entry.expect("enriched target exists"))
+            })
+            .expect("load enriched target");
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("enriched"),
+            "cache assertion requires keyword stage success: {:?}",
+            loaded.metadata
+        );
+        assert!(
+            loaded.keywords.iter().any(|keyword| keyword == &sentinel),
+            "cache assertion requires a successful keyword write: {:?}",
+            loaded.keywords
+        );
 
         // Post-fix: the SAME query must now surface BOTH rows, not the
         // stale decoy-only answer cached before the flush.
@@ -1450,7 +1528,7 @@ mod tests {
         let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
 
         let oversized = "x".repeat(MAX_KEYWORD_LEN + 32);
-        let (port, mock) = spawn_mock_extract_llm(json!({
+        let (port, mock, requests) = spawn_recording_mock_extract_llm(json!({
             "keywords": [
                 oversized,
                 "good\u{0001}keyword",
@@ -1469,7 +1547,22 @@ mod tests {
         let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
         let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
 
-        let server = make_server();
+        let llm = tachi_llm::LlmClient::new().expect("construct mock extract lane");
+        assert_eq!(
+            llm.expand_search_keywords("provider/parser probe", &[])
+                .await
+                .expect("mock keyword response must parse"),
+            vec![
+                "x".repeat(MAX_KEYWORD_LEN),
+                "goodkeyword".to_string(),
+                "dup".to_string(),
+                "DUP".to_string(),
+                "safe-term".to_string(),
+            ]
+        );
+
+        let mut server = make_server();
+        server.replace_llm(llm);
         let id = format!("kw-sanitize-{}", uuid::Uuid::new_v4());
         let entry = seed_entry(
             &id,
@@ -1493,6 +1586,8 @@ mod tests {
         )];
         server.flush_enrichment_batch(&mut batch).await;
 
+        assert_mock_saw_keyword_enrichment_request(&requests);
+
         let loaded = server
             .with_global_store(|store| {
                 store
@@ -1501,6 +1596,13 @@ mod tests {
                     .map(|e| e.expect("entry exists"))
             })
             .expect("load");
+
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("enriched"),
+            "mock response must parse and the keyword stage must succeed: {:?}",
+            loaded.metadata
+        );
 
         assert!(
             loaded
