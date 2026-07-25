@@ -46,19 +46,36 @@ jobs:
             echo 'supply-chain policy found no checked-in workflows or composite actions' >&2
             exit 1
           fi
+          if ! printf '%s\n' "${policy_files[@]}" | grep -Eq '^\.github/actions/.+/action\.ya?ml$'; then
+            echo 'supply-chain policy must include checked-in composite actions' >&2
+            exit 1
+          fi
 
           remote_action_pattern="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+['\"]?[[:alnum:]][[:alnum:]_.-]*/[[:alnum:]][[:alnum:]_.-]*([^@[:space:]'\"]*)@"
-          pinned_action_pattern="uses:[[:space:]]+['\"]?[^@'\"]+@[0-9a-f]{40}['\"]?[[:space:]]+#[[:space:]]+[^[:space:]]+"
+          nextest_action_pattern="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+['\"]?taiki-e/install-action@"
+          pinned_version_action_pattern="uses:[[:space:]]+['\"]?[^@'\"]+@[0-9a-f]{40}['\"]?[[:space:]]+#[[:space:]]+v[0-9]+(\.[0-9]+){0,2}[[:space:]]*$"
+          pinned_nextest_action_pattern="uses:[[:space:]]+['\"]?taiki-e/install-action@[0-9a-f]{40}['\"]?[[:space:]]+#[[:space:]]+releases/nextest snapshot [0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]*$"
+          pinned_action_pattern="(${pinned_version_action_pattern})|(${pinned_nextest_action_pattern})"
           cargo_install_pattern='^[[:space:]]*(run:[[:space:]]+)?(sudo[[:space:]]+)?cargo([[:space:]]+\+[^[:space:]]+)?[[:space:]]+install[[:space:]]+'
           pinned_cargo_pattern='--version [0-9]+\.[0-9]+\.[0-9]+ .*--locked([[:space:]]|$)'
           docker_action_pattern='uses:[[:space:]]+.*docker://'
           image_reference_pattern='^[[:space:]]*(image|container):[[:space:]]+[^[:space:]#]+'
           digest_pattern='@sha256:[0-9a-f]{64}'
+          direct_toolchain_action_pattern='^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+.*(rust-toolchain|setup-rust-toolchain)@'
+          toolchain_input_pattern='^[[:space:]]*toolchain:[[:space:]]+'
+          moving_rustup_pattern='^[[:space:]]*(run:[[:space:]]+)?(sudo[[:space:]]+)?rustup.*(^|[^[:alnum:]_.-])(stable|beta|nightly)([^[:alnum:]_.-]|$)'
 
           if ! printf '%s\n' '      - uses: actions/checkout@v5' | grep -Eq "${remote_action_pattern}" \
             || printf '%s\n' '      - uses: actions/checkout@v5' | grep -Eq "${pinned_action_pattern}" \
             || ! printf '%s\n' '    uses: owner/repo/.github/workflows/reuse.yml@main' | grep -Eq "${remote_action_pattern}" \
-            || ! printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5' | grep -Eq "${pinned_action_pattern}"; then
+            || ! printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5' | grep -Eq "${pinned_action_pattern}" \
+            || ! printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.0.1' | grep -Eq "${pinned_action_pattern}" \
+            || printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.0.1.2' | grep -Eq "${pinned_action_pattern}" \
+            || printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # not-a-ref' | grep -Eq "${pinned_action_pattern}" \
+            || printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # releases/nextest snapshot 2026-07-25' | grep -Eq "${pinned_action_pattern}" \
+            || ! printf '%s\n' '      - uses: taiki-e/install-action@0123456789abcdef0123456789abcdef01234567 # releases/nextest snapshot 2026-07-25' | grep -Eq "${pinned_action_pattern}" \
+            || printf '%s\n' '      - uses: taiki-e/install-action@0123456789abcdef0123456789abcdef01234567 # releases/nextest snapshot 2026-7-25' | grep -Eq "${pinned_action_pattern}" \
+            || printf '%s\n' '      - uses: taiki-e/install-action@0123456789abcdef0123456789abcdef01234567 # v2' | grep -Eq "${pinned_nextest_action_pattern}"; then
             echo 'remote-action policy self-test failed' >&2
             exit 1
           fi
@@ -82,10 +99,33 @@ jobs:
             echo 'Docker digest policy self-test failed' >&2
             exit 1
           fi
+          if ! printf '%s\n' '      uses: dtolnay/rust-toolchain@0123456789abcdef0123456789abcdef01234567 # v1' | grep -Eq "${direct_toolchain_action_pattern}" \
+            || ! printf '%s\n' '        toolchain: stable' | grep -Eq "${toolchain_input_pattern}" \
+            || ! printf '%s\n' '        toolchain: 1.97.0' | grep -Eq "${toolchain_input_pattern}" \
+            || ! printf '%s\n' '      run: rustup toolchain install stable' | grep -Eq "${moving_rustup_pattern}" \
+            || printf '%s\n' '      run: rustup toolchain install 1.97.0' | grep -Eq "${moving_rustup_pattern}"; then
+            echo 'Rust toolchain policy self-test failed' >&2
+            exit 1
+          fi
+
+          toolchain_files=()
+          while IFS= read -r file; do
+            toolchain_files+=("${file}")
+          done < <(git ls-files 'rust-toolchain' 'rust-toolchain.toml')
+          if ((${#toolchain_files[@]} != 1)) || [[ "${toolchain_files[0]}" != rust-toolchain.toml ]] \
+            || ! grep -Eq '^channel = "[0-9]+\.[0-9]+\.[0-9]+"$' rust-toolchain.toml; then
+            echo 'rust-toolchain.toml must be the single exact Rust toolchain source' >&2
+            exit 1
+          fi
 
           if grep -hE "${remote_action_pattern}" "${policy_files[@]}" \
             | grep -Ev "${pinned_action_pattern}"; then
             echo 'remote GitHub actions require an immutable SHA and version comment' >&2
+            exit 1
+          fi
+          if grep -hE "${nextest_action_pattern}" "${policy_files[@]}" \
+            | grep -Ev "${pinned_nextest_action_pattern}"; then
+            echo 'taiki-e/install-action requires a dated releases/nextest snapshot comment' >&2
             exit 1
           fi
           if grep -hE "${cargo_install_pattern}" "${policy_files[@]}" \
@@ -93,14 +133,26 @@ jobs:
             echo 'cargo installs require an exact version and --locked' >&2
             exit 1
           fi
-          if grep -hE "${docker_action_pattern}" "${workflow_files[@]}" \
+          if grep -hE "${docker_action_pattern}" "${policy_files[@]}" \
             | grep -Ev "${digest_pattern}"; then
             echo 'docker:// actions require an immutable sha256 digest' >&2
             exit 1
           fi
-          if grep -hE "${image_reference_pattern}" "${workflow_files[@]}" \
+          if grep -hE "${image_reference_pattern}" "${policy_files[@]}" \
             | grep -Ev "${digest_pattern}"; then
-            echo 'workflow container images require an immutable sha256 digest' >&2
+            echo 'workflow and action container images require an immutable sha256 digest' >&2
+            exit 1
+          fi
+          if grep -hE "${direct_toolchain_action_pattern}" "${policy_files[@]}"; then
+            echo 'workflows must use the local Rust action backed by rust-toolchain.toml' >&2
+            exit 1
+          fi
+          if grep -hE "${toolchain_input_pattern}" "${policy_files[@]}"; then
+            echo 'workflow toolchain inputs must not override rust-toolchain.toml' >&2
+            exit 1
+          fi
+          if grep -hE "${moving_rustup_pattern}" "${policy_files[@]}"; then
+            echo 'rustup commands must not use moving Rust toolchain names' >&2
             exit 1
           fi
           if ! grep -Eq '^[[:space:]]*run: npm audit --audit-level=high[[:space:]]*$' .github/workflows/ci.yml; then
@@ -197,7 +249,7 @@ jobs:
       - name: Install cargo-nextest
         # get.nextest.rs is unreachable from this runner's network (DNS blocked);
         # taiki-e/install-action pulls a prebuilt binary from GitHub Releases.
-        uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # nextest snapshot 2026-07-25
+        uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
 
       - name: Run workspace tests
         run: cargo nextest run --workspace --locked --profile ci
