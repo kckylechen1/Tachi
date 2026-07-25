@@ -636,7 +636,12 @@ mod exact_dedupe_open_tests {
             Ok(_) => panic!("spoofed schema was accepted"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("current memories schema"));
+        assert!(
+            error
+                .to_string()
+                .contains("no such table: memory_search_generation"),
+            "unexpected spoofed-schema refusal: {error}"
+        );
 
         let conn = Connection::open(&path).unwrap();
         let tables: Vec<String> = conn
