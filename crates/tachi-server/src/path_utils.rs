@@ -16,6 +16,17 @@ pub(crate) use alias::{
     plan_c_previous_dir_name_from_root, plan_c_previous_raw_dir_name_from_root,
     plan_c_project_root_from_local_db, resolve_project_db_path,
 };
+
+/// Classify a manifest DB leaf without changing non-project path semantics.
+/// Project entries are canonical data files and must never be symlinks;
+/// global and other roles retain their existing target-following `exists` behavior.
+pub(crate) fn manifest_db_leaf_exists(entry: &crate::manifest::DbEntry) -> Result<bool, String> {
+    if entry.role == crate::manifest::DbRole::Project {
+        canonical_db_leaf_exists_without_symlink(std::path::Path::new(&entry.path))
+    } else {
+        Ok(std::path::Path::new(&entry.path).exists())
+    }
+}
 pub(crate) use home::tachi_home;
 pub(crate) use named::{list_named_projects, named_project_for_db_path, named_project_from_path};
 pub(crate) use symlink::{

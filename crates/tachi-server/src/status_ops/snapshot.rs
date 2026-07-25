@@ -32,6 +32,42 @@ pub(crate) fn collect_snapshot_scoped(
     collect_snapshot_inner(app_home, global_db_path, project_db_path, false, all_dbs)
 }
 
+fn unavailable_db_status(entry: &DbEntry, label: String, orphan: bool, error: String) -> DbStatus {
+    DbStatus {
+        path: entry.path.clone(),
+        label,
+        orphan,
+        memory_total: 0,
+        vector_count: 0,
+        vector_missing: 0,
+        vector_orphans: 0,
+        vector_coverage: 0.0,
+        vector_dimension: None,
+        vector_sweep: None,
+        vector_sweep_error: None,
+        namespace: NamespaceHealth::default(),
+        continuity: memcore::ContinuityMetrics::default(),
+        pending_enrichment: 0,
+        enrichment_failed_recent: 0,
+        enrichment_failures: Vec::new(),
+        pending: 0,
+        running: 0,
+        active_jobs: 0,
+        completed: 0,
+        failed: 0,
+        dead_lettered: 0,
+        skipped: 0,
+        terminal_jobs: 0,
+        gc_eligible: 0,
+        stuck_in_progress: 0,
+        latest_active_job: None,
+        latest_terminal_job: None,
+        latest_job: None,
+        latest_failed_job: None,
+        error: Some(error),
+    }
+}
+
 fn collect_snapshot_inner(
     app_home: &Path,
     global_db_path: &Path,
@@ -76,40 +112,20 @@ fn collect_snapshot_inner(
         let path = PathBuf::from(&entry.path);
         let label = db_status_label(entry, &path);
         let orphan = is_orphan_entry(entry, &path, global_db_path, project_db_path);
-        if !path.exists() {
-            dbs.push(DbStatus {
-                path: entry.path.clone(),
+        let leaf_exists = match crate::path_utils::manifest_db_leaf_exists(entry) {
+            Ok(exists) => exists,
+            Err(error) => {
+                dbs.push(unavailable_db_status(entry, label, orphan, error));
+                continue;
+            }
+        };
+        if !leaf_exists {
+            dbs.push(unavailable_db_status(
+                entry,
                 label,
                 orphan,
-                memory_total: 0,
-                vector_count: 0,
-                vector_missing: 0,
-                vector_orphans: 0,
-                vector_coverage: 0.0,
-                vector_dimension: None,
-                vector_sweep: None,
-                vector_sweep_error: None,
-                namespace: NamespaceHealth::default(),
-                continuity: memcore::ContinuityMetrics::default(),
-                pending_enrichment: 0,
-                enrichment_failed_recent: 0,
-                enrichment_failures: Vec::new(),
-                pending: 0,
-                running: 0,
-                active_jobs: 0,
-                completed: 0,
-                failed: 0,
-                dead_lettered: 0,
-                skipped: 0,
-                terminal_jobs: 0,
-                gc_eligible: 0,
-                stuck_in_progress: 0,
-                latest_active_job: None,
-                latest_terminal_job: None,
-                latest_job: None,
-                latest_failed_job: None,
-                error: Some("missing on disk".to_string()),
-            });
+                "missing on disk".to_string(),
+            ));
             continue;
         }
         match probe_db(&path) {
@@ -164,39 +180,7 @@ fn collect_snapshot_inner(
                     error: None,
                 });
             }
-            Err(e) => dbs.push(DbStatus {
-                path: entry.path.clone(),
-                label,
-                orphan,
-                memory_total: 0,
-                vector_count: 0,
-                vector_missing: 0,
-                vector_orphans: 0,
-                vector_coverage: 0.0,
-                vector_dimension: None,
-                vector_sweep: None,
-                vector_sweep_error: None,
-                namespace: NamespaceHealth::default(),
-                continuity: memcore::ContinuityMetrics::default(),
-                pending_enrichment: 0,
-                enrichment_failed_recent: 0,
-                enrichment_failures: Vec::new(),
-                pending: 0,
-                running: 0,
-                active_jobs: 0,
-                completed: 0,
-                failed: 0,
-                dead_lettered: 0,
-                skipped: 0,
-                terminal_jobs: 0,
-                gc_eligible: 0,
-                stuck_in_progress: 0,
-                latest_active_job: None,
-                latest_terminal_job: None,
-                latest_job: None,
-                latest_failed_job: None,
-                error: Some(e),
-            }),
+            Err(error) => dbs.push(unavailable_db_status(entry, label, orphan, error)),
         }
     }
 

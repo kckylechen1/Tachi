@@ -86,10 +86,11 @@ pub(crate) fn load_manifest_targets(
         .dbs
         .into_iter()
         .map(|entry| {
+            crate::path_utils::manifest_db_leaf_exists(&entry)?;
             let path = PathBuf::from(&entry.path);
             let name = manifest_db_name(&entry, &path);
             let label = manifest_db_label(&entry, &path);
-            ManifestDbTarget {
+            Ok(ManifestDbTarget {
                 name,
                 label,
                 path,
@@ -98,9 +99,9 @@ pub(crate) fn load_manifest_targets(
                 schema_kind: entry.schema_kind,
                 allow_write: entry.allow_write,
                 last_classification: entry.last_classification,
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
 
     if targets.is_empty() {
         targets.push(ManifestDbTarget {

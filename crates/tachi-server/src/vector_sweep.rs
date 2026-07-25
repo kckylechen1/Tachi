@@ -88,6 +88,18 @@ fn collect_sweep_paths_inner(
                 if !entry.allow_write || entry.schema_kind != "tachi" {
                     continue;
                 }
+                match crate::path_utils::manifest_db_leaf_exists(&entry) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %entry.path,
+                            error = %error,
+                            "vector sweep refused manifest DB"
+                        );
+                        continue;
+                    }
+                }
                 push(PathBuf::from(entry.path));
             }
         }

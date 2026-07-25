@@ -160,8 +160,16 @@ fn manifest_worker_targets(
         let path = PathBuf::from(&entry.path);
         // Only schedule against actual SQLite files. Manifest may carry
         // stale paths; skip silently rather than spawning doomed workers.
-        if !path.exists() {
-            continue;
+        match crate::path_utils::manifest_db_leaf_exists(entry) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                eprintln!(
+                    "[foundry-scheduler] refusing manifest DB {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
         }
         let label = manifest_label_for(&path, &entry.scope_hint);
         let route = classify_route(entry, &path, own_global, own_project);

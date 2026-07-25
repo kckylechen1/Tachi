@@ -1157,7 +1157,7 @@ impl DbRuntime {
 }
 
 fn project_db_cache_key(db_path: &Path) -> Result<PathBuf, String> {
-    if db_path.exists() {
+    if project_db_leaf_exists_without_symlink(db_path)? {
         return std::fs::canonicalize(db_path)
             .map_err(|e| format!("canonicalize project db {}: {e}", db_path.display()));
     }
@@ -1175,11 +1175,26 @@ fn project_db_cache_key(db_path: &Path) -> Result<PathBuf, String> {
 }
 
 fn project_db_read_cache_key(db_path: &Path) -> Result<PathBuf, String> {
-    if !db_path.exists() {
+    if !project_db_leaf_exists_without_symlink(db_path)? {
         return Err(format!("project db does not exist: {}", db_path.display()));
     }
     std::fs::canonicalize(db_path)
         .map_err(|e| format!("canonicalize project db {}: {e}", db_path.display()))
+}
+
+fn project_db_leaf_exists_without_symlink(db_path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(db_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "project DB path {} must not be a symlink",
+            db_path.display()
+        )),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "inspect project DB path {}: {error}",
+            db_path.display()
+        )),
+    }
 }
 
 /// Default requests-per-minute limit per session (0 = unlimited)
@@ -1285,6 +1300,7 @@ impl ProjectDbState {
         read_pool_size: usize,
         migration: &MigrationAuthority,
     ) -> Result<Self, String> {
+        project_db_leaf_exists_without_symlink(&db_path)?;
         let db_str = db_path.to_str().ok_or_else(|| {
             format!(
                 "Project DB path contains invalid UTF-8: {}",
@@ -1465,6 +1481,114 @@ mod tests {
             project_attach_init_gate: Arc::new(StdMutex::new(())),
             schema_migration: MigrationAuthority::Deny,
         }
+    }
+
+    #[cfg(unix)]
+    fn test_file_identity(path: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path).expect("path metadata");
+        (metadata.dev(), metadata.ino())
+    }
+
+    #[cfg(unix)]
+    fn assert_project_symlink_refused_for_runtime_read_and_write(kind: &str) {
+        let temp = unique_temp_dir(&format!("project-symlink-{kind}"));
+        let global_db = temp.join("global.db");
+        drop(
+            MemoryStore::open_with_label(global_db.to_str().expect("global path"), "global")
+                .expect("seed global DB"),
+        );
+        let runtime = test_runtime(global_db);
+        let project_link = temp.join("project.db");
+        let external_db = temp.join("external.db");
+        let external_before = if kind == "wrong" {
+            drop(
+                MemoryStore::open_with_label(
+                    external_db.to_str().expect("external path"),
+                    "foreign",
+                )
+                .expect("seed foreign DB"),
+            );
+            Some((
+                test_file_identity(&external_db),
+                std::fs::read(&external_db).expect("foreign bytes"),
+            ))
+        } else {
+            None
+        };
+        let target = if kind == "loop" {
+            project_link.clone()
+        } else {
+            external_db.clone()
+        };
+        std::os::unix::fs::symlink(&target, &project_link).expect("project symlink");
+        let link_identity = test_file_identity(&project_link);
+
+        let read_result = runtime.with_path_store_read(&project_link, |_store| Ok(()));
+        let write_result = runtime.with_path_store(&project_link, |_store| Ok(()));
+
+        for (operation, result) in [("read", read_result), ("write", write_result)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(()) => panic!("project {kind} symlink must refuse runtime {operation}"),
+            };
+            assert!(
+                error.contains("project DB path") && error.contains("must not be a symlink"),
+                "expected project leaf refusal for {operation}, got: {error}"
+            );
+        }
+        assert_eq!(test_file_identity(&project_link), link_identity);
+        assert_eq!(std::fs::read_link(&project_link).unwrap(), target);
+        if let Some((identity, bytes)) = external_before {
+            assert_eq!(test_file_identity(&external_db), identity);
+            assert_eq!(std::fs::read(&external_db).unwrap(), bytes);
+        } else if kind == "dangling" {
+            assert!(std::fs::symlink_metadata(&external_db).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_wrong_target_symlink_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("wrong");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_dangling_symlink_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("dangling");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_symlink_loop_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("loop");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_global_symlink_remains_supported() {
+        let temp = unique_temp_dir("global-symlink");
+        let external_db = temp.join("external-global.db");
+        drop(
+            MemoryStore::open_with_label(
+                external_db.to_str().expect("external global path"),
+                "global",
+            )
+            .expect("seed external global DB"),
+        );
+        let global_link = temp.join("global.db");
+        std::os::unix::fs::symlink(&external_db, &global_link).expect("global symlink");
+
+        let runtime = test_runtime(global_link);
+
+        runtime
+            .with_global_store_read(|_store| Ok(()))
+            .expect("global symlink read remains supported");
+        runtime
+            .with_global_store(|_store| Ok(()))
+            .expect("global symlink write remains supported");
     }
 
     #[test]

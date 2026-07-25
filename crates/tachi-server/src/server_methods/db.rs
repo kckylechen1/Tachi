@@ -415,6 +415,7 @@ impl MemoryServer {
                             == Some(safe_name)
                 });
             if derived_match || scope_match {
+                crate::path_utils::manifest_db_leaf_exists(entry)?;
                 let identity = std::fs::canonicalize(db_path).map_err(|err| {
                     format!(
                         "Project '{safe_name}' manifest entry is missing or unreadable at {}: {err}",
@@ -442,7 +443,7 @@ impl MemoryServer {
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = Self::resolve_named_project_db_path(project_name)?;
+        let db_path = Self::resolve_named_project_db_open_path(project_name)?;
         self.db.with_path_store_read_with_label(
             &db_path,
             &format!("named-project:{project_name}"),
@@ -456,7 +457,7 @@ impl MemoryServer {
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = Self::resolve_named_project_db_path(project_name)?;
+        let db_path = Self::resolve_named_project_db_open_path(project_name)?;
         self.db
             .with_path_store_with_label(&db_path, project_name, f)
     }
@@ -469,6 +470,25 @@ impl MemoryServer {
         project_name: &str,
     ) -> Result<(), String> {
         self.with_named_project_store(project_name, |_| Ok(()))
+    }
+
+    fn resolve_named_project_db_open_path(project_name: &str) -> Result<PathBuf, String> {
+        let addressed_path = Self::resolve_named_project_db_path(project_name)?;
+        match std::fs::symlink_metadata(&addressed_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::canonicalize(&addressed_path).map_err(|error| {
+                    format!(
+                        "Project '{project_name}' alias cannot be canonicalized at {}: {error}",
+                        addressed_path.display()
+                    )
+                })
+            }
+            Ok(_) => Ok(addressed_path),
+            Err(error) => Err(format!(
+                "Project '{project_name}' database cannot be inspected at {}: {error}",
+                addressed_path.display()
+            )),
+        }
     }
 
     pub(crate) fn resolve_write_scope(&self, requested: &str) -> (DbScope, Option<String>) {
@@ -734,6 +754,66 @@ mod resolve_named_project_tests {
                 !tachi_home.join("manifest.json").exists(),
                 "standalone named store must not be claimed as the enclosing Git project"
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_project_runtime_opens_valid_plan_c_alias_via_physical_db() {
+        with_env_lock(|| {
+            use std::os::unix::fs::MetadataExt;
+
+            let tmp = crate::test_support::non_skipped_fixture_tempdir("server-methods-");
+            let tachi_home = tmp.path().join("home");
+            std::fs::create_dir_all(&tachi_home).expect("home");
+            let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+            let repo = tmp.path().join("Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("repo");
+            let local_db = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(local_db.parent().unwrap()).expect("project DB parent");
+            drop(
+                MemoryStore::open(local_db.to_str().expect("project DB path"))
+                    .expect("seed project DB"),
+            );
+            let target_identity = {
+                let metadata = std::fs::metadata(&local_db).expect("project DB metadata");
+                (metadata.dev(), metadata.ino())
+            };
+            let project_name =
+                crate::path_utils::plan_c_dir_name_from_root(&repo).expect("project name");
+            let alias = crate::path_utils::plan_c_global_db_path(&project_name);
+            std::fs::create_dir_all(alias.parent().unwrap()).expect("alias parent");
+            std::os::unix::fs::symlink(&local_db, &alias).expect("Plan C alias");
+
+            let global_db = tmp.path().join("global.db");
+            let server = MemoryServer::new(global_db, None).expect("server");
+            server
+                .with_named_project_store(&project_name, |store| {
+                    store
+                        .connection()
+                        .execute("CREATE TABLE alias_open_probe (value INTEGER NOT NULL)", [])
+                        .map_err(|error| error.to_string())?;
+                    store
+                        .connection()
+                        .execute("INSERT INTO alias_open_probe VALUES (7)", [])
+                        .map_err(|error| error.to_string())?;
+                    Ok(())
+                })
+                .expect("write through valid Plan C alias");
+            let value: i64 = server
+                .with_named_project_store_read(&project_name, |store| {
+                    store
+                        .connection()
+                        .query_row("SELECT value FROM alias_open_probe", [], |row| row.get(0))
+                        .map_err(|error| error.to_string())
+                })
+                .expect("read through valid Plan C alias");
+
+            assert_eq!(value, 7);
+            assert_eq!(std::fs::read_link(&alias).unwrap(), local_db);
+            let metadata = std::fs::metadata(&local_db).expect("project DB metadata after open");
+            assert_eq!((metadata.dev(), metadata.ino()), target_identity);
         });
     }
 

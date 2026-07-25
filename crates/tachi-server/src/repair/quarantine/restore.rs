@@ -74,6 +74,7 @@ pub fn cmd_restore_all(
     apply: bool,
     json_out: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let rows = collect_quarantined(manifest)?;
     let dest_entry = match resolve_one(manifest, to_db) {
         Some(e) => e,
         None => {
@@ -85,8 +86,6 @@ pub fn cmd_restore_all(
     let dest_canonical = std::fs::canonicalize(&dest_entry.path)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| dest_entry.path.clone());
-
-    let rows = collect_quarantined(manifest)?;
 
     // Filter: rows whose expected_db canonicalizes to the destination.
     //

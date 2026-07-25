@@ -102,3 +102,119 @@ fn default_scope_with_no_project_db_probes_only_global() {
     );
     assert_eq!(snapshot.dbs[0].path, global_db.to_str().unwrap());
 }
+
+#[cfg(unix)]
+fn file_identity(path: &std::path::Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(path).expect("path metadata");
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(unix)]
+fn assert_status_project_symlink_is_structured_error(kind: &str) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let app_home = dir.path().join("home");
+    let global_db = app_home.join("global.db");
+    std::fs::create_dir_all(&app_home).expect("app home");
+    drop(MemoryStore::open(global_db.to_str().unwrap()).expect("global DB"));
+    let project_link = dir.path().join("project.db");
+    let external_db = dir.path().join("external.db");
+    let external_before = if kind == "wrong" {
+        drop(MemoryStore::open(external_db.to_str().unwrap()).expect("foreign DB"));
+        Some((
+            file_identity(&external_db),
+            std::fs::read(&external_db).expect("foreign bytes"),
+        ))
+    } else {
+        None
+    };
+    let target = if kind == "loop" {
+        project_link.clone()
+    } else {
+        external_db.clone()
+    };
+    std::os::unix::fs::symlink(&target, &project_link).expect("project symlink");
+    let link_identity = file_identity(&project_link);
+    let manifest = Manifest {
+        schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![
+            entry(&global_db, DbRole::Global),
+            entry(&project_link, DbRole::Project),
+        ],
+    };
+    manifest
+        .save(&app_home.join("manifest.json"))
+        .expect("manifest");
+
+    let snapshot = collect_snapshot_scoped(&app_home, &global_db, Some(&project_link), true);
+
+    let status = snapshot
+        .dbs
+        .iter()
+        .find(|status| status.path == project_link.to_string_lossy())
+        .expect("project status row");
+    let error = status.error.as_deref().expect("structured project error");
+    assert!(
+        error.contains("canonical repo DB path") && error.contains("must not be a symlink"),
+        "expected loud project leaf refusal, got: {error}"
+    );
+    assert_eq!(file_identity(&project_link), link_identity);
+    assert_eq!(std::fs::read_link(&project_link).unwrap(), target);
+    if let Some((identity, bytes)) = external_before {
+        assert_eq!(file_identity(&external_db), identity);
+        assert_eq!(std::fs::read(&external_db).unwrap(), bytes);
+    } else if kind == "dangling" {
+        assert!(std::fs::symlink_metadata(&external_db).is_err());
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn status_project_wrong_target_symlink_is_structured_error() {
+    assert_status_project_symlink_is_structured_error("wrong");
+}
+
+#[test]
+#[cfg(unix)]
+fn status_project_dangling_symlink_is_structured_error() {
+    assert_status_project_symlink_is_structured_error("dangling");
+}
+
+#[test]
+#[cfg(unix)]
+fn status_project_symlink_loop_is_structured_error() {
+    assert_status_project_symlink_is_structured_error("loop");
+}
+
+#[test]
+#[cfg(unix)]
+fn status_global_symlink_remains_supported() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let app_home = dir.path().join("home");
+    std::fs::create_dir_all(&app_home).expect("app home");
+    let external_db = dir.path().join("global-target.db");
+    drop(MemoryStore::open(external_db.to_str().unwrap()).expect("global target"));
+    let global_link = app_home.join("global.db");
+    std::os::unix::fs::symlink(&external_db, &global_link).expect("global symlink");
+    let manifest = Manifest {
+        schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![entry(&global_link, DbRole::Global)],
+    };
+    manifest
+        .save(&app_home.join("manifest.json"))
+        .expect("manifest");
+
+    let snapshot = collect_snapshot_scoped(&app_home, &global_link, None, true);
+
+    assert_eq!(snapshot.dbs.len(), 1);
+    assert!(
+        snapshot.dbs[0].error.is_none(),
+        "global symlink must retain read-only status semantics: {:?}",
+        snapshot.dbs[0].error
+    );
+}
