@@ -127,6 +127,14 @@ impl From<memcore::MemoryError> for RepairError {
     }
 }
 
+/// Opens a repair connection without initializing or migrating the DB while
+/// registering the default-deny function required by persistent v23 guards.
+pub(crate) fn open_repair_connection(path: impl AsRef<Path>) -> Result<Connection, RepairError> {
+    let conn = Connection::open(path)?;
+    memcore::db::ensure_reserved_reference_write_guard(&conn)?;
+    Ok(conn)
+}
+
 /// Per-DB context handed to each rule.
 pub struct DbContext {
     pub label: String,
@@ -140,7 +148,7 @@ impl DbContext {
         crate::path_utils::manifest_db_leaf_exists(entry).map_err(|error| {
             RepairError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         })?;
-        let conn = Connection::open(&path)?;
+        let conn = open_repair_connection(&path)?;
         // Match the rest of the codebase: prefer WAL & shorter busy timeout
         // for repair sessions running alongside a possibly-live daemon.
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));

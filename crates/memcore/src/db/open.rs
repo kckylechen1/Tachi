@@ -348,7 +348,10 @@ pub(crate) fn validate_persistent_trigger_inventory(
     Ok(())
 }
 
-pub(crate) fn ensure_reserved_reference_write_guard(conn: &Connection) -> Result<(), MemoryError> {
+/// Ensure a connection can evaluate the persistent v23 reference-write
+/// triggers. The registered function defaults to deny; only typed mutation or
+/// explicit schema-migration authorization can enable it on owned connections.
+pub fn ensure_reserved_reference_write_guard(conn: &Connection) -> Result<(), MemoryError> {
     if conn
         .query_row(
             "SELECT tachi_reserved_reference_write_enabled()",

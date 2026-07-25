@@ -168,11 +168,10 @@ fn fresh_db_at(path: &PathBuf, label: &str) -> Connection {
 }
 
 fn open_ctx(path: &PathBuf, label: &str) -> DbContext {
-    DbContext {
-        label: label.to_string(),
-        path: path.clone(),
-        conn: Connection::open(path).unwrap(),
-    }
+    let entry = manifest_db_entry(path, crate::manifest::DbRole::Project);
+    let mut ctx = DbContext::open(&entry).expect("repair context opens");
+    ctx.label = label.to_string();
+    ctx
 }
 
 fn insert_memory(

@@ -92,6 +92,67 @@ fn r11_plan_c_split_brain_merges_alias_and_relinks_symlink() {
 }
 
 #[test]
+fn plan_c_repair_opens_v23_guards_and_denies_raw_reference_writes() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("plan-c-v23.db");
+    let conn = fresh_db_at(&db_path, "project:plan-c-v23");
+    insert_memory(
+        &conn,
+        "guarded-row",
+        "/project/guarded",
+        "guarded row",
+        "{}",
+        None,
+        None,
+    );
+    drop(conn);
+
+    let ctx = open_ctx(&db_path, "project:plan-c-v23");
+    let schema_version: i64 = ctx
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        schema_version,
+        i64::from(memcore::db::migrations::EXPECTED_SCHEMA_VERSION),
+        "fixture must retain the current canonical schema"
+    );
+    let reference_guard_count: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'trigger'
+               AND name IN (
+                   'memories_reserved_refs_insert_guard',
+                   'memories_reserved_refs_update_guard'
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        reference_guard_count, 2,
+        "v23 canonical reference-write triggers must be present"
+    );
+
+    let error = ctx
+        .conn
+        .execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.source_refs', json('[\"untyped\"]'))
+             WHERE id = 'guarded-row'",
+            [],
+        )
+        .expect_err("raw repair connection must not bypass reserved reference guards");
+    assert!(
+        error
+            .to_string()
+            .contains("reserved memory reference metadata requires typed mutation"),
+        "unexpected protected-write result: {error}"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn quarantine_subcommands_refuse_manifest_project_symlink_without_following_foreign_db() {
     use crate::manifest::{DbEntry, DbRole, Manifest};

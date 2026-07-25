@@ -36,7 +36,7 @@ pub fn cmd_restore(
         }
         return Ok(());
     }
-    let mut conn = Connection::open(&target.db_path)?;
+    let mut conn = open_repair_connection(&target.db_path)?;
     let tx = conn.transaction()?;
     tx.execute(
         "UPDATE memories
@@ -162,7 +162,7 @@ pub fn cmd_restore_all(
     }
 
     // ── apply ──
-    let mut dest_conn = Connection::open(&dest_entry.path)?;
+    let mut dest_conn = open_repair_connection(&dest_entry.path)?;
     let mut moved = 0usize;
     let mut errors: Vec<String> = Vec::new();
 
@@ -174,7 +174,7 @@ pub fn cmd_restore_all(
     }
 
     for (src_path, group) in by_src {
-        let mut src_conn = match Connection::open(&src_path) {
+        let mut src_conn = match open_repair_connection(&src_path) {
             Ok(c) => c,
             Err(e) => {
                 errors.push(format!("open src {}: {e}", src_path.display()));

@@ -125,6 +125,8 @@ pub(crate) use memory_crud::{
     insert_if_absent, upsert, upsert_idless, upsert_with_validated_reference_mutations_within_tx,
     upsert_within_tx,
 };
+/// Public: see `open::ensure_reserved_reference_write_guard`'s doc comment.
+pub use open::ensure_reserved_reference_write_guard;
 /// Public: benchmarks/diagnostics outside this crate read the process-wide
 /// lock-retry backoff counter without needing a tracing subscriber (see
 /// `open::lock_retry_backoff_count`'s doc comment).
@@ -133,9 +135,8 @@ pub use open::lock_retry_backoff_count;
 pub use open::sqlite_error_is_locked;
 pub(crate) use open::{
     acquire_startup_lock, authorize_planner_maintenance, authorize_reserved_reference_write,
-    authorize_schema_migration, configure_connection, ensure_reserved_reference_write_guard,
-    install_reserved_reference_authorizer, open_read_only, open_read_write,
-    register_reserved_reference_write_guard, retry_memory_locked,
+    authorize_schema_migration, configure_connection, install_reserved_reference_authorizer,
+    open_read_only, open_read_write, register_reserved_reference_write_guard, retry_memory_locked,
     validate_persistent_trigger_inventory, ReservedReferenceWriteFlag,
 };
 pub use open_context::{
