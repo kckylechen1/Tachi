@@ -6,10 +6,11 @@
 
 use crate::copilot_ops::handle_tachi_wiki_write;
 use crate::facade_memory_ops::shape_save_facade_response;
-use crate::memory_search_ops::{handle_remember, handle_save_memory_with_evidence_refs};
+use crate::memory_search_ops::{handle_remember, handle_save_memory_with_references};
 use crate::pipeline_ops::handle_extract_facts;
 use crate::tool_params::*;
 use crate::MemoryServer;
+#[cfg(test)]
 use chrono::Utc;
 
 pub(crate) async fn handle_tachi_save(
@@ -168,11 +169,8 @@ pub(crate) async fn handle_tachi_save(
             // `tachi_wiki_write` runs). Caller-controlled reserved reference
             // metadata is removed, then validated typed refs travel as a
             // separate internal argument to the atomic save seam.
-            crate::wiki_ops::validate_references(&params.references)?;
-            let metadata = strip_reserved_reference_metadata(params.metadata.clone());
-            let metadata = merge_referenced_files(metadata, &params.files, &params.text);
-            let captured_at = Utc::now().to_rfc3339();
-            let evidence_refs = build_evidence_refs_v1(&params.references, &captured_at);
+            let metadata =
+                merge_referenced_files(params.metadata.clone(), &params.files, &params.text);
             let mem_params = SaveMemoryParams {
                 text: params.text.clone(),
                 summary: params.summary.clone().unwrap_or_default(),
@@ -205,7 +203,7 @@ pub(crate) async fn handle_tachi_save(
                 metadata,
                 emit_continuity: params.emit_continuity,
             };
-            handle_save_memory_with_evidence_refs(server, mem_params, evidence_refs).await
+            handle_save_memory_with_references(server, mem_params, params.references.clone()).await
         }
     }
 }
@@ -272,19 +270,6 @@ fn merge_referenced_files(
     };
     obj.insert("files".to_string(), serde_json::json!(files));
     Some(serde_json::Value::Object(obj))
-}
-
-fn strip_reserved_reference_metadata(
-    metadata: Option<serde_json::Value>,
-) -> Option<serde_json::Value> {
-    match metadata {
-        Some(serde_json::Value::Object(mut object)) => {
-            object.remove("evidence_refs_v1");
-            object.remove("source_refs");
-            Some(serde_json::Value::Object(object))
-        }
-        other => other,
-    }
 }
 
 /// tachi#1288 (Fix B): write validated `references[]` into

@@ -331,6 +331,68 @@ pub enum IdlessUpsertResult {
     Duplicate { id: String },
 }
 
+/// Evidence append accepted by the atomic metadata merge. Construction checks
+/// the serialized typed-ref shape so the database API never accepts an
+/// arbitrary caller-provided JSON value as trusted evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedEvidenceRefAppend {
+    reference: String,
+    captured_at: String,
+    target_kind: Option<String>,
+}
+
+impl TypedEvidenceRefAppend {
+    pub fn new(
+        reference: String,
+        captured_at: String,
+        target_kind: Option<String>,
+    ) -> Result<Self, MemoryError> {
+        if reference.trim().is_empty() || captured_at.trim().is_empty() {
+            return Err(MemoryError::InvalidArg(
+                "validated evidence refs require non-empty ref and captured_at".into(),
+            ));
+        }
+        if let Some(kind) = target_kind.as_deref() {
+            if !matches!(
+                kind,
+                "issue"
+                    | "comment"
+                    | "pr"
+                    | "commit"
+                    | "canonical_doc"
+                    | "episodic_memory"
+                    | "wiki"
+                    | "guide"
+                    | "precedent"
+                    | "eval"
+                    | "runtime"
+            ) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "unsupported evidence target_kind: {kind}"
+                )));
+            }
+        }
+        Ok(Self {
+            reference,
+            captured_at,
+            target_kind,
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        let mut object = Map::new();
+        object.insert("ref".to_string(), Value::String(self.reference.clone()));
+        object.insert(
+            "captured_at".to_string(),
+            Value::String(self.captured_at.clone()),
+        );
+        if let Some(kind) = self.target_kind.as_ref() {
+            object.insert("target_kind".to_string(), Value::String(kind.clone()));
+        }
+        Value::Object(object)
+    }
+}
+
 /// Result of an atomic insert-only memory write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertMemoryResult {
@@ -366,7 +428,7 @@ impl crate::MemoryStore {
         entry: &MemoryEntry,
         idless_identity: Option<&str>,
         metadata_patch: &Map<String, Value>,
-        append_refs: &[Value],
+        append_refs: &[TypedEvidenceRefAppend],
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
         if self.path_validation && !atomic_evidence_path_validation_disabled() {
             let allow_cross = entry
@@ -411,7 +473,7 @@ fn merge_atomic_evidence_metadata(
     tx: &rusqlite::Transaction<'_>,
     entry_id: &str,
     metadata_patch: &Map<String, Value>,
-    append_refs: &[Value],
+    append_refs: &[TypedEvidenceRefAppend],
 ) -> Result<Value, MemoryError> {
     let existing_metadata = tx
         .query_row(
@@ -442,14 +504,11 @@ fn merge_atomic_evidence_metadata(
         }
     }
     for new_ref in append_refs {
-        let reference = typed_evidence_ref_key(new_ref).ok_or_else(|| {
-            MemoryError::InvalidArg("atomic evidence append contained a malformed typed ref".into())
-        })?;
         if !evidence_refs
             .iter()
-            .any(|existing| typed_evidence_ref_key(existing) == Some(reference))
+            .any(|existing| typed_evidence_ref_key(existing) == Some(new_ref.reference.as_str()))
         {
-            evidence_refs.push(new_ref.clone());
+            evidence_refs.push(new_ref.to_value());
         }
     }
     if !evidence_refs.is_empty() {
@@ -464,7 +523,7 @@ fn upsert_with_atomic_evidence_refs(
     vec_available: bool,
     idless_identity: Option<&str>,
     metadata_patch: &Map<String, Value>,
-    append_refs: &[Value],
+    append_refs: &[TypedEvidenceRefAppend],
 ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut merged_entry = entry.clone();

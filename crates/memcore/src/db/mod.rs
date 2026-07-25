@@ -118,7 +118,7 @@ pub use memory_crud::{
     set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
     symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
     update_enrichment_fields, update_with_revision, upsert, upsert_idless, IdlessUpsertResult,
-    InsertMemoryResult, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    InsertMemoryResult, TypedEvidenceRefAppend, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 /// Public: benchmarks/diagnostics outside this crate read the process-wide
 /// lock-retry backoff counter without needing a tracing subscriber (see

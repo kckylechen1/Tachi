@@ -8,9 +8,9 @@ mod response;
 mod validation;
 pub(crate) mod write_affinity;
 
+pub(crate) use handler::{handle_save_memory, handle_save_memory_with_references};
 #[cfg(test)]
-pub(crate) use handler::install_pre_upsert_barrier;
-pub(crate) use handler::{handle_save_memory, handle_save_memory_with_evidence_refs};
+pub(crate) use handler::{install_pre_upsert_barrier, install_pre_upsert_pause};
 pub(crate) use remember::handle_remember;
 
 /// Stable internal API for `complete_ops`: persist the eval record produced by

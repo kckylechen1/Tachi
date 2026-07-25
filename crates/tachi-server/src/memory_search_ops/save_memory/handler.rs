@@ -9,11 +9,42 @@ use super::validation::{validate_save_text, SaveTextValidation};
 use super::write_affinity::{apply_write_affinity, AffinityNote};
 use crate::memory_search_ops::auto_link::{is_training_seed, spawn_auto_linking};
 use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
-use crate::tool_params::{SaveMemoryParams, WikiEvidenceRefV1};
+use crate::tool_params::{build_evidence_refs_v1, SaveMemoryParams};
 use crate::{DbScope, MemoryServer};
 use blake2::{Blake2s256, Digest};
 use chrono::Utc;
 use serde_json::json;
+
+struct TrustedEvidenceRefs(Vec<memcore::db::TypedEvidenceRefAppend>);
+
+impl TrustedEvidenceRefs {
+    fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    fn validate(references: &[String]) -> Result<Self, String> {
+        crate::wiki_ops::validate_references(references)?;
+        let captured_at = Utc::now().to_rfc3339();
+        build_evidence_refs_v1(references, &captured_at)
+            .into_iter()
+            .map(|reference| {
+                let target_kind = reference
+                    .target_kind
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| format!("serialize trusted evidence target kind: {error}"))?
+                    .and_then(|value| value.as_str().map(str::to_string));
+                memcore::db::TypedEvidenceRefAppend::new(
+                    reference.target_ref,
+                    reference.captured_at,
+                    target_kind,
+                )
+                .map_err(|error| format!("construct trusted evidence ref: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
+    }
+}
 
 #[cfg(test)]
 struct PreUpsertBarrier {
@@ -26,7 +57,22 @@ static PRE_UPSERT_BARRIER: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsert
     std::sync::OnceLock::new();
 
 #[cfg(test)]
+struct PreUpsertPause {
+    entry_id: String,
+    pause_trusted_append: bool,
+    arrived: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static PRE_UPSERT_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsertPause>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
 pub(crate) struct PreUpsertBarrierGuard;
+
+#[cfg(test)]
+pub(crate) struct PreUpsertPauseGuard;
 
 #[cfg(test)]
 pub(crate) fn install_pre_upsert_barrier(
@@ -51,6 +97,32 @@ impl Drop for PreUpsertBarrierGuard {
 }
 
 #[cfg(test)]
+pub(crate) fn install_pre_upsert_pause(
+    entry_id: &str,
+    pause_trusted_append: bool,
+    arrived: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+) -> PreUpsertPauseGuard {
+    let slot = PRE_UPSERT_PAUSE.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PreUpsertPause {
+        entry_id: entry_id.to_string(),
+        pause_trusted_append,
+        arrived,
+        release,
+    });
+    PreUpsertPauseGuard
+}
+
+#[cfg(test)]
+impl Drop for PreUpsertPauseGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = PRE_UPSERT_PAUSE.get() {
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+}
+
+#[cfg(test)]
 fn wait_at_pre_upsert_barrier(entry_id: &str) {
     let barrier = PRE_UPSERT_BARRIER.get().and_then(|slot| {
         slot.lock()
@@ -61,6 +133,28 @@ fn wait_at_pre_upsert_barrier(entry_id: &str) {
     });
     if let Some(barrier) = barrier {
         barrier.wait();
+    }
+}
+
+#[cfg(test)]
+fn wait_at_pre_upsert_pause(entry_id: &str, trusted_append: bool) {
+    let pause = PRE_UPSERT_PAUSE.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|configured| {
+                configured.entry_id == entry_id && configured.pause_trusted_append == trusted_append
+            })
+            .map(|configured| {
+                (
+                    std::sync::Arc::clone(&configured.arrived),
+                    std::sync::Arc::clone(&configured.release),
+                )
+            })
+    });
+    if let Some((arrived, release)) = pause {
+        arrived.wait();
+        release.wait();
     }
 }
 
@@ -90,6 +184,13 @@ fn atomic_evidence_metadata_patch(
         }
     }
     patch
+}
+
+fn strip_reserved_reference_metadata(metadata: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(object)) = metadata {
+        object.remove("evidence_refs_v1");
+        object.remove("source_refs");
+    }
 }
 
 fn idless_save_identity(path: &str, text: &str) -> String {
@@ -129,22 +230,24 @@ pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
     params: SaveMemoryParams,
 ) -> Result<String, String> {
-    handle_save_memory_impl(server, params, None).await
+    handle_save_memory_impl(server, params, TrustedEvidenceRefs::empty()).await
 }
 
-pub(crate) async fn handle_save_memory_with_evidence_refs(
+pub(crate) async fn handle_save_memory_with_references(
     server: &MemoryServer,
     params: SaveMemoryParams,
-    evidence_refs: Vec<WikiEvidenceRefV1>,
+    references: Vec<String>,
 ) -> Result<String, String> {
-    handle_save_memory_impl(server, params, Some(evidence_refs)).await
+    let evidence_refs = TrustedEvidenceRefs::validate(&references)?;
+    handle_save_memory_impl(server, params, evidence_refs).await
 }
 
 async fn handle_save_memory_impl(
     server: &MemoryServer,
     mut params: SaveMemoryParams,
-    evidence_refs: Option<Vec<WikiEvidenceRefV1>>,
+    evidence_refs: TrustedEvidenceRefs,
 ) -> Result<String, String> {
+    strip_reserved_reference_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
     params.summary = scrub_think_tags(&params.summary);
     let (safe_text, secret_redactions) = scrub_secrets(&params.text);
@@ -300,9 +403,9 @@ async fn handle_save_memory_impl(
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
     let emit_continuity = params.emit_continuity;
-    let explicit_metadata_keys = evidence_refs
+    let explicit_metadata_keys = params
+        .metadata
         .as_ref()
-        .and_then(|_| params.metadata.as_ref())
         .and_then(serde_json::Value::as_object)
         .map(|object| object.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
@@ -336,20 +439,21 @@ async fn handle_save_memory_impl(
         }
     }
 
-    let evidence_write = evidence_refs.map(|references| AtomicEvidenceWrite {
+    #[cfg(test)]
+    let trusted_append = !evidence_refs.0.is_empty();
+    let evidence_write = AtomicEvidenceWrite {
         metadata_patch: atomic_evidence_metadata_patch(
             existing_entry.as_ref().map(|existing| &existing.metadata),
             &entry.metadata,
             &explicit_metadata_keys,
         ),
-        append_refs: references
-            .into_iter()
-            .map(|reference| serde_json::json!(reference))
-            .collect(),
-    });
+        append_refs: evidence_refs.0,
+    };
 
     #[cfg(test)]
     wait_at_pre_upsert_barrier(&entry.id);
+    #[cfg(test)]
+    wait_at_pre_upsert_pause(&entry.id, trusted_append);
 
     if let Some(identity) = idless_identity.as_deref() {
         match upsert_idless_save_entry(
@@ -358,7 +462,7 @@ async fn handle_save_memory_impl(
             identity,
             target_db,
             named_project.as_deref(),
-            evidence_write.as_ref(),
+            &evidence_write,
         )? {
             memcore::db::IdlessUpsertResult::Saved => {}
             memcore::db::IdlessUpsertResult::Duplicate { id } => {
@@ -373,7 +477,7 @@ async fn handle_save_memory_impl(
             &mut entry,
             target_db,
             named_project.as_deref(),
-            evidence_write.as_ref(),
+            &evidence_write,
         )?;
     }
 

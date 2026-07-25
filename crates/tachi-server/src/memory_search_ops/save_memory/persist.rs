@@ -5,7 +5,7 @@ use memcore::{db::IdlessUpsertResult, MemoryEntry, MemoryStore};
 
 pub(super) struct AtomicEvidenceWrite {
     pub metadata_patch: serde_json::Map<String, serde_json::Value>,
-    pub append_refs: Vec<serde_json::Value>,
+    pub append_refs: Vec<memcore::db::TypedEvidenceRefAppend>,
 }
 
 /// Return the id of an active row with the same normalized path and exact
@@ -63,25 +63,19 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
     entry: &mut MemoryEntry,
     target_db: DbScope,
     named_project: Option<&str>,
-    evidence_write: Option<&AtomicEvidenceWrite>,
+    evidence_write: &AtomicEvidenceWrite,
 ) -> Result<(), String> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
-        if let Some(evidence_write) = evidence_write {
-            let (_, metadata) = store
-                .upsert_with_atomic_evidence_refs(
-                    entry,
-                    None,
-                    &evidence_write.metadata_patch,
-                    &evidence_write.append_refs,
-                )
-                .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
-            entry.metadata = metadata;
-            Ok(())
-        } else {
-            store
-                .upsert(entry)
-                .map_err(|error| format_save_error(server, target_db, project_name, &error))
-        }
+        let (_, metadata) = store
+            .upsert_with_atomic_evidence_refs(
+                entry,
+                None,
+                &evidence_write.metadata_patch,
+                &evidence_write.append_refs,
+            )
+            .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
+        entry.metadata = metadata;
+        Ok(())
     };
     if let Some(project_name) = named_project {
         server.with_named_project_store(project_name, |store| persist(store, Some(project_name)))
@@ -96,25 +90,19 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
     identity: &str,
     target_db: DbScope,
     named_project: Option<&str>,
-    evidence_write: Option<&AtomicEvidenceWrite>,
+    evidence_write: &AtomicEvidenceWrite,
 ) -> Result<IdlessUpsertResult, String> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
-        if let Some(evidence_write) = evidence_write {
-            let (result, metadata) = store
-                .upsert_with_atomic_evidence_refs(
-                    entry,
-                    Some(identity),
-                    &evidence_write.metadata_patch,
-                    &evidence_write.append_refs,
-                )
-                .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
-            entry.metadata = metadata;
-            Ok(result)
-        } else {
-            store
-                .upsert_idless(entry, identity)
-                .map_err(|error| format_save_error(server, target_db, project_name, &error))
-        }
+        let (result, metadata) = store
+            .upsert_with_atomic_evidence_refs(
+                entry,
+                Some(identity),
+                &evidence_write.metadata_patch,
+                &evidence_write.append_refs,
+            )
+            .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
+        entry.metadata = metadata;
+        Ok(result)
     };
     if let Some(project_name) = named_project {
         server.with_named_project_store(project_name, |store| persist(store, Some(project_name)))
