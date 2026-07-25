@@ -17,6 +17,12 @@ use serde_json::json;
 
 pub(super) struct AuthorizedReferenceMutations(Vec<memcore::db::ValidatedReferenceMutation>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaveMetadataAuthority {
+    Public,
+    ServerVerified,
+}
+
 impl AuthorizedReferenceMutations {
     pub(super) fn empty() -> Self {
         Self(Vec::new())
@@ -197,6 +203,27 @@ fn strip_reserved_reference_metadata(metadata: &mut Option<serde_json::Value>) {
     }
 }
 
+fn is_wiki_namespace(path: &str) -> bool {
+    let normalized = memcore::path_router::normalize_path(path);
+    normalized == "/wiki" || normalized.starts_with("/wiki/")
+}
+
+fn constrain_public_wiki_metadata(metadata: &mut Option<serde_json::Value>) -> Result<(), String> {
+    let metadata = metadata.get_or_insert_with(|| json!({}));
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| "metadata must be a JSON object for wiki-path saves".to_string())?;
+
+    for key in ["review_receipt", "source_bundle_hash", "source_ref"] {
+        object.remove(key);
+    }
+    object.insert("lifecycle".to_string(), json!("pending_review"));
+    object.insert("status".to_string(), json!("pending_review"));
+    object.insert("review_status".to_string(), json!("pending"));
+    object.insert("authority".to_string(), json!("advisory"));
+    Ok(())
+}
+
 fn idless_save_identity(path: &str, text: &str) -> String {
     let path = memcore::path_router::normalize_path(path);
     let mut hasher = Blake2s256::new();
@@ -234,7 +261,13 @@ pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
     params: SaveMemoryParams,
 ) -> Result<String, String> {
-    handle_save_memory_impl(server, params, AuthorizedReferenceMutations::empty()).await
+    handle_save_memory_impl(
+        server,
+        params,
+        AuthorizedReferenceMutations::empty(),
+        SaveMetadataAuthority::Public,
+    )
+    .await
 }
 
 pub(crate) async fn handle_save_memory_with_references(
@@ -243,7 +276,7 @@ pub(crate) async fn handle_save_memory_with_references(
     references: Vec<String>,
 ) -> Result<String, String> {
     let evidence_refs = AuthorizedReferenceMutations::validate(&references)?;
-    handle_save_memory_impl(server, params, evidence_refs).await
+    handle_save_memory_impl(server, params, evidence_refs, SaveMetadataAuthority::Public).await
 }
 
 pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
@@ -255,6 +288,7 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
         server,
         params,
         AuthorizedReferenceMutations::from_authorized(mutations),
+        SaveMetadataAuthority::ServerVerified,
     )
     .await
 }
@@ -263,6 +297,7 @@ async fn handle_save_memory_impl(
     server: &MemoryServer,
     mut params: SaveMemoryParams,
     evidence_refs: AuthorizedReferenceMutations,
+    metadata_authority: SaveMetadataAuthority,
 ) -> Result<String, String> {
     strip_reserved_reference_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
@@ -331,6 +366,17 @@ async fn handle_save_memory_impl(
         target_db,
         named_project.as_deref(),
     )?;
+    // Generic-save metadata is caller-controlled, while wiki reads treat an
+    // absent lifecycle as active. Check both normalized paths so aliases and
+    // same-id updates cannot carry forged approval through this public route.
+    if metadata_authority == SaveMetadataAuthority::Public
+        && (is_wiki_namespace(&params.path)
+            || pre_gate_existing_entry
+                .as_ref()
+                .is_some_and(|entry| is_wiki_namespace(&entry.path)))
+    {
+        constrain_public_wiki_metadata(&mut params.metadata)?;
+    }
     let id_resolves_at_target = pre_gate_existing_entry.is_some();
 
     // #1041 S1: domain-store write affinity gate. Only acts on the ambiguous
