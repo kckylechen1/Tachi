@@ -37,7 +37,7 @@ fn base_write_params(path: Option<String>) -> WikiWriteParams {
 /// does earn `active`.
 #[tokio::test]
 async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_ordinary_unreviewed_path() {
-    let server = make_server();
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let response = server
         .tachi_wiki_write(Parameters(base_write_params(None)))
         .await
@@ -105,7 +105,7 @@ async fn tachi_wiki_write_rejects_forged_review_authority() {
 
 #[tokio::test]
 async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_drafts_path() {
-    let server = make_server();
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let response = server
         .tachi_wiki_write(Parameters(base_write_params(Some(
             "/wiki/drafts/lifecycle-write-test".to_string(),

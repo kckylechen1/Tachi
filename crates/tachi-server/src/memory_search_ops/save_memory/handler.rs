@@ -208,13 +208,32 @@ fn is_wiki_namespace(path: &str) -> bool {
     normalized == "/wiki" || normalized.starts_with("/wiki/")
 }
 
-fn constrain_public_wiki_metadata(metadata: &mut Option<serde_json::Value>) -> Result<(), String> {
-    let metadata = metadata.get_or_insert_with(|| json!({}));
+const PUBLIC_WIKI_AUTHORITY_KEYS: [&str; 3] =
+    ["review_receipt", "source_bundle_hash", "source_ref"];
+
+fn is_wiki_classified(entry: &memcore::MemoryEntry) -> bool {
+    is_wiki_namespace(&entry.path)
+        || matches!(
+            entry.category.trim().to_ascii_lowercase().as_str(),
+            "wiki" | "guide"
+        )
+        || entry
+            .domain
+            .as_deref()
+            .is_some_and(|domain| domain.trim().eq_ignore_ascii_case("wiki"))
+        || entry
+            .metadata
+            .get("wiki")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn constrain_public_wiki_metadata(metadata: &mut serde_json::Value) -> Result<(), String> {
     let object = metadata
         .as_object_mut()
-        .ok_or_else(|| "metadata must be a JSON object for wiki-path saves".to_string())?;
+        .ok_or_else(|| "metadata must be a JSON object for wiki-classified saves".to_string())?;
 
-    for key in ["review_receipt", "source_bundle_hash", "source_ref"] {
+    for key in PUBLIC_WIKI_AUTHORITY_KEYS {
         object.remove(key);
     }
     object.insert("lifecycle".to_string(), json!("pending_review"));
@@ -366,17 +385,6 @@ async fn handle_save_memory_impl(
         target_db,
         named_project.as_deref(),
     )?;
-    // Generic-save metadata is caller-controlled, while wiki reads treat an
-    // absent lifecycle as active. Check both normalized paths so aliases and
-    // same-id updates cannot carry forged approval through this public route.
-    if metadata_authority == SaveMetadataAuthority::Public
-        && (is_wiki_namespace(&params.path)
-            || pre_gate_existing_entry
-                .as_ref()
-                .is_some_and(|entry| is_wiki_namespace(&entry.path)))
-    {
-        constrain_public_wiki_metadata(&mut params.metadata)?;
-    }
     let id_resolves_at_target = pre_gate_existing_entry.is_some();
 
     // #1041 S1: domain-store write affinity gate. Only acts on the ambiguous
@@ -502,6 +510,19 @@ async fn handle_save_memory_impl(
         }
     }
 
+    // Public metadata is caller-controlled. Decide from the completed row,
+    // after patch inheritance and domain resolution, and retain the existing
+    // row's classification as a one-way authority constraint even when a
+    // public update tries to declassify the candidate.
+    let metadata_removals = if metadata_authority == SaveMetadataAuthority::Public
+        && (is_wiki_classified(&entry) || existing_entry.as_ref().is_some_and(is_wiki_classified))
+    {
+        constrain_public_wiki_metadata(&mut entry.metadata)?;
+        PUBLIC_WIKI_AUTHORITY_KEYS.to_vec()
+    } else {
+        Vec::new()
+    };
+
     #[cfg(test)]
     let trusted_append = !evidence_refs.0.is_empty();
     let evidence_write = AtomicReferenceWrite {
@@ -510,6 +531,7 @@ async fn handle_save_memory_impl(
             &entry.metadata,
             &explicit_metadata_keys,
         ),
+        metadata_removals,
         mutations: evidence_refs.0,
     };
 

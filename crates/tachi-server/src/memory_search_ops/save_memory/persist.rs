@@ -5,6 +5,7 @@ use memcore::{db::IdlessUpsertResult, MemoryEntry, MemoryStore};
 
 pub(super) struct AtomicReferenceWrite {
     pub metadata_patch: serde_json::Map<String, serde_json::Value>,
+    pub metadata_removals: Vec<&'static str>,
     pub mutations: Vec<memcore::db::ValidatedReferenceMutation>,
 }
 
@@ -67,10 +68,11 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
 ) -> Result<(), String> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
         let (_, metadata) = store
-            .upsert_with_validated_reference_mutations(
+            .upsert_with_validated_reference_mutations_and_metadata_removals(
                 entry,
                 None,
                 &evidence_write.metadata_patch,
+                &evidence_write.metadata_removals,
                 &evidence_write.mutations,
             )
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
@@ -94,10 +96,11 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
 ) -> Result<IdlessUpsertResult, String> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
         let (result, metadata) = store
-            .upsert_with_validated_reference_mutations(
+            .upsert_with_validated_reference_mutations_and_metadata_removals(
                 entry,
                 Some(identity),
                 &evidence_write.metadata_patch,
+                &evidence_write.metadata_removals,
                 &evidence_write.mutations,
             )
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;

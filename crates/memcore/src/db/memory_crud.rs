@@ -727,6 +727,26 @@ impl crate::MemoryStore {
         metadata_patch: &Map<String, Value>,
         mutations: &[ValidatedReferenceMutation],
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+        self.upsert_with_validated_reference_mutations_and_metadata_removals(
+            entry,
+            idless_identity,
+            metadata_patch,
+            &[],
+            mutations,
+        )
+    }
+
+    /// Trusted metadata-removal counterpart used when a server-side policy
+    /// must atomically delete caller-forged authority while preserving typed
+    /// reference metadata. Reserved reference keys cannot be removed here.
+    pub fn upsert_with_validated_reference_mutations_and_metadata_removals(
+        &mut self,
+        entry: &MemoryEntry,
+        idless_identity: Option<&str>,
+        metadata_patch: &Map<String, Value>,
+        metadata_removals: &[&str],
+        mutations: &[ValidatedReferenceMutation],
+    ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
         if self.path_validation && !atomic_evidence_path_validation_disabled() {
             let allow_cross = entry
                 .metadata
@@ -755,6 +775,7 @@ impl crate::MemoryStore {
                 vec_available,
                 idless_identity,
                 metadata_patch,
+                metadata_removals,
                 mutations,
             )
         })
@@ -808,7 +829,7 @@ fn normalized_append_key(target: ReservedReferenceTarget, value: &Value) -> Opti
                 MAX_REFERENCE_BYTES,
             )
             .ok()?;
-            let captured_at = normalize_timestamp(
+            normalize_timestamp(
                 object.get("captured_at")?.as_str()?.to_string(),
                 "evidence captured_at",
             )
@@ -825,7 +846,7 @@ fn normalized_append_key(target: ReservedReferenceTarget, value: &Value) -> Opti
                 Some(_) => return None,
                 None => None,
             };
-            serde_json::to_string(&(reference, target_kind, captured_at)).ok()
+            serde_json::to_string(&(reference, target_kind)).ok()
         }
         ReservedReferenceTarget::SourceRefs => serde_json::to_string(value).ok(),
     }
@@ -835,6 +856,7 @@ fn merge_validated_reference_metadata(
     tx: &rusqlite::Transaction<'_>,
     entry_id: &str,
     metadata_patch: &Map<String, Value>,
+    metadata_removals: &[&str],
     mutations: &[ValidatedReferenceMutation],
 ) -> Result<Value, MemoryError> {
     let existing_metadata = read_existing_metadata(tx, entry_id)?;
@@ -847,6 +869,14 @@ fn merge_validated_reference_metadata(
         if key != "evidence_refs_v1" && key != "source_refs" {
             merged.insert(key.clone(), value.clone());
         }
+    }
+    for key in metadata_removals {
+        if RESERVED_REFERENCE_KEYS.contains(key) {
+            return Err(MemoryError::InvalidArg(format!(
+                "trusted metadata removal cannot delete reserved reference key '{key}'"
+            )));
+        }
+        merged.remove(*key);
     }
     for mutation in mutations {
         match &mutation.operation {
@@ -891,15 +921,17 @@ fn upsert_with_validated_reference_mutations(
     vec_available: bool,
     idless_identity: Option<&str>,
     metadata_patch: &Map<String, Value>,
+    metadata_removals: &[&str],
     mutations: &[ValidatedReferenceMutation],
 ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let result = upsert_with_validated_reference_mutations_within_tx(
+    let result = upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
         &tx,
         entry,
         vec_available,
         idless_identity,
         metadata_patch,
+        metadata_removals,
         mutations,
     )?;
     tx.commit()?;
@@ -914,9 +946,34 @@ pub(crate) fn upsert_with_validated_reference_mutations_within_tx(
     metadata_patch: &Map<String, Value>,
     mutations: &[ValidatedReferenceMutation],
 ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+    upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+        tx,
+        entry,
+        vec_available,
+        idless_identity,
+        metadata_patch,
+        &[],
+        mutations,
+    )
+}
+
+fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+    metadata_patch: &Map<String, Value>,
+    metadata_removals: &[&str],
+    mutations: &[ValidatedReferenceMutation],
+) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let mut merged_entry = entry.clone();
-    merged_entry.metadata =
-        merge_validated_reference_metadata(tx, &entry.id, metadata_patch, mutations)?;
+    merged_entry.metadata = merge_validated_reference_metadata(
+        tx,
+        &entry.id,
+        metadata_patch,
+        metadata_removals,
+        mutations,
+    )?;
     let result = upsert_prepared_within_tx(tx, &merged_entry, vec_available, idless_identity)?;
     Ok((result, merged_entry.metadata))
 }
@@ -1123,7 +1180,7 @@ mod reserved_reference_tests {
     }
 
     #[test]
-    fn evidence_dedupe_preserves_target_kind_timestamp_and_order() {
+    fn evidence_dedupe_preserves_target_kind_first_timestamp_and_order() {
         let (_dir, mut store) = open_store();
         let clean = entry("typed-evidence-identity", json!({}));
         store
@@ -1181,15 +1238,45 @@ mod reserved_reference_tests {
                     "ref": "#100",
                     "captured_at": "2026-07-25T00:00:00.000Z",
                     "target_kind": "pr"
-                },
-                {
-                    "ref": "#100",
-                    "captured_at": "2026-07-26T00:00:00.000Z",
-                    "target_kind": "issue"
                 }
             ]),
-            "exact duplicates dedupe while typed distinctions survive in append order"
+            "ref+kind duplicates keep the first timestamp while kind distinctions survive"
         );
+    }
+
+    #[test]
+    fn trusted_metadata_removals_cannot_delete_reserved_references() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("metadata-removal-reference-boundary", json!({}));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .expect("seed trusted evidence");
+
+        for key in RESERVED_REFERENCE_KEYS {
+            let error = store
+                .upsert_with_validated_reference_mutations_and_metadata_removals(
+                    &clean,
+                    None,
+                    &Map::new(),
+                    &[key],
+                    &[],
+                )
+                .expect_err("metadata removal must not erase reserved references");
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot delete reserved reference key"),
+                "unexpected {key} removal refusal: {error}"
+            );
+        }
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100"]);
     }
 
     #[test]
@@ -2038,7 +2125,7 @@ fn insert_if_absent_with_reference_mutations(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut metadata = match metadata_patch {
         Some(metadata_patch) => {
-            merge_validated_reference_metadata(&tx, &entry.id, metadata_patch, mutations)?
+            merge_validated_reference_metadata(&tx, &entry.id, metadata_patch, &[], mutations)?
         }
         None => strip_untrusted_reserved_metadata(&entry.metadata),
     };
