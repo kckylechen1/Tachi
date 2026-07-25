@@ -608,8 +608,11 @@ struct ProposalGeneration {
 }
 
 #[cfg(test)]
+type ProposalAfterBuildHook = Box<dyn FnOnce(&[Value])>;
+
+#[cfg(test)]
 struct ProposalPersistenceTestHook {
-    after_build: Option<Box<dyn FnOnce(&[Value])>>,
+    after_build: Option<ProposalAfterBuildHook>,
 }
 
 #[cfg(test)]
