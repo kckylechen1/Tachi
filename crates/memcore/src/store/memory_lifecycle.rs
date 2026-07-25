@@ -10,12 +10,13 @@
 //! ## Identity
 //!
 //! `compute_lifecycle_identity` hashes a canonical serialization of the
-//! typed [`LifecycleApplyPayload`] (source/target endpoint snapshots +
-//! action + schema/policy version). Volatile fields (status, review notes,
-//! `applied_at`, `expires_at`) live OUTSIDE the payload in the stored
-//! proposal JSON, so they can never perturb the identity. At apply, the
-//! payload is rebuilt from the LIVE rows and the identity is recomputed; a
-//! mismatch means the world drifted between approve and apply → refuse.
+//! typed [`LifecycleApplyPayload`] (source/target endpoint snapshots,
+//! nonvolatile human-review display, action, and schema/policy version).
+//! Volatile fields (status, review notes, `applied_at`, `expires_at`) live
+//! OUTSIDE the payload in the stored proposal JSON, so they can never perturb
+//! the identity. At apply, the endpoint portion is rebuilt from LIVE rows and
+//! combined with the validated immutable display before identity recomputation;
+//! a mismatch means the world drifted between approve and apply → refuse.
 //!
 //! The membership rule for [`LifecycleEndpointSnapshot`] is **every input the
 //! apply step reads**, not every field a reviewer looks at — anything apply
@@ -133,12 +134,34 @@ pub struct LifecycleEndpointSnapshot {
     /// row can never hash differently.
     pub importance_bits: u64,
     pub archived: bool,
+    /// The supersession edge is written by both revisioned lifecycle applies
+    /// and `mark_superseded_closing_validity` (without a revision bump). A
+    /// stale approved proposal must never overwrite a later canonical edge.
+    pub superseded_by: Option<String>,
+    /// The validity boundary coupled to `superseded_by`. This is semantic
+    /// lifecycle state, not a volatile bookkeeping timestamp.
+    pub valid_until: Option<String>,
     pub retention_policy: Option<String>,
     pub tier: String,
     pub is_wiki: bool,
     /// `None` when the endpoint is eligible (not protected); a static reason
     /// tag when protected. Protected rows can never be lifecycle sources.
     pub protected_reason: Option<String>,
+}
+
+/// Immutable human-review copy displayed at the proposal top level.
+///
+/// `status`, review notes, and proposal timestamps are deliberately absent:
+/// they are mutable lifecycle bookkeeping. Every nonvolatile field a human
+/// reviews before approving is instead hash-bound here and cross-checked
+/// against its top-level copy by [`validate_lifecycle_proposal`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LifecycleReviewDisplay {
+    pub kind: String,
+    pub requires_human_approval: bool,
+    pub path: String,
+    pub rationale: String,
+    pub evidence: serde_json::Value,
 }
 
 /// Typed immutable apply payload — the canonical shape hashed for identity.
@@ -151,6 +174,7 @@ pub struct LifecycleApplyPayload {
     pub lifecycle_action: String,
     pub source: LifecycleEndpointSnapshot,
     pub target: Option<LifecycleEndpointSnapshot>,
+    pub review_display: LifecycleReviewDisplay,
 }
 
 /// Deterministic SHA-256 identity over the canonical serialization of the
@@ -294,6 +318,12 @@ pub fn snapshot_endpoint(entry: &MemoryEntry) -> LifecycleEndpointSnapshot {
         entities: canonical_tags(&entry.entities),
         importance_bits: entry.importance.to_bits(),
         archived: entry.archived,
+        // Proposal generators only consider active rows (supersession edges
+        // are hidden from their input queries), so `None` is the state a
+        // reviewer approved. Apply re-reads the actual column in the locked
+        // transaction and refuses if a no-revision writer set it meanwhile.
+        superseded_by: None,
+        valid_until: entry.valid_until.clone(),
         retention_policy: entry.retention_policy.clone(),
         tier: entry.tier.clone(),
         is_wiki: entry.is_wiki(),
@@ -308,12 +338,36 @@ pub fn build_apply_payload(
     source: &MemoryEntry,
     target: Option<&MemoryEntry>,
 ) -> LifecycleApplyPayload {
+    build_apply_payload_with_review_display(
+        action,
+        source,
+        target,
+        LifecycleReviewDisplay {
+            kind: "memory_lifecycle".to_string(),
+            requires_human_approval: true,
+            path: source.path.clone(),
+            rationale: "direct lifecycle payload".to_string(),
+            evidence: serde_json::json!({}),
+        },
+    )
+}
+
+/// Build a v2 apply payload with the exact nonvolatile copy shown to the
+/// human reviewer. Proposal generators must use this form so the display is
+/// bound to the same identity as the execution inputs.
+pub fn build_apply_payload_with_review_display(
+    action: &str,
+    source: &MemoryEntry,
+    target: Option<&MemoryEntry>,
+    review_display: LifecycleReviewDisplay,
+) -> LifecycleApplyPayload {
     LifecycleApplyPayload {
         schema_version: LIFECYCLE_SCHEMA_VERSION,
         policy_version: LIFECYCLE_POLICY_VERSION.to_string(),
         lifecycle_action: action.to_string(),
         source: snapshot_endpoint(source),
         target: target.map(snapshot_endpoint),
+        review_display,
     }
 }
 
@@ -324,10 +378,10 @@ pub fn is_legacy_v1_proposal(value: &serde_json::Value) -> bool {
     value.get("schema_version").and_then(|v| v.as_u64()) != Some(LIFECYCLE_SCHEMA_VERSION as u64)
 }
 
-/// Validate the immutable execution fields duplicated at the proposal top
-/// level against its typed apply payload, then verify that the stored identity
-/// hashes that payload. Review and apply both call this guard so presentation
-/// fields cannot be tampered into an execution request after proposal.
+/// Validate immutable execution and human-review fields duplicated at the
+/// proposal top level against its typed apply payload, then verify that the
+/// stored identity hashes that payload. Review and apply both call this guard
+/// so neither execution nor display fields can be tampered after proposal.
 pub fn validate_lifecycle_proposal(
     proposal_id: &str,
     proposal: &serde_json::Value,
@@ -355,6 +409,10 @@ pub fn validate_lifecycle_proposal(
         serde_json::to_value(payload.target.as_ref().map(|target| target.id.clone()))
             .expect("lifecycle target id serializable");
     for (field, expected) in [
+        (
+            "kind",
+            serde_json::json!(payload.review_display.kind.clone()),
+        ),
         ("schema_version", serde_json::json!(payload.schema_version)),
         (
             "policy_version",
@@ -366,6 +424,19 @@ pub fn validate_lifecycle_proposal(
         ),
         ("source_id", serde_json::json!(payload.source.id.clone())),
         ("target_id", expected_target_id),
+        (
+            "requires_human_approval",
+            serde_json::json!(payload.review_display.requires_human_approval),
+        ),
+        (
+            "path",
+            serde_json::json!(payload.review_display.path.clone()),
+        ),
+        (
+            "rationale",
+            serde_json::json!(payload.review_display.rationale.clone()),
+        ),
+        ("evidence", payload.review_display.evidence.clone()),
     ] {
         if proposal.get(field) != Some(&expected) {
             return Err(MemoryError::InvalidArg(format!(
@@ -520,7 +591,7 @@ fn read_endpoint_snapshot(
     let snapshot = tx
         .query_row(
             "SELECT id, path, text, archived, revision, retention_policy, tier, category, domain,
-                    metadata, keywords, entities, importance
+                    metadata, keywords, entities, importance, superseded_by, valid_until
              FROM memories WHERE id = ?1",
             params![id],
             |r| {
@@ -537,6 +608,8 @@ fn read_endpoint_snapshot(
                 let keywords_json: String = r.get(10)?;
                 let entities_json: String = r.get(11)?;
                 let importance: f64 = r.get(12)?;
+                let superseded_by: Option<String> = r.get(13)?;
+                let valid_until: Option<String> = r.get(14)?;
 
                 let metadata: serde_json::Value =
                     serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({}));
@@ -567,6 +640,8 @@ fn read_endpoint_snapshot(
                     entities: canonical_tags(&entities),
                     importance_bits: importance.to_bits(),
                     archived,
+                    superseded_by,
+                    valid_until,
                     retention_policy,
                     tier,
                     is_wiki,
@@ -676,6 +751,10 @@ fn apply_lifecycle_proposal_once(
         lifecycle_action: action.to_string(),
         source: live_source,
         target: live_target,
+        // The display copy was validated against the stored top-level fields
+        // above. It is immutable proposal content, not a live memory row, so
+        // preserve it while rebuilding the endpoint portion of the identity.
+        review_display: stored_payload.review_display.clone(),
     };
     let live_identity = compute_lifecycle_identity(&live_payload);
     if live_identity != stored_identity {
@@ -888,7 +967,19 @@ mod tests {
             revision: 5,
             ..test_entry()
         };
-        let payload = build_apply_payload(ACTION_MERGE_INTO, &entry, Some(&target));
+        let review_display = LifecycleReviewDisplay {
+            kind: "memory_lifecycle".to_string(),
+            requires_human_approval: true,
+            path: entry.path.clone(),
+            rationale: "test rationale".to_string(),
+            evidence: serde_json::json!({"test": true}),
+        };
+        let payload = build_apply_payload_with_review_display(
+            ACTION_MERGE_INTO,
+            &entry,
+            Some(&target),
+            review_display.clone(),
+        );
         let id_a = compute_lifecycle_identity(&payload);
         let id_b = compute_lifecycle_identity(&payload);
         assert_eq!(id_a, id_b, "identity must be deterministic");
@@ -900,6 +991,7 @@ mod tests {
             lifecycle_action: ACTION_MERGE_INTO.to_string(),
             source: snapshot_endpoint(&entry),
             target: Some(snapshot_endpoint(&target)),
+            review_display,
         };
         assert_eq!(
             compute_lifecycle_identity(&rebuilt),
@@ -1108,11 +1200,16 @@ mod tests {
         let proposal_id = lifecycle_proposal_id(&payload).expect("known action");
         let proposal = serde_json::json!({
             "proposal_id": proposal_id,
+            "kind": payload.review_display.kind.clone(),
             "schema_version": payload.schema_version,
             "policy_version": payload.policy_version.clone(),
             "lifecycle_action": payload.lifecycle_action.clone(),
             "source_id": payload.source.id.clone(),
             "target_id": serde_json::Value::Null,
+            "requires_human_approval": payload.review_display.requires_human_approval,
+            "path": payload.review_display.path.clone(),
+            "rationale": payload.review_display.rationale.clone(),
+            "evidence": payload.review_display.evidence.clone(),
             "identity": compute_lifecycle_identity(&payload),
             "apply_payload": payload,
         });
@@ -1142,13 +1239,17 @@ mod tests {
         let proposal_id = lifecycle_proposal_id(&payload).expect("known action");
         let proposal = serde_json::json!({
             "proposal_id": proposal_id.clone(),
-            "kind": "memory_lifecycle",
+            "kind": payload.review_display.kind.clone(),
             "schema_version": payload.schema_version,
             "policy_version": payload.policy_version.clone(),
             "lifecycle_action": payload.lifecycle_action.clone(),
             "status": "pending",
             "source_id": payload.source.id.clone(),
             "target_id": serde_json::Value::Null,
+            "requires_human_approval": payload.review_display.requires_human_approval,
+            "path": payload.review_display.path.clone(),
+            "rationale": payload.review_display.rationale.clone(),
+            "evidence": payload.review_display.evidence.clone(),
             "identity": compute_lifecycle_identity(&payload),
             "apply_payload": payload.clone(),
         });
@@ -1203,7 +1304,7 @@ mod tests {
         let proposal_id = lifecycle_proposal_id(payload).expect("known action");
         let proposal = serde_json::json!({
             "proposal_id": proposal_id.clone(),
-            "kind": "memory_lifecycle",
+            "kind": payload.review_display.kind.clone(),
             "schema_version": payload.schema_version,
             "policy_version": payload.policy_version.clone(),
             "lifecycle_action": payload.lifecycle_action.clone(),
@@ -1214,6 +1315,10 @@ mod tests {
                 .as_ref()
                 .map(|t| serde_json::json!(t.id.clone()))
                 .unwrap_or(serde_json::Value::Null),
+            "requires_human_approval": payload.review_display.requires_human_approval,
+            "path": payload.review_display.path.clone(),
+            "rationale": payload.review_display.rationale.clone(),
+            "evidence": payload.review_display.evidence.clone(),
             "identity": compute_lifecycle_identity(payload),
             "apply_payload": payload,
         });

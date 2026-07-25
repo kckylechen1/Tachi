@@ -666,7 +666,26 @@ fn enrich_with_v2_identity(
     source: &MemoryEntry,
     target: Option<&MemoryEntry>,
 ) -> Value {
-    let payload = lifecycle::build_apply_payload(action, source, target);
+    let review_display = lifecycle::LifecycleReviewDisplay {
+        kind: proposal["kind"]
+            .as_str()
+            .expect("lifecycle proposal kind must be a string")
+            .to_string(),
+        requires_human_approval: proposal["requires_human_approval"]
+            .as_bool()
+            .expect("lifecycle proposal approval requirement must be a boolean"),
+        path: proposal["path"]
+            .as_str()
+            .expect("lifecycle proposal path must be a string")
+            .to_string(),
+        rationale: proposal["rationale"]
+            .as_str()
+            .expect("lifecycle proposal rationale must be a string")
+            .to_string(),
+        evidence: proposal["evidence"].clone(),
+    };
+    let payload =
+        lifecycle::build_apply_payload_with_review_display(action, source, target, review_display);
     let identity = lifecycle::compute_lifecycle_identity(&payload);
     let proposal_id = lifecycle::lifecycle_proposal_id(&payload)
         .expect("proposal generator uses a known lifecycle action");
