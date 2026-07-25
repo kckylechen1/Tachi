@@ -498,7 +498,7 @@ fn drive_recall_apply_state_machine(
                 &after_digest,
                 &patch,
             )?;
-            write_recall_config_env(config_env_path, &patch)?;
+            write_recall_config_env(config_env_path, &patch, before_digest)?;
             let outcome = RecallApplyOutcome::Fresh { attempt_id };
             finalize_recall_apply(
                 server,
@@ -564,7 +564,7 @@ fn drive_recall_apply_state_machine(
             } else if observed == receipt_before {
                 // Rename never landed; safe to redo the file write against the
                 // known-clean before state, then finalize.
-                write_recall_config_env(config_env_path, &patch)?;
+                write_recall_config_env(config_env_path, &patch, &receipt_before)?;
                 let observed_after = compute_recall_digest(config_env_path)?;
                 if observed_after != receipt_after {
                     return Err(format!(
@@ -1113,77 +1113,67 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// SHA-256 hex of the TACHI_RECALL_* keys currently on disk at `path`. Used as
-/// the `before_digest` of a fresh apply and as the `observed` digest the
-/// recovery path compares against the receipt's before/after digests. Only the
-/// TACHI_RECALL_* keys are hashed — a third party changing VOYAGE_API_KEY must
-/// not flip a recovery into a `third_party_drift` refusal, and a third party
-/// changing any TACHI_RECALL_* key must.
+/// SHA-256 hex of the complete config.env source currently on disk at `path`.
+/// Used as the `before_digest` of a fresh apply and as the `observed` digest
+/// the recovery path compares against the receipt's before/after digests. The
+/// atomic writer reconstructs the whole source, so the fingerprint must cover
+/// provider/Vault lines, comments, and formatting too; otherwise a concurrent
+/// non-recall edit could be silently blessed or overwritten by that rewrite.
 fn compute_recall_digest(path: &Path) -> Result<String, String> {
-    let pairs = read_recall_pairs(path)?;
-    Ok(digest_of_pairs(&pairs))
+    Ok(digest_config_env_source(&read_config_env_body(path)?))
 }
 
-/// SHA-256 hex of the TACHI_RECALL_* keys at `path` *after* `patch` is applied
-/// (existing keys replaced, new keys appended). Used as the `after_digest` of
-/// a fresh apply. Re-derived independently of `write_recall_config_env` so a
-/// bug in the writer cannot silently produce a different file than the digest
-/// promised.
+/// SHA-256 hex of the complete config.env source at `path` *after* `patch` is
+/// applied (existing recall keys replaced, new recall keys appended). Used as
+/// the `after_digest` of a fresh apply, so recovery detects drift in any line
+/// the atomic replacement can carry forward.
 fn compute_projected_recall_digest(
     path: &Path,
     patch: &BTreeMap<String, String>,
 ) -> Result<String, String> {
-    let mut pairs = read_recall_pairs(path)?;
-    let mut seen = BTreeSet::new();
-    for pair in pairs.iter_mut() {
-        if let Some(value) = patch.get(&pair.0) {
-            pair.1 = value.clone();
-        }
-        seen.insert(pair.0.clone());
-    }
-    for (key, value) in patch {
-        if !seen.contains(key) {
-            pairs.push((key.clone(), value.clone()));
-        }
-    }
-    pairs.sort();
-    Ok(digest_of_pairs(&pairs))
+    let source = read_config_env_body(path)?;
+    Ok(digest_config_env_source(&render_recall_config_env(
+        &source, patch,
+    )))
 }
 
-fn read_recall_pairs(path: &Path) -> Result<Vec<(String, String)>, String> {
-    let body = match std::fs::read_to_string(path) {
-        Ok(body) => body,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+fn read_config_env_body(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => Ok(body),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(err) => return Err(format!("read config.env {}: {err}", path.display())),
-    };
-    let mut pairs = Vec::new();
-    for line in body.lines() {
+    }
+}
+
+fn digest_config_env_source(source: &str) -> String {
+    hex_lower(&Sha256::digest(source.as_bytes()))
+}
+
+fn render_recall_config_env(source: &str, values: &BTreeMap<String, String>) -> String {
+    let mut seen = BTreeSet::new();
+    let mut lines = Vec::new();
+    for line in source.lines() {
         let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((raw_key, raw_value)) = trimmed.split_once('=') else {
+        let Some((raw_key, _raw_value)) = trimmed.split_once('=') else {
+            lines.push(line.to_string());
             continue;
         };
         let key = raw_key.trim();
-        if !key.starts_with("TACHI_RECALL_") {
-            continue;
+        if let Some(value) = values.get(key) {
+            lines.push(format!("{key}={value}"));
+            seen.insert(key.to_string());
+        } else {
+            lines.push(line.to_string());
         }
-        pairs.push((key.to_string(), raw_value.trim().to_string()));
     }
-    pairs.sort();
-    Ok(pairs)
-}
-
-fn digest_of_pairs(pairs: &[(String, String)]) -> String {
-    let mut hasher = Sha256::new();
-    for (key, value) in pairs {
-        hasher.update(key.as_bytes());
-        hasher.update(b"=");
-        hasher.update(value.as_bytes());
-        hasher.update(b"\n");
+    for (key, value) in values {
+        if !seen.contains(key) {
+            lines.push(format!("{key}={value}"));
+        }
     }
-    hex_lower(&hasher.finalize())
+    let mut body = lines.join("\n");
+    body.push('\n');
+    body
 }
 
 // Reads the BOUND apply payload (`identity_payload.apply_payload.config_env`),
@@ -1227,45 +1217,53 @@ fn parse_config_env_patch(identity_payload: &Value) -> Result<BTreeMap<String, S
 ///   is confirmed durable before the proposal can finalize as applied;
 /// * the temp name carries a per-attempt uuid so two concurrent applies (which
 ///   the upper CAS already serializes) cannot collide on the same temp path.
-fn write_recall_config_env(path: &Path, values: &BTreeMap<String, String>) -> Result<(), String> {
+fn write_recall_config_env(
+    path: &Path,
+    values: &BTreeMap<String, String>,
+    expected_source_revision: &str,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create config.env parent {}: {e}", parent.display()))?;
     }
-    let existing = match std::fs::read_to_string(path) {
-        Ok(body) => body,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(format!("read config.env {}: {err}", path.display())),
+    let existing = read_config_env_body(path)?;
+    let observed_source_revision = digest_config_env_source(&existing);
+    if observed_source_revision != expected_source_revision {
+        return Err(format!(
+            "source_state_drift: config.env {} changed before atomic replacement; expected source revision {expected_source_revision}, observed {observed_source_revision}; refusing to overwrite the current source",
+            path.display()
+        ));
+    }
+    let existing_permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(format!(
+                "read config.env metadata {}: {err}",
+                path.display()
+            ))
+        }
     };
-    let mut seen = BTreeSet::new();
-    let mut lines = Vec::new();
-    for line in existing.lines() {
-        let trimmed = line.trim_start();
-        let Some((raw_key, _raw_value)) = trimmed.split_once('=') else {
-            lines.push(line.to_string());
-            continue;
-        };
-        let key = raw_key.trim();
-        if let Some(value) = values.get(key) {
-            lines.push(format!("{key}={value}"));
-            seen.insert(key.to_string());
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-    for (key, value) in values {
-        if !seen.contains(key) {
-            lines.push(format!("{key}={value}"));
-        }
-    }
-    let mut body = lines.join("\n");
-    body.push('\n');
+    let body = render_recall_config_env(&existing, values);
     let tmp = tmp_path_for(path);
     {
-        let mut file = std::fs::File::create(&tmp)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
             .map_err(|e| format!("create temp config.env {}: {e}", tmp.display()))?;
         file.write_all(body.as_bytes())
             .map_err(|e| format!("write temp config.env {}: {e}", tmp.display()))?;
+        if let Some(permissions) = existing_permissions {
+            file.set_permissions(permissions).map_err(|e| {
+                format!("preserve config.env permissions on {}: {e}", tmp.display())
+            })?;
+        }
         file.sync_all()
             .map_err(|e| format!("fsync temp config.env {}: {e}", tmp.display()))?;
     }

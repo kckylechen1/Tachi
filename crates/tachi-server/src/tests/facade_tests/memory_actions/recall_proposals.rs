@@ -264,62 +264,28 @@ async fn recall_proposal_reject_stamps_a_ttl_immediately() {
 }
 
 /// Local mirror of `recall_proposal_ops::compute_recall_digest`. The recovery
-/// path recomputes this same digest on the live config.env and compares it to
-/// the applying_receipt's before/after digests, so the receipt we stamp in
-/// these tests must use the identical algorithm. Kept local (rather than
-/// reaching into the production module) to avoid broadening this PR's file
-/// scope to facade_memory_ops/mod.rs.
+/// path fingerprints the complete config.env source and compares it to the
+/// applying_receipt's before/after digests, so the receipt we stamp in these
+/// tests must use the identical algorithm. Kept local (rather than reaching
+/// into the production module) to avoid broadening this PR's file scope to
+/// facade_memory_ops/mod.rs.
 fn test_recall_digest_of(path: &std::path::Path) -> String {
-    use sha2::{Digest, Sha256};
     let body = match std::fs::read_to_string(path) {
         Ok(body) => body,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => panic!("read config.env {}: {err}", path.display()),
     };
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((raw_key, raw_value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = raw_key.trim();
-        if !key.starts_with("TACHI_RECALL_") {
-            continue;
-        }
-        pairs.push((key.to_string(), raw_value.trim().to_string()));
-    }
-    pairs.sort();
-    let mut hasher = Sha256::new();
-    for (key, value) in &pairs {
-        hasher.update(key.as_bytes());
-        hasher.update(b"=");
-        hasher.update(value.as_bytes());
-        hasher.update(b"\n");
-    }
-    let bytes = hasher.finalize();
-    let mut out = String::with_capacity(2 * bytes.len());
-    for byte in bytes {
-        out.push_str(&format!("{:02x}", byte));
-    }
-    out
+    test_config_env_digest(&body)
 }
 
-/// Local mirror of `recall_proposal_ops::digest_of_pairs`. Used by the
-/// third-party-drift test to compute the projected `after_digest` WITHOUT
-/// mutating the config file (so we can prove the recovery path distinguishes
-/// "file still at before" from "file at the would-be after").
-fn test_digest_of_pairs(pairs: &[(String, String)]) -> String {
+/// Local mirror of `recall_proposal_ops::digest_config_env_source`. Used by
+/// the recovery test to compute an `after_digest` without mutating the config
+/// file, so the receipt covers the same complete source that production will
+/// replace.
+fn test_config_env_digest(body: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    for (key, value) in pairs {
-        hasher.update(key.as_bytes());
-        hasher.update(b"=");
-        hasher.update(value.as_bytes());
-        hasher.update(b"\n");
-    }
+    hasher.update(body.as_bytes());
     let bytes = hasher.finalize();
     let mut out = String::with_capacity(2 * bytes.len());
     for byte in bytes {
@@ -727,31 +693,12 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
         .expect("approve");
 
     let before_digest = test_recall_digest_of(&config_env_path);
-    // Compute the projected after_digest WITHOUT mutating the file: hand-apply
-    // the patch to a throwaway copy and hash it.
-    let projected = {
-        let mut pairs: Vec<(String, String)> = vec![(
-            "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR".to_string(),
-            "0.1".to_string(),
-        )];
-        let mut seen = std::collections::BTreeSet::new();
-        for pair in pairs.iter_mut() {
-            if pair.0 == "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR" {
-                pair.1 = "0.6".to_string();
-            }
-            seen.insert(pair.0.clone());
-        }
-        if !seen.contains("TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS") {
-            pairs.push((
-                "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS".to_string(),
-                "4".to_string(),
-            ));
-        }
-        pairs.sort();
-        // Hash the projected pairs with the same algorithm the production
-        // recovery path will use when it reads the post-rename file.
-        test_digest_of_pairs(&pairs)
-    };
+    // Compute the projected after_digest WITHOUT mutating the file. The
+    // writer preserves source order, replaces the score line, then appends the
+    // missing max-terms line and a final newline.
+    let projected = test_config_env_digest(
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\n",
+    );
 
     // (a) before-digest retry: file still at before state, row at applying
     // with receipt. Apply should redo the write and finalize.
@@ -1580,9 +1527,10 @@ async fn recall_review_refuses_tampered_unbound_top_level_config_env() {
     );
 }
 
-/// Discrimination: recall proposal identity binds the live TACHI_RECALL_*
-/// source digest. Config drift must refuse review and approved apply without
-/// changing proposal state, while regeneration mints a distinct pending id.
+/// Discrimination: recall proposal identity binds the complete config.env
+/// source it can later rewrite. A provider/Vault-only edit must refuse review
+/// and approved apply without changing proposal state or overwriting that
+/// provider edit, while regeneration mints a distinct pending id.
 #[tokio::test]
 async fn recall_source_config_drift_refuses_review_apply_and_rotates_pending_identity() {
     let (server, temp_home) = make_server_with_temp_home();
@@ -1591,7 +1539,7 @@ async fn recall_source_config_drift_refuses_review_apply_and_rotates_pending_ide
         .expect("create config parent");
     std::fs::write(
         &config_env_path,
-        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+        "VOYAGE_API_KEY=vault:provider-at-generation\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
     )
     .expect("seed config");
     seed_recall_pair(&server, "source-drift");
@@ -1600,7 +1548,7 @@ async fn recall_source_config_drift_refuses_review_apply_and_rotates_pending_ide
     let first_id = first["proposal_id"].as_str().expect("first id").to_string();
     std::fs::write(
         &config_env_path,
-        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.2\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+        "VOYAGE_API_KEY=vault:provider-before-review\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
     )
     .expect("third-party config edit before review");
 
@@ -1640,7 +1588,7 @@ async fn recall_source_config_drift_refuses_review_apply_and_rotates_pending_ide
         .expect("approve regenerated proposal");
     std::fs::write(
         &config_env_path,
-        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.3\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+        "VOYAGE_API_KEY=vault:provider-before-apply\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
     )
     .expect("third-party config edit after approval");
 
@@ -1662,8 +1610,59 @@ async fn recall_source_config_drift_refuses_review_apply_and_rotates_pending_ide
     );
     assert_eq!(
         std::fs::read_to_string(&config_env_path).expect("read config after refusal"),
-        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.3\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
-        "refused apply must not overwrite third-party config"
+        "VOYAGE_API_KEY=vault:provider-before-apply\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+        "refused apply must not overwrite the concurrent provider/Vault edit"
+    );
+}
+
+/// Discrimination: an atomic config replacement must retain restrictive
+/// existing permissions. The old `File::create` temp path honored the process
+/// umask and commonly replaced a private 0600 config with mode 0644.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_preserves_private_config_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n",
+    )
+    .expect("seed private config");
+    std::fs::set_permissions(&config_env_path, std::fs::Permissions::from_mode(0o600))
+        .expect("restrict config.env to owner-only mode");
+    seed_recall_pair(&server, "private-mode");
+
+    let proposal = generate_recall_source_proposal(&server, "private-mode").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve private-config proposal");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id);
+    apply.confirm = true;
+    crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("apply private-config proposal");
+
+    assert_eq!(
+        std::fs::metadata(&config_env_path)
+            .expect("read rewritten config mode")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "atomic replacement must not downgrade a private config.env to 0644"
     );
 }
 
