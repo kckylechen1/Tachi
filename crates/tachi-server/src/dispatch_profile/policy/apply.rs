@@ -17,7 +17,7 @@ pub(crate) fn handle_route_policy_apply(
     }
     let applied_at = Utc::now().to_rfc3339();
     let updated = server.with_global_store(|store| {
-        let (raw, _version) = store
+        let (raw, version) = store
             .get_state_kv(DISPATCH_POLICY_PROPOSAL_NS, proposal_id)
             .map_err(|e| format!("load route policy proposal: {e}"))?
             .ok_or_else(|| format!("route policy proposal not found: {proposal_id}"))?;
@@ -38,16 +38,78 @@ pub(crate) fn handle_route_policy_apply(
             .unwrap_or("route_policy");
         match kind {
             "route_policy" => {
+                // Legacy route_policy proposals (pre-v3 schema) carry no
+                // content-addressed binding, so what the human reviewed is no
+                // guarantee of what apply will persist. Refuse loudly; the row
+                // remains listable with `legacy_unbound_proposal: true` but
+                // cannot be applied.
+                if value.get("schema_version").and_then(Value::as_u64)
+                    != Some(tachi_dispatch::policy::ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)
+                {
+                    return Err(format!(
+                        "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be applied; regenerate with action='proposals' to mint a fresh pending v3 proposal"
+                    ));
+                }
+                // Overwrite the top-level `policy_rule` / `evidence` fields
+                // with the digest-validated `identity_payload` copies
+                // immediately before persisting. `routing.rs`'s live
+                // consumer (`build_route_policy_rule_loadout`, run on every
+                // routing decision, unmodified by this PR and also reading
+                // legacy pre-v3 rows already applied before this change)
+                // reads `policy_rule` and `evidence` from the top level, NOT
+                // from `identity_payload` — so it cannot be repointed at the
+                // bound copy without breaking those pre-existing legacy rows.
+                // At this point the drift check above has already proven the
+                // two copies are canonically equal, so this write is a
+                // normalization (stable key order, no literal-vs-canonical
+                // mismatch), never a content change — the refusal above is
+                // what actually stops a drifted proposal; this is defense in
+                // depth for what lands in the namespace every routing
+                // decision reads.
+                // Atomically write proposal + route rule in ONE SQLite
+                // transaction with a hard_state version CAS on the proposal
+                // row's approved -> applied transition. A late write failure
+                // (the rule write, the commit, the CAS itself) rolls back both
+                // rows: the apply either fully lands or leaves no trace.
+                let tx = store
+                    .connection_mut()
+                    .transaction()
+                    .map_err(|e| format!("open route policy apply tx: {e}"))?;
+                let source_rows = memcore::db::list_state(&tx, ROUTE_POLICY_RULE_NS)
+                    .map_err(|e| format!("list active route policy rules in apply tx: {e}"))?;
+                let live_source_revision = super::handlers::route_policy_source_revision(&source_rows);
+                let identity_payload = super::handlers::validate_route_policy_proposal(
+                    proposal_id,
+                    &value,
+                    Some(&live_source_revision),
+                )?;
+                if let Some(bound_apply_payload) = identity_payload.get("apply_payload") {
+                    value["policy_rule"] = bound_apply_payload.clone();
+                }
+                if let Some(bound_evidence) = identity_payload.get("evidence_review") {
+                    value["evidence"] = bound_evidence.clone();
+                }
                 value["status"] = json!("applied");
                 value["applied_at"] = json!(applied_at);
                 let next = serde_json::to_string(&value)
                     .map_err(|e| format!("serialize applied route policy proposal: {e}"))?;
-                store
-                    .set_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next)
-                    .map_err(|e| format!("persist applied route policy proposal: {e}"))?;
-                store
-                    .set_state(ROUTE_POLICY_RULE_NS, proposal_id, &next)
+                let cas_ok = memcore::db::set_state_if_version(
+                    &tx,
+                    DISPATCH_POLICY_PROPOSAL_NS,
+                    proposal_id,
+                    &next,
+                    version,
+                )
+                .map_err(|e| format!("CAS applied route policy proposal: {e}"))?;
+                if !cas_ok {
+                    return Err(format!(
+                        "stale_state_version: route policy proposal {proposal_id} changed before apply; reload and retry"
+                    ));
+                }
+                memcore::db::set_state(&tx, ROUTE_POLICY_RULE_NS, proposal_id, &next)
                     .map_err(|e| format!("persist route policy rule: {e}"))?;
+                tx.commit()
+                    .map_err(|e| format!("commit route policy apply tx: {e}"))?;
             }
             "loadout_evolution" => {
                 let profile_name = value

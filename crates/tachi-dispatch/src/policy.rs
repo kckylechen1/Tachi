@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::eval::AgentPerformanceMatrixRow;
 use crate::{
@@ -7,6 +7,127 @@ use crate::{
     profile_skill_loadout_json, sanitize_policy_key, DispatchProfileDef, RouteSimulationSummary,
     DISPATCH_PROFILES, MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES,
 };
+
+/// Policy-version tag bound into every v3 route-policy proposal identity. The
+/// identity binds the *complete immutable apply payload + the evidence used
+/// for review + this policy version + the apply target*, so any change to the
+/// apply shape (a new field on `policy_rule`, a renamed target, or this const
+/// itself) rotates every proposal id and forces re-review. Bumped only on a
+/// breaking change to the proposal schema/apply payload.
+pub const ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION: u64 = 3;
+pub const ROUTE_POLICY_PROPOSAL_POLICY_VERSION: &str = "2026-07-route-policy-v3";
+pub const ROUTE_POLICY_PROPOSAL_KIND: &str = "route_policy";
+
+/// Stable apply-target tag bound into the identity, so a proposal cannot be
+/// replayed against a different namespace (route-rule vs profile overlay) by
+/// swapping the target field alone.
+pub const ROUTE_POLICY_PROPOSAL_TARGET: &str = "route_policy_rule";
+
+/// Recursively re-serialize a [`Value`] into canonical form: every JSON object
+/// becomes a sorted-key `BTreeMap`, every array is canonicalized element-wise,
+/// and scalars pass through untouched. The output is deterministic regardless
+/// of the input's insertion order, which is the property the v3 content-addressed
+/// identity (see [`route_policy_v3_identity_payload`]) requires: two callers
+/// that built the "same" proposal from different code paths must hash to the
+/// same id, and any change to the apply payload, review evidence, policy
+/// version, or target must produce a different id.
+///
+/// `pub` (not crate-private) so the server crate's display/bound drift checks
+/// — comparing an unbound top-level display field (`policy_rule`, `evidence`,
+/// `config_env`) against its digest-bound `identity_payload` counterpart —
+/// normalize through the SAME canonicalization the identity hash itself uses,
+/// rather than inventing a second comparison rule that could silently drift
+/// from this one. See `canonical_json_eq`.
+pub fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted = BTreeMap::new();
+            for (key, value) in map {
+                sorted.insert(key.clone(), canonical_json(value));
+            }
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
+        scalar => scalar.clone(),
+    }
+}
+
+/// `true` iff `a` and `b` are equal after canonicalization through the same
+/// [`canonical_json`] the v3 identity hash uses. The single comparison rule
+/// for every display-copy-vs-bound-copy drift check in the server crate
+/// (route policy's `policy_rule`/`evidence`, recall's `config_env`) — never
+/// duplicate this as a second normalization.
+pub fn canonical_json_eq(a: &Value, b: &Value) -> bool {
+    canonical_json(a) == canonical_json(b)
+}
+
+/// Build the canonical identity payload that the v3 proposal id hashes. The
+/// returned value is a fully canonicalized [`Value`] (sorted keys top to
+/// bottom) ready to be serialized and SHA-256 hashed by the caller — the
+/// dispatch crate is intentionally free of a crypto dependency, so the hash
+/// itself is computed in the server crate where `sha2` is already in scope.
+///
+/// What is bound (and thus what rotates the id when it changes):
+/// * `policy_version` — the proposal-schema version ([`ROUTE_POLICY_PROPOSAL_POLICY_VERSION`]);
+/// * `target` — the apply target tag ([`ROUTE_POLICY_PROPOSAL_TARGET`]);
+/// * `apply_payload` — the complete immutable payload that apply will persist
+///   (the `policy_rule` body, including `fallback_to_current_profile`);
+/// * `evidence_review` — the evidence snapshot the human reviewed.
+///
+/// What is *not* bound (and thus must never rotate the id): `status`,
+/// `created_or_refreshed_at`, `review`, `applied_at`, `requires_human_approval`.
+pub fn route_policy_v3_identity_payload(
+    apply_payload: &Value,
+    evidence_review: &Value,
+    policy_version: &str,
+    target: &str,
+    source_revision: &str,
+) -> Value {
+    let mut map: BTreeMap<String, Value> = BTreeMap::new();
+    map.insert("kind".to_string(), json!(ROUTE_POLICY_PROPOSAL_KIND));
+    map.insert("policy_version".to_string(), json!(policy_version));
+    map.insert("source_revision".to_string(), json!(source_revision));
+    map.insert("target".to_string(), json!(target));
+    map.insert("apply_payload".to_string(), canonical_json(apply_payload));
+    map.insert(
+        "evidence_review".to_string(),
+        canonical_json(evidence_review),
+    );
+    Value::Object(map.into_iter().collect())
+}
+
+/// Same content-addressing helper for recall-config proposals. The dispatch
+/// crate has no recall-specific types (recall lives in the server crate), so
+/// this is a thin canonicalizer over a caller-supplied apply payload
+/// (`config_env`) and review evidence. The server crate's
+/// `recall_proposal_ops` is the only caller.
+pub const RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION: u64 = 3;
+pub const RECALL_CONFIG_PROPOSAL_POLICY_VERSION: &str = "2026-07-recall-config-v3";
+pub const RECALL_CONFIG_PROPOSAL_KIND: &str = "recall_config";
+pub const RECALL_CONFIG_PROPOSAL_TARGET: &str = "recall_config_env";
+
+pub fn recall_config_v3_identity_payload(
+    config_env: &Value,
+    evidence_review: &Value,
+    policy_version: &str,
+    target: &str,
+    source_revision: &str,
+) -> Value {
+    let mut map: BTreeMap<String, Value> = BTreeMap::new();
+    map.insert("kind".to_string(), json!(RECALL_CONFIG_PROPOSAL_KIND));
+    map.insert("policy_version".to_string(), json!(policy_version));
+    map.insert("source_revision".to_string(), json!(source_revision));
+    map.insert("target".to_string(), json!(target));
+    map.insert(
+        "apply_payload".to_string(),
+        json!({ "config_env": canonical_json(config_env) }),
+    );
+    map.insert(
+        "evidence_review".to_string(),
+        canonical_json(evidence_review),
+    );
+    Value::Object(map.into_iter().collect())
+}
 
 #[derive(Debug, Clone)]
 pub struct LoadoutEvalEntry {
@@ -191,6 +312,7 @@ pub fn build_route_policy_proposals(
     row_count: usize,
     limit: usize,
     created_or_refreshed_at: &str,
+    source_revision: &str,
 ) -> Vec<Value> {
     let current_by_task = current
         .route_choices
@@ -206,15 +328,42 @@ pub fn build_route_policy_proposals(
             if current_choice.profile == choice.profile {
                 continue;
             }
-            let id = format!(
+            let legacy_proposal_id = format!(
                 "route_policy:{}:{}:{}",
                 sanitize_policy_key(&variant.policy),
                 sanitize_policy_key(&choice.task_type),
                 sanitize_policy_key(&choice.profile)
             );
+            let apply_payload = json!({
+                "when_task_type": choice.task_type,
+                "prefer_profile": choice.profile,
+                "policy": variant.policy,
+                "fallback_to_current_profile": current_choice.profile,
+            });
+            let evidence = json!({
+                "source": "live_memory_eval",
+                "row_count": row_count,
+                "limit": limit,
+                "current": current_choice,
+                "proposed": choice,
+                "route_simulate_call": "tachi_task(action='route_simulate', limit=...)",
+            });
+            let identity_payload = route_policy_v3_identity_payload(
+                &apply_payload,
+                &evidence,
+                ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
+                ROUTE_POLICY_PROPOSAL_TARGET,
+                source_revision,
+            );
             out.push(json!({
-                "proposal_id": id,
-                "kind": "route_policy",
+                "proposal_id": legacy_proposal_id,
+                "legacy_proposal_id": legacy_proposal_id,
+                "kind": ROUTE_POLICY_PROPOSAL_KIND,
+                "schema_version": ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION,
+                "policy_version": ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
+                "target": ROUTE_POLICY_PROPOSAL_TARGET,
+                "source_revision": source_revision,
+                "identity_payload": identity_payload,
                 "status": "pending",
                 "requires_human_approval": true,
                 "created_or_refreshed_at": created_or_refreshed_at,
@@ -225,20 +374,8 @@ pub fn build_route_policy_proposals(
                 "current_score": current_choice.score,
                 "proposed_score": choice.score,
                 "score_delta": round2(choice.score - current_choice.score),
-                "policy_rule": {
-                    "when_task_type": choice.task_type,
-                    "prefer_profile": choice.profile,
-                    "policy": variant.policy,
-                    "fallback_to_current_profile": current_choice.profile,
-                },
-                "evidence": {
-                    "source": "live_memory_eval",
-                    "row_count": row_count,
-                    "limit": limit,
-                    "current": current_choice,
-                    "proposed": choice,
-                    "route_simulate_call": "tachi_task(action='route_simulate', limit=...)",
-                },
+                "policy_rule": apply_payload,
+                "evidence": evidence,
                 "rationale": format!(
                     "{} replay prefers {} over current {} for {}",
                     variant.policy, choice.profile, current_choice.profile, choice.task_type
@@ -917,7 +1054,7 @@ mod tests {
             ..current.clone()
         };
 
-        let proposals = build_route_policy_proposals(&current, &[variant], 4, 50, "now");
+        let proposals = build_route_policy_proposals(&current, &[variant], 4, 50, "now", "source");
 
         assert_eq!(proposals.len(), 1);
         assert_eq!(
@@ -926,6 +1063,237 @@ mod tests {
         );
         assert_eq!(proposals[0]["created_or_refreshed_at"], json!("now"));
         assert_eq!(proposals[0]["score_delta"], json!(2.5));
+    }
+
+    /// v3 schema: every route-policy proposal carries a content-addressed
+    /// identity input covering policy_version + target + apply_payload +
+    /// evidence_review. The dispatch layer does not hash (no sha2 dep — by
+    /// design); it just produces the canonical input the server layer hashes.
+    /// This pins the schema so an accidental field drop/rename is caught here.
+    #[test]
+    fn route_policy_proposals_carry_v3_identity_payload() {
+        let current = RouteSimulationSummary {
+            policy: "current".to_string(),
+            selected_route_count: 1,
+            sample_count: 4,
+            estimated_success_rate: Some(0.5),
+            estimated_verification_rate: Some(0.5),
+            failure_count: 1,
+            avg_retry_count: Some(0.5),
+            avg_human_override_rate: Some(0.0),
+            avg_latency_ms: Some(10.0),
+            avg_cost_usd: Some(0.02),
+            total_cost_usd: Some(0.08),
+            score: 10.0,
+            route_choices: vec![crate::RouteSimulationChoice {
+                task_type: "fix_request".to_string(),
+                profile: "claude_plan".to_string(),
+                agent: "claude".to_string(),
+                samples: 4,
+                score: 10.0,
+                success_rate: Some(0.5),
+                verification_rate: 0.5,
+                failure_count: 1,
+                avg_latency_ms: Some(10.0),
+                avg_cost_usd: Some(0.02),
+                avg_retry_count: 0.5,
+                human_override_rate: 0.0,
+                reasons: vec!["current".to_string()],
+            }],
+            caveats: Vec::new(),
+        };
+        let variant = RouteSimulationSummary {
+            route_choices: vec![crate::RouteSimulationChoice {
+                profile: "opencode_builder".to_string(),
+                score: 12.5,
+                reasons: vec!["cheaper".to_string()],
+                ..current.route_choices[0].clone()
+            }],
+            policy: "cost_sensitive".to_string(),
+            score: 12.5,
+            ..current.clone()
+        };
+
+        let proposals = build_route_policy_proposals(&current, &[variant], 4, 50, "now", "source");
+        assert_eq!(proposals.len(), 1);
+        let proposal = &proposals[0];
+
+        // Schema marker present and on the v3 baseline.
+        assert_eq!(
+            proposal["schema_version"],
+            json!(ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            proposal["policy_version"],
+            json!(ROUTE_POLICY_PROPOSAL_POLICY_VERSION)
+        );
+        assert_eq!(proposal["target"], json!(ROUTE_POLICY_PROPOSAL_TARGET));
+
+        // The apply payload is bound to the identity, including the fallback
+        // profile — which is the field that flips when the current profile
+        // changes (the "regeneration with changed fallback" case).
+        let identity = proposal["identity_payload"].clone();
+        assert_eq!(
+            identity["apply_payload"]["fallback_to_current_profile"],
+            json!("claude_plan")
+        );
+        assert_eq!(
+            identity["apply_payload"]["prefer_profile"],
+            json!("opencode_builder")
+        );
+        // Evidence used for review is bound too — changing it must rotate the
+        // canonical payload (and therefore the server-side id).
+        assert_eq!(identity["evidence_review"]["row_count"], json!(4));
+        assert_eq!(identity["evidence_review"]["limit"], json!(50));
+
+        // Volatile fields are NOT in the identity payload by construction.
+        assert!(identity.get("status").is_none());
+        assert!(identity.get("created_or_refreshed_at").is_none());
+        assert!(identity.get("review").is_none());
+    }
+
+    /// The identity payload is the discriminating input for the SHA-256 id the
+    /// server layer hashes. Changing the fallback profile (i.e. changing what
+    /// the proposal would actually persist on apply) MUST change the canonical
+    /// payload — otherwise a regenerated proposal could inherit an old approval
+    /// across changed content. This pins that property at the unit level; the
+    /// integration test (`route_regen_with_changed_fallback_gets_new_pending_id`)
+    /// exercises the same property end-to-end through the server's SHA-256 id.
+    #[test]
+    fn route_policy_identity_payload_rotates_when_fallback_changes() {
+        // `RouteSimulationSummary` does not derive `Default`, so the test builds
+        // the full struct explicitly and only varies the fallback profile.
+        let mk_summary = |fallback_profile: &str| {
+            let current_choice = crate::RouteSimulationChoice {
+                task_type: "fix_request".to_string(),
+                profile: fallback_profile.to_string(),
+                agent: "claude".to_string(),
+                samples: 4,
+                score: 10.0,
+                success_rate: Some(0.5),
+                verification_rate: 0.5,
+                failure_count: 1,
+                avg_latency_ms: Some(10.0),
+                avg_cost_usd: Some(0.02),
+                avg_retry_count: 0.5,
+                human_override_rate: 0.0,
+                reasons: vec!["current".to_string()],
+            };
+            let current = RouteSimulationSummary {
+                policy: "current".to_string(),
+                selected_route_count: 1,
+                sample_count: 4,
+                estimated_success_rate: Some(0.5),
+                estimated_verification_rate: Some(0.5),
+                failure_count: 1,
+                avg_retry_count: Some(0.5),
+                avg_human_override_rate: Some(0.0),
+                avg_latency_ms: Some(10.0),
+                avg_cost_usd: Some(0.02),
+                total_cost_usd: Some(0.08),
+                score: 10.0,
+                route_choices: vec![current_choice.clone()],
+                caveats: Vec::new(),
+            };
+            let variant_choice = crate::RouteSimulationChoice {
+                profile: "opencode_builder".to_string(),
+                score: 12.5,
+                reasons: vec!["cheaper".to_string()],
+                ..current_choice
+            };
+            let variant = RouteSimulationSummary {
+                policy: "cost_sensitive".to_string(),
+                score: 12.5,
+                route_choices: vec![variant_choice],
+                ..current.clone()
+            };
+            (current, variant)
+        };
+        let mk_identity = |fallback_profile: &str| {
+            let (current, variant) = mk_summary(fallback_profile);
+            let proposals =
+                build_route_policy_proposals(&current, &[variant], 4, 50, "now", "source");
+            serde_json::to_string(&proposals[0]["identity_payload"]).unwrap()
+        };
+
+        let base = mk_identity("claude_plan");
+        let flipped = mk_identity("glm_impl");
+        assert_ne!(
+            base, flipped,
+            "identity payload must change when fallback_to_current_profile changes"
+        );
+    }
+
+    /// Changing the reviewed evidence (row_count / limit) MUST rotate the
+    /// canonical payload — a proposal the human reviewed against evidence A
+    /// cannot inherit its approval when regenerated against evidence B even if
+    /// the apply payload is otherwise identical.
+    #[test]
+    fn route_policy_identity_payload_rotates_when_evidence_changes() {
+        let mk_summary = || {
+            let current_choice = crate::RouteSimulationChoice {
+                task_type: "fix_request".to_string(),
+                profile: "claude_plan".to_string(),
+                agent: "claude".to_string(),
+                samples: 4,
+                score: 10.0,
+                success_rate: Some(0.5),
+                verification_rate: 0.5,
+                failure_count: 1,
+                avg_latency_ms: Some(10.0),
+                avg_cost_usd: Some(0.02),
+                avg_retry_count: 0.5,
+                human_override_rate: 0.0,
+                reasons: vec!["current".to_string()],
+            };
+            let current = RouteSimulationSummary {
+                policy: "current".to_string(),
+                selected_route_count: 1,
+                sample_count: 4,
+                estimated_success_rate: Some(0.5),
+                estimated_verification_rate: Some(0.5),
+                failure_count: 1,
+                avg_retry_count: Some(0.5),
+                avg_human_override_rate: Some(0.0),
+                avg_latency_ms: Some(10.0),
+                avg_cost_usd: Some(0.02),
+                total_cost_usd: Some(0.08),
+                score: 10.0,
+                route_choices: vec![current_choice.clone()],
+                caveats: Vec::new(),
+            };
+            let variant_choice = crate::RouteSimulationChoice {
+                profile: "opencode_builder".to_string(),
+                score: 12.5,
+                reasons: vec!["cheaper".to_string()],
+                ..current_choice
+            };
+            let variant = RouteSimulationSummary {
+                policy: "cost_sensitive".to_string(),
+                score: 12.5,
+                route_choices: vec![variant_choice],
+                ..current.clone()
+            };
+            (current, variant)
+        };
+        let mk_identity = |row_count: usize, limit: usize| {
+            let (current, variant) = mk_summary();
+            let proposals = build_route_policy_proposals(
+                &current,
+                &[variant],
+                row_count,
+                limit,
+                "now",
+                "source",
+            );
+            serde_json::to_string(&proposals[0]["identity_payload"]).unwrap()
+        };
+
+        let a = mk_identity(4, 50);
+        let b = mk_identity(8, 50);
+        let c = mk_identity(4, 100);
+        assert_ne!(a, b, "identity must change when row_count changes");
+        assert_ne!(a, c, "identity must change when limit changes");
     }
 
     #[test]
