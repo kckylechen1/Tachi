@@ -947,6 +947,52 @@ mod idless_upsert_tests {
     }
 
     #[test]
+    fn insert_if_absent_makes_new_row_available_to_symbolic_trigram_lookup() {
+        let mut store = crate::MemoryStore::open_in_memory().unwrap();
+        let symbolic_fts_exists: bool = store
+            .connection()
+            .query_row(
+                "SELECT EXISTS (\
+                     SELECT 1 FROM sqlite_master \
+                     WHERE type = 'table' AND name = 'memories_symbolic_fts'\
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            symbolic_fts_exists,
+            "this regression must exercise the symbolic trigram index, not its table-scan fallback"
+        );
+        let mut item = entry("insert-only-symbolic");
+        item.text = "insertonlysymbolicneedle".to_string();
+
+        assert_eq!(
+            store.insert_if_absent(&item).unwrap(),
+            InsertMemoryResult::Inserted
+        );
+
+        let hits = search_symbolic_candidates(
+            store.connection(),
+            "insertonlysymbolicneedle",
+            10,
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            hits.iter().any(|entry| entry.id == item.id),
+            "an inserted row must be discoverable through the symbolic trigram path; got {:?}",
+            hits.iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn explicit_id_update_clears_stale_idless_identity() {
         let mut store = crate::MemoryStore::open_in_memory().unwrap();
         assert_eq!(
