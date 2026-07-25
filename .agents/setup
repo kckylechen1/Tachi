@@ -12,6 +12,7 @@ export RUSTUP_AUTO_INSTALL=0
 
 readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3 node npm)
 readonly REQUIRED_RUST_COMPONENTS=(clippy rustfmt)
+readonly REQUIRED_CARGO_AUDIT_VERSION="0.22.2"
 setup_source="${BASH_SOURCE[0]}"
 setup_parent="${setup_source%/*}"
 if [[ "${setup_parent}" == "${setup_source}" ]]; then
@@ -48,6 +49,14 @@ if command -v node >/dev/null 2>&1 && node_version="$(node --version 2>/dev/null
   node_major="${node_major%%.*}"
   if [[ ! "${node_major}" =~ ^[0-9]+$ ]] || ((node_major < 20)); then
     missing+=("node>=20(found:${node_version:-unknown})")
+  fi
+fi
+
+if command -v cargo-audit >/dev/null 2>&1; then
+  cargo_audit_version="$(cargo-audit --version 2>/dev/null || true)"
+  read -r cargo_audit_name cargo_audit_actual _ <<<"${cargo_audit_version}"
+  if [[ "${cargo_audit_name:-}" != cargo-audit || "${cargo_audit_actual:-}" != "${REQUIRED_CARGO_AUDIT_VERSION}" ]]; then
+    missing+=("cargo-audit=${cargo_audit_actual:-unknown}(required:${REQUIRED_CARGO_AUDIT_VERSION})")
   fi
 fi
 

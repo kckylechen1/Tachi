@@ -245,12 +245,59 @@ class ActionPolicy
   def validate_run(node, path)
     value = node.value
     @run_count += 1
+
+    if node.start_line == node.end_line && @cargo_installs.key?(value)
+      @cargo_uses[value] += 1
+      return
+    end
+
+    if dynamic_cargo_installer?(value)
+      raise PolicyError, "#{path}: no dynamic cargo installer invocation: #{value.inspect}"
+    end
     return unless cargo_install_occurrence?(value)
 
-    unless node.start_line == node.end_line && @cargo_installs.key?(value)
-      raise PolicyError, "#{path}: unaudited cargo install command: #{value.inspect}"
+    raise PolicyError, "#{path}: unaudited cargo install command: #{value.inspect}"
+  end
+
+  def dynamic_cargo_installer?(value)
+    command_text = value.gsub(/\\\r?\n/, " ").gsub(/\r?\n/, " ; ")
+    normalized = command_text.gsub(/[[:space:]]+/, " ")
+    return false unless normalized.match?(/cargo|install|audit/)
+
+    dynamic = /\$\{\{|\$\{|\$[A-Za-z_][A-Za-z0-9_]*|\$\(|`/
+    dynamic_token = /\$\{\{.*?\}\}|\$\{.*?\}|\$[A-Za-z_][A-Za-z0-9_]*|\$\([^)]*\)|`[^`]*`/
+    if normalized.match?(dynamic_token)
+      static_fragments = normalized.gsub(dynamic_token, "")
+      return true if static_fragments.match?(/\bcargo[[:space:]]+install\b/)
     end
-    @cargo_uses[value] += 1
+
+    dynamic_cargo_command = /\A[[:space:]]*(?:(?:sudo|env)[[:space:]]+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*["']?(?:\$\{\{[^}]*cargo[^}]*\}\}|\$\{[^}]*cargo[^}]*\}|\$CARGO\b|\$\([^)]*cargo[^)]*\)|`[^`]*cargo[^`]*`)/i
+    segments = normalized.split(/[;&|]+/)
+    return true if segments.any? do |segment|
+      match = segment.match(dynamic_cargo_command)
+      next false unless match
+
+      tail = segment[match.end(0)..] || ""
+      tail.match?(/install/i) || tail.match?(dynamic)
+    end
+    return true if segments.any? { |segment| segment.match?(/\bcargo(?![A-Za-z0-9_])[^[:space:]]*(?:\$\{\{|\$\{|\$[A-Za-z_]|\$\(|`)/) }
+    return true if segments.any? { |segment| segment.match?(/\bcargo[[:space:]]+["']?(?:\$\{\{|\$\{|\$[A-Za-z_]|\$\(|`)/) }
+    return true if segments.any? { |segment| segment.match?(/\bcargo\b/) && segment.match?(/install/) && segment.match?(dynamic) }
+    return true if segments.any? do |segment|
+      segment.match?(/(?:\A|[()[:space:]])(?:eval|sh|bash)[[:space:]]+-c(?:[[:space:]]|\z)/) &&
+        segment.match?(/cargo.*install/)
+    end
+
+    segments.each_with_index.any? do |segment, index|
+      assignment = segment.match(/\A[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)\z/)
+      next false unless assignment && assignment[2].match?(/cargo|install|audit/i)
+
+      variable = Regexp.escape(assignment[1])
+      later = segments[(index + 1)..].join(";")
+      later.match?(/(?:\A|;)[[:space:]]*["']?\$(?:\{#{variable}\}|#{variable})\b/i) ||
+        later.match?(/(?:eval|sh[[:space:]]+-c|bash[[:space:]]+-c)[[:space:]]+["']?\$(?:\{#{variable}\}|#{variable})\b/i) ||
+        later.match?(/\$(?:\{#{variable}\}|#{variable})\b[^;]*install/i)
+    end
   end
 
   def cargo_install_occurrence?(value)
@@ -324,6 +371,18 @@ def self_test!
     "cargo-multiline" => "run: |\n  #{audited}\n",
     "cargo-continuation" => "run: |\n  cargo \\\n  install cargo-audit --version 0.22.2 --locked --quiet\n",
     "cargo-shell-string" => "run: sh -c 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n",
+    "cargo-github-command" => "run: ${{ env.CARGO }} install cargo-audit --version 0.22.2 --locked --quiet\n",
+    "cargo-github-subcommand" => "run: cargo ${{ env.SUBCOMMAND }} cargo-audit --version 0.22.2 --locked --quiet\n",
+    "cargo-shell-default" => "run: ${CARGO:-cargo} install cargo-audit --version 0.22.2 --locked --quiet\n",
+    "cargo-concatenated" => "run: cargo${EMPTY} install cargo-audit --version 0.22.2 --locked --quiet\n",
+    "cargo-fragment-concatenated" => "run: ca${X}rgo in${Y}stall cargo-audit --version 0.22.2 --locked --quiet\n",
+    "cargo-command-substitution" => "run: $(printf cargo) install cargo-audit --version 0.22.2 --locked --quiet\n",
+    "cargo-backticks" => "run: '`printf cargo` install cargo-audit --version 0.22.2 --locked --quiet'\n",
+    "cargo-eval" => "run: eval 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n",
+    "cargo-bash-c" => "run: bash -c 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n",
+    "cargo-assignment" => "run: CMD=cargo; $CMD install cargo-audit --version 0.22.2 --locked --quiet\n",
+    "cargo-assigned-command" => "run: INSTALLER='cargo install cargo-audit --version 0.22.2 --locked --quiet'; $INSTALLER\n",
+    "cargo-dynamic-newline" => "run: |\n  \"${CARGO:-cargo}\" \\\n+  install cargo-audit --version 0.22.2 --locked --quiet\n",
     "cargo-wrong-args" => "run: cargo install --locked cargo-audit --version 0.22.2 --quiet\n",
     "cargo-quoted" => "run: \"cargo install cargo-audit --version 0.22.1 --locked --quiet\"\n",
     "cargo-folded" => "run: >-\n  #{audited}\n"
