@@ -24,6 +24,38 @@ fn seed_scratch(id: &str, path: &str, text: &str, days_ago: i64) -> memcore::Mem
     e
 }
 
+/// Lifecycle proposal fixtures need independently active candidates.  Ordinary
+/// `upsert` intentionally performs write-time Jaccard deduplication for
+/// production writes, which can pre-supersede a synthetic twin before this
+/// test reaches the consolidate generator.
+fn assert_active_unsuperseded_before_consolidate(
+    server: &crate::server_state::MemoryServer,
+    ids: &[&str],
+) {
+    server
+        .with_global_store_read(|store| {
+            for id in ids {
+                let entry = store
+                    .get_with_options(id, true)
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or_else(|| panic!("seeded lifecycle endpoint {id} exists"));
+                assert!(
+                    !entry.archived,
+                    "seeded lifecycle endpoint {id} must be active before consolidate"
+                );
+                assert!(
+                    matches!(
+                        store.supersession_target(id).map_err(|e| e.to_string())?,
+                        Some(None)
+                    ),
+                    "seeded lifecycle endpoint {id} must be unsuperseded before consolidate"
+                );
+            }
+            Ok(())
+        })
+        .expect("verify lifecycle fixture endpoints are active and unsuperseded");
+}
+
 async fn propose_and_approve_lifecycle_action(
     server: &crate::server_state::MemoryServer,
     source_id: &str,
@@ -663,6 +695,7 @@ async fn consolidate_apply_refuses_source_no_revision_supersession_drift_without
         .expect("seed no-revision source drift rows");
 
     let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
     propose.path_prefix = Some("/scratch/no-revision/source".to_string());
     let proposed: Value = serde_json::from_str(
         &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
@@ -819,6 +852,7 @@ async fn consolidate_apply_refuses_target_no_revision_supersession_drift_without
         .expect("seed no-revision target drift rows");
 
     let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
     propose.path_prefix = Some("/scratch/no-revision/target".to_string());
     let proposed: Value = serde_json::from_str(
         &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
@@ -2295,11 +2329,12 @@ async fn consolidate_propose_near_dup_merge_for_cross_path_raw_twins() {
     higher.importance = 0.8;
     server
         .with_global_store(|store| {
-            store.upsert(&lower).map_err(|e| e.to_string())?;
-            store.upsert(&higher).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&lower).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&higher).map_err(|e| e.to_string())?;
             Ok(())
         })
         .expect("seed cross-path near-dup twins");
+    assert_active_unsuperseded_before_consolidate(&server, &["near-dup-low", "near-dup-high"]);
 
     let mut propose = tachi_memory_params("consolidate");
     propose.format = Some("json".to_string());
@@ -2389,11 +2424,17 @@ async fn consolidate_near_dup_merge_never_proposes_protected_rows() {
     );
     server
         .with_global_store(|store| {
-            store.upsert(&pinned).map_err(|e| e.to_string())?;
-            store.upsert(&eligible).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&pinned).map_err(|e| e.to_string())?;
+            store
+                .insert_if_absent(&eligible)
+                .map_err(|e| e.to_string())?;
             Ok(())
         })
         .expect("seed pinned twin");
+    assert_active_unsuperseded_before_consolidate(
+        &server,
+        &["near-dup-pinned", "near-dup-eligible"],
+    );
 
     let mut propose = tachi_memory_params("consolidate");
     propose.format = Some("json".to_string());
@@ -2445,12 +2486,16 @@ async fn consolidate_no_op_sibling_star_merges_remain_applicable() {
     c.importance = 0.9;
     server
         .with_global_store(|store| {
-            store.upsert(&a).map_err(|e| e.to_string())?;
-            store.upsert(&b).map_err(|e| e.to_string())?;
-            store.upsert(&c).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&a).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&b).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&c).map_err(|e| e.to_string())?;
             Ok(())
         })
         .expect("seed transitive near-dup chain");
+    assert_active_unsuperseded_before_consolidate(
+        &server,
+        &["near-dup-chain-a", "near-dup-chain-b", "near-dup-chain-c"],
+    );
     let target_revision_before = server
         .with_global_store_read(|store| {
             store
@@ -2586,11 +2631,12 @@ async fn consolidate_same_path_twins_do_not_emit_near_dup_merge() {
     );
     server
         .with_global_store(|store| {
-            store.upsert(&older).map_err(|e| e.to_string())?;
-            store.upsert(&newer).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&older).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&newer).map_err(|e| e.to_string())?;
             Ok(())
         })
         .expect("seed same-path twins");
+    assert_active_unsuperseded_before_consolidate(&server, &["same-path-old", "same-path-new"]);
 
     let mut propose = tachi_memory_params("consolidate");
     propose.format = Some("json".to_string());
