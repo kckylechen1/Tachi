@@ -339,6 +339,28 @@ async fn extract_ingest_metadata(
     }
 }
 
+/// Persist a new ingest entry only after it has claimed any active predecessor.
+/// A false supersession CAS means another writer already owns that predecessor,
+/// so the new entry must not become a competing wiki candidate.
+fn persist_wiki_ingest_entry(
+    store: &mut MemoryStore,
+    entry: &MemoryEntry,
+    old_id: Option<&str>,
+) -> Result<(), String> {
+    store
+        .with_immutable_supersession_transaction(|replacement| {
+            if let Some(old_id) = old_id {
+                replacement.claim_immutable_supersession(old_id, &entry.id)?;
+            }
+            replacement.upsert(entry)?;
+            if let Some(old_id) = old_id {
+                replacement.archive_claimed_source(old_id)?;
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("wiki ingest refused: {e}"))
+}
+
 pub(crate) async fn handle_wiki_ingest(
     server: &MemoryServer,
     params: TachiWikiIngestParams,
@@ -460,19 +482,7 @@ pub(crate) async fn handle_wiki_ingest(
             }
         };
 
-        store
-            .upsert(&entry)
-            .map_err(|e| format!("wiki ingest save: {e}"))?;
-
-        if let Some(old_id) = old_id {
-            store
-                .supersede_memory(&old_id, &id)
-                .map_err(|e| format!("supersede old wiki failed: {e}"))?;
-            store
-                .archive_memory(&old_id)
-                .map_err(|e| format!("archive old wiki failed: {e}"))?;
-        }
-        Ok(())
+        persist_wiki_ingest_entry(store, &entry, old_id.as_deref())
     })?;
 
     let mut related = Vec::new();
@@ -597,6 +607,85 @@ mod ingest_local_file_allowed_tests {
         assert!(
             wiki_ingest_local_file_allowed(&app_file, resolved_tachi_home),
             "file under the losing key TACHI_APP_HOME must still be allowed (union, not narrowing)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod immutable_supersession_tests {
+    use super::*;
+
+    fn wiki_entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: format!("/wiki/general/{id}"),
+            summary: format!("wiki summary {id}"),
+            text: format!("wiki body {id}"),
+            importance: 0.7,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "experience".to_string(),
+            topic: id.to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "wiki".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({"wiki": true}),
+            vector: None,
+            retention_policy: Some("permanent".to_string()),
+            domain: Some("wiki".to_string()),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    #[test]
+    fn conflicted_predecessor_refuses_before_saving_a_new_wiki_candidate() {
+        let temp = tempfile::tempdir().expect("wiki immutable-edge tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+        let old = wiki_entry("old-wiki-entry");
+        let canonical = wiki_entry("canonical-wiki-entry");
+        let candidate = wiki_entry("stale-wiki-candidate");
+        store.upsert(&old).expect("seed old wiki entry");
+        store.upsert(&canonical).expect("seed canonical wiki entry");
+        assert!(store
+            .supersede_memory(&old.id, &canonical.id)
+            .expect("seed immutable predecessor edge"));
+
+        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id))
+            .expect_err("conflicted predecessor must refuse wiki candidate");
+        assert!(err.contains("immutable supersession CAS"), "err: {err}");
+        let old_after = store
+            .get_with_options(&old.id, true)
+            .expect("read old wiki entry")
+            .expect("old wiki entry remains");
+        assert!(
+            !old_after.archived,
+            "failed CAS must not archive the established predecessor"
+        );
+        assert_eq!(
+            store
+                .supersession_target(&old.id)
+                .expect("read predecessor edge"),
+            Some(Some(canonical.id)),
+            "failed CAS must preserve the original predecessor edge"
+        );
+        assert!(
+            store
+                .get_with_options(&candidate.id, true)
+                .expect("read candidate")
+                .is_none(),
+            "failed CAS must not leave a new competing wiki candidate"
         );
     }
 }

@@ -171,7 +171,24 @@ mod tests {
         server
             .with_project_store(|store| {
                 for entry in &entries {
-                    store.upsert(entry).map_err(|e| e.to_string())?;
+                    store.insert_if_absent(entry).map_err(|e| e.to_string())?;
+                    let seeded = store
+                        .get_with_options(&entry.id, true)
+                        .map_err(|e| e.to_string())?
+                        .expect("seeded duplicate exists");
+                    assert!(
+                        !seeded.archived,
+                        "pre-pass fixture {} must start active",
+                        entry.id
+                    );
+                    assert_eq!(
+                        store
+                            .supersession_target(&entry.id)
+                            .map_err(|e| e.to_string())?,
+                        Some(None),
+                        "pre-pass fixture {} must start unsuperseded",
+                        entry.id
+                    );
                 }
                 Ok(())
             })

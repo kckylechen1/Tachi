@@ -100,6 +100,10 @@ pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
+/// Caller-transaction upsert seam for lifecycle-apply: runs the full upsert
+/// body (main row + FTS + vectors + idless semantics) inside a caller-owned
+/// `BEGIN IMMEDIATE` transaction. See `memory_crud::upsert_within_tx`.
+pub(crate) use memory_crud::upsert_within_tx;
 #[cfg(test)]
 pub(crate) use memory_crud::AccessUpdate;
 pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;

@@ -361,6 +361,111 @@ fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
         .expect("verify guarded sources");
 }
 
+#[test]
+fn persist_distill_memory_does_not_project_a_conflicted_supersession_source() {
+    let temp = tempfile::tempdir().expect("temp daily distill conflict db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let source = candidate_entry(0);
+    let mut canonical = candidate_entry(1);
+    canonical.id = "existing-canonical".to_string();
+    canonical.path = "/project/existing-canonical".to_string();
+
+    server
+        .with_project_store(|store| {
+            store.insert_if_absent(&source).map_err(|e| e.to_string())?;
+            store
+                .insert_if_absent(&canonical)
+                .map_err(|e| e.to_string())?;
+            assert!(
+                store
+                    .supersede_memory(&source.id, &canonical.id)
+                    .map_err(|e| e.to_string())?,
+                "seeded source must establish its immutable prior edge"
+            );
+            Ok(())
+        })
+        .expect("seed conflicted distill source");
+
+    let group = CandidateGroup {
+        group_id: "conflicted_source".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries: vec![source.clone()],
+    };
+    let payload = GroupPayload {
+        summary: "distilled conflict summary".to_string(),
+        text: "distilled conflict memory".to_string(),
+        keywords: vec!["conflict".to_string()],
+        skip_reason: None,
+    };
+
+    let err = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-conflict",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect_err("conflicted source must refuse the entire distill replacement");
+    assert!(
+        err.contains("immutable supersession"),
+        "refusal must identify the immutable-edge conflict: {err}"
+    );
+
+    server
+        .with_project_store_read(|store| {
+            let source_state: (bool, Option<String>) = store
+                .connection()
+                .query_row(
+                    "SELECT archived, superseded_by FROM memories WHERE id = ?1",
+                    [&source.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let distill_memories: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE source = 'foundry_distill'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let derived_items: i64 = store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM derived_items", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            let graph_edges: i64 = store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                source_state,
+                (false, Some(canonical.id.clone())),
+                "failed CAS must preserve the established source edge and keep it active"
+            );
+            assert_eq!(
+                distill_memories, 0,
+                "failed CAS must roll back the candidate-success memory projection"
+            );
+            assert_eq!(
+                derived_items, 0,
+                "failed CAS must roll back the derived candidate projection"
+            );
+            assert_eq!(
+                graph_edges, 0,
+                "failed CAS must roll back every candidate-success graph projection"
+            );
+            Ok(())
+        })
+        .expect("verify conflicted distill source has no side effects");
+}
+
 // ── #1261 step 2/3: CLI fallback removed from call_claude_batch ──────
 
 /// Before #1261, this test proved the #1087 flag-off path routed to the

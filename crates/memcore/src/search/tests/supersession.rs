@@ -191,3 +191,44 @@ fn supersede_preserves_explicit_valid_until() {
         "explicit valid_until must be preserved, got {after:?}"
     );
 }
+
+#[test]
+fn supersede_edge_is_immutable_after_the_first_write() {
+    let mut conn = setup();
+    insert(&mut conn, "immutable-source", "immutable source body", &[]);
+    insert(&mut conn, "immutable-target-b", "requested target B", &[]);
+    insert(&mut conn, "immutable-target-c", "canonical target C", &[]);
+
+    assert!(
+        crate::db::supersede_memory(&conn, "immutable-source", "immutable-target-c").unwrap(),
+        "the first edge must install"
+    );
+    let before: (Option<String>, Option<String>, i64) = conn
+        .query_row(
+            "SELECT superseded_by, valid_until, revision FROM memories WHERE id = ?1",
+            ["immutable-source"],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+
+    assert!(
+        !crate::db::supersede_memory(&conn, "immutable-source", "immutable-target-c").unwrap(),
+        "replaying the same edge must not rewrite it"
+    );
+    assert!(
+        !crate::db::supersede_memory(&conn, "immutable-source", "immutable-target-b").unwrap(),
+        "a conflicting edge must not replace the first edge"
+    );
+    let after: (Option<String>, Option<String>, i64) = conn
+        .query_row(
+            "SELECT superseded_by, valid_until, revision FROM memories WHERE id = ?1",
+            ["immutable-source"],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "same-edge replay and conflicting requests must leave the first edge byte-for-byte intact"
+    );
+    assert_eq!(after.0.as_deref(), Some("immutable-target-c"));
+}

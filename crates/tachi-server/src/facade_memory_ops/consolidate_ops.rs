@@ -35,11 +35,11 @@ use super::evidence_format::{json_string, wants_json};
 use crate::tool_params::TachiMemoryParams;
 use crate::MemoryServer;
 use chrono::{Duration, Utc};
+use memcore::store::memory_lifecycle as lifecycle;
 use memcore::MemoryEntry;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-const LIFECYCLE_PROPOSAL_NS: &str = "memory_lifecycle_proposals";
 const SCRATCH_PREFIX: &str = "/scratch";
 const STALE_DAYS_DEFAULT: i64 = 30;
 const ARCHIVE_IMPORTANCE_MAX: f64 = 0.55;
@@ -57,22 +57,26 @@ const SCOPE_ACCOUNTING_SAMPLE_LIMIT: usize = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
 enum ConsolidationExclusionReason {
     OutsideRequestedPrefix,
+    AlreadySuperseded,
     AlreadyArchived,
     PatternTier,
     WikiCategory,
     WikiPath,
     RetentionPolicy,
+    FutureProtection,
 }
 
 impl ConsolidationExclusionReason {
     const fn as_str(self) -> &'static str {
         match self {
             Self::OutsideRequestedPrefix => "outside_requested_prefix",
+            Self::AlreadySuperseded => "already_superseded",
             Self::AlreadyArchived => "already_archived",
             Self::PatternTier => "pattern_tier",
             Self::WikiCategory => "wiki_category",
             Self::WikiPath => "wiki_path",
             Self::RetentionPolicy => "retention_policy",
+            Self::FutureProtection => "future_protection",
         }
     }
 }
@@ -89,13 +93,19 @@ struct ConsolidationScope {
 }
 
 impl ConsolidationScope {
-    fn from_entries(entries: Vec<MemoryEntry>, path_prefix: &str) -> Self {
+    fn from_entries(
+        entries: Vec<MemoryEntry>,
+        path_prefix: &str,
+        superseded_ids: &HashSet<String>,
+    ) -> Self {
         let mut eligible = Vec::new();
         let mut exclusions = Vec::new();
 
         for entry in entries {
             let exclusion = if !entry.path.starts_with(path_prefix) {
                 Some(ConsolidationExclusionReason::OutsideRequestedPrefix)
+            } else if superseded_ids.contains(&entry.id) {
+                Some(ConsolidationExclusionReason::AlreadySuperseded)
             } else {
                 protection_reason(&entry)
             };
@@ -232,52 +242,24 @@ async fn handle_propose(
 
 fn handle_review(server: &MemoryServer, params: &TachiMemoryParams) -> Result<String, String> {
     let proposal_id = required_proposal_id(params)?;
-    let status = match params
-        .review_status
+    let decision = lifecycle::LifecycleReviewDecision::parse(
+        params.review_status.as_deref().unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())?;
+    let note = params
+        .notes
         .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "approved" | "approve" => "approved",
-        "rejected" | "reject" => "rejected",
-        other => {
-            return Err(format!(
-                "Invalid review_status '{other}'. Expected approved|rejected"
-            ))
-        }
-    };
-    let reviewed_at = Utc::now().to_rfc3339();
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    // Delegate to the lifecycle module: v2 schema check, pending-only gate,
+    // and hard_state version CAS all live there. Legacy v1 proposals are
+    // refused loudly inside `review_lifecycle_proposal`.
     let updated = with_proposal_store(server, params, |store| {
-        let (raw, _version) = store
-            .get_state_kv(LIFECYCLE_PROPOSAL_NS, proposal_id)
-            .map_err(|e| format!("load lifecycle proposal: {e}"))?
-            .ok_or_else(|| format!("lifecycle proposal not found: {proposal_id}"))?;
-        let mut value: Value =
-            serde_json::from_str(&raw).map_err(|e| format!("parse lifecycle proposal: {e}"))?;
-        value["status"] = json!(status);
-        value["review"] = json!({
-            "status": status,
-            "note": params.notes.clone(),
-            "reviewed_at": reviewed_at,
-        });
-        // `hard_state` TTL (#1342 follow-up): `rejected` is terminal — the
-        // proposal will never be applied — so it gets a 30-day TTL here.
-        // `approved` is NOT terminal (it still awaits `handle_apply`), so it
-        // must stay TTL-less; the TTL for an approved-then-applied proposal
-        // is stamped by `handle_apply` below instead.
-        if status == "rejected" {
-            value["expires_at"] = json!((Utc::now() + Duration::days(30)).to_rfc3339());
-        }
-        let next = serde_json::to_string(&value)
-            .map_err(|e| format!("serialize lifecycle review: {e}"))?;
-        store
-            .set_state(LIFECYCLE_PROPOSAL_NS, proposal_id, &next)
-            .map_err(|e| format!("persist lifecycle review: {e}"))?;
-        Ok(value)
+        lifecycle::review_lifecycle_proposal(store, proposal_id, decision, note)
+            .map_err(|e| e.to_string())
     })?;
 
+    let status = decision.as_str();
     let response = json!({
         "status": "completed",
         "action": "consolidate",
@@ -302,75 +284,39 @@ fn handle_apply(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Str
         );
     }
 
-    let raw = with_proposal_store_read(server, params, |store| {
-        store
-            .get_state_kv(LIFECYCLE_PROPOSAL_NS, proposal_id)
-            .map_err(|e| format!("load lifecycle proposal: {e}"))?
-            .map(|(raw, _)| raw)
-            .ok_or_else(|| format!("lifecycle proposal not found: {proposal_id}"))
+    // Delegate to the lifecycle module: v2 schema check, approved-only gate,
+    // full hash/revision/path/protection revalidation inside one
+    // BEGIN IMMEDIATE transaction, mutation + proposal-status CAS, commit.
+    // Legacy v1 proposals are refused loudly inside `apply_lifecycle_proposal`.
+    let result = with_memory_store(server, params, |store| {
+        lifecycle::apply_lifecycle_proposal(store, proposal_id).map_err(|e| e.to_string())
     })?;
-    let mut proposal: Value =
-        serde_json::from_str(&raw).map_err(|e| format!("parse lifecycle proposal: {e}"))?;
-    let status = proposal
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("pending");
-    if status != "approved" {
-        return Err(format!(
-            "lifecycle proposal {proposal_id} must be approved before apply; current status={status}"
-        ));
-    }
 
-    let action = proposal
-        .get("lifecycle_action")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let source_id = proposal
-        .get("source_id")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let target_id = proposal
-        .get("target_id")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
-
-    if source_id.is_empty() {
-        return Err(format!(
-            "lifecycle proposal {proposal_id} missing source_id"
-        ));
-    }
-
-    let apply_result =
-        apply_lifecycle_action(server, params, &action, &source_id, target_id.as_deref())?;
-    let applied_at = Utc::now().to_rfc3339();
-    proposal["status"] = json!("applied");
-    proposal["applied_at"] = json!(applied_at);
-    // `hard_state` TTL (#1342 follow-up): `applied` is terminal — the
-    // mutation already happened — so this write gets a 30-day TTL.
-    proposal["expires_at"] = json!((Utc::now() + Duration::days(30)).to_rfc3339());
-    proposal["apply_result"] = apply_result.clone();
-    let proposal_for_store = proposal.clone();
-    with_proposal_store(server, params, |store| {
-        let next = serde_json::to_string(&proposal_for_store)
-            .map_err(|e| format!("serialize applied lifecycle proposal: {e}"))?;
-        store
-            .set_state(LIFECYCLE_PROPOSAL_NS, proposal_id, &next)
-            .map_err(|e| format!("persist applied lifecycle proposal: {e}"))
-    })?;
+    // #1413 concern 1 / recall-cache invalidation: run AFTER
+    // `apply_lifecycle_proposal` returns — its BEGIN IMMEDIATE transaction
+    // is already committed at this point, so the invalidation never fires
+    // on a rolled-back apply.
+    let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+        server,
+        "consolidate_lifecycle",
+    );
 
     let response = json!({
         "status": "completed",
         "action": "consolidate",
         "sub_action": "apply",
         "proposal_id": proposal_id,
-        "apply_result": apply_result,
-        "proposal": proposal,
+        "apply_result": result.apply_result,
+        "proposal": result.proposal,
     });
     if wants_json(params.format.as_deref()) {
         return json_string(&response);
     }
+    let action = result
+        .apply_result
+        .get("lifecycle_action")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     Ok(format!(
         "Tachi consolidate apply\nstatus: completed\nproposal_id: `{proposal_id}`\nlifecycle_action: {action}"
     ))
@@ -496,18 +442,18 @@ fn apply_lifecycle_action(
             })?;
             with_memory_store(server, params, |store| {
                 refuse_if_protected(store, source_id, "supersede")?;
-                let changed = store
-                    .supersede_memory(source_id, target)
-                    .map_err(|e| format!("supersede_memory: {e}"))?;
-                let archived = store
-                    .archive_memory(source_id)
-                    .map_err(|e| format!("archive after supersede: {e}"))?;
+                store
+                    .with_immutable_supersession_transaction(|replacement| {
+                        replacement.claim_immutable_supersession(source_id, target)?;
+                        replacement.archive_claimed_source(source_id)
+                    })
+                    .map_err(|e| format!("supersede refused: {e}"))?;
                 Ok(json!({
                     "lifecycle_action": "supersede",
                     "source_id": source_id,
                     "target_id": target,
-                    "superseded": changed,
-                    "archived": archived,
+                    "superseded": true,
+                    "archived": true,
                 }))
             })
         }
@@ -525,39 +471,50 @@ fn apply_lifecycle_action(
                     .get(target)
                     .map_err(|e| format!("load target: {e}"))?
                     .ok_or_else(|| format!("target not found: {target}"))?;
+                // Canonical on both sides of the no-op guard below — the fold
+                // is sorted+deduplicated while the stored column keeps the last
+                // writer's serialization order, so a raw comparison would
+                // report "changed" for any target whose array is not already
+                // sorted and unique. Same helper as the reviewed apply path in
+                // `memcore::store::memory_lifecycle`, so the two agree on what
+                // "unchanged" means.
+                let target_keywords = lifecycle::canonical_tags(&survivor.keywords);
+                let target_entities = lifecycle::canonical_tags(&survivor.entities);
+                let target_importance = survivor.importance;
                 // Fold unique keywords/entities; keep survivor text as canonical.
-                let mut kw: std::collections::BTreeSet<String> =
-                    survivor.keywords.iter().cloned().collect();
-                for k in &source.keywords {
-                    kw.insert(k.clone());
-                }
-                survivor.keywords = kw.into_iter().collect();
-                let mut ents: std::collections::BTreeSet<String> =
-                    survivor.entities.iter().cloned().collect();
-                for e in &source.entities {
-                    ents.insert(e.clone());
-                }
-                survivor.entities = ents.into_iter().collect();
+                let mut merged_kw = survivor.keywords.clone();
+                merged_kw.extend(source.keywords.iter().cloned());
+                survivor.keywords = lifecycle::canonical_tags(&merged_kw);
+                let mut merged_ents = survivor.entities.clone();
+                merged_ents.extend(source.entities.iter().cloned());
+                survivor.entities = lifecycle::canonical_tags(&merged_ents);
                 if survivor.importance < source.importance {
                     survivor.importance = source.importance;
                 }
+                let survivor_changed = survivor.keywords != target_keywords
+                    || survivor.entities != target_entities
+                    || survivor.importance != target_importance;
+                // Claim, survivor fold, and source archive share one physical
+                // transaction. A stale A -> B request after A -> C therefore
+                // cannot mutate B, and any later write failure rolls A's claim
+                // back instead of leaving a partial lifecycle result.
                 store
-                    .upsert(&survivor)
-                    .map_err(|e| format!("upsert merged survivor: {e}"))?;
-                let changed = store
-                    .supersede_memory(source_id, target)
-                    .map_err(|e| format!("supersede_memory after merge: {e}"))?;
-                let archived = store
-                    .archive_memory(source_id)
-                    .map_err(|e| format!("archive after merge: {e}"))?;
+                    .with_immutable_supersession_transaction(|replacement| {
+                        replacement.claim_immutable_supersession(source_id, target)?;
+                        if survivor_changed {
+                            replacement.upsert(&survivor)?;
+                        }
+                        replacement.archive_claimed_source(source_id)
+                    })
+                    .map_err(|e| format!("{action} refused: {e}"))?;
                 Ok(json!({
                     "lifecycle_action": action,
                     "source_id": source_id,
                     "target_id": target,
                     "merged_keywords": survivor.keywords.len(),
                     "merged_entities": survivor.entities.len(),
-                    "superseded": changed,
-                    "archived": archived,
+                    "superseded": true,
+                    "archived": true,
                 }))
             })
         }
@@ -650,57 +607,249 @@ struct ProposalGeneration {
     scope: ConsolidationScope,
 }
 
+#[cfg(test)]
+type ProposalAfterBuildHook = Box<dyn FnOnce(&[Value])>;
+
+#[cfg(test)]
+struct ProposalPersistenceTestHook {
+    after_build: Option<ProposalAfterBuildHook>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot, per-calling-thread synchronization seam. Unlike a process
+    /// global hook, parallel tests cannot observe or consume another test's
+    /// callbacks. The guard below also clears an unconsumed hook on unwind.
+    static PROPOSAL_PERSISTENCE_TEST_HOOK:
+        std::cell::RefCell<Option<ProposalPersistenceTestHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct ProposalPersistenceTestHookGuard;
+
+#[cfg(test)]
+impl Drop for ProposalPersistenceTestHookGuard {
+    fn drop(&mut self) {
+        PROPOSAL_PERSISTENCE_TEST_HOOK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_proposal_persistence_test_hook(
+    after_build: impl FnOnce(&[Value]) + 'static,
+) -> ProposalPersistenceTestHookGuard {
+    PROPOSAL_PERSISTENCE_TEST_HOOK.with(|slot| {
+        let previous = slot.borrow_mut().replace(ProposalPersistenceTestHook {
+            after_build: Some(Box::new(after_build)),
+        });
+        assert!(
+            previous.is_none(),
+            "proposal persistence test hook already installed"
+        );
+    });
+    ProposalPersistenceTestHookGuard
+}
+
+#[cfg(test)]
+fn run_proposal_persistence_test_after_build(proposals: &[Value]) {
+    let callback = PROPOSAL_PERSISTENCE_TEST_HOOK.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .and_then(|mut hook| hook.after_build.take())
+    });
+    if let Some(callback) = callback {
+        callback(proposals);
+    }
+}
+
+/// Hold SQLite's physical-database write reservation across lifecycle
+/// census/build and proposal persistence. Runtime route gates are still useful
+/// for same-route store ownership, but active-project and named-project routes
+/// may own distinct gates while opening the same database file. `BEGIN
+/// IMMEDIATE` is the shared write-ordering boundary those aliases (and
+/// independent writers) cannot bypass.
+fn with_lifecycle_proposal_generation_transaction<T>(
+    store: &mut memcore::MemoryStore,
+    operation: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    store
+        .connection()
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin lifecycle proposal transaction: {e}"))?;
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(store)));
+    match outcome {
+        Ok(Ok(value)) => match store.connection().execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(commit_error) => {
+                let rollback = store.connection().execute_batch("ROLLBACK");
+                let rollback_suffix = rollback
+                    .err()
+                    .map(|e| format!("; rollback after commit failure also failed: {e}"))
+                    .unwrap_or_default();
+                Err(format!(
+                    "commit lifecycle proposal transaction: {commit_error}{rollback_suffix}"
+                ))
+            }
+        },
+        Ok(Err(operation_error)) => {
+            let rollback = store.connection().execute_batch("ROLLBACK");
+            match rollback {
+                Ok(()) => Err(operation_error),
+                Err(rollback_error) => Err(format!(
+                    "{operation_error}; rollback lifecycle proposal transaction: {rollback_error}"
+                )),
+            }
+        }
+        Err(payload) => {
+            if let Err(rollback_error) = store.connection().execute_batch("ROLLBACK") {
+                eprintln!(
+                    "WARNING: rollback lifecycle proposal transaction during panic failed: {rollback_error}"
+                );
+            }
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
+
 fn generate_and_persist_proposals(
     server: &MemoryServer,
     params: &TachiMemoryParams,
     path_prefix: &str,
 ) -> Result<ProposalGeneration, String> {
-    let entries = with_memory_store_read(server, params, |store| {
-        store
-            .list_by_path(path_prefix, 500, false)
-            .map_err(|e| format!("list_by_path: {e}"))
-    })?;
-
-    let scope = ConsolidationScope::from_entries(entries, path_prefix);
-    let mut proposals = Vec::new();
-    proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
-    proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
-    proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
-    proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
-
-    if proposals.is_empty() {
-        return Ok(ProposalGeneration { proposals, scope });
-    }
-
+    // The selected route's exclusive gate owns its store connection. The
+    // SQLite transaction inside it is the physical-DB ordering boundary: it
+    // spans list/census, endpoint snapshot construction, existing-status
+    // checks, and persistence even when an active-project and named-project
+    // route resolve to the same file through distinct runtime gates. No store
+    // gates are nested. Apply's own `BEGIN IMMEDIATE` live-row revalidation
+    // remains the last line for drift after proposal persistence.
     with_proposal_store(server, params, |store| {
-        for proposal in &proposals {
-            let id = proposal["proposal_id"]
-                .as_str()
-                .ok_or_else(|| "proposal missing proposal_id".to_string())?;
-            // Do not clobber approved/applied/rejected.
-            if let Some((existing, _)) = store
-                .get_state_kv(LIFECYCLE_PROPOSAL_NS, id)
-                .map_err(|e| format!("load existing proposal: {e}"))?
-            {
-                if let Ok(existing_json) = serde_json::from_str::<Value>(&existing) {
-                    let status = existing_json
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or("pending");
-                    if status != "pending" {
-                        continue;
-                    }
+        with_lifecycle_proposal_generation_transaction(store, |store| {
+            let entries = store
+                .list_by_path(path_prefix, 500, false)
+                .map_err(|e| format!("list_by_path: {e}"))?;
+
+            // `list_by_path(..., include_archived=false)` excludes archived rows
+            // but deliberately does not hide a live row whose supersession edge
+            // was written without archiving it. Every lifecycle payload currently
+            // records `superseded_by=None` at propose time, so remove those rows
+            // from the one shared source/target pool before any generator reaches
+            // `snapshot_endpoint`. Keep the exclusion in scope accounting rather
+            // than making a superseded scan look empty.
+            let mut superseded_ids = HashSet::new();
+            for entry in &entries {
+                if store
+                    .supersession_target(&entry.id)
+                    .map_err(|e| format!("load supersession state for {}: {e}", entry.id))?
+                    .flatten()
+                    .is_some()
+                {
+                    superseded_ids.insert(entry.id.clone());
                 }
             }
-            let raw =
-                serde_json::to_string(proposal).map_err(|e| format!("serialize proposal: {e}"))?;
-            store
-                .set_state(LIFECYCLE_PROPOSAL_NS, id, &raw)
-                .map_err(|e| format!("persist proposal: {e}"))?;
-        }
-        Ok(())
-    })?;
-    Ok(ProposalGeneration { proposals, scope })
+
+            let scope = ConsolidationScope::from_entries(entries, path_prefix, &superseded_ids);
+            let mut proposals = Vec::new();
+            proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
+            proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
+            proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
+            proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
+
+            if proposals.is_empty() {
+                return Ok(ProposalGeneration { proposals, scope });
+            }
+
+            #[cfg(test)]
+            run_proposal_persistence_test_after_build(&proposals);
+
+            for proposal in &proposals {
+                let id = proposal["proposal_id"]
+                    .as_str()
+                    .ok_or_else(|| "proposal missing proposal_id".to_string())?;
+                // Do not clobber approved/applied/rejected.
+                if let Some((existing, _)) = store
+                    .get_state_kv(lifecycle::LIFECYCLE_PROPOSAL_NS, id)
+                    .map_err(|e| format!("load existing proposal: {e}"))?
+                {
+                    if let Ok(existing_json) = serde_json::from_str::<Value>(&existing) {
+                        let status = existing_json
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("pending");
+                        if status != "pending" {
+                            continue;
+                        }
+                    }
+                }
+                let raw = serde_json::to_string(proposal)
+                    .map_err(|e| format!("serialize proposal: {e}"))?;
+                store
+                    .set_state(lifecycle::LIFECYCLE_PROPOSAL_NS, id, &raw)
+                    .map_err(|e| format!("persist proposal: {e}"))?;
+            }
+            Ok(ProposalGeneration { proposals, scope })
+        })
+    })
+}
+
+/// Same-path duplicates → `merge_into` when summaries overlap enough, else
+/// plain `supersede` (newer wins without folding keywords).
+/// Stamp a pending proposal with v2 identity fields (`schema_version`,
+/// `policy_version`, `identity`, `apply_payload`). The identity is a SHA-256
+/// over the typed immutable [`lifecycle::LifecycleApplyPayload`], rebuilt and
+/// re-verified at apply. Volatile state (status/review/timestamps) lives
+/// outside the payload and can never perturb the identity.
+fn enrich_with_v2_identity(
+    mut proposal: Value,
+    action: &str,
+    source: &MemoryEntry,
+    target: Option<&MemoryEntry>,
+) -> Value {
+    let review_display = lifecycle::LifecycleReviewDisplay {
+        kind: proposal["kind"]
+            .as_str()
+            .expect("lifecycle proposal kind must be a string")
+            .to_string(),
+        requires_human_approval: proposal["requires_human_approval"]
+            .as_bool()
+            .expect("lifecycle proposal approval requirement must be a boolean"),
+        path: proposal["path"]
+            .as_str()
+            .expect("lifecycle proposal path must be a string")
+            .to_string(),
+        rationale: proposal["rationale"]
+            .as_str()
+            .expect("lifecycle proposal rationale must be a string")
+            .to_string(),
+        evidence: proposal["evidence"].clone(),
+    };
+    let payload =
+        lifecycle::build_apply_payload_with_review_display(action, source, target, review_display);
+    let identity = lifecycle::compute_lifecycle_identity(&payload);
+    let proposal_id = lifecycle::lifecycle_proposal_id(&payload)
+        .expect("proposal generator uses a known lifecycle action");
+    let obj = proposal
+        .as_object_mut()
+        .expect("lifecycle proposal must be a JSON object");
+    obj.insert(
+        "schema_version".into(),
+        json!(lifecycle::LIFECYCLE_SCHEMA_VERSION),
+    );
+    obj.insert(
+        "policy_version".into(),
+        json!(lifecycle::LIFECYCLE_POLICY_VERSION),
+    );
+    obj.insert("identity".into(), json!(identity));
+    obj.insert("proposal_id".into(), json!(proposal_id));
+    obj.insert(
+        "apply_payload".into(),
+        serde_json::to_value(&payload).unwrap_or(Value::Null),
+    );
+    proposal
 }
 
 /// Same-path duplicates → `merge_into` when summaries overlap enough, else
@@ -746,32 +895,31 @@ fn propose_same_path_lifecycle(entries: &[MemoryEntry], path_prefix: &str) -> Ve
                     ),
                 )
             };
-            let id = format!(
-                "lifecycle:{action}:{}:{}",
-                id_prefix(&older.id),
-                id_prefix(&survivor.id)
-            );
-            out.push(json!({
-                "proposal_id": id,
-                "kind": "memory_lifecycle",
-                "lifecycle_action": action,
-                "status": "pending",
-                "requires_human_approval": true,
-                "created_or_refreshed_at": Utc::now().to_rfc3339(),
-                "source_id": older.id,
-                "target_id": survivor.id,
-                "path": path,
-                "rationale": rationale,
-                "evidence": {
-                    "source_timestamp": older.timestamp,
-                    "target_timestamp": survivor.timestamp,
-                    "source_summary": older.summary,
-                    "target_summary": survivor.summary,
-                    "summary_token_jaccard": jaccard,
-                    "source_access_count": older.access_count,
-                    "target_access_count": survivor.access_count,
-                },
-            }));
+            out.push(enrich_with_v2_identity(
+                json!({
+                    "kind": "memory_lifecycle",
+                    "lifecycle_action": action,
+                    "status": "pending",
+                    "requires_human_approval": true,
+                    "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                    "source_id": older.id,
+                    "target_id": survivor.id,
+                    "path": path,
+                    "rationale": rationale,
+                    "evidence": {
+                        "source_timestamp": older.timestamp,
+                        "target_timestamp": survivor.timestamp,
+                        "source_summary": older.summary,
+                        "target_summary": survivor.summary,
+                        "summary_token_jaccard": jaccard,
+                        "source_access_count": older.access_count,
+                        "target_access_count": survivor.access_count,
+                    },
+                }),
+                action,
+                older,
+                Some(survivor),
+            ));
         }
     }
     out
@@ -850,42 +998,42 @@ fn propose_near_dup_merge(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Val
                 .get(&(source_idx.min(survivor_idx), source_idx.max(survivor_idx)))
                 .copied()
                 .unwrap_or_else(|| memcore::text_token_jaccard(&source.text, &survivor.text));
-            // Use full ids — 8-char `id_prefix` collides for `near-dup-chain-*`
-            // style names and would overwrite sibling star edges in state KV.
-            let id = format!("lifecycle:near_dup_merge:{}:{}", source.id, survivor.id);
-            out.push(json!({
-                "proposal_id": id,
-                "kind": "memory_lifecycle",
-                "lifecycle_action": "near_dup_merge",
-                "status": "pending",
-                "requires_human_approval": true,
-                "created_or_refreshed_at": Utc::now().to_rfc3339(),
-                "source_id": source.id,
-                "target_id": survivor.id,
-                "path": source.path,
-                "rationale": format!(
-                    "Raw near-duplicate text (token_jaccard={similarity:.3}) — merge lower-value `{}` into `{}`.",
-                    source.id, survivor.id
-                ),
-                "evidence": {
-                    "source_path": source.path,
-                    "target_path": survivor.path,
-                    "source_timestamp": source.timestamp,
-                    "target_timestamp": survivor.timestamp,
-                    "source_importance": source.importance,
-                    "target_importance": survivor.importance,
-                    "text_token_jaccard": similarity,
-                    "near_dup_threshold": threshold,
-                    "source_text_preview": source.text.chars().take(120).collect::<String>(),
-                    "target_text_preview": survivor.text.chars().take(120).collect::<String>(),
-                },
-            }));
+            out.push(enrich_with_v2_identity(
+                json!({
+                    "kind": "memory_lifecycle",
+                    "lifecycle_action": "near_dup_merge",
+                    "status": "pending",
+                    "requires_human_approval": true,
+                    "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                    "source_id": source.id,
+                    "target_id": survivor.id,
+                    "path": source.path,
+                    "rationale": format!(
+                        "Raw near-duplicate text (token_jaccard={similarity:.3}) — merge lower-value `{}` into `{}`.",
+                        source.id, survivor.id
+                    ),
+                    "evidence": {
+                        "source_path": source.path,
+                        "target_path": survivor.path,
+                        "source_timestamp": source.timestamp,
+                        "target_timestamp": survivor.timestamp,
+                        "source_importance": source.importance,
+                        "target_importance": survivor.importance,
+                        "text_token_jaccard": similarity,
+                        "near_dup_threshold": threshold,
+                        "source_text_preview": source.text.chars().take(120).collect::<String>(),
+                        "target_text_preview": survivor.text.chars().take(120).collect::<String>(),
+                    },
+                }),
+                "near_dup_merge",
+                source,
+                Some(survivor),
+            ));
         }
     }
     out
 }
 
-/// Prefer higher importance; on tie prefer newer timestamp (then lower id).
 fn cmp_near_dup_survivor(a: &MemoryEntry, b: &MemoryEntry) -> std::cmp::Ordering {
     a.importance
         .partial_cmp(&b.importance)
@@ -921,30 +1069,33 @@ fn propose_promote_distilled(entries: &[MemoryEntry], path_prefix: &str) -> Vec<
         {
             continue;
         }
-        let id = format!("lifecycle:promote:{}", id_prefix(&entry.id));
-        out.push(json!({
-            "proposal_id": id,
-            "kind": "memory_lifecycle",
-            "lifecycle_action": "promote_distilled",
-            "status": "pending",
-            "requires_human_approval": true,
-            "created_or_refreshed_at": Utc::now().to_rfc3339(),
-            "source_id": entry.id,
-            "target_id": Value::Null,
-            "path": entry.path,
-            "rationale": format!(
-                "Raw row `{}` earned diverse recall (recall_count={}, query_diversity={}); promote to consolidated.",
-                entry.id, entry.recall_count, entry.query_diversity
-            ),
-            "evidence": {
-                "tier": entry.tier,
-                "recall_count": entry.recall_count,
-                "query_diversity": entry.query_diversity,
-                "access_count": entry.access_count,
-                "importance": entry.importance,
-                "summary": entry.summary,
-            },
-        }));
+        out.push(enrich_with_v2_identity(
+            json!({
+                "kind": "memory_lifecycle",
+                "lifecycle_action": "promote_distilled",
+                "status": "pending",
+                "requires_human_approval": true,
+                "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                "source_id": entry.id,
+                "target_id": Value::Null,
+                "path": entry.path,
+                "rationale": format!(
+                    "Raw row `{}` earned diverse recall (recall_count={}, query_diversity={}); promote to consolidated.",
+                    entry.id, entry.recall_count, entry.query_diversity
+                ),
+                "evidence": {
+                    "tier": entry.tier,
+                    "recall_count": entry.recall_count,
+                    "query_diversity": entry.query_diversity,
+                    "access_count": entry.access_count,
+                    "importance": entry.importance,
+                    "summary": entry.summary,
+                },
+            }),
+            "promote_distilled",
+            entry,
+            None,
+        ));
     }
     out
 }
@@ -980,37 +1131,35 @@ fn propose_stale_archives(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Val
         if !entry_timestamp_before(entry, cutoff) {
             continue;
         }
-        let id = format!("lifecycle:archive:{}", id_prefix(&entry.id));
-        out.push(json!({
-            "proposal_id": id,
-            "kind": "memory_lifecycle",
-            "lifecycle_action": "archive",
-            "status": "pending",
-            "requires_human_approval": true,
-            "created_or_refreshed_at": Utc::now().to_rfc3339(),
-            "source_id": entry.id,
-            "target_id": Value::Null,
-            "path": entry.path,
-            "rationale": format!(
-                "Stale low-value row `{}` (importance={}, access=0, older than {STALE_DAYS_DEFAULT}d).",
-                entry.id, entry.importance
-            ),
-            "evidence": {
-                "timestamp": entry.timestamp,
-                "importance": entry.importance,
-                "access_count": entry.access_count,
-                "recall_count": entry.recall_count,
-                "summary": entry.summary,
-                "retention_policy": entry.retention_policy,
-            },
-        }));
+        out.push(enrich_with_v2_identity(
+            json!({
+                "kind": "memory_lifecycle",
+                "lifecycle_action": "archive",
+                "status": "pending",
+                "requires_human_approval": true,
+                "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                "source_id": entry.id,
+                "target_id": Value::Null,
+                "path": entry.path,
+                "rationale": format!(
+                    "Stale low-value row `{}` (importance={}, access=0, older than {STALE_DAYS_DEFAULT}d).",
+                    entry.id, entry.importance
+                ),
+                "evidence": {
+                    "timestamp": entry.timestamp,
+                    "importance": entry.importance,
+                    "access_count": entry.access_count,
+                    "recall_count": entry.recall_count,
+                    "summary": entry.summary,
+                    "retention_policy": entry.retention_policy,
+                },
+            }),
+            "archive",
+            entry,
+            None,
+        ));
     }
     out
-}
-
-/// Safe 8-char prefix for proposal ids (char-based; never panics on non-ASCII ids).
-fn id_prefix(id: &str) -> String {
-    id.chars().take(8).collect()
 }
 
 fn cmp_entry_timestamp_desc(a: &MemoryEntry, b: &MemoryEntry) -> std::cmp::Ordering {
@@ -1039,29 +1188,14 @@ fn is_protected(entry: &MemoryEntry) -> bool {
 }
 
 fn protection_reason(entry: &MemoryEntry) -> Option<ConsolidationExclusionReason> {
-    if entry.archived {
-        return Some(ConsolidationExclusionReason::AlreadyArchived);
-    }
-    if entry.tier.eq_ignore_ascii_case("pattern") {
-        return Some(ConsolidationExclusionReason::PatternTier);
-    }
-    if entry.is_wiki() {
-        return Some(ConsolidationExclusionReason::WikiCategory);
-    }
-    if entry.path.starts_with("/wiki") {
-        return Some(ConsolidationExclusionReason::WikiPath);
-    }
-    if matches!(
-        entry
-            .retention_policy
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("permanent" | "pinned" | "durable")
-    ) {
-        return Some(ConsolidationExclusionReason::RetentionPolicy);
-    }
-    None
+    lifecycle::lifecycle_protection_reason(entry).map(|reason| match reason {
+        "archived" => ConsolidationExclusionReason::AlreadyArchived,
+        "pattern_tier" => ConsolidationExclusionReason::PatternTier,
+        "wiki_category" => ConsolidationExclusionReason::WikiCategory,
+        "wiki_path" => ConsolidationExclusionReason::WikiPath,
+        "retention_policy" => ConsolidationExclusionReason::RetentionPolicy,
+        _ => ConsolidationExclusionReason::FutureProtection,
+    })
 }
 
 fn list_proposals(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Vec<Value>, String> {
@@ -1069,7 +1203,7 @@ fn list_proposals(server: &MemoryServer, params: &TachiMemoryParams) -> Result<V
     // see the proposals they just generated (Gemini #904 review).
     let rows = with_proposal_store_read(server, params, |store| {
         store
-            .list_state(LIFECYCLE_PROPOSAL_NS)
+            .list_state(lifecycle::LIFECYCLE_PROPOSAL_NS)
             .map_err(|e| format!("list lifecycle proposals: {e}"))
     })?;
 
@@ -1154,14 +1288,6 @@ fn with_memory_store<T>(
     f: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     with_proposal_store(server, params, f)
-}
-
-fn with_memory_store_read<T>(
-    server: &MemoryServer,
-    params: &TachiMemoryParams,
-    f: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
-) -> Result<T, String> {
-    with_proposal_store_read(server, params, f)
 }
 
 #[cfg(test)]

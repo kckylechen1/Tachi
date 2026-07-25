@@ -590,8 +590,14 @@ async fn memory_gc_clears_recall_cache_after_commit() {
 
 // ── D4: a consolidate lifecycle action (merge_into) clears the cache ───────
 // Drives `apply_lifecycle_action` via its automated `merge_into_for_project`
-// entry — the SAME choke point the human-reviewed propose/review/apply loop
-// reaches — so the test exercises the real mutation path, not a stand-in. The
+// entry. NOT the same code path as the human-reviewed propose/review/apply
+// loop: `handle_apply` delegates to
+// `memcore::store::memory_lifecycle::apply_lifecycle_proposal` and runs its own
+// post-commit invalidation, so `apply_lifecycle_action` now has exactly two
+// callers, both automated (`merge_into_for_project` and, through it,
+// `foundry_runtime_ops::daily_distill::consolidate_prepass`). What this test
+// covers is that automated arm's real mutation path — the reviewed arm's
+// invalidation is a separate obligation and needs its own coverage. The
 // invalidation must fire AFTER the `with_memory_store` closure returns.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
