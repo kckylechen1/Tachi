@@ -211,6 +211,58 @@ fn run_recall_apply_post_write_pre_sync_test_hook(
     Ok(())
 }
 
+/// Test-only handoff seam: replace the pathname after the append descriptor
+/// has been synced. The replacement carries identical bytes but has never
+/// been synced through the descriptor that performed the approved append.
+#[cfg(all(test, unix))]
+fn run_recall_apply_post_descriptor_sync_test_hook(
+    params: &TachiMemoryParams,
+    config_env_path: &Path,
+) -> Result<(), String> {
+    if !params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| {
+            metadata.get("test_replace_config_env_after_append_sync_before_terminal_cas")
+        })
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let replacement_body = std::fs::read(config_env_path).map_err(|err| {
+        format!(
+            "test hook read synced config.env {} before replacement: {err}",
+            config_env_path.display()
+        )
+    })?;
+    let mut replacement = config_env_path.as_os_str().to_os_string();
+    replacement.push(format!(".post-sync-replacement-{}", uuid::Uuid::new_v4().simple()));
+    let replacement = std::path::PathBuf::from(replacement);
+    std::fs::write(&replacement, replacement_body).map_err(|err| {
+        format!(
+            "test hook write unsynced config.env replacement {}: {err}",
+            replacement.display()
+        )
+    })?;
+    std::fs::rename(&replacement, config_env_path).map_err(|err| {
+        let _ = std::fs::remove_file(&replacement);
+        format!(
+            "test hook replace config.env {} after descriptor sync: {err}",
+            config_env_path.display()
+        )
+    })
+}
+
+#[cfg(any(not(test), not(unix)))]
+fn run_recall_apply_post_descriptor_sync_test_hook(
+    _params: &TachiMemoryParams,
+    _config_env_path: &Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 fn run_completed_recovery_pre_sync_test_hook(params: &TachiMemoryParams) -> Result<(), String> {
     if params
@@ -567,6 +619,22 @@ struct AnchoredRecallConfigParent {
     leaf: CString,
 }
 
+/// A config.env descriptor whose receipt-bound after-state has been observed
+/// and synced. It remains open through the terminal proposal CAS so finalize
+/// can prove the path still names this exact inode instead of reopening an
+/// indistinguishable replacement by pathname.
+#[cfg(unix)]
+struct DurableRecallConfig {
+    path: std::path::PathBuf,
+    file: std::fs::File,
+    anchored: AnchoredRecallConfigParent,
+    descriptor_metadata: std::fs::Metadata,
+    expected_after_digest: String,
+}
+
+#[cfg(not(unix))]
+struct DurableRecallConfig;
+
 struct ValidatedRecallReceipt<'a> {
     attempt_id: &'a str,
     before_digest: &'a str,
@@ -703,7 +771,7 @@ fn drive_recall_apply_state_machine(
                 append_plan.before_len,
                 &append_plan.append_payload,
             )?;
-            append_recall_config_env(
+            let mut durable_config = append_recall_config_env(
                 config_env_path,
                 before_digest,
                 after_digest,
@@ -717,8 +785,9 @@ fn drive_recall_apply_state_machine(
                 proposal_id,
                 &outcome,
                 &patch,
-                after_digest,
+                &mut durable_config,
                 config_env_path,
+                params,
             )
         }
         "applying" => {
@@ -754,7 +823,7 @@ fn drive_recall_apply_state_machine(
                 // the anchored no-follow protocol, repeat that proof on the
                 // descriptor being synced, then finalize without another path
                 // lookup.
-                sync_completed_recall_recovery(
+                let mut durable_config = sync_completed_recall_recovery(
                     config_env_path,
                     &bound_source_revision,
                     &patch,
@@ -764,17 +833,19 @@ fn drive_recall_apply_state_machine(
                 let outcome = RecallApplyOutcome::FinalizedExisting {
                     attempt_id: receipt.attempt_id.to_string(),
                 };
-                finalize_recall_apply_state(
+                finalize_recall_apply(
                     server,
                     proposal_id,
                     &outcome,
                     &patch,
+                    &mut durable_config,
                     config_env_path,
+                    params,
                 )
             } else if append_progress.is_some() {
                 // The append did not land or only a receipt-bound prefix
                 // landed before a crash. Resume only the missing suffix.
-                append_recall_config_env(
+                let mut durable_config = append_recall_config_env(
                     config_env_path,
                     receipt.before_digest,
                     receipt.after_digest,
@@ -804,8 +875,9 @@ fn drive_recall_apply_state_machine(
                     proposal_id,
                     &outcome,
                     &patch,
-                    receipt.after_digest,
+                    &mut durable_config,
                     config_env_path,
+                    params,
                 )
             } else {
                 // The file drifted to something other than the receipt's before
@@ -878,42 +950,39 @@ fn stamp_applying_receipt(
     })
 }
 
-/// CAS applying -> applied. Re-asserts the observed config.env digest equals
-/// the receipt's `after_digest` immediately before the CAS, so a crash between
-/// the append and this finalize cannot stamp `applied` on a row whose file is
-/// somehow not actually at the after state. Returns the terminal proposal row
-/// and the apply result so the caller can surface them in the response.
+/// CAS applying -> applied while retaining the synced config descriptor. The
+/// terminal transaction rechecks that config.env still names the exact inode
+/// which holds the receipt-bound after state, then syncs that descriptor and
+/// its anchored parent immediately before the state CAS.
 fn finalize_recall_apply(
     server: &MemoryServer,
     proposal_id: &str,
     outcome: &RecallApplyOutcome,
     patch: &BTreeMap<String, String>,
-    expected_after_digest: &str,
+    durable_config: &mut DurableRecallConfig,
     config_env_path: &Path,
+    params: &TachiMemoryParams,
 ) -> Result<(Value, RecallApplyResult, RecallApplyOutcome), String> {
-    let observed = compute_recall_digest(config_env_path)?;
-    if observed != expected_after_digest {
-        return Err(format!(
-            "finalize_refused: recall config proposal {proposal_id} observed config.env digest {observed} does not match expected after_digest {expected_after_digest}; refusing to mark applied"
-        ));
-    }
-    // A newly created file can be durable as file data while its directory
-    // entry is not. Confirm parent-directory durability before the terminal
-    // CAS on every finalize path, including recovery after a process crash.
-    // An unsupported directory sync is loud and leaves the proposal applying.
-    sync_recall_config_parent(config_env_path)?;
-    finalize_recall_apply_state(server, proposal_id, outcome, patch, config_env_path)
+    run_recall_apply_post_descriptor_sync_test_hook(params, config_env_path)?;
+    finalize_recall_apply_state(
+        server,
+        proposal_id,
+        outcome,
+        patch,
+        durable_config,
+        config_env_path,
+    )
 }
 
-/// Persist the terminal proposal only after the caller has established both
-/// config-file and parent-directory durability. This helper performs no path
-/// lookup, so descriptor-bound recovery proof cannot be invalidated by an
-/// unvalidated reopen between fsync and the applying -> applied CAS.
+/// Persist the terminal proposal only after the live descriptor proves its
+/// expected bytes, durability, and anchored path identity inside the same
+/// transaction immediately before the terminal CAS.
 fn finalize_recall_apply_state(
     server: &MemoryServer,
     proposal_id: &str,
     outcome: &RecallApplyOutcome,
     patch: &BTreeMap<String, String>,
+    durable_config: &mut DurableRecallConfig,
     config_env_path: &Path,
 ) -> Result<(Value, RecallApplyResult, RecallApplyOutcome), String> {
     let applied_at = Utc::now().to_rfc3339();
@@ -935,6 +1004,7 @@ fn finalize_recall_apply_state(
                 "stale_state_version: recall config proposal {proposal_id} is no longer 'applying' (now '{current}'); another finalize won the race — reload"
             ));
         }
+        assert_durable_recall_config_for_terminal(durable_config, proposal_id)?;
         value["status"] = json!("applied");
         value["applied_at"] = json!(applied_at);
         // `hard_state` TTL (#1342 follow-up): `applied` is terminal — the
@@ -1937,7 +2007,7 @@ fn sync_completed_recall_recovery(
     patch: &BTreeMap<String, String>,
     receipt: &ValidatedRecallReceipt<'_>,
     params: &TachiMemoryParams,
-) -> Result<(), String> {
+) -> Result<DurableRecallConfig, String> {
     let anchored = open_anchored_recall_config_parent(path, false)?.ok_or_else(|| {
         format!(
             "third_party_drift: completed recovery config parent for {} disappeared",
@@ -1983,7 +2053,14 @@ fn sync_completed_recall_recovery(
         )
     })?;
     assert_anchored_parent_identity(path, &anchored)?;
-    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
+    Ok(DurableRecallConfig {
+        path: path.to_path_buf(),
+        file,
+        anchored,
+        descriptor_metadata,
+        expected_after_digest: receipt.after_digest.to_string(),
+    })
 }
 
 #[cfg(not(unix))]
@@ -1993,7 +2070,7 @@ fn sync_completed_recall_recovery(
     _patch: &BTreeMap<String, String>,
     _receipt: &ValidatedRecallReceipt<'_>,
     _params: &TachiMemoryParams,
-) -> Result<(), String> {
+) -> Result<DurableRecallConfig, String> {
     Err(format!(
         "unsupported_platform: completed recall recovery for {} requires descriptor identity and fsync guarantees",
         path.display()
@@ -2043,7 +2120,7 @@ fn append_recall_config_env(
     expected_before_len: usize,
     expected_append_payload: &str,
     params: &TachiMemoryParams,
-) -> Result<(), String> {
+) -> Result<DurableRecallConfig, String> {
     let anchored = open_anchored_recall_config_parent(path, true)?.ok_or_else(|| {
         format!(
             "create config.env parent {}: component traversal returned no directory",
@@ -2144,7 +2221,16 @@ fn append_recall_config_env(
     anchored
         .directory
         .sync_all()
-        .map_err(|err| format!("fsync anchored config.env parent {}: {err}", path.display()))
+        .map_err(|err| format!("fsync anchored config.env parent {}: {err}", path.display()))?;
+    assert_anchored_parent_identity(path, &anchored)?;
+    assert_anchored_leaf_identity(path, &anchored, &descriptor_metadata)?;
+    Ok(DurableRecallConfig {
+        path: path.to_path_buf(),
+        file,
+        anchored,
+        descriptor_metadata,
+        expected_after_digest: expected_after_revision.to_string(),
+    })
 }
 
 #[cfg(unix)]
@@ -2206,7 +2292,7 @@ fn append_recall_config_env(
     _expected_before_len: usize,
     _expected_append_payload: &str,
     _params: &TachiMemoryParams,
-) -> Result<(), String> {
+) -> Result<DurableRecallConfig, String> {
     Err(format!(
         "unsupported_platform: recall config apply for {} requires descriptor identity and no-follow guarantees",
         path.display()
@@ -2214,28 +2300,58 @@ fn append_recall_config_env(
 }
 
 #[cfg(unix)]
-fn sync_recall_config_parent(path: &Path) -> Result<(), String> {
-    let anchored = open_anchored_recall_config_parent(path, false)?
-        .ok_or_else(|| format!("fsync config.env parent: {} does not exist", path.display()))?;
-    anchored
-        .directory
-        .sync_all()
-        .map_err(|err| format!("fsync anchored config.env parent {}: {err}", path.display()))
+fn assert_durable_recall_config_for_terminal(
+    durable: &mut DurableRecallConfig,
+    proposal_id: &str,
+) -> Result<(), String> {
+    assert_anchored_parent_identity(&durable.path, &durable.anchored)?;
+    assert_anchored_leaf_identity(
+        &durable.path,
+        &durable.anchored,
+        &durable.descriptor_metadata,
+    )?;
+    let source = read_recall_config_descriptor(&mut durable.file, &durable.path)?;
+    let observed = digest_config_env_source(&source);
+    if observed != durable.expected_after_digest {
+        return Err(format!(
+            "finalize_refused: recall config proposal {proposal_id} descriptor digest {observed} does not match expected after_digest {}; refusing to mark applied",
+            durable.expected_after_digest
+        ));
+    }
+    durable.file.sync_all().map_err(|err| {
+        format!(
+            "fsync terminal recall config.env {}: {err}",
+            durable.path.display()
+        )
+    })?;
+    assert_anchored_parent_identity(&durable.path, &durable.anchored)?;
+    assert_anchored_leaf_identity(
+        &durable.path,
+        &durable.anchored,
+        &durable.descriptor_metadata,
+    )?;
+    durable.anchored.directory.sync_all().map_err(|err| {
+        format!(
+            "fsync terminal config.env parent {}: {err}",
+            durable.path.display()
+        )
+    })?;
+    assert_anchored_parent_identity(&durable.path, &durable.anchored)?;
+    assert_anchored_leaf_identity(
+        &durable.path,
+        &durable.anchored,
+        &durable.descriptor_metadata,
+    )
 }
 
 #[cfg(not(unix))]
-fn sync_recall_config_parent(path: &Path) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| {
-        format!(
-            "fsync config.env parent: {} has no parent directory",
-            path.display()
-        )
-    })?;
-    let directory = std::fs::File::open(parent)
-        .map_err(|e| format!("open config.env parent {} for fsync: {e}", parent.display()))?;
-    directory
-        .sync_all()
-        .map_err(|e| format!("fsync config.env parent {}: {e}", parent.display()))
+fn assert_durable_recall_config_for_terminal(
+    _durable: &mut DurableRecallConfig,
+    proposal_id: &str,
+) -> Result<(), String> {
+    Err(format!(
+        "unsupported_platform: terminal recall config apply for proposal {proposal_id} requires descriptor identity and fsync guarantees"
+    ))
 }
 
 fn required_proposal_id(params: &TachiMemoryParams) -> Result<&str, String> {
