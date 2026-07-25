@@ -1,6 +1,6 @@
 use super::cache::{
-    recall_cache_epoch, recall_cache_key, recall_cache_read_enabled, recall_cache_ttl_secs,
-    recall_cache_write_through,
+    recall_cache_epoch, recall_cache_generation_fingerprint, recall_cache_key,
+    recall_cache_read_enabled, recall_cache_ttl_secs, recall_cache_write_through,
 };
 use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
@@ -57,11 +57,28 @@ pub(crate) async fn handle_search_memory_with_access(
         .agent_role
         .as_deref()
         .is_some_and(|role| !role.trim().is_empty());
-    let cache_key = (recall_cache_read_enabled()
+    let cache_eligible = recall_cache_read_enabled()
         && params.query_vec.is_none()
         && !sandboxed_search
-        && !memcore::should_skip_query(&params.query))
-    .then(|| recall_cache_key(&params, top_k, project_only));
+        && !memcore::should_skip_query(&params.query);
+    let cache_key = if cache_eligible {
+        match recall_cache_generation_fingerprint(server, &params, project_only) {
+            Ok(generation_fingerprint) => Some(recall_cache_key(
+                &params,
+                top_k,
+                project_only,
+                &generation_fingerprint,
+            )),
+            Err(error) => {
+                tracing::warn!(
+                    "[recall_cache] bypassing cache because authoritative generation validation failed: {error}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // tachi#1435 slice 4 / #2059 codex round 2: snapshot the cache epoch
     // BEFORE touching the store at all (read lookup or the miss-path

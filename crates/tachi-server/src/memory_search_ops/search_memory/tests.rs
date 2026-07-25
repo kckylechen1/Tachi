@@ -1,8 +1,9 @@
 use serde_json::json;
 
 use super::cache::{
-    invalidate_recall_cache_after_write, recall_cache_epoch, recall_cache_key,
-    recall_cache_write_through, recall_cache_write_through_is_safe,
+    invalidate_recall_cache_after_write, recall_cache_epoch, recall_cache_generation_fingerprint,
+    recall_cache_key as build_recall_cache_key, recall_cache_write_through,
+    recall_cache_write_through_is_safe,
 };
 use super::filters::project_scope_allows_memory_with_config;
 use crate::memory_search_ops::routing_config::RoutingConfig;
@@ -66,6 +67,10 @@ fn params(query: &str) -> SearchMemoryParams {
         include_metadata: false,
         format: None,
     }
+}
+
+fn recall_cache_key(params: &SearchMemoryParams, top_k: usize, project_only: bool) -> String {
+    build_recall_cache_key(params, top_k, project_only, "global=0")
 }
 
 fn domain_pack_routing_config() -> RoutingConfig {
@@ -182,6 +187,48 @@ fn recall_cache_key_ignores_rerank_intent() {
         recall_cache_key(&a, 5, false),
         recall_cache_key(&b, 5, false)
     );
+}
+
+#[test]
+fn recall_cache_key_separates_authoritative_database_generations() {
+    let params = params("same query");
+    assert_ne!(
+        build_recall_cache_key(&params, 5, false, "global=8,project=2"),
+        build_recall_cache_key(&params, 5, false, "global=9,project=2"),
+        "a committed global mutation must select a new cache key"
+    );
+    assert_ne!(
+        build_recall_cache_key(&params, 5, false, "global=8,project=2"),
+        build_recall_cache_key(&params, 5, false, "global=8,project=3"),
+        "a committed project mutation must select a new cache key"
+    );
+}
+
+#[test]
+fn initialized_store_exposes_a_cache_safe_authoritative_generation() {
+    let server = make_server();
+    let mut search = params("cache generation probe");
+    search.project = None;
+    let generation = recall_cache_generation_fingerprint(&server, &search, false)
+        .expect("freshly initialized store must be cache-safe");
+    assert_eq!(generation, "global=0");
+}
+
+#[test]
+fn cache_generation_fingerprint_includes_global_and_bound_project_stores() {
+    let temp = tempfile::tempdir().expect("temporary database directory");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.sqlite"),
+        Some(temp.path().join("project.sqlite")),
+    )
+    .expect("server with global and bound project stores");
+    let mut search = params("cache generation probe");
+    search.project = None;
+
+    let generation = recall_cache_generation_fingerprint(&server, &search, false)
+        .expect("both selected stores must expose a cache-safe generation");
+
+    assert_eq!(generation, "global=0,bound-project=0");
 }
 
 #[test]

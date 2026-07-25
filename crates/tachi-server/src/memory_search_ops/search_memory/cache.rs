@@ -1,3 +1,6 @@
+use crate::memory_search_ops::search_helpers::{
+    infer_search_project, named_project_db_exists, resolve_workspace_named_project,
+};
 use crate::tool_params::SearchMemoryParams;
 use crate::utils::{parse_env_bool, stable_hash};
 use crate::MemoryServer;
@@ -18,82 +21,178 @@ pub(super) fn recall_cache_read_enabled() -> bool {
     parse_env_bool("TACHI_ENABLE_RECALL_CACHE").unwrap_or(false)
 }
 
-// ─── Write-side invalidation + epoch guard (tachi#1435 slice 3/4/6 / #2059) ─
+/// Snapshot every DB that the real search routing will read. The cache key
+/// carries these persisted generations, so a committed write from another
+/// process naturally selects a new key even when no caller manually evicts the
+/// global cache table. Any unknown, legacy, read-only, or trigger-drifted DB
+/// disables caching for this query rather than serving a stale result.
+///
+/// This deliberately mirrors the target-selection branches in `rows.rs`; each
+/// target is read exactly once through its normal read-store path. The labels
+/// are stable routing identities, while the generation is the authoritative
+/// freshness value in that physical DB.
+pub(super) fn recall_cache_generation_fingerprint(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+    project_only: bool,
+) -> Result<String, String> {
+    let mut generations = Vec::new();
+    let mut record_generation = |label: String, generation: i64| {
+        if !generations.iter().any(|(known, _)| known == &label) {
+            generations.push((label, generation));
+        }
+    };
+
+    macro_rules! read_generation {
+        ($label:expr, $read:expr) => {
+            record_generation($label, $read?);
+        };
+    }
+
+    let wiki_path_prefix = params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
+    let mut searched_named = false;
+    if let Some(project_name) = params.project.as_deref() {
+        if named_project_db_exists(project_name) {
+            read_generation!(
+                format!("named-project:{project_name}"),
+                server.with_named_project_store_read(project_name, |store| {
+                    store.search_generation().map_err(|error| error.to_string())
+                })
+            );
+            searched_named = true;
+            if !project_only {
+                read_generation!(
+                    "global".to_string(),
+                    server.with_global_store_read(|store| {
+                        store.search_generation().map_err(|error| error.to_string())
+                    })
+                );
+            }
+        } else if !project_only {
+            return Err(format!(
+                "named project '{project_name}' is unavailable for cache validation"
+            ));
+        }
+    }
+
+    let mut searched_default_wiki = false;
+    if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
+        read_generation!(
+            "named-project:wiki".to_string(),
+            server.with_named_project_store_read("wiki", |store| {
+                store.search_generation().map_err(|error| error.to_string())
+            })
+        );
+        searched_default_wiki = true;
+    }
+
+    if !searched_named {
+        if project_only {
+            let named_project = resolve_workspace_named_project();
+            if let Some(project_name) = named_project.as_deref() {
+                if named_project_db_exists(project_name)
+                    && (project_name != "wiki" || !searched_default_wiki)
+                {
+                    let workspace_path = server.project_db_path_buf();
+                    let named_path = MemoryServer::resolve_named_project_db_path(project_name).ok();
+                    let skip_workspace = workspace_path
+                        .as_deref()
+                        .zip(named_path.as_deref())
+                        .map(|(workspace, named)| workspace == named)
+                        .unwrap_or(false);
+                    if !skip_workspace && server.has_project_db() {
+                        read_generation!(
+                            "bound-project".to_string(),
+                            server.with_project_store_read(|store| {
+                                store.search_generation().map_err(|error| error.to_string())
+                            })
+                        );
+                    }
+                    if named_path.is_some() {
+                        read_generation!(
+                            format!("named-project:{project_name}"),
+                            server.with_named_project_store_read(project_name, |store| {
+                                store.search_generation().map_err(|error| error.to_string())
+                            })
+                        );
+                    }
+                } else if server.has_project_db() {
+                    read_generation!(
+                        "bound-project".to_string(),
+                        server.with_project_store_read(|store| {
+                            store.search_generation().map_err(|error| error.to_string())
+                        })
+                    );
+                }
+            } else if server.has_project_db() {
+                read_generation!(
+                    "bound-project".to_string(),
+                    server.with_project_store_read(|store| {
+                        store.search_generation().map_err(|error| error.to_string())
+                    })
+                );
+            }
+        } else {
+            let routing_config = server.routing_config().get();
+            let inferred_project = infer_search_project(
+                &server.tachi_home_dir(),
+                &params.query,
+                params.domain.as_deref(),
+                &routing_config,
+            );
+            let inferred_db_path = inferred_project
+                .as_deref()
+                .and_then(|name| MemoryServer::resolve_named_project_db_path(name).ok());
+            let skip_workspace = inferred_db_path.is_some()
+                && server.project_db_path_buf().as_ref() == inferred_db_path.as_ref();
+
+            read_generation!(
+                "global".to_string(),
+                server.with_global_store_read(|store| {
+                    store.search_generation().map_err(|error| error.to_string())
+                })
+            );
+            if let Some(project_name) = inferred_project.as_deref() {
+                if project_name != "wiki" || !searched_default_wiki {
+                    read_generation!(
+                        format!("named-project:{project_name}"),
+                        server.with_named_project_store_read(project_name, |store| {
+                            store.search_generation().map_err(|error| error.to_string())
+                        })
+                    );
+                }
+            } else if server.has_project_db() && !skip_workspace {
+                read_generation!(
+                    "bound-project".to_string(),
+                    server.with_project_store_read(|store| {
+                        store.search_generation().map_err(|error| error.to_string())
+                    })
+                );
+            }
+        }
+    }
+
+    if generations.is_empty() {
+        return Err("search selected no database for cache generation validation".to_string());
+    }
+    Ok(generations
+        .into_iter()
+        .map(|(label, generation)| format!("{label}={generation}"))
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
+// ─── Optional local eviction fast path ────────────────────────────────────
 //
-// `invalidate_recall_cache_after_write` is the single choke point every
-// content-changing writer calls after its own commit: a fresh save
-// (`save_memory::handler`), an enrichment-batch flush that adds
-// embeddings/keywords/summary (`enrichment.rs`), a contradiction supersede
-// (`memory_search_ops::contradiction`), and an auto-link supersede
-// (`memory_search_ops::auto_link`). All four change what a subsequent search
-// would surface, so all four must invalidate — once per commit/batch, never
-// per-row inside a batch.
-//
-// `RECALL_CACHE_EPOCH` closes a race the DELETE alone does not: an in-flight
-// cache MISS search that already computed its (now-stale) result set before
-// a concurrent save committed + invalidated must not resurrect that stale
-// result via its own write-through landing *after* the invalidation. A
-// search snapshots the epoch before doing any store work
-// (`recall_cache_epoch()`); its write-through compares that snapshot against
-// the current epoch immediately before writing and discards (does not write)
-// on a mismatch — discarding is always safe, the next miss just recomputes.
-//
-// **Mutual-exclusion invariant (tachi#1435 slice 6 / #2059 codex round 3,
-// "tooth B" — TOCTOU fix)**: the epoch check above is a classic
-// check-then-act unless the CHECK and the WRITE it gates are the same
-// atomic unit as the DELETE+bump it is racing against. A check done *before*
-// acquiring any lock (as a first draft of this file did) leaves a window: a
-// concurrent invalidator's DELETE+bump can land in between the check and the
-// eventual write, and the write still lands stale. The fix needs no new
-// lock: `MemoryServer::with_global_store` (`memory-server-runtime/src/
-// lib.rs` — `global_rw_gate: Arc<StdRwLock<()>>`, taken in WRITE mode) is
-// already an exclusive critical section every writer to this table goes
-// through. This module puts exactly two things inside that SAME critical
-// section, never outside it:
-//   1. [`invalidate_recall_cache_after_write`]'s `DELETE` + the epoch bump —
-//      both inside the one `with_global_store` closure below.
-//   2. The write-through's epoch recheck + `recall_cache_store` call — both
-//      inside the one `with_global_store` closure in
-//      `search_memory::handlers::handle_search_memory_with_access`.
-// Because `with_global_store` serializes ALL callers against each other
-// (std `RwLock::write` is exclusive against every other writer, not just
-// readers), these two critical sections can never interleave — one runs to
-// completion before the other starts. Both possible orderings are then
-// safe:
-//   * Invalidate-first: by the time the write-through's critical section
-//     runs, the epoch is already bumped, its recheck sees the mismatch, and
-//     it discards instead of writing.
-//   * Write-first: the write-through's critical section lands its row while
-//     holding the lock, releases it, and THEN the invalidator's critical
-//     section runs its `DELETE` — which removes that just-written row along
-//     with everything else, so nothing stale survives either way.
-// A check-then-act split across two separate lock acquisitions (check
-// outside, write inside — or vice versa) reopens exactly this hole; both
-// halves of each side MUST stay in one closure.
-//
-// **Cross-process safety boundary**: this counter is process-local
-// (`static AtomicU64`, not persisted). That is safe ONLY because of two
-// facts that must keep holding:
-//   1. The underlying `DELETE FROM recall_cache` this function issues IS a
-//      real, cross-process-visible SQL commit — any *other* process reading
-//      the same SQLite file after that commit sees the cache empty.
-//   2. In production there is exactly ONE process that ever reads or
-//      write-throughs this cache: the single-instance `tachi-server` daemon.
-//      `portable-server` (the other MCP server binary in this workspace)
-//      has zero references to `recall_cache` anywhere in its crate or its
-//      `portable-kernel` dependency (verified by grep — see tachi#1435 slice
-//      3's dispatch report) — it never engages this cache at all, so it
-//      cannot observe or race this in-memory epoch.
-// If a second cache-*consuming* process (one that calls `recall_cache_lookup`
-// / `recall_cache_store`, not merely one that writes memories) is ever
-// introduced, this in-memory epoch stops being sufficient — it would need to
-// become a persisted (DB-backed) generation/version column that every
-// process reads and compares, not an `AtomicU64`. The `with_global_store`
-// mutual-exclusion trick above is also process-local for the same reason:
-// `global_rw_gate` is an in-process `RwLock`, so it too would need to become
-// a real cross-process lock (or the whole compare-and-write folded into one
-// SQL statement/transaction) the moment a second cache-consuming process
-// exists.
+// SQLite's trigger-maintained generation is the cache authority across every
+// process. This epoch plus best-effort whole-table eviction only avoids local
+// stale write-through work; missing a manual caller or a process-local race
+// cannot cause a stale hit because the next lookup reads the DB generation.
+// The epoch recheck and write-through remain inside one global-store write
+// closure so an in-process eviction cannot be undone by an older miss result.
 static RECALL_CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Snapshot the current cache epoch. Callers take this BEFORE doing any
@@ -231,9 +330,10 @@ pub(super) fn recall_cache_key(
     params: &SearchMemoryParams,
     top_k: usize,
     project_only: bool,
+    generation_fingerprint: &str,
 ) -> String {
     let seed = format!(
-        "rcv1|{q}|{proj}|{prefix}|{domain}|{top_k}|{po}|{tr}|{ar}|{meta}|{role}",
+        "rcv2|{q}|{proj}|{prefix}|{domain}|{top_k}|{po}|{tr}|{ar}|{meta}|{role}|{generation_fingerprint}",
         q = normalize_cache_query(&params.query),
         proj = params.project.as_deref().unwrap_or(""),
         prefix = params.path_prefix.as_deref().unwrap_or(""),

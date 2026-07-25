@@ -643,3 +643,150 @@ async fn consolidate_lifecycle_clears_recall_cache_after_commit() {
         "a consolidate lifecycle action must clear the recall cache after its store commit"
     );
 }
+
+// The cache key must derive freshness from SQLite itself, not from the
+// writer-facing invalidation calls above. This models two server processes:
+// B warms the cache, then A performs a raw memcore upsert that never calls a
+// tachi-server cache helper. B's next identical read must observe the changed
+// database generation and compute fresh rows.
+#[tokio::test]
+async fn raw_memcore_write_in_one_server_invalidates_another_servers_warm_cache() {
+    let (writer, _temp_home) = make_server_with_temp_home();
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
+        .expect("independent reader server");
+    let needle = format!(
+        "CrossProcessGenerationNeedle{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let first = handle_save_memory(
+        &writer,
+        save_params(
+            "/scratch/cache-generation/first",
+            &format!("{needle} first cacheable memory"),
+        ),
+    )
+    .await
+    .expect("seed first memory");
+    let first_id = serde_json::from_str::<Value>(&first).expect("seed json")["id"]
+        .as_str()
+        .expect("seed id")
+        .to_string();
+
+    let warmed = search_rows(&reader, &needle).await;
+    assert!(
+        warmed.iter().any(|row| row["id"] == first_id),
+        "reader must see the first row while warming the cache: {warmed:#?}"
+    );
+    let cache_entries_before_raw_write = global_recall_cache_entries(&reader);
+    assert!(
+        cache_entries_before_raw_write > 0,
+        "the reader search must populate the shared recall cache before the raw write"
+    );
+    let unchanged = search_rows(&reader, &needle).await;
+    assert!(
+        unchanged.iter().any(|row| row["id"] == first_id),
+        "the unchanged database must keep serving its warm cache entry: {unchanged:#?}"
+    );
+
+    let mut raw_entry = writer
+        .with_global_store_read(|store| {
+            store
+                .get(&first_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "seed memory disappeared".to_string())
+        })
+        .expect("load raw entry template");
+    let second_id = format!("raw-generation-{}", uuid::Uuid::new_v4());
+    raw_entry.id = second_id.clone();
+    raw_entry.path = "/scratch/cache-generation/raw-memcore".to_string();
+    raw_entry.text = format!("{needle} second row written by raw memcore upsert");
+    raw_entry.summary = raw_entry.text.clone();
+    writer
+        .with_global_store(|store| store.upsert(&raw_entry).map_err(|error| error.to_string()))
+        .expect("raw memcore upsert in independent writer");
+
+    assert_eq!(
+        global_recall_cache_entries(&reader),
+        cache_entries_before_raw_write,
+        "this path must prove SQLite generation validation, not a manual cache-table delete"
+    );
+    let refreshed = search_rows(&reader, &needle).await;
+    assert!(
+        refreshed.iter().any(|row| row["id"] == second_id),
+        "reader B must not replay its warm pre-write cache after raw writer A committed: {refreshed:#?}"
+    );
+}
+
+// A missing trigger means the generation can no longer prove freshness. The
+// cache stays physically populated, but the reader must bypass it and search
+// rather than presenting a clean-looking stale hit.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn missing_generation_trigger_bypasses_a_warm_cache_instead_of_serving_stale_rows() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let server = make_server();
+    let needle = format!("GenerationDriftNeedle{}", uuid::Uuid::new_v4().simple());
+    let first = handle_save_memory(
+        &server,
+        save_params(
+            "/scratch/cache-generation/drift-first",
+            &format!("{needle} first cacheable memory"),
+        ),
+    )
+    .await
+    .expect("seed first memory");
+    let first_id = serde_json::from_str::<Value>(&first).expect("seed json")["id"]
+        .as_str()
+        .expect("seed id")
+        .to_string();
+    assert!(
+        search_rows(&server, &needle)
+            .await
+            .iter()
+            .any(|row| row["id"] == first_id),
+        "first search must warm a non-empty cache"
+    );
+    let cache_entries_before_drift = global_recall_cache_entries(&server);
+    assert!(cache_entries_before_drift > 0, "warm cache must exist");
+
+    let second_id = format!("drift-generation-{}", uuid::Uuid::new_v4());
+    let mut raw_entry = server
+        .with_global_store_read(|store| {
+            store
+                .get(&first_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "seed memory disappeared".to_string())
+        })
+        .expect("load raw entry template");
+    raw_entry.id = second_id.clone();
+    raw_entry.path = "/scratch/cache-generation/drift-second".to_string();
+    raw_entry.text = format!("{needle} second row after trigger drift");
+    raw_entry.summary = raw_entry.text.clone();
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER memory_search_generation_after_insert")
+                .map_err(|error| error.to_string())?;
+            store
+                .upsert(&raw_entry)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .expect("simulate trigger drift plus out-of-band insert");
+
+    assert_eq!(
+        global_recall_cache_entries(&server),
+        cache_entries_before_drift,
+        "trigger drift must not rely on an unrelated cache eviction to look fresh"
+    );
+    let refreshed = search_rows(&server, &needle).await;
+    assert!(
+        refreshed.iter().any(|row| row["id"] == second_id),
+        "an invalid generation contract must bypass the warm cache, not hide the new row: {refreshed:#?}"
+    );
+}

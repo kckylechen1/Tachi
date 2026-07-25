@@ -296,6 +296,11 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
 
     migrate_enum_constraints(conn)?;
 
+    // Must run after any legacy `memories` rebuild because SQLite drops table
+    // triggers during that migration. The trigger is the cross-process cache
+    // authority; drift is an open failure, never a silently stale cache hit.
+    crate::db::search_generation::ensure_search_generation_schema(conn)?;
+
     ensure_optimization_indexes(conn);
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after

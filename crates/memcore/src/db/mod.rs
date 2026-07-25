@@ -31,6 +31,7 @@ pub mod open_context;
 mod recall_cache;
 mod sandbox;
 mod schema;
+mod search_generation;
 #[cfg(feature = "admin")]
 pub mod session_claims;
 mod sqlite_extensions;
@@ -142,6 +143,7 @@ pub use sandbox::{
     path_matches_pattern, set_sandbox_policy, set_sandbox_rule,
 };
 pub use schema::{init_schema, init_schema_with_label_mut};
+pub use search_generation::search_generation;
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
