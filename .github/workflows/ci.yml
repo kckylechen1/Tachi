@@ -20,16 +20,31 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Validate hermetic build-seat readiness check
+      - name: Validate setup and CI supply-chain policy
         run: |
           bash -n .agents/setup
-          grep -Fx 'readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3)' .agents/setup
-          grep -Fx 'readonly REQUIRED_RUST_COMPONENTS=(clippy rustfmt)' .agents/setup
-          grep -Fx '        run: npm audit --audit-level=high' .github/workflows/ci.yml
           if grep -Eq '(^|[[:space:]])(curl|wget)[[:space:]]|cargo[[:space:]]+(install|fetch)|rustup[[:space:]]+(toolchain|component)[[:space:]]+(install|add)' .agents/setup; then
             echo 'build-seat setup must not bootstrap mutable tools' >&2
+            exit 1
+          fi
+          if grep -Eq 'CARGO_NET_OFFLINE|dependency cache|advisory (database|DB)' .agents/setup; then
+            echo 'build-seat setup verifies tools, not dependency or advisory data readiness' >&2
+            exit 1
+          fi
+          if grep -hE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[[:alnum:]_.-]+/[[:alnum:]_.-]+@' .github/workflows/ci.yml .github/actions/setup-rust/action.yml \
+            | grep -Ev 'uses:[[:space:]]+[^@]+@[0-9a-f]{40}[[:space:]]+#[[:space:]]+[^[:space:]]+'; then
+            echo 'remote GitHub actions require an immutable SHA and version comment' >&2
+            exit 1
+          fi
+          if grep -hE '^[[:space:]]*cargo install ' .github/workflows/ci.yml .github/actions/setup-rust/action.yml \
+            | grep -Ev -- '--version [0-9]+\.[0-9]+\.[0-9]+ .*--locked([[:space:]]|$)'; then
+            echo 'cargo installs require an exact version and --locked' >&2
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*run: npm audit --audit-level=high[[:space:]]*$' .github/workflows/ci.yml; then
+            echo 'npm audit must enforce high-severity findings' >&2
             exit 1
           fi
           if grep -Eq 'npm audit[^\n]*\|\|[[:space:]]*true' .github/workflows/ci.yml; then
@@ -37,13 +52,56 @@ jobs:
             exit 1
           fi
 
+          setup_test_root="$(mktemp -d)"
+          trap 'rm -rf -- "${setup_test_root}"' EXIT
+          setup_stub_dir="${setup_test_root}/bin"
+          mkdir -p "${setup_stub_dir}"
+          required_tools=(cargo rustc cargo-nextest cargo-audit python3 node npm)
+
+          for tool in "${required_tools[@]}"; do
+            printf '#!/bin/sh\nexit 0\n' >"${setup_stub_dir}/${tool}"
+          done
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'if [ -n "${SIMULATE_MISSING_COMPONENT:-}" ] && [ "${1:-}" = "${SIMULATE_MISSING_COMPONENT}" ]; then exit 1; fi' \
+            'exit 0' >"${setup_stub_dir}/cargo"
+          chmod +x "${setup_stub_dir}"/*
+
+          run_fake_setup() {
+            SIMULATE_MISSING_COMPONENT="${1:-}" \
+              CARGO_HOME="${setup_test_root}/cargo-home" \
+              PATH="${setup_stub_dir}" \
+              /bin/bash .agents/setup >"${setup_test_root}/output" 2>&1
+          }
+
+          run_fake_setup
+          for tool in "${required_tools[@]}"; do
+            mv "${setup_stub_dir}/${tool}" "${setup_stub_dir}/${tool}.disabled"
+            if run_fake_setup; then
+              echo "setup accepted missing required tool: ${tool}" >&2
+              exit 1
+            fi
+            grep -F "${tool}" "${setup_test_root}/output"
+            mv "${setup_stub_dir}/${tool}.disabled" "${setup_stub_dir}/${tool}"
+          done
+
+          for component_case in clippy:clippy rustfmt:fmt; do
+            component="${component_case%%:*}"
+            subcommand="${component_case##*:}"
+            if run_fake_setup "${subcommand}"; then
+              echo "setup accepted missing Rust component: ${component}" >&2
+              exit 1
+            fi
+            grep -F "${component}" "${setup_test_root}/output"
+          done
+
   rust:
     name: Rust workspace
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
@@ -59,13 +117,13 @@ jobs:
 
       - name: Run cargo audit
         run: |
-          cargo install cargo-audit --quiet
+          cargo install cargo-audit --version 0.22.2 --locked --quiet
           cargo audit --deny warnings
 
       - name: Install cargo-nextest
         # get.nextest.rs is unreachable from this runner's network (DNS blocked);
         # taiki-e/install-action pulls a prebuilt binary from GitHub Releases.
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # nextest snapshot 2026-07-25
 
       - name: Run workspace tests
         run: cargo nextest run --workspace --locked --profile ci
@@ -79,10 +137,10 @@ jobs:
         # compile/link and test-execution durations distinguishable in CI
         # telemetry instead of being collapsed into one step clock. Uses the
         # same actions/* first-party family as checkout/setup-node (pinned to
-        # @v4, matching the upload-artifact major already used by
+        # the v4.6.2 commit, matching the upload-artifact major already used by
         # release-cli-binaries.yml) -- no new third-party action introduced.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-report
           path: target/nextest/ci/junit.xml
@@ -109,9 +167,9 @@ jobs:
           - integrations/openclaw
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 20
           cache: npm
@@ -124,6 +182,11 @@ jobs:
       - name: Build
         working-directory: ${{ matrix.package }}
         run: npm run build
+
+      - name: Run OpenClaw runtime compatibility smoke
+        if: matrix.package == 'integrations/openclaw'
+        working-directory: integrations/openclaw
+        run: npm run test:runtime
 
       - name: Run npm audit
         working-directory: ${{ matrix.package }}

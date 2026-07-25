@@ -4,28 +4,38 @@
 # This hook intentionally provisions nothing. A mutable bootstrap cannot prove
 # what toolchain ran a mission, and a seat that lacks a required tool must fail
 # before it can produce a review-shaped but unverified result. The orb image
-# must provide these exact CI prerequisites before this hook is invoked.
+# must provide these command-line tools before this hook is invoked.
 set -euo pipefail
 
 export PATH="${CARGO_HOME:-${HOME}/.cargo}/bin:${PATH}"
 export RUSTUP_AUTO_INSTALL=0
-export CARGO_NET_OFFLINE=true
 
-readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3)
+readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3 node npm)
 readonly REQUIRED_RUST_COMPONENTS=(clippy rustfmt)
 
 missing=()
 
 for tool in "${REQUIRED_TOOLS[@]}"; do
-  command -v "${tool}" >/dev/null 2>&1 || missing+=("${tool}")
+  if ! command -v "${tool}" >/dev/null 2>&1 || ! "${tool}" --version >/dev/null 2>&1; then
+    missing+=("${tool}")
+  fi
 done
 
-if command -v cargo >/dev/null 2>&1 && ! cargo clippy --version >/dev/null 2>&1; then
-  missing+=("clippy")
-fi
+if command -v cargo >/dev/null 2>&1; then
+  for component in "${REQUIRED_RUST_COMPONENTS[@]}"; do
+    case "${component}" in
+      clippy) cargo_subcommand="clippy" ;;
+      rustfmt) cargo_subcommand="fmt" ;;
+      *)
+        missing+=("unknown-rust-component:${component}")
+        continue
+        ;;
+    esac
 
-if command -v rustfmt >/dev/null 2>&1 && ! rustfmt --version >/dev/null 2>&1; then
-  missing+=("rustfmt")
+    if ! cargo "${cargo_subcommand}" --version >/dev/null 2>&1; then
+      missing+=("${component}")
+    fi
+  done
 fi
 
 if ((${#missing[@]})); then
@@ -34,11 +44,13 @@ if ((${#missing[@]})); then
   exit 1
 fi
 
-printf 'setup: ready -- '
-cargo --version
-rustc --version
-cargo clippy --version
-rustfmt --version
-cargo nextest --version
-cargo audit --version
-python3 --version
+printf 'setup: ready -- required command-line tools are usable\n'
+for tool in "${REQUIRED_TOOLS[@]}"; do
+  "${tool}" --version
+done
+for component in "${REQUIRED_RUST_COMPONENTS[@]}"; do
+  case "${component}" in
+    clippy) cargo clippy --version ;;
+    rustfmt) cargo fmt --version ;;
+  esac
+done
