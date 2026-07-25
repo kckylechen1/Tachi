@@ -36,6 +36,51 @@ fn has_existing_application_schema(conn: &Connection) -> Result<bool, MemoryErro
     Ok(application_objects != 0)
 }
 
+/// Prove that the compatibility handle can serve every read-only backfill
+/// query before exposing it. This validates SQLite's parsed schema directly;
+/// it never interprets stored DDL text and never initializes missing objects.
+fn validate_read_only_backfill_compat_schema(conn: &Connection) -> Result<(), MemoryError> {
+    fn require_table(conn: &Connection, table: &str) -> Result<(), MemoryError> {
+        if db::table_exists(conn, table)? {
+            return Ok(());
+        }
+        Err(MemoryError::InvalidArg(format!(
+            "read-only backfill compatibility requires table '{table}'"
+        )))
+    }
+
+    require_table(conn, "memories")?;
+    conn.prepare(
+        "SELECT id, path, source, topic, metadata, text, summary, revision,
+                keywords, scope, category, archived
+         FROM memories
+         WHERE 0",
+    )
+    .map_err(|error| {
+        MemoryError::InvalidArg(format!(
+            "read-only backfill compatibility requires memories schema: {error}"
+        ))
+    })?;
+
+    require_table(conn, "memories_vec")?;
+    conn.prepare("SELECT id FROM memories_vec WHERE 0")
+        .map_err(|error| {
+            MemoryError::InvalidArg(format!(
+                "read-only backfill compatibility requires memories_vec schema: {error}"
+            ))
+        })?;
+
+    require_table(conn, "memories_fts")?;
+    conn.prepare("SELECT id FROM memories_fts WHERE 0")
+        .map_err(|error| {
+            MemoryError::InvalidArg(format!(
+                "read-only backfill compatibility requires memories_fts schema: {error}"
+            ))
+        })?;
+
+    Ok(())
+}
+
 impl MemoryStore {
     /// Open (or create) a memory database at the given path.
     ///
@@ -209,6 +254,9 @@ impl MemoryStore {
                 std::path::Path::new(db_path),
                 &DbOpenContext::open_existing_deny(),
             )?;
+        }
+        if allow_stamped_older_schema {
+            validate_read_only_backfill_compat_schema(&conn)?;
         }
         let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
         Ok(Self {
@@ -435,6 +483,53 @@ mod exact_dedupe_open_tests {
             db::migrations::read_schema_version(&offline).unwrap(),
             22,
             "rejected write must leave the older stamp unchanged"
+        );
+    }
+
+    #[test]
+    fn read_only_existing_schema_compat_rejects_version_only_v22_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version-only-v22.db");
+        let offline = Connection::open(&path).unwrap();
+        offline.execute_batch("PRAGMA user_version = 22;").unwrap();
+        drop(offline);
+
+        let error =
+            match MemoryStore::open_read_only_existing_schema_compat(&path.to_string_lossy()) {
+                Ok(_) => panic!("version-only v22 DB was accepted as backfill-compatible"),
+                Err(error) => error,
+            };
+        assert!(
+            error
+                .to_string()
+                .contains("read-only backfill compatibility requires table 'memories'"),
+            "unexpected version-only v22 refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn read_only_existing_schema_compat_rejects_malformed_v22_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed-v22.db");
+        let offline = Connection::open(&path).unwrap();
+        offline
+            .execute_batch(
+                "CREATE TABLE memories(id TEXT PRIMARY KEY);
+                 PRAGMA user_version = 22;",
+            )
+            .unwrap();
+        drop(offline);
+
+        let error =
+            match MemoryStore::open_read_only_existing_schema_compat(&path.to_string_lossy()) {
+                Ok(_) => panic!("malformed v22 memories schema was accepted"),
+                Err(error) => error,
+            };
+        assert!(
+            error
+                .to_string()
+                .contains("read-only backfill compatibility requires memories schema"),
+            "unexpected malformed v22 refusal: {error}"
         );
     }
 
