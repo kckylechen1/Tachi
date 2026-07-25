@@ -12,6 +12,185 @@
 
 use super::*;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
+#[cfg(unix)]
+const PINNED_TEST_CREDENTIAL: &str = "test-pinned-credential";
+#[cfg(unix)]
+const ROTATED_TEST_CREDENTIAL: &str = "test-rotated-credential";
+
+#[cfg(unix)]
+fn approver_test_server(temp: &tempfile::TempDir) -> crate::MemoryServer {
+    crate::MemoryServer::new(temp.path().join("global.sqlite"), None).expect("test server")
+}
+
+#[cfg(unix)]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+fn write_fake_gh(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let trace = temp.path().join("gh-trace");
+    let gh = temp.path().join("gh");
+    let trace_path = shell_single_quote(&trace.to_string_lossy());
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" != "api" ]; then
+    printf 'expected gh api invocation\n' >&2
+    exit 2
+fi
+if [ "${{GH_TOKEN:-}}" = "{PINNED_TEST_CREDENTIAL}" ]; then
+    marker=pinned
+else
+    marker=rotated
+fi
+printf '%s:%s\n' "$marker" "$2" >> {trace_path}
+case "$2" in
+    user)
+        printf '%s\n' '{{"login":"owner","id":7,"node_id":"U_7","type":"User"}}'
+        ;;
+    repos/owner/repo)
+        printf '%s\n' '{{"full_name":"owner/repo","owner":{{"login":"owner","id":7,"type":"User"}},"permissions":{{"admin":true,"maintain":true,"push":true,"triage":true,"pull":true}}}}'
+        ;;
+    repos/owner/repo/commits/refs/heads/main)
+        printf '%s\n' '{{"sha":"head-sha"}}'
+        ;;
+    *)
+        # Deliberately emits the credential so the live probe's redaction path
+        # proves that this value cannot reach an authority denial.
+        printf 'unexpected endpoint %s credential=%s\n' "$2" "$GH_TOKEN" >&2
+        exit 1
+        ;;
+esac
+"#
+    );
+    std::fs::write(&gh, script).expect("write fake gh");
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))
+        .expect("make fake gh executable");
+    (gh, trace)
+}
+
+#[cfg(unix)]
+fn pinning_target() -> ApprovalTargetV1 {
+    ApprovalTargetV1 {
+        repo: "owner/repo".to_string(),
+        action: tachi_params::GovernedActionV1::EstablishPrecedent,
+        target_ref: "/precedents/credential-pinning".to_string(),
+        packet_id: "packet-pinning".to_string(),
+        proposal_hash: "proposal-hash".to_string(),
+        source_bundle_hash: "source-bundle-hash".to_string(),
+        source_snapshot_hashes: vec!["source-snapshot-hash".to_string()],
+        repo_revision_pins: vec![tachi_params::RepoRevisionPinV1 {
+            repo: "owner/repo".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+            commit_sha: "head-sha".to_string(),
+        }],
+    }
+}
+
+// This drives the production probe through `resolve_verified_approver`, not a
+// helper: the resolver returns a different credential after its first call,
+// while the fake `gh` records only whether each spawned command received the
+// original value. Before pinning, the second and later API calls would be
+// marked `rotated` and the resolver count would exceed one.
+#[cfg(unix)]
+#[test]
+fn live_probe_pins_one_credential_context_and_redacts_it_from_surfaces() {
+    let temp = tempfile::tempdir().expect("temporary fake gh directory");
+    let (gh_path, trace_path) = write_fake_gh(&temp);
+    let resolution_calls = Arc::new(AtomicUsize::new(0));
+    let resolver_calls = Arc::clone(&resolution_calls);
+    let server = approver_test_server(&temp);
+    let probe = GhApproverAuthorityProbe::with_context_resolver(&server, move |_| {
+        let token = if resolver_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            PINNED_TEST_CREDENTIAL
+        } else {
+            ROTATED_TEST_CREDENTIAL
+        };
+        crate::gh_ops::GhApiContext::for_test(
+            gh_path.to_string_lossy().into_owned(),
+            token.to_string(),
+        )
+    });
+    let policy = build_policy(PolicyInputs::default()).expect("default owner policy");
+    let target = pinning_target();
+
+    let receipt = resolve_verified_approver(
+        &probe,
+        &policy,
+        &target,
+        &CallerAssertedContextV1::default(),
+        chrono::Utc::now(),
+    )
+    .expect("the pinned credential authenticates the repository owner");
+
+    assert_eq!(
+        resolution_calls.load(Ordering::SeqCst),
+        1,
+        "one issuance round must resolve the executable/credential context once"
+    );
+    let trace = std::fs::read_to_string(&trace_path).expect("read fake gh trace");
+    assert_eq!(
+        trace.lines().collect::<Vec<_>>(),
+        vec![
+            "pinned:user",
+            "pinned:repos/owner/repo",
+            "pinned:repos/owner/repo/commits/refs/heads/main",
+        ],
+        "every production gh request in the issuance round must receive the pinned credential"
+    );
+
+    let receipt_debug = format!("{receipt:?}");
+    let receipt_json = serde_json::to_string(&receipt).expect("serialize receipt");
+    for secret in [PINNED_TEST_CREDENTIAL, ROTATED_TEST_CREDENTIAL] {
+        assert!(
+            !receipt_debug.contains(secret),
+            "receipt Debug leaked a credential"
+        );
+        assert!(
+            !receipt_json.contains(secret),
+            "receipt JSON leaked a credential"
+        );
+    }
+
+    let denial = probe
+        .repo_facts("owner/missing")
+        .expect_err("the fake gh rejects the unexpected endpoint");
+    let denial_debug = format!("{denial:?}");
+    let denial_display = denial.to_string();
+    for secret in [PINNED_TEST_CREDENTIAL, ROTATED_TEST_CREDENTIAL] {
+        assert!(
+            !denial_debug.contains(secret),
+            "denial Debug leaked a credential"
+        );
+        assert!(
+            !denial_display.contains(secret),
+            "denial Display leaked a credential"
+        );
+    }
+
+    let unpinnable = GhApproverAuthorityProbe::with_context_resolver(&server, |_| {
+        Err("credential resolver unavailable".to_string())
+    });
+    let refusal = unpinnable
+        .authenticated_principal()
+        .expect_err("a probe without a pinned credential context must refuse");
+    assert_eq!(refusal.kind(), "authority_unavailable");
+    assert!(
+        refusal
+            .to_string()
+            .contains("could not pin the `gh` credential context"),
+        "the refusal must name the broken credential-pinning boundary"
+    );
+}
+
 // ─── API path construction ──────────────────────────────────────────────────
 
 #[test]

@@ -181,18 +181,31 @@ pub(in crate::gh_ops) fn build_gh_command(
 ) -> Result<(Command, String), String> {
     let gh_path = resolve_gh_path()?;
     let token = resolve_gh_token(server)?;
+    let cmd = build_gh_command_for_resolved_credential(&gh_path, token.as_deref());
 
-    let mut cmd = Command::new(&gh_path);
+    Ok((cmd, token.unwrap_or_default()))
+}
+
+/// Rebuild the hardened `gh` command from an already-resolved executable and
+/// credential. The approver-authority probe uses this after it pins one
+/// credential context for an entire verification round; keeping the command
+/// hardening here prevents that special case from growing a second, weaker
+/// environment builder.
+pub(in crate::gh_ops) fn build_gh_command_for_resolved_credential(
+    gh_path: &str,
+    token: Option<&str>,
+) -> Command {
+    let mut cmd = Command::new(gh_path);
     cmd.env_clear();
 
     preserve_gh_env(&mut cmd);
-    if let Some(token) = token.as_deref() {
+    if let Some(token) = token {
         cmd.env("GH_TOKEN", token);
     }
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.env("NO_COLOR", "1");
 
-    Ok((cmd, token.unwrap_or_default()))
+    cmd
 }
 
 /// Execute a gh command and return sanitized output, truncated to MAX_GH_OUTPUT_CHARS

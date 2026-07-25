@@ -72,6 +72,7 @@
 //! — itself `pub(crate)` — so #1077's caller must live inside this crate
 //! regardless of what visibility these functions declare.
 
+use std::cell::OnceCell;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -85,7 +86,7 @@ use tachi_params::{
     TeamMembershipV1, TeamRoleV1, VerifiedPrincipalV1,
 };
 
-use crate::gh_ops::{gh_api_command, gh_redact};
+use crate::gh_ops::{gh_api_command_for_context, gh_redact, resolve_gh_api_context, GhApiContext};
 use crate::MemoryServer;
 
 /// Wall-clock ceiling for a single GitHub probe. Without it there is no
@@ -193,108 +194,9 @@ fn validate_git_ref(git_ref: &str) -> Result<(), AuthorityDenialV1> {
 /// `Failed` so a team-membership probe can report a decided "not a member"
 /// while every other failure stays an availability refusal.
 enum GhApiOutcome {
-    Body { stdout: String, token: String },
+    Body { stdout: String },
     NotFound { stderr: String },
     Failed { detail: String },
-}
-
-/// Run `gh api <path>` with a hard deadline, returning redacted output.
-///
-/// Bounded-output assumption, stated because it is load-bearing: the four
-/// endpoints this module calls (`/user`, `/repos/{o}/{r}`, a team membership,
-/// and a single commit) each return a few kilobytes, comfortably inside the
-/// OS pipe buffer, so the child can exit without a concurrent reader. If a
-/// response ever did exceed the buffer the child would block, the deadline
-/// would fire, and the call would become an availability refusal — the
-/// failure direction is closed, not open.
-fn run_gh_api(server: &MemoryServer, path: &str) -> GhApiOutcome {
-    let (mut cmd, token) = match gh_api_command(server, &[path]) {
-        Ok(pair) => pair,
-        // `build_gh_command` failures name a binary or a secret *name*, never
-        // a secret value.
-        Err(err) => {
-            return GhApiOutcome::Failed {
-                detail: format!("could not build the `gh` command: {err}"),
-            }
-        }
-    };
-
-    if token.trim().is_empty() {
-        return GhApiOutcome::Failed {
-            detail: "no explicit GitHub credential is available (Vault `GH_TOKEN`, or \
-                     `GH_TOKEN`/`GITHUB_TOKEN` in the daemon environment). Approval authority \
-                     must be bound to a credential context this gate can identify, and a `gh` \
-                     keyring session cannot be pinned, so this is a refusal rather than an \
-                     unpinned approval"
-                .to_string(),
-        };
-    }
-
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            return GhApiOutcome::Failed {
-                detail: format!("could not spawn `gh`: {err}"),
-            }
-        }
-    };
-
-    let deadline = Instant::now() + GH_PROBE_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return GhApiOutcome::Failed {
-                        detail: format!(
-                            "`gh api {path}` did not finish within {}s and was killed",
-                            GH_PROBE_TIMEOUT.as_secs()
-                        ),
-                    };
-                }
-                std::thread::sleep(GH_PROBE_POLL_INTERVAL);
-            }
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return GhApiOutcome::Failed {
-                    detail: format!("could not wait on `gh`: {err}"),
-                };
-            }
-        }
-    }
-
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(err) => {
-            return GhApiOutcome::Failed {
-                detail: format!("could not read `gh` output: {err}"),
-            }
-        }
-    };
-
-    let stdout = gh_redact(&String::from_utf8_lossy(&output.stdout), &token);
-    let stderr = gh_redact(&String::from_utf8_lossy(&output.stderr), &token);
-
-    if output.status.success() {
-        return GhApiOutcome::Body { stdout, token };
-    }
-    if stderr.contains("HTTP 404") {
-        return GhApiOutcome::NotFound { stderr };
-    }
-    GhApiOutcome::Failed {
-        detail: format!(
-            "`gh api {path}` failed (exit {}): {}",
-            output.status.code().unwrap_or(-1),
-            stderr.chars().take(500).collect::<String>()
-        ),
-    }
 }
 
 /// Fetch and parse a JSON body, or refuse. Any non-success outcome — including
@@ -302,25 +204,25 @@ fn run_gh_api(server: &MemoryServer, path: &str) -> GhApiOutcome {
 /// [`GhApproverAuthorityProbe::team_membership`] treats 404 as a decided
 /// negative, and it calls [`run_gh_api`] directly for exactly that reason.
 fn gh_api_json(
-    server: &MemoryServer,
-    probe: &str,
+    probe: &GhApproverAuthorityProbe<'_>,
+    probe_name: &str,
     path: &str,
-) -> Result<(Value, String), AuthorityDenialV1> {
-    match run_gh_api(server, path) {
-        GhApiOutcome::Body { stdout, token } => {
+) -> Result<Value, AuthorityDenialV1> {
+    match probe.run_gh_api(path) {
+        GhApiOutcome::Body { stdout } => {
             let value: Value = serde_json::from_str(&stdout).map_err(|err| {
                 unavailable(
-                    probe,
+                    probe_name,
                     format!("`gh api {path}` returned unparseable JSON: {err}"),
                 )
             })?;
-            Ok((value, token))
+            Ok(value)
         }
         GhApiOutcome::NotFound { stderr } => Err(unavailable(
-            probe,
+            probe_name,
             format!("`gh api {path}` returned HTTP 404: {stderr}"),
         )),
-        GhApiOutcome::Failed { detail } => Err(unavailable(probe, detail)),
+        GhApiOutcome::Failed { detail } => Err(unavailable(probe_name, detail)),
     }
 }
 
@@ -363,7 +265,11 @@ fn now_rfc3339() -> String {
 /// Live GitHub implementation of [`ApproverAuthorityProbe`].
 pub struct GhApproverAuthorityProbe<'a> {
     server: &'a MemoryServer,
+    context_resolver: Box<GhApiContextResolver<'a>>,
+    pinned_context: OnceCell<Result<GhApiContext, String>>,
 }
+
+type GhApiContextResolver<'a> = dyn Fn(&MemoryServer) -> Result<GhApiContext, String> + 'a;
 
 impl<'a> GhApproverAuthorityProbe<'a> {
     /// `pub(crate)`, not `pub`: `MemoryServer` is itself `pub(crate)`
@@ -372,14 +278,130 @@ impl<'a> GhApproverAuthorityProbe<'a> {
     /// would be unreachable from outside the crate anyway and trips
     /// the rustc `private_interfaces` lint.
     pub(crate) fn new(server: &'a MemoryServer) -> Self {
-        Self { server }
+        Self {
+            server,
+            context_resolver: Box::new(resolve_gh_api_context),
+            pinned_context: OnceCell::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_context_resolver(
+        server: &'a MemoryServer,
+        context_resolver: impl Fn(&MemoryServer) -> Result<GhApiContext, String> + 'a,
+    ) -> Self {
+        Self {
+            server,
+            context_resolver: Box::new(context_resolver),
+            pinned_context: OnceCell::new(),
+        }
+    }
+
+    fn pinned_context(&self) -> Result<&GhApiContext, String> {
+        self.pinned_context
+            .get_or_init(|| (self.context_resolver)(self.server))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// Run `gh api <path>` with a hard deadline, returning redacted output.
+    ///
+    /// Bounded-output assumption, stated because it is load-bearing: the four
+    /// endpoints this module calls (`/user`, `/repos/{o}/{r}`, a team membership,
+    /// and a single commit) each return a few kilobytes, comfortably inside the
+    /// OS pipe buffer, so the child can exit without a concurrent reader. If a
+    /// response ever did exceed the buffer the child would block, the deadline
+    /// would fire, and the call would become an availability refusal — the
+    /// failure direction is closed, not open.
+    fn run_gh_api(&self, path: &str) -> GhApiOutcome {
+        let context = match self.pinned_context() {
+            Ok(context) => context,
+            Err(err) => {
+                return GhApiOutcome::Failed {
+                    detail: format!("could not pin the `gh` credential context: {err}"),
+                }
+            }
+        };
+        let token = context.token();
+        let mut cmd = gh_api_command_for_context(context, &[path]);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                return GhApiOutcome::Failed {
+                    detail: format!("could not spawn `gh`: {err}"),
+                }
+            }
+        };
+
+        let deadline = Instant::now() + GH_PROBE_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return GhApiOutcome::Failed {
+                            detail: format!(
+                                "`gh api {path}` did not finish within {}s and was killed",
+                                GH_PROBE_TIMEOUT.as_secs()
+                            ),
+                        };
+                    }
+                    std::thread::sleep(GH_PROBE_POLL_INTERVAL);
+                }
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return GhApiOutcome::Failed {
+                        detail: format!("could not wait on `gh`: {err}"),
+                    };
+                }
+            }
+        }
+
+        let output = match child.wait_with_output() {
+            Ok(output) => output,
+            Err(err) => {
+                return GhApiOutcome::Failed {
+                    detail: format!("could not read `gh` output: {err}"),
+                }
+            }
+        };
+
+        let stdout = gh_redact(&String::from_utf8_lossy(&output.stdout), token);
+        let stderr = gh_redact(&String::from_utf8_lossy(&output.stderr), token);
+
+        if output.status.success() {
+            return GhApiOutcome::Body { stdout };
+        }
+        if stderr.contains("HTTP 404") {
+            return GhApiOutcome::NotFound { stderr };
+        }
+        GhApiOutcome::Failed {
+            detail: format!(
+                "`gh api {path}` failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                stderr.chars().take(500).collect::<String>()
+            ),
+        }
     }
 }
 
 impl ApproverAuthorityProbe for GhApproverAuthorityProbe<'_> {
     fn authenticated_principal(&self) -> Result<VerifiedPrincipalV1, AuthorityDenialV1> {
         let probe = "authenticated_principal";
-        let (value, token) = gh_api_json(self.server, probe, "user")?;
+        let value = gh_api_json(self, probe, "user")?;
+        let credential = self.pinned_context().map_err(|err| {
+            unavailable(
+                probe,
+                format!("could not pin the `gh` credential context: {err}"),
+            )
+        })?;
         Ok(VerifiedPrincipalV1 {
             login: field_str(&value, probe, "user", "login")?,
             user_id: field_u64(&value, probe, "user", "id")?,
@@ -387,7 +409,7 @@ impl ApproverAuthorityProbe for GhApproverAuthorityProbe<'_> {
             account_type: field_str(&value, probe, "user", "type")?,
             credential_context: CredentialContextV1 {
                 source: CREDENTIAL_SOURCE.to_string(),
-                credential_fingerprint: tachi_params::credential_fingerprint(&token),
+                credential_fingerprint: tachi_params::credential_fingerprint(credential.token()),
             },
             verified_at: now_rfc3339(),
         })
@@ -397,7 +419,7 @@ impl ApproverAuthorityProbe for GhApproverAuthorityProbe<'_> {
         let probe = "repo_facts";
         let (owner, name) = split_repo(repo)?;
         let path = format!("repos/{owner}/{name}");
-        let (value, _token) = gh_api_json(self.server, probe, &path)?;
+        let value = gh_api_json(self, probe, &path)?;
 
         let owner_obj = value
             .get("owner")
@@ -440,14 +462,14 @@ impl ApproverAuthorityProbe for GhApproverAuthorityProbe<'_> {
         validate_path_segment("login", login)?;
         let path = format!("orgs/{org}/teams/{team_slug}/memberships/{login}");
 
-        match run_gh_api(self.server, &path) {
+        match self.run_gh_api(&path) {
             GhApiOutcome::NotFound { .. } => Ok(TeamMembershipProbeV1::NotMember {
                 org: org.to_string(),
                 team_slug: team_slug.to_string(),
                 login: login.to_string(),
             }),
             GhApiOutcome::Failed { detail } => Err(unavailable(probe, detail)),
-            GhApiOutcome::Body { stdout, .. } => {
+            GhApiOutcome::Body { stdout } => {
                 let value: Value = serde_json::from_str(&stdout).map_err(|err| {
                     unavailable(probe, format!("`{path}` returned unparseable JSON: {err}"))
                 })?;
@@ -472,7 +494,7 @@ impl ApproverAuthorityProbe for GhApproverAuthorityProbe<'_> {
         let (owner, name) = split_repo(repo)?;
         validate_git_ref(git_ref)?;
         let path = format!("repos/{owner}/{name}/commits/{git_ref}");
-        let (value, _token) = gh_api_json(self.server, probe, &path)?;
+        let value = gh_api_json(self, probe, &path)?;
         Ok(RepoRevisionV1 {
             repo: repo.to_string(),
             git_ref: git_ref.to_string(),
