@@ -765,9 +765,13 @@ mod resolve_or_register_workspace_root_tests {
             let server = make_server(root);
             let repo = root.join("Fresh-Read-Repo");
             std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(db_path.parent().expect("project db parent"))
+                .expect("create project db parent");
+            std::fs::File::create(&db_path).expect("reserve empty project db path");
             let name = server
                 .resolve_or_register_workspace_root(&repo.display().to_string())
-                .expect("auto-register fresh named project");
+                .expect("auto-register fresh named project from reserved empty db");
             drop(server);
 
             let reopened = make_server(root);

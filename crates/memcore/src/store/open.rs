@@ -16,6 +16,26 @@ fn path_validation_disabled() -> bool {
     )
 }
 
+/// Filesystem presence does not distinguish an operational database from an
+/// empty path reservation. Only an unstamped database with no application
+/// schema may enter ordinary initialization and install the canonical guards.
+fn has_existing_application_schema(conn: &Connection) -> Result<bool, MemoryError> {
+    if db::migrations::read_schema_version(conn)? != 0 {
+        return Ok(true);
+    }
+
+    let application_objects: i64 = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM main.sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(application_objects != 0)
+}
+
 impl MemoryStore {
     /// Open (or create) a memory database at the given path.
     ///
@@ -89,13 +109,11 @@ impl MemoryStore {
         // see `db::filename`'s doc comment for why it lives here and not
         // scattered across every call site that builds a `db_path`.
         db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
-        let database_existed = std::path::Path::new(db_path).exists();
         let mut conn = db::open_read_write(db_path)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
-        let may_install_required_triggers = !database_existed
-            || matches!(ctx.intent, db::OpenIntent::CreateFresh)
-            || ctx.migration_allowed();
+        let existing_application_schema = has_existing_application_schema(&conn)?;
+        let may_install_required_triggers = !existing_application_schema || ctx.migration_allowed();
         db::validate_persistent_trigger_inventory(&conn, !may_install_required_triggers)?;
         // Both labelled and unlabelled opens run schema init + data migrations
         // through init_schema_with_label_mut so the pre-migration backup and
@@ -376,6 +394,52 @@ mod exact_dedupe_open_tests {
                 .unwrap();
             assert_eq!(remaining, 0, "{label} open repaired before refusing");
         }
+    }
+
+    #[test]
+    fn partial_memories_schema_is_existing_and_refused_before_guard_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial-memories.db");
+        let offline = Connection::open(&path).unwrap();
+        offline
+            .execute_batch(
+                "CREATE TABLE memories(
+                    id TEXT PRIMARY KEY,
+                    metadata TEXT NOT NULL DEFAULT '{}'
+                 );",
+            )
+            .unwrap();
+        drop(offline);
+
+        let error = match MemoryStore::open(&path.to_string_lossy()) {
+            Ok(_) => panic!("partial memories schema was initialized and repaired"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("required trigger 'memories_reserved_refs_insert_guard' is missing"),
+            "unexpected partial-schema refusal: {error}"
+        );
+
+        let offline = Connection::open(&path).unwrap();
+        let schema: Vec<(String, String)> = offline
+            .prepare(
+                "SELECT type, name FROM main.sqlite_schema
+                 WHERE name NOT LIKE 'sqlite_%'
+                 ORDER BY type, name",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            schema,
+            vec![("table".to_string(), "memories".to_string())],
+            "refused open must not initialize or repair partial schema"
+        );
+        assert_eq!(db::migrations::read_schema_version(&offline).unwrap(), 0);
     }
 
     #[test]

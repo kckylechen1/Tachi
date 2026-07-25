@@ -113,6 +113,7 @@ impl MemoryStore {
     /// occasionally, or once before closing the database." Best-effort: a
     /// failure here should never fail whatever else the caller was doing.
     pub fn run_optimize(&self) -> Result<(), MemoryError> {
+        let _authorization = db::authorize_planner_maintenance(&self.reserved_reference_write)?;
         self.conn
             .execute_batch("PRAGMA optimize;")
             .map_err(MemoryError::from)

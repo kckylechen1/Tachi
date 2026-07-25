@@ -1687,6 +1687,10 @@ mod reserved_reference_tests {
         )
         .expect("open_raw ordinary DML remains available");
         assert!(
+            raw.execute_batch("ANALYZE").is_err(),
+            "open_raw gained planner-maintenance schema authority"
+        );
+        assert!(
             raw.execute_batch("DROP TRIGGER memories_reserved_refs_update_guard")
                 .is_err(),
             "open_raw dropped the canonical guard"
@@ -1912,6 +1916,23 @@ mod reserved_reference_tests {
             crate::db::authorize_schema_migration(&store.reserved_reference_write)
                 .expect("schema migration scope must release after an error");
         drop(migration_retry);
+
+        let planner_error = (|| -> Result<(), crate::error::MemoryError> {
+            let _authorization =
+                crate::db::authorize_planner_maintenance(&store.reserved_reference_write)?;
+            store
+                .connection()
+                .execute_batch("CREATE TABLE planner_scope_error(value INTEGER);")?;
+            Ok(())
+        })();
+        assert!(
+            planner_error.is_err(),
+            "planner maintenance scope must not permit arbitrary table DDL"
+        );
+        let planner_retry =
+            crate::db::authorize_planner_maintenance(&store.reserved_reference_write)
+                .expect("planner maintenance scope must release after an error");
+        drop(planner_retry);
 
         assert!(
             store

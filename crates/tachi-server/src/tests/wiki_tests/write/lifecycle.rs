@@ -66,7 +66,7 @@ async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_ordinary_unreviewe
 /// pending until a separate server-verified authority channel exists.
 #[tokio::test]
 async fn tachi_wiki_write_rejects_forged_review_authority() {
-    let server = make_server();
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let mut params = base_write_params(None);
     params.references = vec!["kckylechen1/tachi#1072".to_string()];
     params.metadata = Some(json!({

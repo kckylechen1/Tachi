@@ -29,6 +29,7 @@ static SQLITE_STARTUP_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) struct ConnectionAuthorizationState {
     typed_dml: AtomicBool,
     schema_migration: AtomicBool,
+    planner_maintenance: AtomicBool,
 }
 
 pub(crate) type ReservedReferenceWriteFlag = Arc<ConnectionAuthorizationState>;
@@ -36,6 +37,7 @@ pub(crate) type ReservedReferenceWriteFlag = Arc<ConnectionAuthorizationState>;
 enum AuthorizationKind {
     TypedDml,
     SchemaMigration,
+    PlannerMaintenance,
 }
 
 pub(crate) struct ReservedReferenceWriteAuthorization {
@@ -50,6 +52,9 @@ impl Drop for ReservedReferenceWriteAuthorization {
             AuthorizationKind::SchemaMigration => {
                 self.flag.schema_migration.store(false, Ordering::SeqCst)
             }
+            AuthorizationKind::PlannerMaintenance => {
+                self.flag.planner_maintenance.store(false, Ordering::SeqCst)
+            }
         }
     }
 }
@@ -60,6 +65,7 @@ pub(crate) fn register_reserved_reference_write_guard(
     let flag = Arc::new(ConnectionAuthorizationState {
         typed_dml: AtomicBool::new(false),
         schema_migration: AtomicBool::new(false),
+        planner_maintenance: AtomicBool::new(false),
     });
     let function_flag = Arc::clone(&flag);
     conn.create_scalar_function(
@@ -155,8 +161,8 @@ unsafe extern "C" fn reserved_reference_authorizer(
     database: *const c_char,
     accessor: *const c_char,
 ) -> c_int {
-    let (typed_dml, schema_migration) = if state.is_null() {
-        (false, false)
+    let (typed_dml, schema_migration, planner_maintenance) = if state.is_null() {
+        (false, false, false)
     } else {
         // MemoryStore owns this state for longer than its Connection. Raw
         // fixture handles pass null and therefore remain permanently denied.
@@ -164,6 +170,7 @@ unsafe extern "C" fn reserved_reference_authorizer(
         (
             state.typed_dml.load(Ordering::SeqCst),
             state.schema_migration.load(Ordering::SeqCst),
+            state.planner_maintenance.load(Ordering::SeqCst),
         )
     };
 
@@ -191,6 +198,15 @@ unsafe extern "C" fn reserved_reference_authorizer(
     }
 
     if schema_migration {
+        return rusqlite::ffi::SQLITE_OK;
+    }
+
+    let planner_maintenance_action = action == rusqlite::ffi::SQLITE_ANALYZE
+        || (action == rusqlite::ffi::SQLITE_CREATE_TABLE
+            && (sqlite_identifier_eq(arg1, b"sqlite_stat1")
+                || sqlite_identifier_eq(arg1, b"sqlite_stat4"))
+            && sqlite_identifier_eq(database, b"main"));
+    if planner_maintenance && planner_maintenance_action {
         return rusqlite::ffi::SQLITE_OK;
     }
 
@@ -351,6 +367,22 @@ pub(crate) fn authorize_schema_migration(
     Ok(ReservedReferenceWriteAuthorization {
         flag: Arc::clone(flag),
         kind: AuthorizationKind::SchemaMigration,
+    })
+}
+
+pub(crate) fn authorize_planner_maintenance(
+    flag: &ReservedReferenceWriteFlag,
+) -> Result<ReservedReferenceWriteAuthorization, MemoryError> {
+    flag.planner_maintenance
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| {
+            MemoryError::InvalidArg(
+                "planner maintenance authorization is already active".to_string(),
+            )
+        })?;
+    Ok(ReservedReferenceWriteAuthorization {
+        flag: Arc::clone(flag),
+        kind: AuthorizationKind::PlannerMaintenance,
     })
 }
 
