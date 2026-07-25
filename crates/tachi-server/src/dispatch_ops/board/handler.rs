@@ -226,6 +226,9 @@ pub(crate) async fn handle_tachi_board(
             RunTaskScan::failed(format!("board run fallback worker failed: {error}"))
         })
     };
+    if let Some(error) = run_scan.error.take() {
+        return Err(error);
+    }
     let run_count = if flow_filter.is_some() {
         flow_run_count
     } else {

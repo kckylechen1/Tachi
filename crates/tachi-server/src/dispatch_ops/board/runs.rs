@@ -236,13 +236,10 @@ pub(super) fn collect_run_tasks_from_dir(
                 continue;
             }
             Err(error) => {
-                invalid_entries += 1;
-                tracing::warn!(
-                    run_dir = %run_dir.display(),
-                    error = %error,
-                    "board skipped invalid run status"
-                );
-                continue;
+                return RunTaskScan::failed(format!(
+                    "board refused run status {}: {error}",
+                    status_path.display()
+                ));
             }
         };
         let status: Value = match serde_json::from_str(&status_read.text) {
@@ -281,13 +278,10 @@ pub(super) fn collect_run_tasks_from_dir(
         ) {
             Ok(result) => result.is_some(),
             Err(error) => {
-                invalid_entries += 1;
-                tracing::warn!(
-                    run_dir = %run_dir.display(),
-                    error = %error,
-                    "board skipped run with invalid filesystem state"
-                );
-                continue;
+                return RunTaskScan::failed(format!(
+                    "board refused result marker {}: {error}",
+                    run_dir.join("result.md").display()
+                ));
             }
         };
         let fields = run_state_fields(&status, result_written, status_read.modified, now);

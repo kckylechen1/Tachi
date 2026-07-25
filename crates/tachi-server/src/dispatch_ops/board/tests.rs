@@ -320,10 +320,8 @@ async fn board_flow_lookup_surfaces_symlinked_status_as_an_error() {
     let flow_id = "flow_20260725T000000Z_board_symlink";
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("flow run dir");
     std::fs::create_dir_all(&run_dir).expect("create flow run dir");
-    let outside = run_dir
-        .parent()
-        .expect("run root")
-        .join("outside-flow-status.json");
+    let outside_dir = tempfile::tempdir().expect("outside flow fixture");
+    let outside = outside_dir.path().join("outside-flow-status.json");
     std::fs::write(&outside, json!({"dispatch_ids": []}).to_string())
         .expect("write outside flow status");
     std::os::unix::fs::symlink(&outside, run_dir.join("status.json")).expect("symlink flow status");
@@ -341,7 +339,7 @@ async fn board_flow_lookup_surfaces_symlinked_status_as_an_error() {
     .await
     .expect_err("symlinked flow status must fail loudly");
     assert!(
-        error.contains("refuse non-regular JSON file"),
+        error.contains("resolves outside containment root"),
         "unexpected flow status error: {error}"
     );
 }
