@@ -251,16 +251,21 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // Poll for kanban state instead of a fixed sleep to avoid race conditions
         let (watchdog_polls, watchdog_interval) = watchdog_poll_config();
         let mut receipt_terminal_state = None;
+        let mut pending_completion_recovery = false;
         let mut receipt_read_error = None;
         let mut kanban_state = None;
         for _ in 0..watchdog_polls {
             tokio::time::sleep(watchdog_interval).await;
-            match resolved_completion_terminal_state(&workspace_dir_for_spawn) {
-                Ok(Some(receipt_state)) => {
+            match completion_receipt_state(&workspace_dir_for_spawn) {
+                Ok(CompletionReceiptState::Terminal(receipt_state)) => {
                     receipt_terminal_state = Some(receipt_state);
                     break;
                 }
-                Ok(None) => {}
+                Ok(CompletionReceiptState::PendingRecovery) => {
+                    pending_completion_recovery = true;
+                    break;
+                }
+                Ok(CompletionReceiptState::Open) => {}
                 Err(error) => {
                     receipt_read_error = Some(error);
                     break;
@@ -276,14 +281,22 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Some(s) => Some(s),
             None => get_kanban_state(&server_clone, &d_id).await,
         };
-        if receipt_terminal_state.is_none() && receipt_read_error.is_none() {
-            match resolved_completion_terminal_state(&workspace_dir_for_spawn) {
-                Ok(receipt_state) => receipt_terminal_state = receipt_state,
+        if receipt_terminal_state.is_none()
+            && !pending_completion_recovery
+            && receipt_read_error.is_none()
+        {
+            match completion_receipt_state(&workspace_dir_for_spawn) {
+                Ok(CompletionReceiptState::Terminal(receipt_state)) => {
+                    receipt_terminal_state = Some(receipt_state)
+                }
+                Ok(CompletionReceiptState::PendingRecovery) => pending_completion_recovery = true,
+                Ok(CompletionReceiptState::Open) => {}
                 Err(error) => receipt_read_error = Some(error),
             }
         }
         let polled_terminal_state = canonical_terminal_state(kanban_state.as_deref());
-        let is_closed = receipt_terminal_state.is_some() || polled_terminal_state.is_some();
+        let is_closed = !pending_completion_recovery
+            && (receipt_terminal_state.is_some() || polled_terminal_state.is_some());
         // #1250: terminal accounting in the final `status.json` rewrite must
         // reflect the resolved predicate verdict, NOT the raw process exit
         // code. The watchdog branch below is the only path that actually
@@ -301,7 +314,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             );
             "TASK_STATE_FAILED"
         });
-        if !is_closed && watchdog_resolved_state.is_none() {
+        if pending_completion_recovery {
+            eprintln!(
+                "[watchdog] dispatch {} has a pending canonical-outcome recovery receipt; \
+                 skipping terminalization until tachi_complete reconciles it",
+                d_id
+            );
+        }
+        if !is_closed && !pending_completion_recovery && watchdog_resolved_state.is_none() {
             let exited_ok = matches!(&result, Ok(r) if r.exit_code == Some(0));
 
             if exited_ok {
@@ -468,8 +488,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         }
 
         let should_cleanup = match &result {
-            Ok(r) => should_cleanup_run(r.exit_code, kanban_state.as_deref()),
+            Ok(r) if !pending_completion_recovery => {
+                should_cleanup_run(r.exit_code, kanban_state.as_deref())
+            }
             Err(_) => false,
+            Ok(_) => false,
         };
 
         // Final audit: dispatch_finished + status.json refresh.
@@ -541,7 +564,9 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 d_id, error
             );
         }
-        let final_status_state = if artifact_read_error.is_some() {
+        let final_status_state = if pending_completion_recovery {
+            pending_recovery_status_state(prev_status.as_ref())
+        } else if artifact_read_error.is_some() {
             "TASK_STATE_FAILED"
         } else {
             terminal_status_state(
@@ -781,16 +806,24 @@ fn terminal_status_state(
 /// receipt is valid only with its explicit closure marker, so the generic
 /// INPUT_REQUIRED vocabulary used by plan review cannot be misclassified as a
 /// terminal partial close.
-fn resolved_completion_terminal_state(
-    run_dir: &std::path::Path,
-) -> Result<Option<&'static str>, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionReceiptState {
+    Terminal(&'static str),
+    PendingRecovery,
+    Open,
+}
+
+/// Read a handler-written completion receipt from the dispatch run. A pending
+/// canonical-outcome recovery takes precedence over any stale terminal data:
+/// it is an explicit barrier until tachi_complete reconciles the outcome row.
+fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionReceiptState, String> {
     let Some(raw_status) = crate::dispatch_ops::read_text_file_within(
         run_dir,
         &run_dir.join("status.json"),
         WATCHDOG_STATUS_MAX_BYTES,
     )?
     else {
-        return Ok(None);
+        return Ok(CompletionReceiptState::Open);
     };
     let status: Value = serde_json::from_str(&raw_status).map_err(|error| {
         format!(
@@ -798,11 +831,14 @@ fn resolved_completion_terminal_state(
             run_dir.join("status.json").display()
         )
     })?;
+    if status.get("completion_recovery").is_some() {
+        return Ok(CompletionReceiptState::PendingRecovery);
+    }
     let Some(receipt) = status.get("resolved_completion").and_then(Value::as_object) else {
-        return Ok(None);
+        return Ok(CompletionReceiptState::Open);
     };
     let Some(state) = receipt.get("state").and_then(Value::as_str) else {
-        return Ok(None);
+        return Ok(CompletionReceiptState::Open);
     };
     if receipt
         .get("eval_ledger_id")
@@ -815,20 +851,45 @@ fn resolved_completion_terminal_state(
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
             .is_none()
     {
-        return Ok(None);
+        return Ok(CompletionReceiptState::Open);
     }
     Ok(match state {
         "TASK_STATE_INPUT_REQUIRED"
             if receipt.get("closure_kind").and_then(Value::as_str) == Some("partial") =>
         {
-            Some("TASK_STATE_INPUT_REQUIRED")
+            CompletionReceiptState::Terminal("TASK_STATE_INPUT_REQUIRED")
         }
-        "TASK_STATE_INPUT_REQUIRED" => None,
+        "TASK_STATE_INPUT_REQUIRED" => CompletionReceiptState::Open,
         terminal if receipt.get("closure_kind").is_some_and(Value::is_null) => {
             canonical_terminal_state(Some(terminal))
+                .map(CompletionReceiptState::Terminal)
+                .unwrap_or(CompletionReceiptState::Open)
         }
-        _ => None,
+        _ => CompletionReceiptState::Open,
     })
+}
+
+fn resolved_completion_terminal_state(
+    run_dir: &std::path::Path,
+) -> Result<Option<&'static str>, String> {
+    Ok(match completion_receipt_state(run_dir)? {
+        CompletionReceiptState::Terminal(state) => Some(state),
+        CompletionReceiptState::PendingRecovery | CompletionReceiptState::Open => None,
+    })
+}
+
+fn pending_recovery_status_state(previous_status: Option<&Value>) -> &'static str {
+    previous_status
+        .and_then(|status| status.get("state"))
+        .and_then(Value::as_str)
+        .and_then(|state| match state {
+            "TASK_STATE_PENDING" => Some("TASK_STATE_PENDING"),
+            "TASK_STATE_WORKING" => Some("TASK_STATE_WORKING"),
+            "TASK_STATE_RUNNING" => Some("TASK_STATE_RUNNING"),
+            "TASK_STATE_INPUT_REQUIRED" => Some("TASK_STATE_INPUT_REQUIRED"),
+            _ => None,
+        })
+        .unwrap_or("TASK_STATE_WORKING")
 }
 
 /// The status ledger keeps INPUT_REQUIRED for both partial outcomes and plan

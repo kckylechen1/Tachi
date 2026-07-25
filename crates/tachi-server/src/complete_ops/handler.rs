@@ -575,6 +575,7 @@ pub(crate) async fn handle_tachi_complete(
         "eval_memory_id": eval_memory_id.clone(),
         "eval_path": path.clone(),
         "dispatch_id": params.dispatch_id.clone(),
+        "dispatch_outcome_id": dispatch_outcome_status.get("outcome_id").cloned().unwrap_or(Value::Null),
         "flow_id": params.flow_id.clone(),
         "issue_ref": params.issue_ref.clone(),
         "pr_ref": params.pr_ref.clone(),

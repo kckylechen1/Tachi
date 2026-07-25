@@ -422,12 +422,28 @@ pub(crate) fn emit_task_completion_events(
         .and_then(Value::as_str)
         .unwrap_or("agent")
         .to_string();
+    // `dispatch_outcome_id` is the canonical replay identity once a dispatch
+    // outcome exists. Manual completions keep their caller-supplied task id.
+    // Event types and subagent identity remain in the hash so distinct,
+    // legitimate completion facts do not collapse together.
+    let completion_identity = task_payload
+        .get("dispatch_outcome_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            task_payload
+                .get("dispatch_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| task_id.clone());
     let task_event = TachiEventRecord {
         id: stable_event_payload_id(&[
             "task.outcome",
+            completion_identity.as_str(),
             task_id.as_str(),
             agent.as_str(),
-            &uuid::Uuid::new_v4().to_string(),
         ]),
         source_repo: "tachi".to_string(),
         adapter: "tachi_complete".to_string(),
@@ -474,11 +490,11 @@ pub(crate) fn emit_task_completion_events(
         let event = TachiEventRecord {
             id: stable_event_payload_id(&[
                 "subagent.evaluated",
+                completion_identity.as_str(),
                 task_id.as_str(),
                 role,
                 subagent_name,
                 &index.to_string(),
-                &uuid::Uuid::new_v4().to_string(),
             ]),
             source_repo: "tachi".to_string(),
             adapter: "tachi_complete".to_string(),
