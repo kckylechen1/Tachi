@@ -1262,7 +1262,7 @@ pub fn supersede_memory(
         "UPDATE memories
          SET superseded_by = ?1, updated_at = ?2, revision = revision + 1,
              valid_until = COALESCE(valid_until, ?2)
-         WHERE id = ?3 AND (superseded_by IS NULL OR superseded_by != ?1)",
+         WHERE id = ?3 AND superseded_by IS NULL",
         params![superseded_by, now, id],
     )?;
     Ok(conn.changes() > 0)

@@ -2308,6 +2308,244 @@ async fn merge_into_for_project_cannot_reach_other_lifecycle_actions() {
     );
 }
 
+/// An automated merge must never replace an established supersession edge.
+/// In particular, a stale A -> B request after A -> C must refuse before it
+/// archives A or folds any of A into B.
+#[tokio::test]
+async fn merge_into_for_project_refuses_conflicting_immutable_supersession_without_side_effects() {
+    let server = make_server();
+    let mut source = make_entry("wrapper-conflict-source");
+    source.text = "source evidence that already belongs to canonical C".to_string();
+    source.summary = "source evidence".to_string();
+    source.keywords = vec!["source-only".to_string()];
+    let mut requested_target = make_entry("wrapper-conflict-target-b");
+    requested_target.text = "requested target B must not receive stale source data".to_string();
+    requested_target.summary = "requested target B".to_string();
+    requested_target.keywords = vec!["target-b-only".to_string()];
+    let mut canonical_target = make_entry("wrapper-conflict-target-c");
+    canonical_target.text = "canonical target C already owns the source edge".to_string();
+    canonical_target.summary = "canonical target C".to_string();
+
+    server
+        .with_global_store(|store| {
+            store.upsert(&source).map_err(|e| e.to_string())?;
+            store.upsert(&requested_target).map_err(|e| e.to_string())?;
+            store.upsert(&canonical_target).map_err(|e| e.to_string())?;
+            assert!(
+                store
+                    .supersede_memory("wrapper-conflict-source", "wrapper-conflict-target-c")
+                    .map_err(|e| e.to_string())?,
+                "the first A -> C edge must install"
+            );
+            Ok(())
+        })
+        .expect("seed established A -> C edge");
+
+    let target_b_before = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT summary, text, keywords, entities, importance, timestamp, archived,
+                            superseded_by, revision, metadata, updated_at
+                     FROM memories WHERE id = ?1",
+                    ["wrapper-conflict-target-b"],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, f64>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, bool>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, i64>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, String>(10)?,
+                        ))
+                    },
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("capture target B before stale merge");
+
+    let err = crate::facade_memory_ops::consolidate_ops::merge_into_for_project(
+        &server,
+        None,
+        "wrapper-conflict-source",
+        "wrapper-conflict-target-b",
+    )
+    .expect_err("A -> B must loudly refuse after immutable A -> C");
+    assert!(
+        err.contains("immutable supersession") || err.contains("supersession edge"),
+        "refusal must name the immutable edge conflict: {err}"
+    );
+
+    server
+        .with_global_store_read(|store| {
+            let source_after = store
+                .get_with_options("wrapper-conflict-source", true)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "source must remain present".to_string())?;
+            let target_b_after = store
+                .connection()
+                .query_row(
+                    "SELECT summary, text, keywords, entities, importance, timestamp, archived,
+                            superseded_by, revision, metadata, updated_at
+                     FROM memories WHERE id = ?1",
+                    ["wrapper-conflict-target-b"],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, f64>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, bool>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, i64>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, String>(10)?,
+                        ))
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            assert!(
+                !source_after.archived,
+                "conflicting A -> B request must not archive A"
+            );
+            assert_eq!(
+                store
+                    .supersession_target("wrapper-conflict-source")
+                    .map_err(|e| e.to_string())?,
+                Some(Some("wrapper-conflict-target-c".to_string())),
+                "conflicting request must preserve the established A -> C edge"
+            );
+            assert_eq!(
+                target_b_after, target_b_before,
+                "conflicting request must leave requested target B byte/semantically unchanged"
+            );
+            Ok(())
+        })
+        .expect("verify immutable-edge conflict leaves no side effects");
+}
+
+/// The claim itself is not enough: if a later source archive fails, the
+/// transaction must unwind the newly claimed edge as well as any survivor
+/// mutation.  The trigger is a real SQLite downstream-write failure seam.
+#[tokio::test]
+async fn merge_into_for_project_rolls_back_claim_when_archive_fails() {
+    let server = make_server();
+    let mut source = make_entry("wrapper-rollback-source");
+    source.text = "source must remain active when archive fails".to_string();
+    source.summary = "rollback source".to_string();
+    let mut target = make_entry("wrapper-rollback-target");
+    target.text = "target must remain unchanged when source archive fails".to_string();
+    target.summary = "rollback target".to_string();
+
+    server
+        .with_global_store(|store| {
+            store.insert_if_absent(&source).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&target).map_err(|e| e.to_string())?;
+            store
+                .connection()
+                .execute_batch(
+                    r#"
+                    CREATE TRIGGER inject_lifecycle_archive_failure
+                    BEFORE UPDATE OF archived ON memories
+                    WHEN OLD.id = 'wrapper-rollback-source'
+                    BEGIN
+                        SELECT RAISE(ABORT, 'injected lifecycle archive failure');
+                    END;
+                    "#,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed merge rollback fixture and archive-failure trigger");
+
+    let target_before = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT summary, text, keywords, entities, importance, archived, superseded_by, revision
+                     FROM memories WHERE id = ?1",
+                    ["wrapper-rollback-target"],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, f64>(4)?,
+                            row.get::<_, bool>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, i64>(7)?,
+                        ))
+                    },
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("capture target before injected failure");
+
+    let err = crate::facade_memory_ops::consolidate_ops::merge_into_for_project(
+        &server,
+        None,
+        "wrapper-rollback-source",
+        "wrapper-rollback-target",
+    )
+    .expect_err("injected archive failure must abort the merge transaction");
+    assert!(
+        err.contains("injected lifecycle archive failure"),
+        "downstream archive failure must surface: {err}"
+    );
+
+    server
+        .with_global_store_read(|store| {
+            let source_after = store
+                .get_with_options("wrapper-rollback-source", true)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "source must remain present".to_string())?;
+            let target_after = store
+                .connection()
+                .query_row(
+                    "SELECT summary, text, keywords, entities, importance, archived, superseded_by, revision
+                     FROM memories WHERE id = ?1",
+                    ["wrapper-rollback-target"],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, f64>(4)?,
+                            row.get::<_, bool>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, i64>(7)?,
+                        ))
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            assert!(!source_after.archived, "archive failure must leave A active");
+            assert_eq!(
+                store
+                    .supersession_target("wrapper-rollback-source")
+                    .map_err(|e| e.to_string())?,
+                Some(None),
+                "archive failure must roll back the just-claimed A -> B edge"
+            );
+            assert_eq!(
+                target_after, target_before,
+                "archive failure must leave B byte/semantically unchanged"
+            );
+            Ok(())
+        })
+        .expect("verify archive failure rolled the replacement transaction back");
+}
+
 #[tokio::test]
 async fn consolidate_propose_near_dup_merge_for_cross_path_raw_twins() {
     let server = make_server();

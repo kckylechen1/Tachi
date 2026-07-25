@@ -34,6 +34,7 @@ pub mod gc_candidates;
 pub mod graph;
 #[cfg(feature = "admin")]
 pub mod hub;
+pub mod immutable_supersession;
 pub mod lessons;
 pub mod linking;
 pub mod llm_usage;

@@ -442,18 +442,18 @@ fn apply_lifecycle_action(
             })?;
             with_memory_store(server, params, |store| {
                 refuse_if_protected(store, source_id, "supersede")?;
-                let changed = store
-                    .supersede_memory(source_id, target)
-                    .map_err(|e| format!("supersede_memory: {e}"))?;
-                let archived = store
-                    .archive_memory(source_id)
-                    .map_err(|e| format!("archive after supersede: {e}"))?;
+                store
+                    .with_immutable_supersession_transaction(|replacement| {
+                        replacement.claim_immutable_supersession(source_id, target)?;
+                        replacement.archive_claimed_source(source_id)
+                    })
+                    .map_err(|e| format!("supersede refused: {e}"))?;
                 Ok(json!({
                     "lifecycle_action": "supersede",
                     "source_id": source_id,
                     "target_id": target,
-                    "superseded": changed,
-                    "archived": archived,
+                    "superseded": true,
+                    "archived": true,
                 }))
             })
         }
@@ -491,31 +491,30 @@ fn apply_lifecycle_action(
                 if survivor.importance < source.importance {
                     survivor.importance = source.importance;
                 }
-                // An unchanged survivor must not be rewritten: upsert bumps
-                // revision, which would invalidate approved sibling star
-                // proposals that target the same snapshot.
-                if survivor.keywords != target_keywords
+                let survivor_changed = survivor.keywords != target_keywords
                     || survivor.entities != target_entities
-                    || survivor.importance != target_importance
-                {
-                    store
-                        .upsert(&survivor)
-                        .map_err(|e| format!("upsert merged survivor: {e}"))?;
-                }
-                let changed = store
-                    .supersede_memory(source_id, target)
-                    .map_err(|e| format!("supersede_memory after merge: {e}"))?;
-                let archived = store
-                    .archive_memory(source_id)
-                    .map_err(|e| format!("archive after merge: {e}"))?;
+                    || survivor.importance != target_importance;
+                // Claim, survivor fold, and source archive share one physical
+                // transaction. A stale A -> B request after A -> C therefore
+                // cannot mutate B, and any later write failure rolls A's claim
+                // back instead of leaving a partial lifecycle result.
+                store
+                    .with_immutable_supersession_transaction(|replacement| {
+                        replacement.claim_immutable_supersession(source_id, target)?;
+                        if survivor_changed {
+                            replacement.upsert(&survivor)?;
+                        }
+                        replacement.archive_claimed_source(source_id)
+                    })
+                    .map_err(|e| format!("{action} refused: {e}"))?;
                 Ok(json!({
                     "lifecycle_action": action,
                     "source_id": source_id,
                     "target_id": target,
                     "merged_keywords": survivor.keywords.len(),
                     "merged_entities": survivor.entities.len(),
-                    "superseded": changed,
-                    "archived": archived,
+                    "superseded": true,
+                    "archived": true,
                 }))
             })
         }
