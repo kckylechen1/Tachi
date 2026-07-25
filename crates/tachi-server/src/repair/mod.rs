@@ -137,6 +137,16 @@ pub struct DbContext {
 impl DbContext {
     pub fn open(entry: &DbEntry) -> Result<Self, RepairError> {
         let path = PathBuf::from(&entry.path);
+        // Manifest project entries name canonical data files. Reject a symlink
+        // leaf at this lowest repair open boundary so R11 and future rules
+        // cannot follow it; global DB path semantics remain unchanged.
+        if entry.role == crate::manifest::DbRole::Project {
+            crate::path_utils::canonical_db_leaf_exists_without_symlink(&path).map_err(
+                |error| {
+                    RepairError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+                },
+            )?;
+        }
         let conn = Connection::open(&path)?;
         // Match the rest of the codebase: prefer WAL & shorter busy timeout
         // for repair sessions running alongside a possibly-live daemon.

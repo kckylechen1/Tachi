@@ -127,6 +127,17 @@ fn expand_cli_path(raw: &Path, home: &Path) -> PathBuf {
     expand_user_path(raw.to_string_lossy().as_ref(), home)
 }
 
+fn distill_db_override(command: &Commands, home: &Path) -> Option<PathBuf> {
+    use tachi_bootstrap::cli::DistillAction;
+
+    match command {
+        Commands::Distill {
+            action: DistillAction::Run { db: Some(db), .. },
+        } => Some(expand_cli_path(db, home)),
+        _ => None,
+    }
+}
+
 /// `<main>-wal` / `<main>-shm` sidecar path for a SQLite main file.
 fn sidecar_path(main: &Path, suffix: &str) -> PathBuf {
     let mut s = main.as_os_str().to_owned();
@@ -554,6 +565,14 @@ async fn run_startup_hygiene(
         None
     };
 
+    let distill_db_override = distill_db_override(&ctx.command, &ctx.home);
+    // A distill override is the canonical project data file for this command,
+    // not a managed Plan C alias. Classify its leaf before startup can create
+    // the auto project's alias or copy legacy data.
+    if let Some(db_path) = distill_db_override.as_deref() {
+        crate::path_utils::canonical_db_leaf_exists_without_symlink(db_path)?;
+    }
+
     // The repo-local project DB is the canonical data file, never the Plan C
     // alias. Reject a symlink leaf before alias inspection/creation or a
     // legacy copy can follow it into an external target.
@@ -619,16 +638,18 @@ async fn run_startup_hygiene(
 
     if let Commands::Distill { action } = &ctx.command {
         use tachi_bootstrap::cli::DistillAction;
-        let DistillAction::Run { db, no_consolidate } = action;
-        let target_project = db
+        let DistillAction::Run {
+            db: _,
+            no_consolidate,
+        } = action;
+        let target_project = distill_db_override
             .clone()
-            .map(|p| expand_user_path(p.to_string_lossy().as_ref(), &ctx.home))
             .or(project_db_path.clone())
             .ok_or_else(|| {
                 "distill run requires a project DB: pass --project-db PATH or `distill run --db PATH`"
                     .to_string()
             })?;
-        if !target_project.exists() {
+        if !crate::path_utils::canonical_db_leaf_exists_without_symlink(&target_project)? {
             return Err(format!("project DB not found: {}", target_project.display()).into());
         }
         let server = MemoryServer::new(global_db_path.to_path_buf(), Some(target_project.clone()))?;
@@ -1055,6 +1076,30 @@ mod tests {
         }
     }
 
+    fn startup_distill_cli_and_context(
+        root: &Path,
+        app_home: &Path,
+        db: PathBuf,
+    ) -> (Cli, StartupContext) {
+        use tachi_bootstrap::cli::DistillAction;
+
+        let mut cli = startup_test_cli();
+        cli.command = Some(Commands::Distill {
+            action: DistillAction::Run {
+                db: Some(db.clone()),
+                no_consolidate: false,
+            },
+        });
+        let mut ctx = startup_test_context(root, app_home);
+        ctx.command = Commands::Distill {
+            action: DistillAction::Run {
+                db: Some(db),
+                no_consolidate: false,
+            },
+        };
+        (cli, ctx)
+    }
+
     #[cfg(unix)]
     fn startup_file_identity(path: &Path) -> (u64, u64) {
         use std::os::unix::fs::MetadataExt;
@@ -1092,6 +1137,194 @@ mod tests {
             std::fs::symlink_metadata(alias).is_err(),
             "canonical refusal must precede Plan C alias creation"
         );
+    }
+
+    #[cfg(unix)]
+    fn assert_distill_override_refusal_side_effects(
+        root: &Path,
+        app_home: &Path,
+        global_db: &Path,
+        manifest_before: &[u8],
+    ) {
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        assert!(
+            std::fs::symlink_metadata(&canonical_db).is_err(),
+            "override refusal must not create the auto project DB"
+        );
+        let project = crate::path_utils::plan_c_dir_name_from_root(root).expect("project name");
+        let alias = crate::path_utils::plan_c_global_db_path(&project);
+        assert!(
+            std::fs::symlink_metadata(alias).is_err(),
+            "override refusal must precede Plan C alias creation"
+        );
+        assert!(
+            std::fs::symlink_metadata(global_db).is_err(),
+            "override refusal must precede global DB open"
+        );
+        assert_eq!(
+            std::fs::read(app_home.join("manifest.json")).expect("manifest preserved"),
+            manifest_before
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn distill_db_override_dangling_symlink_refuses_before_side_effects() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("distill-db-override-");
+        let root = fixture.path().join("Dangling-Override-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"distill-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let external_target = fixture.path().join("external/dangling.db");
+        let override_db = fixture.path().join("override.db");
+        std::os::unix::fs::symlink(&external_target, &override_db).expect("dangling override");
+        let override_identity = startup_file_identity(&override_db);
+        let (cli, ctx) = startup_distill_cli_and_context(&root, &app_home, override_db.clone());
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("dangling distill DB override must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert_eq!(startup_file_identity(&override_db), override_identity);
+        assert_eq!(std::fs::read_link(&override_db).unwrap(), external_target);
+        assert!(std::fs::symlink_metadata(&external_target).is_err());
+        assert_distill_override_refusal_side_effects(&root, &app_home, &global_db, manifest_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn distill_db_override_wrong_symlink_refuses_without_external_mutation() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("distill-db-override-");
+        let root = fixture.path().join("Wrong-Override-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"distill-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let external_target = fixture.path().join("external/foreign.db");
+        std::fs::create_dir_all(external_target.parent().unwrap()).expect("external parent");
+        let store = memcore::MemoryStore::open(external_target.to_str().expect("UTF-8 DB"))
+            .expect("seed foreign DB");
+        drop(store);
+        let external_identity = startup_file_identity(&external_target);
+        let external_before = std::fs::read(&external_target).expect("foreign DB bytes");
+        let override_db = fixture.path().join("override.db");
+        std::os::unix::fs::symlink(&external_target, &override_db).expect("wrong override");
+        let override_identity = startup_file_identity(&override_db);
+        let (cli, ctx) = startup_distill_cli_and_context(&root, &app_home, override_db.clone());
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("wrong-target distill DB override must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert_eq!(startup_file_identity(&override_db), override_identity);
+        assert_eq!(std::fs::read_link(&override_db).unwrap(), external_target);
+        assert_eq!(startup_file_identity(&external_target), external_identity);
+        assert_eq!(std::fs::read(&external_target).unwrap(), external_before);
+        assert_distill_override_refusal_side_effects(&root, &app_home, &global_db, manifest_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn distill_db_override_symlink_loop_refuses_before_side_effects() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("distill-db-override-");
+        let root = fixture.path().join("Loop-Override-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"distill-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let override_db = fixture.path().join("override.db");
+        std::os::unix::fs::symlink(&override_db, &override_db).expect("looped override");
+        let override_identity = startup_file_identity(&override_db);
+        let (cli, ctx) = startup_distill_cli_and_context(&root, &app_home, override_db.clone());
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("looped distill DB override must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert_eq!(startup_file_identity(&override_db), override_identity);
+        assert_eq!(std::fs::read_link(&override_db).unwrap(), override_db);
+        assert_distill_override_refusal_side_effects(&root, &app_home, &global_db, manifest_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn distill_db_override_regular_file_opens_normally() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("distill-db-override-");
+        let root = fixture.path().join("Regular-Override-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let override_db = fixture.path().join("override.db");
+        let store = memcore::MemoryStore::open(override_db.to_str().expect("UTF-8 DB"))
+            .expect("seed regular override DB");
+        drop(store);
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("global parent");
+        let global = memcore::MemoryStore::open(global_db.to_str().expect("UTF-8 global DB"))
+            .expect("seed global DB");
+        drop(global);
+        let (cli, ctx) = startup_distill_cli_and_context(&root, &app_home, override_db.clone());
+
+        let result = run_startup_hygiene(&cli, &ctx, &global_db)
+            .await
+            .expect("regular distill DB override works");
+
+        assert!(result.is_none(), "distill command completes during hygiene");
+        let metadata = std::fs::symlink_metadata(override_db).expect("override metadata");
+        assert!(metadata.file_type().is_file());
+        assert!(!metadata.file_type().is_symlink());
     }
 
     #[tokio::test(flavor = "current_thread")]
