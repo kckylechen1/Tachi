@@ -91,6 +91,33 @@ fn expected_reference_trigger(raw: *const c_char) -> bool {
         || sqlite_identifier_eq(raw, b"memories_reserved_refs_update_guard")
 }
 
+fn schema_mutation(action: c_int) -> bool {
+    matches!(
+        action,
+        rusqlite::ffi::SQLITE_CREATE_INDEX
+            | rusqlite::ffi::SQLITE_CREATE_TABLE
+            | rusqlite::ffi::SQLITE_CREATE_TEMP_INDEX
+            | rusqlite::ffi::SQLITE_CREATE_TEMP_TABLE
+            | rusqlite::ffi::SQLITE_CREATE_TEMP_TRIGGER
+            | rusqlite::ffi::SQLITE_CREATE_TEMP_VIEW
+            | rusqlite::ffi::SQLITE_CREATE_TRIGGER
+            | rusqlite::ffi::SQLITE_CREATE_VIEW
+            | rusqlite::ffi::SQLITE_CREATE_VTABLE
+            | rusqlite::ffi::SQLITE_DROP_INDEX
+            | rusqlite::ffi::SQLITE_DROP_TABLE
+            | rusqlite::ffi::SQLITE_DROP_TEMP_INDEX
+            | rusqlite::ffi::SQLITE_DROP_TEMP_TABLE
+            | rusqlite::ffi::SQLITE_DROP_TEMP_TRIGGER
+            | rusqlite::ffi::SQLITE_DROP_TEMP_VIEW
+            | rusqlite::ffi::SQLITE_DROP_TRIGGER
+            | rusqlite::ffi::SQLITE_DROP_VIEW
+            | rusqlite::ffi::SQLITE_DROP_VTABLE
+            | rusqlite::ffi::SQLITE_ALTER_TABLE
+            | rusqlite::ffi::SQLITE_ANALYZE
+            | rusqlite::ffi::SQLITE_REINDEX
+    )
+}
+
 fn protected_memory_authority_column(raw: *const c_char) -> bool {
     // These columns are consumed by namespace routing, write affinity,
     // lifecycle protection/CAS, or trusted-state classification. Content and
@@ -167,14 +194,15 @@ unsafe extern "C" fn reserved_reference_authorizer(
         return rusqlite::ffi::SQLITE_OK;
     }
 
+    if schema_mutation(action) {
+        return rusqlite::ffi::SQLITE_DENY;
+    }
+
     let protected_memory_write = (action == rusqlite::ffi::SQLITE_INSERT
         && sqlite_identifier_eq(arg1, b"memories"))
         || (action == rusqlite::ffi::SQLITE_UPDATE
             && sqlite_identifier_eq(arg1, b"memories")
             && protected_memory_authority_column(arg2));
-    let protected_memory_schema = (action == rusqlite::ffi::SQLITE_DROP_TABLE
-        && sqlite_identifier_eq(arg1, b"memories"))
-        || (action == rusqlite::ffi::SQLITE_ALTER_TABLE && sqlite_identifier_eq(arg2, b"memories"));
     let unsafe_pragma =
         action == rusqlite::ffi::SQLITE_PRAGMA && sqlite_identifier_eq(arg1, b"writable_schema");
     let attached_schema = matches!(
@@ -190,7 +218,7 @@ unsafe extern "C" fn reserved_reference_authorizer(
         } else {
             rusqlite::ffi::SQLITE_DENY
         }
-    } else if protected_memory_schema || unsafe_pragma || attached_schema {
+    } else if unsafe_pragma || attached_schema {
         rusqlite::ffi::SQLITE_DENY
     } else {
         rusqlite::ffi::SQLITE_OK

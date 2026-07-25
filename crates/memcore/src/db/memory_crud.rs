@@ -800,13 +800,33 @@ impl crate::MemoryStore {
 
 fn normalized_append_key(target: ReservedReferenceTarget, value: &Value) -> Option<String> {
     match target {
-        ReservedReferenceTarget::EvidenceRefsV1 => value
-            .as_object()?
-            .get("ref")?
-            .as_str()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
+        ReservedReferenceTarget::EvidenceRefsV1 => {
+            let object = value.as_object()?;
+            let reference = normalize_required_bounded(
+                object.get("ref")?.as_str()?.to_string(),
+                "evidence ref",
+                MAX_REFERENCE_BYTES,
+            )
+            .ok()?;
+            let captured_at = normalize_timestamp(
+                object.get("captured_at")?.as_str()?.to_string(),
+                "evidence captured_at",
+            )
+            .ok()?;
+            let target_kind = match object.get("target_kind") {
+                Some(Value::String(kind)) => Some(
+                    normalize_required_lower_bounded(
+                        kind.to_string(),
+                        "evidence target_kind",
+                        MAX_REFERENCE_KIND_BYTES,
+                    )
+                    .ok()?,
+                ),
+                Some(_) => return None,
+                None => None,
+            };
+            serde_json::to_string(&(reference, target_kind, captured_at)).ok()
+        }
         ReservedReferenceTarget::SourceRefs => serde_json::to_string(value).ok(),
     }
 }
@@ -1100,6 +1120,76 @@ mod reserved_reference_tests {
             None
         )
         .is_err());
+    }
+
+    #[test]
+    fn evidence_dedupe_preserves_target_kind_timestamp_and_order() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("typed-evidence-identity", json!({}));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[ValidatedReferenceMutation::evidence(
+                    " #100 ".to_string(),
+                    "2026-07-25T08:00:00+08:00".to_string(),
+                    Some(" ISSUE ".to_string()),
+                )
+                .unwrap()],
+            )
+            .expect("seed typed evidence");
+
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[
+                    ValidatedReferenceMutation::evidence(
+                        "#100".to_string(),
+                        "2026-07-25T00:00:00Z".to_string(),
+                        Some("issue".to_string()),
+                    )
+                    .unwrap(),
+                    ValidatedReferenceMutation::evidence(
+                        "#100".to_string(),
+                        "2026-07-25T00:00:00Z".to_string(),
+                        Some("pr".to_string()),
+                    )
+                    .unwrap(),
+                    ValidatedReferenceMutation::evidence(
+                        "#100".to_string(),
+                        "2026-07-26T00:00:00Z".to_string(),
+                        Some("issue".to_string()),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .expect("append semantically distinct evidence");
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(
+            stored.metadata["evidence_refs_v1"],
+            json!([
+                {
+                    "ref": "#100",
+                    "captured_at": "2026-07-25T00:00:00.000Z",
+                    "target_kind": "issue"
+                },
+                {
+                    "ref": "#100",
+                    "captured_at": "2026-07-25T00:00:00.000Z",
+                    "target_kind": "pr"
+                },
+                {
+                    "ref": "#100",
+                    "captured_at": "2026-07-26T00:00:00.000Z",
+                    "target_kind": "issue"
+                }
+            ]),
+            "exact duplicates dedupe while typed distinctions survive in append order"
+        );
     }
 
     #[test]
@@ -1520,14 +1610,45 @@ mod reserved_reference_tests {
             "raw handle enabled writable_schema"
         );
 
+        let migration = crate::db::authorize_schema_migration(&store.reserved_reference_write)
+            .expect("authorize private schema fixture");
         store
             .connection()
             .execute_batch(
-                "CREATE TABLE raw_guard_probe(value INTEGER NOT NULL);
-                 INSERT INTO raw_guard_probe(value) VALUES (1);
-                 UPDATE raw_guard_probe SET value = 2;",
+                "CREATE TABLE private_schema_probe(value INTEGER NOT NULL);
+                 CREATE INDEX private_schema_probe_index ON private_schema_probe(value);
+                 CREATE VIEW private_schema_probe_view AS
+                     SELECT value FROM private_schema_probe;",
             )
-            .expect("ordinary non-memory SQL remains available");
+            .expect("private migration scope may install schema objects");
+        drop(migration);
+
+        for (label, sql) in [
+            (
+                "create table",
+                "CREATE TABLE raw_guard_probe(value INTEGER NOT NULL)",
+            ),
+            (
+                "create index",
+                "CREATE INDEX raw_guard_probe_index ON private_schema_probe(value)",
+            ),
+            (
+                "create view",
+                "CREATE VIEW raw_guard_probe_view AS SELECT value FROM private_schema_probe",
+            ),
+            (
+                "alter table",
+                "ALTER TABLE private_schema_probe ADD COLUMN injected INTEGER",
+            ),
+            ("drop table", "DROP TABLE private_schema_probe"),
+            ("drop index", "DROP INDEX private_schema_probe_index"),
+            ("drop view", "DROP VIEW private_schema_probe_view"),
+        ] {
+            assert!(
+                store.connection().execute_batch(sql).is_err(),
+                "public store handle allowed {label}"
+            );
+        }
         store
             .connection()
             .execute(
@@ -1537,12 +1658,34 @@ mod reserved_reference_tests {
             .expect("ordinary non-protected memory column remains writable");
 
         let raw = crate::db::open_raw(&path).unwrap();
-        raw.execute_batch(
-            "CREATE TABLE open_raw_probe(value INTEGER NOT NULL);
-             INSERT INTO open_raw_probe(value) VALUES (1);
-             UPDATE open_raw_probe SET value = 2;",
+        for (label, sql) in [
+            (
+                "create table",
+                "CREATE TABLE open_raw_probe(value INTEGER NOT NULL)",
+            ),
+            (
+                "create index",
+                "CREATE INDEX open_raw_probe_index ON private_schema_probe(value)",
+            ),
+            (
+                "create view",
+                "CREATE VIEW open_raw_probe_view AS SELECT value FROM private_schema_probe",
+            ),
+            (
+                "alter table",
+                "ALTER TABLE private_schema_probe ADD COLUMN open_raw_injected INTEGER",
+            ),
+            ("drop table", "DROP TABLE private_schema_probe"),
+            ("drop index", "DROP INDEX private_schema_probe_index"),
+            ("drop view", "DROP VIEW private_schema_probe_view"),
+        ] {
+            assert!(raw.execute_batch(sql).is_err(), "open_raw allowed {label}");
+        }
+        raw.execute(
+            "UPDATE memories SET text = 'open_raw ordinary update' WHERE id = ?1",
+            params![clean.id],
         )
-        .expect("open_raw ordinary non-memory SQL remains available");
+        .expect("open_raw ordinary DML remains available");
         assert!(
             raw.execute_batch("DROP TRIGGER memories_reserved_refs_update_guard")
                 .is_err(),
@@ -1558,7 +1701,7 @@ mod reserved_reference_tests {
         );
 
         let stored = store.get(&clean.id).unwrap().unwrap();
-        assert_eq!(stored.text, "ordinary update");
+        assert_eq!(stored.text, "open_raw ordinary update");
         assert_eq!(refs(&stored), vec!["#100"]);
     }
 
@@ -1634,13 +1777,13 @@ mod reserved_reference_tests {
                 .is_err(),
             "raw handle dropped an arbitrary persistent trigger"
         );
-        store
-            .connection()
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS raw_drop_probe(value INTEGER NOT NULL);
-                 INSERT INTO raw_drop_probe(value) VALUES (1);",
-            )
-            .expect("unrelated auxiliary-table DML remains available");
+        assert!(
+            store
+                .connection()
+                .execute_batch("CREATE TABLE raw_drop_probe(value INTEGER NOT NULL)")
+                .is_err(),
+            "raw handle created an auxiliary table"
+        );
 
         let temp = rusqlite::Connection::open_in_memory().expect("open temp trigger fixture");
         temp.execute_batch(

@@ -89,10 +89,14 @@ impl MemoryStore {
         // see `db::filename`'s doc comment for why it lives here and not
         // scattered across every call site that builds a `db_path`.
         db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
+        let database_existed = std::path::Path::new(db_path).exists();
         let mut conn = db::open_read_write(db_path)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
-        db::validate_persistent_trigger_inventory(&conn, false)?;
+        let may_install_required_triggers = !database_existed
+            || matches!(ctx.intent, db::OpenIntent::CreateFresh)
+            || ctx.migration_allowed();
+        db::validate_persistent_trigger_inventory(&conn, !may_install_required_triggers)?;
         // Both labelled and unlabelled opens run schema init + data migrations
         // through init_schema_with_label_mut so the pre-migration backup and
         // post-migration fingerprint marker apply uniformly. Previously the
@@ -101,10 +105,13 @@ impl MemoryStore {
         let p = std::path::PathBuf::from(db_path);
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
         let schema_result = db::init_schema_with_label_mut(&mut conn, db_label, &p, ctx);
+        let vec_available = schema_result
+            .as_ref()
+            .map(|_| db::try_load_sqlite_vec(&conn))
+            .unwrap_or(false);
         drop(migration_authorization);
         let _ = schema_result?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
-        let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -142,7 +149,7 @@ impl MemoryStore {
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         db::migrations::check_schema_version_gate(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
-        let vec_available = db::try_load_sqlite_vec(&conn);
+        let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -154,8 +161,8 @@ impl MemoryStore {
 
     /// Open an existing database for a narrowly-scoped maintenance write.
     /// This never creates a file, initializes schema, or runs migrations; it
-    /// does refresh the reserved-reference safety triggers before exposing a
-    /// write-capable connection.
+    /// refuses an incomplete trigger inventory before exposing a write-capable
+    /// connection.
     pub fn open_existing_read_write(db_path: &str) -> Result<Self, MemoryError> {
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
@@ -165,7 +172,7 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
-        db::validate_persistent_trigger_inventory(&conn, false)?;
+        db::validate_persistent_trigger_inventory(&conn, true)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
             return Err(MemoryError::InvalidArg(format!(
@@ -185,11 +192,6 @@ impl MemoryStore {
                 "exact-dedupe apply requires current memories schema: {error}"
             ))
         })?;
-        let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
-        let guard_result = db::install_reserved_reference_guard(&conn);
-        drop(migration_authorization);
-        guard_result?;
-        db::validate_persistent_trigger_inventory(&conn, true)?;
         // Registration above makes vec0 available to this connection, but a
         // maintenance open must not create its virtual table. Preparing a
         // read-only query proves the already-existing table and module are
@@ -217,10 +219,13 @@ impl MemoryStore {
         db::validate_persistent_trigger_inventory(&conn, false)?;
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
         let schema_result = db::init_schema(&conn);
+        let vec_available = schema_result
+            .as_ref()
+            .map(|_| db::try_load_sqlite_vec(&conn))
+            .unwrap_or(false);
         drop(migration_authorization);
         schema_result?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
-        let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -302,10 +307,12 @@ mod exact_dedupe_open_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("current.db");
         let store = MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let migration = db::authorize_schema_migration(&store.reserved_reference_write).unwrap();
         store
             .connection()
             .execute("DROP TABLE memories_vec", [])
             .unwrap();
+        drop(migration);
         drop(store);
 
         let maintenance = MemoryStore::open_existing_read_write(&path.to_string_lossy()).unwrap();
@@ -322,31 +329,60 @@ mod exact_dedupe_open_tests {
     }
 
     #[test]
-    fn existing_read_write_refreshes_reserved_reference_guards() {
+    fn existing_opens_refuse_missing_reserved_reference_guards_before_repair() {
+        type StoreOpener = fn(&str) -> Result<MemoryStore, MemoryError>;
+        let openers: [(&str, StoreOpener); 2] = [
+            ("ordinary", MemoryStore::open),
+            ("maintenance", MemoryStore::open_existing_read_write),
+        ];
+
+        for (label, open) in openers {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("{label}.db"));
+            drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+            let offline = Connection::open(&path).unwrap();
+            offline
+                .execute_batch(
+                    "DROP TRIGGER memories_reserved_refs_insert_guard;
+                     DROP TRIGGER memories_reserved_refs_update_guard;",
+                )
+                .unwrap();
+            drop(offline);
+
+            let error = match open(&path.to_string_lossy()) {
+                Ok(_) => panic!("{label} open silently repaired missing evidence guards"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("required trigger 'memories_reserved_refs_insert_guard' is missing"),
+                "unexpected {label} refusal: {error}"
+            );
+
+            let offline = Connection::open(&path).unwrap();
+            let remaining: i64 = offline
+                .query_row(
+                    "SELECT COUNT(*) FROM main.sqlite_schema
+                     WHERE type = 'trigger'
+                       AND name IN (
+                           'memories_reserved_refs_insert_guard',
+                           'memories_reserved_refs_update_guard'
+                       )",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(remaining, 0, "{label} open repaired before refusing");
+        }
+    }
+
+    #[test]
+    fn authorized_schema_migration_may_reinstall_missing_reference_guards() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("current.db");
-        let mut store = MemoryStore::open(&path.to_string_lossy()).unwrap();
-        let entry: MemoryEntry = serde_json::from_value(serde_json::json!({
-            "id": "maintenance-guard",
-            "text": "maintenance guard fixture",
-            "timestamp": "2026-07-25T00:00:00Z"
-        }))
-        .unwrap();
-        let reference = db::ValidatedReferenceMutation::evidence(
-            "#100".to_string(),
-            "2026-07-25T00:00:00Z".to_string(),
-            None,
-        )
-        .unwrap();
-        store
-            .upsert_with_validated_reference_mutations(
-                &entry,
-                None,
-                &serde_json::Map::new(),
-                &[reference],
-            )
-            .unwrap();
-        drop(store);
+        let path = dir.path().join("authorized-migration.db");
+        drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
 
         let offline = Connection::open(&path).unwrap();
         offline
@@ -357,15 +393,11 @@ mod exact_dedupe_open_tests {
             .unwrap();
         drop(offline);
 
-        let maintenance = MemoryStore::open_existing_read_write(&path.to_string_lossy()).unwrap();
-        let erase = maintenance.connection().execute(
-            "UPDATE memories SET metadata = '{}' WHERE id = 'maintenance-guard'",
-            [],
-        );
-        assert!(
-            erase.is_err(),
-            "maintenance open left reserved refs unguarded"
-        );
+        let context = DbOpenContext::open_existing_allow("test:trigger-repair");
+        let store = MemoryStore::open_with_context(&path.to_string_lossy(), &context)
+            .expect("authorized migration repairs canonical guards");
+        db::validate_persistent_trigger_inventory(store.connection(), true)
+            .expect("authorized migration restores complete canonical inventory");
     }
 
     #[test]
@@ -450,10 +482,13 @@ mod exact_dedupe_open_tests {
         let path = dir.path().join("spoofed.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(&format!(
-            "CREATE TABLE decoy(value TEXT); PRAGMA user_version = {}",
+            "CREATE TABLE decoy(value TEXT);
+             CREATE TABLE memories(id TEXT PRIMARY KEY, metadata TEXT NOT NULL DEFAULT '{{}}');
+             PRAGMA user_version = {}",
             db::migrations::EXPECTED_SCHEMA_VERSION
         ))
         .unwrap();
+        db::install_reserved_reference_guard(&conn).unwrap();
         drop(conn);
 
         let error = match MemoryStore::open_existing_read_write(&path.to_string_lossy()) {
@@ -470,6 +505,6 @@ mod exact_dedupe_open_tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(tables, vec!["decoy"]);
+        assert_eq!(tables, vec!["decoy", "memories"]);
     }
 }

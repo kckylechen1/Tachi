@@ -150,6 +150,7 @@ pub use sandbox::{
     list_sandbox_exec_audit, list_sandbox_policies, list_sandbox_rules_for_role,
     path_matches_pattern, set_sandbox_policy, set_sandbox_rule,
 };
+#[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
 pub use schema::{init_schema, init_schema_with_label_mut};
 pub use search_generation::{bump_search_generation, search_generation};

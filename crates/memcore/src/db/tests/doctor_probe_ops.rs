@@ -167,7 +167,7 @@ fn open_immutable_readonly_round_trips_an_existing_database() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("ro.db");
     {
-        let conn = open_raw(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
         conn.execute_batch("CREATE TABLE t (id INTEGER);").unwrap();
     }
 
