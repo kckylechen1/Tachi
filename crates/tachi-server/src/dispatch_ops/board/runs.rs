@@ -19,6 +19,33 @@ pub(super) const BOARD_RUN_DIRECTORY_CANDIDATE_HARD_MAX: usize =
     BOARD_RUN_DIRECTORY_ENTRY_INSPECTION_HARD_MAX - 1;
 pub(super) const BOARD_RUN_STATUS_JSON_MAX_BYTES: u64 = 128 * 1024;
 
+#[derive(Debug, Default)]
+pub(super) struct RunTaskScan {
+    pub(super) tasks: Vec<Value>,
+    pub(super) inspected_entries: usize,
+    pub(super) truncated: bool,
+    pub(super) invalid_entries: usize,
+    pub(super) error: Option<String>,
+}
+
+impl RunTaskScan {
+    pub(super) fn failed(error: String) -> Self {
+        Self {
+            error: Some(error),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn incomplete(&self) -> bool {
+        self.truncated || self.invalid_entries > 0 || self.error.is_some()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+}
+
 #[cfg(test)]
 static RUN_DIRECTORY_ENTRY_VISITS: AtomicUsize = AtomicUsize::new(0);
 
@@ -91,40 +118,44 @@ pub(super) fn collect_run_tasks_from_dir(
     runs_dir: PathBuf,
     state_filter: &str,
     limit: usize,
-) -> Vec<serde_json::Value> {
+) -> RunTaskScan {
     let candidate_limit = limit.min(BOARD_RUN_DIRECTORY_CANDIDATE_HARD_MAX);
     if candidate_limit == 0 {
-        return Vec::new();
+        return RunTaskScan::default();
     }
     let read_dir = match std::fs::read_dir(&runs_dir) {
         Ok(read_dir) => read_dir,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(error) if error.kind() == ErrorKind::NotFound => return RunTaskScan::default(),
         Err(error) => {
+            let message = format!("inspect run ledger {}: {error}", runs_dir.display());
             tracing::warn!(
                 runs_dir = %runs_dir.display(),
                 error = %error,
                 "board could not inspect run ledger"
             );
-            return Vec::new();
+            return RunTaskScan::failed(message);
         }
     };
 
     let mut entries = Vec::with_capacity(candidate_limit);
     let mut inspected_entries = 0usize;
     let mut truncated = false;
+    let mut invalid_entries = 0usize;
     for entry in read_dir.take(candidate_limit.saturating_add(1)) {
-        if inspected_entries == candidate_limit {
-            truncated = true;
-            break;
-        }
         inspected_entries += 1;
 
         #[cfg(test)]
         RUN_DIRECTORY_ENTRY_VISITS.fetch_add(1, Ordering::Relaxed);
 
+        if inspected_entries > candidate_limit {
+            truncated = true;
+            break;
+        }
+
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
+                invalid_entries += 1;
                 tracing::warn!(
                     runs_dir = %runs_dir.display(),
                     error = %error,
@@ -136,6 +167,7 @@ pub(super) fn collect_run_tasks_from_dir(
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(error) => {
+                invalid_entries += 1;
                 tracing::warn!(
                     path = %entry.path().display(),
                     error = %error,
@@ -145,6 +177,7 @@ pub(super) fn collect_run_tasks_from_dir(
             }
         };
         if file_type.is_symlink() {
+            invalid_entries += 1;
             tracing::warn!(
                 path = %entry.path().display(),
                 "board refused symlinked run entry"
@@ -154,6 +187,9 @@ pub(super) fn collect_run_tasks_from_dir(
         if !file_type.is_dir() {
             continue;
         }
+        if entry.file_name() == ".dispatch-dedupe" {
+            continue;
+        }
         entries.push(entry);
     }
     if truncated {
@@ -161,7 +197,7 @@ pub(super) fn collect_run_tasks_from_dir(
             runs_dir = %runs_dir.display(),
             inspected_entries,
             candidate_limit,
-            "board run-ledger scan reached its inspection limit; newest ordering remains kanban-ledger authoritative"
+            "board run-ledger scan reached its inspection limit; sampled filesystem rows are incomplete and directory order is not a recency index"
         );
     }
 
@@ -183,6 +219,7 @@ pub(super) fn collect_run_tasks_from_dir(
         let status = match read_bounded_json_file(&status_path) {
             Ok(status) => status,
             Err(error) => {
+                invalid_entries += 1;
                 tracing::warn!(
                     run_dir = %run_dir.display(),
                     error = %error,
@@ -202,6 +239,11 @@ pub(super) fn collect_run_tasks_from_dir(
                     .map(str::to_string)
             })
         else {
+            invalid_entries += 1;
+            tracing::warn!(
+                run_dir = %run_dir.display(),
+                "board skipped run status without a dispatch id"
+            );
             continue;
         };
         let result_written = result_written_for_run(&run_dir);
@@ -264,14 +306,26 @@ pub(super) fn collect_run_tasks_from_dir(
             .and_then(|v| v.as_str())
             .cmp(&a.get("updated_at").and_then(|v| v.as_str()))
     });
-    runs
+    RunTaskScan {
+        tasks: runs,
+        inspected_entries,
+        truncated,
+        invalid_entries,
+        error: None,
+    }
 }
 
 pub(crate) fn collect_run_task_for_server(
     server: &MemoryServer,
     dispatch_id: &str,
 ) -> Option<serde_json::Value> {
-    collect_run_task_by_id(&runs_dir_for_server(server), dispatch_id)
+    match collect_run_task_by_id(&runs_dir_for_server(server), dispatch_id) {
+        Ok(task) => task,
+        Err(error) => {
+            tracing::warn!(dispatch_id, error = %error, "run status lookup failed");
+            None
+        }
+    }
 }
 
 /// tachi#1173 board autopsy review: `dispatch_id` here is caller-supplied
@@ -287,23 +341,43 @@ pub(crate) fn collect_run_task_for_server(
 pub(super) fn collect_run_task_by_id(
     runs_dir: &Path,
     dispatch_id: &str,
-) -> Option<serde_json::Value> {
+) -> Result<Option<serde_json::Value>, String> {
     if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
-        return None;
+        return Ok(None);
     }
     let run_dir = runs_dir.join(dispatch_id);
-    if !run_dir.is_dir() {
-        return None;
+    let run_metadata = match std::fs::symlink_metadata(&run_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "inspect run directory {}: {error}",
+                run_dir.display()
+            ));
+        }
+    };
+    if run_metadata.file_type().is_symlink() || !run_metadata.file_type().is_dir() {
+        return Ok(None);
     }
     if !crate::dispatch_ops::canonical_dir_is_within(&run_dir, runs_dir) {
-        return None;
+        return Ok(None);
     }
     collect_run_task_from_dir(&run_dir)
 }
 
-fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
+fn collect_run_task_from_dir(run_dir: &Path) -> Result<Option<serde_json::Value>, String> {
     let status_path = run_dir.join("status.json");
-    let status = read_bounded_json_file(&status_path).ok()?;
+    match std::fs::symlink_metadata(&status_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "inspect run status {}: {error}",
+                status_path.display()
+            ));
+        }
+    }
+    let status = read_bounded_json_file(&status_path)?;
     let dispatch_id = status
         .get("dispatch_id")
         .and_then(|v| v.as_str())
@@ -313,7 +387,8 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
-        })?;
+        })
+        .ok_or_else(|| format!("run status {} has no dispatch id", status_path.display()))?;
     let result_written = result_written_for_run(run_dir);
     let updated_at_dt = parse_status_updated_at(&status, &status_path);
     let now = Utc::now();
@@ -342,7 +417,7 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
     } else {
         None
     };
-    Some(json!({
+    Ok(Some(json!({
         "dispatch_id": dispatch_id,
         "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
         "state": state,
@@ -363,7 +438,7 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
         "identity_receipt": status.get("identity_receipt").cloned().unwrap_or(serde_json::Value::Null),
         "acpx": status.get("acpx").cloned().unwrap_or(serde_json::Value::Null),
         "acpx_events": status.get("acpx_events").cloned().unwrap_or(serde_json::Value::Null),
-    }))
+    })))
 }
 
 #[cfg(test)]
@@ -392,6 +467,11 @@ mod tests {
         let tasks = collect_run_tasks_from_dir(runs_dir, "all", usize::MAX);
 
         assert!(tasks.is_empty(), "non-directory fixtures are not run rows");
+        assert_eq!(
+            run_directory_entry_visits(),
+            BOARD_RUN_DIRECTORY_ENTRY_INSPECTION_HARD_MAX,
+            "the one-entry truncation probe is inspection work and must be counted",
+        );
         assert!(
             run_directory_entry_visits() <= BOARD_RUN_DIRECTORY_ENTRY_INSPECTION_HARD_MAX,
             "oversized scan budget must not enumerate every run directory; visited {} entries",
@@ -481,7 +561,10 @@ mod tests {
         ] {
             let result = collect_run_task_by_id(&runs_dir, malicious);
             assert!(
-                result.is_none(),
+                result
+                    .as_ref()
+                    .expect("invalid ids retain not-found semantics")
+                    .is_none(),
                 "dispatch_id {malicious:?} must be rejected fail-closed (treated as \
                  not-found), not resolved outside runs_dir; got: {result:?}"
             );
@@ -516,7 +599,10 @@ mod tests {
 
         let result = collect_run_task_by_id(&runs_dir, link_name);
         assert!(
-            result.is_none(),
+            result
+                .as_ref()
+                .expect("symlinked run dirs retain fail-closed not-found semantics")
+                .is_none(),
             "a symlinked run_dir resolving outside runs_dir must be rejected even though \
              its name alone passes the character allowlist; got: {result:?}"
         );
@@ -542,7 +628,7 @@ mod tests {
         )
         .expect("write status.json");
 
-        let task = collect_run_task_by_id(&runs_dir, dispatch_id);
+        let task = collect_run_task_by_id(&runs_dir, dispatch_id).expect("read valid status");
         assert!(
             task.is_some(),
             "a legitimate, valid-charset dispatch id must still resolve: {task:?}"
@@ -550,6 +636,59 @@ mod tests {
         assert_eq!(
             task.unwrap().get("dispatch_id").and_then(|v| v.as_str()),
             Some(dispatch_id)
+        );
+    }
+
+    #[test]
+    fn collect_run_task_by_id_preserves_missing_status_as_not_found() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "20260725T000000Z-codex-missing";
+        std::fs::create_dir_all(runs_dir.join(dispatch_id)).expect("create run dir");
+
+        let task = collect_run_task_by_id(&runs_dir, dispatch_id).expect("missing is not an error");
+        assert!(task.is_none(), "a missing status remains not-found");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_run_task_by_id_surfaces_symlinked_status_as_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "20260725T000000Z-codex-status-link";
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        let outside = tmp.path().join("outside-status.json");
+        std::fs::write(&outside, json!({"dispatch_id": dispatch_id}).to_string())
+            .expect("write outside status");
+        std::os::unix::fs::symlink(&outside, run_dir.join("status.json")).expect("symlink status");
+
+        let error = collect_run_task_by_id(&runs_dir, dispatch_id)
+            .expect_err("symlinked status must be a loud error");
+        assert!(
+            error.contains("refuse non-regular JSON file"),
+            "unexpected symlink error: {error}"
+        );
+    }
+
+    #[test]
+    fn collect_run_task_by_id_surfaces_oversized_status_as_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "20260725T000000Z-codex-oversized";
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            vec![b' '; BOARD_RUN_STATUS_JSON_MAX_BYTES as usize + 1],
+        )
+        .expect("write oversized status");
+
+        let error = collect_run_task_by_id(&runs_dir, dispatch_id)
+            .expect_err("oversized status must be a loud error");
+        assert!(
+            error.contains("refuse oversized JSON file"),
+            "unexpected oversized status error: {error}"
         );
     }
 }

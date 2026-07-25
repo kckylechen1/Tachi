@@ -2,15 +2,26 @@ use super::runs::read_bounded_json_file;
 use serde_json::{json, Value};
 use std::io::ErrorKind;
 
-pub(super) fn flow_dispatch_ids(flow_id: &str, limit: usize) -> Result<Vec<String>, String> {
+pub(super) struct FlowDispatchIds {
+    pub(super) ids: Vec<String>,
+    pub(super) truncated: bool,
+}
+
+pub(super) fn flow_dispatch_ids(
+    flow_id: &str,
+    limit: usize,
+) -> Result<Option<FlowDispatchIds>, String> {
     if limit == 0 {
-        return Ok(Vec::new());
+        return Ok(Some(FlowDispatchIds {
+            ids: Vec::new(),
+            truncated: false,
+        }));
     }
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id)?;
     let status_path = run_dir.join("status.json");
     match std::fs::symlink_metadata(&status_path) {
         Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(format!(
                 "inspect flow status {}: {error}",
@@ -23,16 +34,37 @@ pub(super) fn flow_dispatch_ids(flow_id: &str, limit: usize) -> Result<Vec<Strin
     let dispatch_ids = status
         .get("dispatch_ids")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>();
+        .ok_or_else(|| {
+            format!(
+                "flow status {} has no dispatch_ids array",
+                status_path.display()
+            )
+        })?;
+    for value in dispatch_ids {
+        let id = value.as_str().ok_or_else(|| {
+            format!(
+                "flow status {} has a non-string dispatch id",
+                status_path.display()
+            )
+        })?;
+        if !crate::dispatch_ops::is_valid_dispatch_id(id) {
+            return Err(format!(
+                "flow status {} has an invalid dispatch id",
+                status_path.display()
+            ));
+        }
+    }
     let newest_start = dispatch_ids.len().saturating_sub(limit);
-    Ok(dispatch_ids
-        .into_iter()
+    let ids = dispatch_ids
+        .iter()
         .skip(newest_start)
+        .filter_map(Value::as_str)
         .map(str::to_string)
-        .collect())
+        .collect();
+    Ok(Some(FlowDispatchIds {
+        ids,
+        truncated: dispatch_ids.len() > limit,
+    }))
 }
 
 pub(super) fn merge_run_task(

@@ -44,11 +44,11 @@ fn read_bounded_tail(path: &Path) -> Option<String> {
         .len()
         .saturating_sub(FAILURE_TAIL_SOURCE_READ_MAX_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut raw = String::new();
+    let mut raw = Vec::new();
     file.take(FAILURE_TAIL_SOURCE_READ_MAX_BYTES)
-        .read_to_string(&mut raw)
+        .read_to_end(&mut raw)
         .ok()?;
-    Some(raw)
+    Some(String::from_utf8_lossy(&raw).into_owned())
 }
 
 /// Returns the last `max_bytes` bytes of `s`, backed off to the nearest char
@@ -224,6 +224,33 @@ mod tests {
         let tail = read_failure_tail(run_dir).expect("failure tail");
         assert!(tail.contains("FAILED: final bounded tail"));
         assert!(tail.len() <= FAILURE_TAIL_MAX_BYTES);
+    }
+
+    #[test]
+    fn read_failure_tail_keeps_terminal_text_when_tail_seek_splits_utf8_prefix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path();
+        let suffix = "\nFAILED: valid terminal tail after multibyte prefix";
+        let mut content = format!("{}{}", "测".repeat(6_000), suffix);
+        while content.is_char_boundary(
+            content
+                .len()
+                .saturating_sub(FAILURE_TAIL_SOURCE_READ_MAX_BYTES as usize),
+        ) {
+            content.insert(0, 'x');
+        }
+        let start = content.len() - FAILURE_TAIL_SOURCE_READ_MAX_BYTES as usize;
+        assert!(
+            !content.is_char_boundary(start),
+            "fixture must force the bounded seek into a UTF-8 continuation byte"
+        );
+        std::fs::write(run_dir.join("result.md"), content).expect("write multibyte result.md");
+
+        let tail = read_failure_tail(run_dir).expect("failure tail");
+        assert!(
+            tail.contains("FAILED: valid terminal tail after multibyte prefix"),
+            "a split prefix must not discard the valid terminal tail: {tail:?}"
+        );
     }
 
     #[test]
