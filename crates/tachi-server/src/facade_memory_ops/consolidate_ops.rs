@@ -613,7 +613,16 @@ fn generate_and_persist_proposals(
     params: &TachiMemoryParams,
     path_prefix: &str,
 ) -> Result<ProposalGeneration, String> {
-    let (scope, proposals) = with_memory_store_read(server, params, |store| {
+    // One exclusive MemoryServer store gate spans list/census, endpoint
+    // snapshot construction, existing-status checks, and persistence. This
+    // closes the production race with same-server writers, including
+    // `mark_superseded_closing_validity`, so a proposal built from A cannot
+    // become visible after that writer has changed A -> C in the gap.
+    //
+    // This gate does not serialize arbitrary external processes that open the
+    // same SQLite database independently. Apply's `BEGIN IMMEDIATE` live-row
+    // revalidation remains the cross-process/database last line of defense.
+    with_proposal_store(server, params, |store| {
         let entries = store
             .list_by_path(path_prefix, 500, false)
             .map_err(|e| format!("list_by_path: {e}"))?;
@@ -643,14 +652,11 @@ fn generate_and_persist_proposals(
         proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
         proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
         proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
-        Ok((scope, proposals))
-    })?;
 
-    if proposals.is_empty() {
-        return Ok(ProposalGeneration { proposals, scope });
-    }
+        if proposals.is_empty() {
+            return Ok(ProposalGeneration { proposals, scope });
+        }
 
-    with_proposal_store(server, params, |store| {
         for proposal in &proposals {
             let id = proposal["proposal_id"]
                 .as_str()
@@ -676,9 +682,8 @@ fn generate_and_persist_proposals(
                 .set_state(lifecycle::LIFECYCLE_PROPOSAL_NS, id, &raw)
                 .map_err(|e| format!("persist proposal: {e}"))?;
         }
-        Ok(())
-    })?;
-    Ok(ProposalGeneration { proposals, scope })
+        Ok(ProposalGeneration { proposals, scope })
+    })
 }
 
 /// Same-path duplicates → `merge_into` when summaries overlap enough, else
