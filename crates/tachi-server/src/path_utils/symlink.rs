@@ -11,6 +11,15 @@ use std::path::Path;
 /// Global Plan C symlink for a repo-local project DB (Unix only).
 #[cfg(unix)]
 pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> PlanCLinkOutcome {
+    ensure_plan_c_symlink_with_hook(local_db, project_root, |_| {})
+}
+
+#[cfg(unix)]
+fn ensure_plan_c_symlink_with_hook(
+    local_db: &Path,
+    project_root: &Path,
+    before_symlink: impl FnOnce(&Path),
+) -> PlanCLinkOutcome {
     let projects_root = tachi_home().join("projects");
     if local_db.starts_with(&projects_root) {
         return PlanCLinkOutcome::Skipped("local db is already under the Plan C projects root");
@@ -34,17 +43,37 @@ pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> Pla
     let Some(global_project_dir) = global_link.parent().map(Path::to_path_buf) else {
         return PlanCLinkOutcome::Skipped("project root has no directory name");
     };
-    if std::fs::create_dir_all(&global_project_dir).is_err() {
-        return PlanCLinkOutcome::Skipped("failed to create Plan C project directory");
-    }
-    if let Err(e) = std::os::unix::fs::symlink(local_db, &global_link) {
-        tracing::warn!(error = %e, path = %global_link.display(), "Failed to create Plan C symlink");
+    if let Err(error) = std::fs::create_dir_all(&global_project_dir) {
         return PlanCLinkOutcome::Failed {
-            path: global_link,
-            error: e.to_string(),
+            path: global_project_dir,
+            error: format!("failed to create Plan C project directory: {error}"),
+        };
+    }
+    before_symlink(&global_link);
+    if let Err(error) = std::os::unix::fs::symlink(local_db, &global_link) {
+        tracing::warn!(error = %error, path = %global_link.display(), "Failed to create Plan C symlink; re-inspecting alias state");
+        return match inspect_plan_c_alias(local_db, project_root) {
+            PlanCAliasInspection::MatchingSymlink => PlanCLinkOutcome::AlreadyLinked,
+            PlanCAliasInspection::SplitBrain(issue) => PlanCLinkOutcome::SplitBrain(issue),
+            PlanCAliasInspection::Integrity(issue) => PlanCLinkOutcome::AliasIntegrity(issue),
+            PlanCAliasInspection::Absent => PlanCLinkOutcome::Failed {
+                path: global_link,
+                error: format!(
+                    "Plan C alias symlink creation failed and re-inspection found no alias: {error}"
+                ),
+            },
         };
     }
     PlanCLinkOutcome::Created(global_link)
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn ensure_plan_c_symlink_with_test_hook(
+    local_db: &Path,
+    project_root: &Path,
+    before_symlink: impl FnOnce(&Path),
+) -> PlanCLinkOutcome {
+    ensure_plan_c_symlink_with_hook(local_db, project_root, before_symlink)
 }
 
 #[cfg(not(unix))]
@@ -157,22 +186,4 @@ pub(crate) fn inspect_plan_c_alias(
         alias_db,
         file_type,
     })
-}
-
-pub(crate) fn plan_c_split_brain_for_local_db(local_db: &Path) -> Option<PlanCSplitBrain> {
-    match inspect_plan_c_alias_for_local_db(local_db) {
-        PlanCAliasInspection::SplitBrain(issue) => Some(issue),
-        PlanCAliasInspection::Absent
-        | PlanCAliasInspection::MatchingSymlink
-        | PlanCAliasInspection::Integrity(_) => None,
-    }
-}
-
-pub(crate) fn plan_c_split_brain(local_db: &Path, project_root: &Path) -> Option<PlanCSplitBrain> {
-    match inspect_plan_c_alias(local_db, project_root) {
-        PlanCAliasInspection::SplitBrain(issue) => Some(issue),
-        PlanCAliasInspection::Absent
-        | PlanCAliasInspection::MatchingSymlink
-        | PlanCAliasInspection::Integrity(_) => None,
-    }
 }

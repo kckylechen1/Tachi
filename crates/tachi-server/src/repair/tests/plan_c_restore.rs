@@ -79,10 +79,10 @@ fn r11_plan_c_split_brain_merges_alias_and_relinks_symlink() {
             .any(|entry| entry.file_name().to_string_lossy().contains(".bak.")),
         "alias backup should be written before relink"
     );
-    assert!(
-        crate::path_utils::plan_c_split_brain_for_local_db(&local_db).is_none(),
-        "post-repair split-brain detector should be clean"
-    );
+    assert!(matches!(
+        crate::path_utils::inspect_plan_c_alias_for_local_db(&local_db),
+        crate::path_utils::PlanCAliasInspection::MatchingSymlink
+    ));
 
     if let Some(value) = saved {
         std::env::set_var("TACHI_HOME", value);

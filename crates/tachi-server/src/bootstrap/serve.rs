@@ -530,6 +530,7 @@ async fn run_startup_hygiene(
 
     // Resolve project DB path
     let explicit_project_db = cli.project_db.is_some();
+    let mut legacy_project_copy = None;
     let project_db_path = if cli.no_project_db {
         if cli.project_db.is_some() {
             eprintln!("--project-db is ignored because --no-project-db is set");
@@ -545,12 +546,7 @@ async fn run_startup_hygiene(
         let project_legacy = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
 
         if project_legacy.exists() && !project_default.exists() {
-            copy_legacy_db_guarded(&project_legacy, &project_default).await?;
-            eprintln!(
-                "Migrated legacy project DB: {} -> {}",
-                project_legacy.display(),
-                project_default.display()
-            );
+            legacy_project_copy = Some((project_legacy, project_default.clone()));
         }
 
         Some(project_default)
@@ -561,11 +557,12 @@ async fn run_startup_hygiene(
     // Plan C: link <tachi_home>/projects/<sanitized-dir>/tachi-memory.db -> repo-local DB.
     // Explicit project DBs are caller-owned (for example embedded agent workspaces)
     // and must not rewrite the repo's global named-project alias.
-    if should_refresh_plan_c_symlink(
+    let refresh_plan_c_symlink = should_refresh_plan_c_symlink(
         project_db_path.as_deref(),
         ctx.git_root.as_deref(),
         explicit_project_db,
-    ) {
+    );
+    if refresh_plan_c_symlink {
         if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
             match crate::path_utils::inspect_plan_c_alias(db_path, root) {
                 crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
@@ -577,6 +574,20 @@ async fn run_startup_hygiene(
                 crate::path_utils::PlanCAliasInspection::Absent
                 | crate::path_utils::PlanCAliasInspection::MatchingSymlink => {}
             }
+        }
+    }
+
+    if let Some((project_legacy, project_default)) = legacy_project_copy {
+        copy_legacy_db_guarded(&project_legacy, &project_default).await?;
+        eprintln!(
+            "Migrated legacy project DB: {} -> {}",
+            project_legacy.display(),
+            project_default.display()
+        );
+    }
+
+    if refresh_plan_c_symlink {
+        if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
             match crate::path_utils::ensure_plan_c_symlink(db_path, root) {
                 crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
                     return Err(issue.warning_message().into());
@@ -584,17 +595,13 @@ async fn run_startup_hygiene(
                 crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
                     return Err(issue.warning_message().into());
                 }
-                // A best-effort symlink syscall failure (identity already
-                // resolved cleanly above) is non-fatal — repo-local/manifest
-                // addressing does not depend on the alias symlink — but it must
-                // be surfaced loudly, not silently dropped.
                 crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                    eprintln!(
-                        "[!] Plan C alias symlink could not be created at {}: {} (the project \
-                         remains reachable by its repo-local path)",
+                    return Err(format!(
+                        "Plan C alias symlink failed at {}: {}; refusing startup",
                         path.display(),
                         error
-                    );
+                    )
+                    .into());
                 }
                 crate::path_utils::PlanCLinkOutcome::AlreadyLinked
                 | crate::path_utils::PlanCLinkOutcome::Created(_)
@@ -999,6 +1006,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvRestore;
 
     #[cfg(unix)]
     struct ClearOwnershipInject;
@@ -1007,6 +1015,126 @@ mod tests {
         fn drop(&mut self) {
             crate::db_ownership::set_ownership_inject_for_test(None);
         }
+    }
+
+    fn startup_test_cli() -> Cli {
+        Cli {
+            daemon: false,
+            port: 6919,
+            global_db: None,
+            project_db: None,
+            no_project_db: false,
+            allow_schema_migration: false,
+            profile: None,
+            gc_enabled: None,
+            gc_initial_delay_secs: None,
+            gc_interval_secs: None,
+            command: Some(Commands::Serve),
+        }
+    }
+
+    fn startup_test_context(root: &Path, app_home: &Path) -> StartupContext {
+        StartupContext {
+            home: root.to_path_buf(),
+            app_home: app_home.to_path_buf(),
+            command: Commands::Serve,
+            defer_manifest_startup: false,
+            git_root: Some(root.to_path_buf()),
+            schema_migration: memcore::MigrationAuthority::Deny,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_plan_c_alias_refusal_precedes_legacy_copy_for_regular_file() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-alias-");
+        let root = fixture.path().join("Regular-Alias-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let legacy_db = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(legacy_db.parent().unwrap()).expect("legacy parent");
+        std::fs::write(&legacy_db, b"legacy-source").expect("legacy DB");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        let alias_name = crate::path_utils::plan_c_dir_name_from_root(&root).expect("alias name");
+        let alias_db = crate::path_utils::plan_c_global_db_path(&alias_name);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::fs::write(&alias_db, b"divergent-alias").expect("alias DB");
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("divergent alias must refuse startup"),
+        };
+
+        assert!(error.to_string().contains("split-brain"), "{error}");
+        assert!(!canonical_db.exists(), "canonical DB must remain absent");
+        assert!(
+            !canonical_db.parent().unwrap().exists(),
+            "canonical parent must remain absent"
+        );
+        assert_eq!(std::fs::read(&legacy_db).unwrap(), b"legacy-source");
+        assert_eq!(std::fs::read(&alias_db).unwrap(), b"divergent-alias");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_plan_c_alias_refusal_precedes_legacy_copy_for_wrong_symlink() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-alias-");
+        let root = fixture.path().join("Wrong-Symlink-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let legacy_db = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(legacy_db.parent().unwrap()).expect("legacy parent");
+        std::fs::write(&legacy_db, b"legacy-source").expect("legacy DB");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        let alias_name = crate::path_utils::plan_c_dir_name_from_root(&root).expect("alias name");
+        let alias_db = crate::path_utils::plan_c_global_db_path(&alias_name);
+        let wrong_db = fixture.path().join("wrong-target.db");
+        std::fs::write(&wrong_db, b"wrong-target").expect("wrong target");
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&wrong_db, &alias_db).expect("wrong symlink");
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("wrong-target alias must refuse startup"),
+        };
+
+        assert!(error.to_string().contains("instead of canonical DB"), "{error}");
+        assert!(!canonical_db.exists(), "canonical DB must remain absent");
+        assert!(
+            !canonical_db.parent().unwrap().exists(),
+            "canonical parent must remain absent"
+        );
+        assert_eq!(std::fs::read(&legacy_db).unwrap(), b"legacy-source");
+        assert_eq!(std::fs::read(&wrong_db).unwrap(), b"wrong-target");
+        assert_eq!(std::fs::read_link(&alias_db).unwrap(), wrong_db);
     }
 
     #[tokio::test]

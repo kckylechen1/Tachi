@@ -135,14 +135,12 @@ impl MemoryServer {
         // platform split in its caller-facing note.
         match crate::path_utils::ensure_plan_c_symlink(&db_path, &git_root) {
             crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                tracing::warn!(
-                    target: "tachi::project_db::auto_register",
-                    path = %path.display(),
-                    error = %error,
-                    project = %project_name,
-                    "workspace-root auto-registration created the project DB but the Plan C \
-                     alias symlink failed; the project remains reachable by its repo-local path"
-                );
+                return Err(format!(
+                    "Plan C alias symlink failed at {} for project '{}': {}; refusing auto-registration success",
+                    path.display(),
+                    project_name,
+                    error
+                ));
             }
             crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
                 return Err(issue.warning_message());
@@ -446,8 +444,8 @@ pub(crate) async fn handle_tachi_init_project_db(
                     return Err(issue.warning_message());
                 }
                 crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                    plan_c_note = Some(format!(
-                        "Plan C global symlink failed at {}: {}",
+                    return Err(format!(
+                        "Plan C global symlink failed at {}: {}; refusing initialized success",
                         path.display(),
                         error
                     ));
@@ -481,6 +479,13 @@ pub(crate) async fn handle_tachi_init_project_db(
         None => activation_note.to_string(),
     };
 
+    let plan_c_split_brain = match crate::path_utils::inspect_plan_c_alias(&db_path, &project_root)
+    {
+        crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => Some(issue),
+        crate::path_utils::PlanCAliasInspection::Absent
+        | crate::path_utils::PlanCAliasInspection::MatchingSymlink
+        | crate::path_utils::PlanCAliasInspection::Integrity(_) => None,
+    };
     serde_json::to_string(&json!({
         "initialized": true,
         "created": !existed,
@@ -490,7 +495,7 @@ pub(crate) async fn handle_tachi_init_project_db(
         "project": project_name,
         "db_path": db_path.display().to_string(),
         "db_relpath": rel.display().to_string(),
-        "plan_c_split_brain": crate::path_utils::plan_c_split_brain(&db_path, &project_root),
+        "plan_c_split_brain": plan_c_split_brain,
         "note": note,
     }))
     .map_err(|e| format!("serialize: {e}"))

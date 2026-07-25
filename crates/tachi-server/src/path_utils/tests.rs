@@ -253,6 +253,95 @@ fn plan_c_matching_symlink_remains_valid() {
 
 #[cfg(unix)]
 #[test]
+fn plan_c_symlink_eexist_race_regular_file_returns_split_brain() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Race-Regular-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+
+        let outcome = super::symlink::ensure_plan_c_symlink_with_test_hook(
+            &local_db,
+            &repo,
+            |alias_db| std::fs::write(alias_db, b"racing-regular").expect("racing alias"),
+        );
+
+        let PlanCLinkOutcome::SplitBrain(issue) = outcome else {
+            panic!("expected split-brain race outcome, got {outcome:?}");
+        };
+        assert_eq!(std::fs::read(&issue.alias_db).unwrap(), b"racing-regular");
+        assert!(!issue.alias_db.is_symlink());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_symlink_eexist_race_wrong_target_returns_integrity() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Race-Wrong-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        let wrong_db = tmp.path().join("wrong-target.db");
+        std::fs::write(&wrong_db, b"wrong").expect("wrong DB");
+
+        let outcome = super::symlink::ensure_plan_c_symlink_with_test_hook(
+            &local_db,
+            &repo,
+            |alias_db| {
+                std::os::unix::fs::symlink(&wrong_db, alias_db).expect("racing wrong symlink")
+            },
+        );
+
+        let PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::WrongTarget {
+            alias_db,
+            actual_db,
+            ..
+        }) = outcome
+        else {
+            panic!("expected wrong-target integrity outcome, got {outcome:?}");
+        };
+        assert_eq!(actual_db, std::fs::canonicalize(&wrong_db).unwrap());
+        assert_eq!(std::fs::read_link(alias_db).unwrap(), wrong_db);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_symlink_eexist_race_matching_target_is_accepted() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Race-Matching-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+
+        let outcome = super::symlink::ensure_plan_c_symlink_with_test_hook(
+            &local_db,
+            &repo,
+            |alias_db| {
+                std::os::unix::fs::symlink(&local_db, alias_db)
+                    .expect("racing matching symlink")
+            },
+        );
+
+        assert!(matches!(outcome, PlanCLinkOutcome::AlreadyLinked));
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        assert_eq!(std::fs::read_link(alias_db).unwrap(), local_db);
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn plan_c_dangling_alias_is_a_typed_integrity_failure() {
     with_env_lock(|| {
         let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
