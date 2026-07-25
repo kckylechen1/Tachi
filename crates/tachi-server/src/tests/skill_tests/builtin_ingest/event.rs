@@ -2,16 +2,16 @@ use super::*;
 use crate::server_state::MemoryServer;
 use crate::tool_params::{IngestEventParams, Message};
 use axum::{
+    Json, Router,
     response::{IntoResponse, Response},
     routing::post,
-    Json, Router,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::Value;
 use std::sync::Arc;
 use tachi_llm::{
-    llm::{ChatLaneConfig, ProviderRuntimeConfig},
     LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
+    llm::{ChatLaneConfig, ProviderRuntimeConfig},
 };
 
 const FACT_RESPONSE: &str = r#"[{"text":"The ingest durability test records one stable fact after reopening the database.","topic":"ingest durability","keywords":["ingest","durability"],"entities":["Tachi"],"scope":"general","importance":0.8}]"#;
@@ -201,14 +201,11 @@ async fn conversation_row_write_failure_is_loud_and_never_records_success() {
     let provider = MockExtractProvider::start().await;
     let temp = tempfile::tempdir().expect("temp row failure database");
     let server = test_server_at(temp.path().join("memory.db"), &provider.llm);
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute_batch("DROP TABLE memories")
-                .map_err(|error| format!("break only the memory row table: {error}"))
-        })
-        .expect("force conversation row write failure");
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| connection.execute_batch("DROP TABLE memories"),
+    )
+    .expect("force conversation row write failure");
 
     let error = crate::pipeline_ops::handle_ingest_event(&server, event_params())
         .await

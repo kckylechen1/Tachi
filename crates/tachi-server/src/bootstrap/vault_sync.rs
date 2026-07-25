@@ -640,14 +640,18 @@ mod tests {
 
         let target = open_cli_store_read_only(&target_db).expect("target store");
         assert!(target.vault_get_config().expect("target config").is_some());
-        assert!(target
-            .vault_get_entry("VOYAGE_API_KEY_1")
-            .expect("target entry")
-            .is_some());
-        assert!(target
-            .vault_get_rotation("VOYAGE_API_KEY")
-            .expect("target rotation")
-            .is_some());
+        assert!(
+            target
+                .vault_get_entry("VOYAGE_API_KEY_1")
+                .expect("target entry")
+                .is_some()
+        );
+        assert!(
+            target
+                .vault_get_rotation("VOYAGE_API_KEY")
+                .expect("target rotation")
+                .is_some()
+        );
 
         let _ = std::fs::remove_file(source_db);
         let _ = std::fs::remove_file(target_db);
@@ -748,20 +752,23 @@ mod tests {
             .expect("export vault sync bundle");
 
         let target = open_cli_store(&target_db).expect("target store");
-        target
-            .connection()
-            .execute_batch(
+        drop(target);
+        crate::test_support::with_unrestricted_fixture_connection(&target_db, |connection| {
+            connection.execute_batch(
                 r#"
-                DROP TRIGGER IF EXISTS block_vault_rotation_import;
-                CREATE TRIGGER block_vault_rotation_import
-                BEFORE INSERT ON vault_key_rotations
-                BEGIN
-                    SELECT RAISE(FAIL, 'blocked by test');
-                END;
+                DROP TABLE vault_key_rotations;
+                CREATE TABLE vault_key_rotations (
+                    prefix              TEXT PRIMARY KEY CHECK (prefix != 'ROLLBACK_API_KEY'),
+                    current_index       INTEGER NOT NULL DEFAULT 1,
+                    total_keys          INTEGER NOT NULL DEFAULT 0,
+                    rotation_strategy   TEXT NOT NULL DEFAULT 'round_robin',
+                    created_at          TEXT NOT NULL DEFAULT '',
+                    updated_at          TEXT NOT NULL DEFAULT ''
+                );
                 "#,
             )
-            .expect("install blocking trigger");
-        drop(target);
+        })
+        .expect("install rotation write fault");
 
         let err = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
             .expect_err("rotation failure should abort import");

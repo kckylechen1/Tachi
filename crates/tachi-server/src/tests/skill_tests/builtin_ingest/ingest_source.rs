@@ -242,19 +242,18 @@ async fn source_success_audit_failure_is_loud_retryable_and_idempotent() {
     let server = source_server_at(temp.path().join("memory.db"));
     let mut params = source_params();
     params.auto_chunk = false;
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute_batch(
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| {
+            connection.execute_batch(
                     "CREATE TRIGGER fail_ingest_success_audit \
                      BEFORE INSERT ON audit_log \
                      WHEN NEW.server_id = 'ingest' AND NEW.tool_name = 'ingest_source' AND NEW.success = 1 \
                      BEGIN SELECT RAISE(FAIL, 'injected ingest audit failure'); END;",
-                )
-                .map_err(|error| format!("install audit failure trigger: {error}"))
-        })
-        .expect("inject audit_log_insert failure");
+            )
+        },
+    )
+    .expect("inject audit_log_insert failure");
 
     let error = crate::pipeline_ops::handle_ingest_source(&server, params.clone())
         .await
@@ -264,14 +263,11 @@ async fn source_success_audit_failure_is_loud_retryable_and_idempotent() {
         "audit failure must be explicit: {error}"
     );
 
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute_batch("DROP TRIGGER fail_ingest_success_audit")
-                .map_err(|error| format!("remove audit failure trigger: {error}"))
-        })
-        .expect("restore audit writes");
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| connection.execute_batch("DROP TRIGGER fail_ingest_success_audit"),
+    )
+    .expect("restore audit writes");
 
     let completed = crate::pipeline_ops::handle_ingest_source(&server, params.clone())
         .await

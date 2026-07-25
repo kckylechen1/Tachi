@@ -13,8 +13,8 @@
 
 use super::make_server;
 use crate::claims_ops::{
-    auto_register_or_heartbeat_claim, briefing_claims_board, list_live_claims_for_briefing,
-    presence_briefing_section, ClaimHookInput,
+    ClaimHookInput, auto_register_or_heartbeat_claim, briefing_claims_board,
+    list_live_claims_for_briefing, presence_briefing_section,
 };
 
 /// Drop the `session_claims` table on the test server's global store,
@@ -22,14 +22,15 @@ use crate::claims_ops::{
 /// damaged file) so the hook's fail-safe path is exercised for real rather
 /// than just at the guard-condition level.
 fn drop_claims_table(server: &crate::server_state::MemoryServer) {
-    server
-        .with_global_store(|store| {
-            store
-                .connection_mut()
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| {
+            connection
                 .execute("DROP TABLE session_claims", [])
-                .map_err(|e| e.to_string())
-        })
-        .expect("drop session_claims table for fail-safe test setup");
+                .map(|_| ())
+        },
+    )
+    .expect("drop session_claims table for fail-safe test setup");
 }
 
 #[test]
@@ -66,9 +67,9 @@ fn auto_register_hook_with_no_identity_writes_nothing() {
                 flow_id: flow_id.map(str::to_string),
                 dispatch_id: Some("dispatch-metadata-must-not-be-an-identity".to_string()),
                 branch: Some("feat/no-identity".to_string()),
-                declared_file_scope: Some(
-                    vec!["crates/tachi-server/src/claims_ops.rs".to_string()],
-                ),
+                declared_file_scope: Some(vec![
+                    "crates/tachi-server/src/claims_ops.rs".to_string(),
+                ]),
             },
         );
 
@@ -182,10 +183,12 @@ async fn two_sessions_each_see_the_others_claim_through_the_real_server() {
         |c| c.session_client.as_deref() == Some("claude-code-seat-a")
             && c.issue_ref.as_deref() == Some("org/repo#500")
     ));
-    assert!(live_from_b
-        .iter()
-        .any(|c| c.session_client.as_deref() == Some("codex-seat-b")
-            && c.issue_ref.as_deref() == Some("org/repo#600")));
+    assert!(
+        live_from_b
+            .iter()
+            .any(|c| c.session_client.as_deref() == Some("codex-seat-b")
+                && c.issue_ref.as_deref() == Some("org/repo#600"))
+    );
 
     // The briefing board projection also reflects both.
     let board = briefing_claims_board(&server_a);
@@ -288,10 +291,12 @@ async fn briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_d
     let section_a = presence_briefing_section(&server_a, Some("org/repo#1001"));
     let warnings_a = section_a["warnings"].as_array().unwrap();
     assert_eq!(warnings_a.len(), 1);
-    assert!(warnings_a[0]
-        .as_str()
-        .unwrap()
-        .contains("file-scope overlap"));
+    assert!(
+        warnings_a[0]
+            .as_str()
+            .unwrap()
+            .contains("file-scope overlap")
+    );
     assert!(warnings_a[0].as_str().unwrap().contains("seat-b"));
 }
 

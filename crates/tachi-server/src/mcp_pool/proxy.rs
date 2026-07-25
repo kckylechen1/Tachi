@@ -1,6 +1,6 @@
 use super::{CircuitProbeDecision, CircuitState};
 use crate::server_state::MemoryServer;
-use crate::shared_defs::{push_dead_letter_with_limits, DeadLetter};
+use crate::shared_defs::{DeadLetter, push_dead_letter_with_limits};
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use serde_json::json;
@@ -567,18 +567,17 @@ mod auto_ingest_response_tests {
     #[tokio::test]
     async fn failed_auto_ingest_does_not_replace_successful_mcp_result() {
         let server = crate::tests::make_server();
-        server
-            .with_global_store(|store| {
-                store
-                    .connection()
-                    .execute_batch(
-                        "CREATE TRIGGER fail_proxy_auto_ingest_row \
+        crate::test_support::with_unrestricted_fixture_connection(
+            &server.global_db_path_buf(),
+            |connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_proxy_auto_ingest_row \
                          BEFORE INSERT ON memories \
                          BEGIN SELECT RAISE(FAIL, 'injected proxy auto-ingest failure'); END;",
-                    )
-                    .map_err(|error| format!("install proxy auto-ingest fault: {error}"))
-            })
-            .expect("install proxy auto-ingest fault");
+                )
+            },
+        )
+        .expect("install proxy auto-ingest fault");
         let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
             "content": [{"type": "text", "text": "successful remote MCP payload"}],
             "isError": false
@@ -658,19 +657,18 @@ mod auto_ingest_response_tests {
     #[tokio::test]
     async fn failed_auto_ingest_staging_is_visible_in_pipeline_status() {
         let server = crate::tests::make_server();
-        server
-            .with_global_store(|store| {
-                store
-                    .connection()
-                    .execute_batch(
-                        "CREATE TRIGGER fail_proxy_auto_ingest_stage \
+        crate::test_support::with_unrestricted_fixture_connection(
+            &server.global_db_path_buf(),
+            |connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_proxy_auto_ingest_stage \
                          BEFORE INSERT ON processed_events \
                          WHEN NEW.worker = 'auto_ingest_job' \
                          BEGIN SELECT RAISE(FAIL, 'injected auto-ingest stage failure'); END;",
-                    )
-                    .map_err(|error| format!("install auto-ingest stage fault: {error}"))
-            })
-            .expect("install auto-ingest stage fault");
+                )
+            },
+        )
+        .expect("install auto-ingest stage fault");
         let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
             "content": [{"type": "text", "text": "successful MCP payload with failed staging"}],
             "isError": false
@@ -698,9 +696,11 @@ mod auto_ingest_response_tests {
             .expect("structured auto-ingest persistence warning");
         assert_eq!(warnings.len(), 1, "exactly one persistence warning");
         assert_eq!(warnings[0]["code"], "auto_ingest_not_persisted");
-        assert!(warnings[0]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("injected auto-ingest stage failure")));
+        assert!(
+            warnings[0]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("injected auto-ingest stage failure"))
+        );
         let status: serde_json::Value = serde_json::from_str(
             &crate::pipeline_ops::handle_get_pipeline_status(&server)
                 .await
