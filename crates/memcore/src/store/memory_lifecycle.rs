@@ -19,12 +19,12 @@
 //! a mismatch means the world drifted between approve and apply → refuse.
 //!
 //! The membership rule for [`LifecycleEndpointSnapshot`] is **every input the
-//! apply step reads**, not every field a reviewer looks at — anything apply
-//! consumes but the identity omits is a field a writer can change after
-//! approval without tripping the drift check, which makes the reviewed
-//! content and the executed content two different things. Set-valued inputs
-//! go in through [`canonical_tags`] so storage order is not mistaken for
-//! drift.
+//! proposal's eligibility/action selection and apply step read**, not every
+//! volatile field on a memory row. Anything either boundary consumes but the
+//! identity omits is a field a writer can change after approval without
+//! tripping the drift check, which makes the reviewed decision and the live
+//! decision inputs two different things. Set-valued inputs go in through
+//! [`canonical_tags`] so storage order is not mistaken for drift.
 //!
 //! ## Review
 //!
@@ -98,8 +98,9 @@ pub fn canonical_tags(values: &[String]) -> Vec<String> {
 /// time. Every field participates in the identity hash, so any drift is
 /// detected at apply.
 ///
-/// The rule for what belongs here is **every input the apply step reads**, not
-/// just the fields a human reviewer looks at. `keywords`/`entities`/
+/// The rule for what belongs here is **every input proposal eligibility/action
+/// selection or the apply step reads**, not just the fields a human reviewer
+/// looks at. `keywords`/`entities`/
 /// `importance` are execution inputs for the merge actions (the fold + the
 /// `MAX(importance)` in `apply_lifecycle_proposal_once`), and two live writers
 /// mutate exactly those three columns *without* bumping `revision`:
@@ -111,6 +112,15 @@ pub fn canonical_tags(values: &[String]) -> Vec<String> {
 /// snapshot byte-identical while changing what actually gets folded — the
 /// reviewer would have approved one keyword set and a different one would
 /// execute.
+///
+/// Generator-only inputs that are not execution inputs are bound
+/// action-selectively. Search access recording mutates `access_count`,
+/// `recall_count`, `query_diversity`, and sometimes `tier` without a revision
+/// bump; stale archive and promote-distilled eligibility consume those fields.
+/// Pair generators also consume summary/timestamp when choosing an action or
+/// survivor. The optional fields below are populated only for actions that
+/// actually use them, so ordinary supersession does not become sensitive to
+/// unrelated recall bookkeeping.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LifecycleEndpointSnapshot {
     pub id: String,
@@ -133,6 +143,23 @@ pub struct LifecycleEndpointSnapshot {
     /// exact round-trip through SQLite's `REAL`, so a byte-for-byte unchanged
     /// row can never hash differently.
     pub importance_bits: u64,
+    /// SHA-256 of `summary`, only for same-path merge/supersede eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility_summary_digest: Option<String>,
+    /// Source/survivor ordering or staleness timestamp, only for actions whose
+    /// generator reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility_timestamp: Option<String>,
+    /// Stale-archive's "unused" gate, action-scoped so other actions do not
+    /// refuse merely because normal recall bookkeeping advanced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility_access_count: Option<i64>,
+    /// Used by stale archive and promote-distilled eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility_recall_count: Option<i64>,
+    /// Used only by promote-distilled eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility_query_diversity: Option<i64>,
     pub archived: bool,
     /// The supersession edge is written by both revisioned lifecycle applies
     /// and `mark_superseded_closing_validity` (without a revision bump). A
@@ -317,6 +344,11 @@ pub fn snapshot_endpoint(entry: &MemoryEntry) -> LifecycleEndpointSnapshot {
         keywords: canonical_tags(&entry.keywords),
         entities: canonical_tags(&entry.entities),
         importance_bits: entry.importance.to_bits(),
+        eligibility_summary_digest: None,
+        eligibility_timestamp: None,
+        eligibility_access_count: None,
+        eligibility_recall_count: None,
+        eligibility_query_diversity: None,
         archived: entry.archived,
         // Proposal generators only consider active rows (supersession edges
         // are hidden from their input queries), so `None` is the state a
@@ -329,6 +361,82 @@ pub fn snapshot_endpoint(entry: &MemoryEntry) -> LifecycleEndpointSnapshot {
         is_wiki: entry.is_wiki(),
         protected_reason: lifecycle_protection_reason(entry).map(str::to_string),
     }
+}
+
+fn bind_action_eligibility(
+    snapshot: &mut LifecycleEndpointSnapshot,
+    action: &str,
+    summary: &str,
+    timestamp: &str,
+    access_count: i64,
+    recall_count: i64,
+    query_diversity: i64,
+) {
+    match action {
+        ACTION_MERGE_INTO | ACTION_SUPERSEDE => {
+            snapshot.eligibility_summary_digest = Some(lifecycle_text_digest(summary));
+            snapshot.eligibility_timestamp = Some(timestamp.to_string());
+        }
+        ACTION_NEAR_DUP_MERGE => {
+            snapshot.eligibility_timestamp = Some(timestamp.to_string());
+        }
+        ACTION_ARCHIVE => {
+            snapshot.eligibility_timestamp = Some(timestamp.to_string());
+            snapshot.eligibility_access_count = Some(access_count);
+            snapshot.eligibility_recall_count = Some(recall_count);
+        }
+        ACTION_PROMOTE_DISTILLED => {
+            snapshot.eligibility_recall_count = Some(recall_count);
+            snapshot.eligibility_query_diversity = Some(query_diversity);
+        }
+        _ => {}
+    }
+}
+
+fn snapshot_endpoint_for_action(action: &str, entry: &MemoryEntry) -> LifecycleEndpointSnapshot {
+    let mut snapshot = snapshot_endpoint(entry);
+    bind_action_eligibility(
+        &mut snapshot,
+        action,
+        &entry.summary,
+        &entry.timestamp,
+        entry.access_count,
+        entry.recall_count,
+        entry.query_diversity,
+    );
+    snapshot
+}
+
+fn validate_action_eligibility_shape(
+    proposal_id: &str,
+    action: &str,
+    endpoint_label: &str,
+    endpoint: &LifecycleEndpointSnapshot,
+) -> Result<(), MemoryError> {
+    let expected = match action {
+        ACTION_MERGE_INTO | ACTION_SUPERSEDE => (true, true, false, false, false),
+        ACTION_NEAR_DUP_MERGE => (false, true, false, false, false),
+        ACTION_ARCHIVE => (false, true, true, true, false),
+        ACTION_PROMOTE_DISTILLED => (false, false, false, true, true),
+        other => {
+            return Err(MemoryError::InvalidArg(format!(
+                "v2 lifecycle proposal {proposal_id} has unsupported lifecycle_action '{other}'"
+            )));
+        }
+    };
+    let actual = (
+        endpoint.eligibility_summary_digest.is_some(),
+        endpoint.eligibility_timestamp.is_some(),
+        endpoint.eligibility_access_count.is_some(),
+        endpoint.eligibility_recall_count.is_some(),
+        endpoint.eligibility_query_diversity.is_some(),
+    );
+    if actual != expected {
+        return Err(MemoryError::InvalidArg(format!(
+            "v2 lifecycle proposal {proposal_id} {endpoint_label} eligibility snapshot does not match action '{action}'"
+        )));
+    }
+    Ok(())
 }
 
 /// Build a v2 apply payload from the source/target entries and the action
@@ -365,8 +473,8 @@ pub fn build_apply_payload_with_review_display(
         schema_version: LIFECYCLE_SCHEMA_VERSION,
         policy_version: LIFECYCLE_POLICY_VERSION.to_string(),
         lifecycle_action: action.to_string(),
-        source: snapshot_endpoint(source),
-        target: target.map(snapshot_endpoint),
+        source: snapshot_endpoint_for_action(action, source),
+        target: target.map(|entry| snapshot_endpoint_for_action(action, entry)),
         review_display,
     }
 }
@@ -403,6 +511,20 @@ pub fn validate_lifecycle_proposal(
         return Err(MemoryError::InvalidArg(format!(
             "v2 lifecycle proposal {proposal_id} uses unsupported schema/policy version"
         )));
+    }
+    validate_action_eligibility_shape(
+        proposal_id,
+        &payload.lifecycle_action,
+        "source",
+        &payload.source,
+    )?;
+    if let Some(target) = payload.target.as_ref() {
+        validate_action_eligibility_shape(
+            proposal_id,
+            &payload.lifecycle_action,
+            "target",
+            target,
+        )?;
     }
 
     let expected_target_id =
@@ -587,29 +709,36 @@ fn read_memory_in_tx(
 fn read_endpoint_snapshot(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
+    action: &str,
 ) -> Result<Option<LifecycleEndpointSnapshot>, MemoryError> {
     let snapshot = tx
         .query_row(
-            "SELECT id, path, text, archived, revision, retention_policy, tier, category, domain,
-                    metadata, keywords, entities, importance, superseded_by, valid_until
+            "SELECT id, path, summary, text, timestamp, archived, revision, retention_policy, tier,
+                    category, domain, metadata, keywords, entities, importance, superseded_by,
+                    valid_until, access_count, recall_count, query_diversity
              FROM memories WHERE id = ?1",
             params![id],
             |r| {
                 let id: String = r.get(0)?;
                 let path: String = r.get(1)?;
-                let text: String = r.get(2)?;
-                let archived: bool = r.get(3)?;
-                let revision: i64 = r.get(4)?;
-                let retention_policy: Option<String> = r.get(5)?;
-                let tier: String = r.get(6)?;
-                let category: String = r.get(7)?;
-                let domain: Option<String> = r.get(8)?;
-                let metadata_str: String = r.get(9)?;
-                let keywords_json: String = r.get(10)?;
-                let entities_json: String = r.get(11)?;
-                let importance: f64 = r.get(12)?;
-                let superseded_by: Option<String> = r.get(13)?;
-                let valid_until: Option<String> = r.get(14)?;
+                let summary: String = r.get(2)?;
+                let text: String = r.get(3)?;
+                let timestamp: String = r.get(4)?;
+                let archived: bool = r.get(5)?;
+                let revision: i64 = r.get(6)?;
+                let retention_policy: Option<String> = r.get(7)?;
+                let tier: String = r.get(8)?;
+                let category: String = r.get(9)?;
+                let domain: Option<String> = r.get(10)?;
+                let metadata_str: String = r.get(11)?;
+                let keywords_json: String = r.get(12)?;
+                let entities_json: String = r.get(13)?;
+                let importance: f64 = r.get(14)?;
+                let superseded_by: Option<String> = r.get(15)?;
+                let valid_until: Option<String> = r.get(16)?;
+                let access_count: i64 = r.get(17)?;
+                let recall_count: i64 = r.get(18)?;
+                let query_diversity: i64 = r.get(19)?;
 
                 let metadata: serde_json::Value =
                     serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({}));
@@ -631,7 +760,7 @@ fn read_endpoint_snapshot(
                 let entities: Vec<String> =
                     serde_json::from_str(&entities_json).unwrap_or_default();
 
-                Ok(LifecycleEndpointSnapshot {
+                let mut snapshot = LifecycleEndpointSnapshot {
                     id,
                     revision,
                     path,
@@ -639,6 +768,11 @@ fn read_endpoint_snapshot(
                     keywords: canonical_tags(&keywords),
                     entities: canonical_tags(&entities),
                     importance_bits: importance.to_bits(),
+                    eligibility_summary_digest: None,
+                    eligibility_timestamp: None,
+                    eligibility_access_count: None,
+                    eligibility_recall_count: None,
+                    eligibility_query_diversity: None,
                     archived,
                     superseded_by,
                     valid_until,
@@ -646,7 +780,17 @@ fn read_endpoint_snapshot(
                     tier,
                     is_wiki,
                     protected_reason,
-                })
+                };
+                bind_action_eligibility(
+                    &mut snapshot,
+                    action,
+                    &summary,
+                    &timestamp,
+                    access_count,
+                    recall_count,
+                    query_diversity,
+                );
+                Ok(snapshot)
             },
         )
         .optional()?;
@@ -725,7 +869,7 @@ fn apply_lifecycle_proposal_once(
     let target_id = stored_payload.target.as_ref().map(|t| t.id.clone());
 
     // ── Revalidate: rebuild payload from LIVE rows, recompute identity ────
-    let live_source = read_endpoint_snapshot(&tx, &source_id)?
+    let live_source = read_endpoint_snapshot(&tx, &source_id, action)?
         .ok_or_else(|| drift_err(proposal_id, format!("source row missing: {source_id}")))?;
     if live_source.protected_reason.is_some() {
         return Err(drift_err(
@@ -738,7 +882,7 @@ fn apply_lifecycle_proposal_once(
     }
     let live_target = if let Some(ref tid) = target_id {
         Some(
-            read_endpoint_snapshot(&tx, tid)?
+            read_endpoint_snapshot(&tx, tid, action)?
                 .ok_or_else(|| drift_err(proposal_id, format!("target row missing: {tid}")))?,
         )
     } else {
@@ -989,8 +1133,8 @@ mod tests {
             schema_version: LIFECYCLE_SCHEMA_VERSION,
             policy_version: LIFECYCLE_POLICY_VERSION.to_string(),
             lifecycle_action: ACTION_MERGE_INTO.to_string(),
-            source: snapshot_endpoint(&entry),
-            target: Some(snapshot_endpoint(&target)),
+            source: snapshot_endpoint_for_action(ACTION_MERGE_INTO, &entry),
+            target: Some(snapshot_endpoint_for_action(ACTION_MERGE_INTO, &target)),
             review_display,
         };
         assert_eq!(
@@ -1052,6 +1196,149 @@ mod tests {
             baseline,
             identity_of(&importance_drifted),
             "importance drift wins the MAX at apply, so it must change the identity"
+        );
+    }
+
+    #[test]
+    fn identity_binds_only_each_actions_eligibility_inputs() {
+        let base = MemoryEntry {
+            id: "eligibility-source".into(),
+            path: "/scratch/eligibility".into(),
+            summary: "same-path summary".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            access_count: 0,
+            recall_count: 0,
+            query_diversity: 0,
+            ..test_entry()
+        };
+        let identity_of = |action: &str, entry: &MemoryEntry| {
+            compute_lifecycle_identity(&build_apply_payload(action, entry, None))
+        };
+
+        let archive = identity_of(ACTION_ARCHIVE, &base);
+        for (field, drifted) in [
+            (
+                "access_count",
+                MemoryEntry {
+                    access_count: 1,
+                    ..base.clone()
+                },
+            ),
+            (
+                "recall_count",
+                MemoryEntry {
+                    recall_count: 1,
+                    ..base.clone()
+                },
+            ),
+            (
+                "timestamp",
+                MemoryEntry {
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    ..base.clone()
+                },
+            ),
+        ] {
+            assert_ne!(
+                archive,
+                identity_of(ACTION_ARCHIVE, &drifted),
+                "archive eligibility field {field} must move the identity"
+            );
+        }
+        assert_eq!(
+            archive,
+            identity_of(
+                ACTION_ARCHIVE,
+                &MemoryEntry {
+                    query_diversity: 9,
+                    ..base.clone()
+                }
+            ),
+            "archive eligibility does not consume query_diversity"
+        );
+
+        let promote = identity_of(ACTION_PROMOTE_DISTILLED, &base);
+        for (field, drifted) in [
+            (
+                "recall_count",
+                MemoryEntry {
+                    recall_count: 1,
+                    ..base.clone()
+                },
+            ),
+            (
+                "query_diversity",
+                MemoryEntry {
+                    query_diversity: 1,
+                    ..base.clone()
+                },
+            ),
+        ] {
+            assert_ne!(
+                promote,
+                identity_of(ACTION_PROMOTE_DISTILLED, &drifted),
+                "promotion eligibility field {field} must move the identity"
+            );
+        }
+        assert_eq!(
+            promote,
+            identity_of(
+                ACTION_PROMOTE_DISTILLED,
+                &MemoryEntry {
+                    access_count: 9,
+                    ..base.clone()
+                }
+            ),
+            "promotion eligibility does not consume access_count"
+        );
+
+        let supersede = identity_of(ACTION_SUPERSEDE, &base);
+        assert_ne!(
+            supersede,
+            identity_of(
+                ACTION_SUPERSEDE,
+                &MemoryEntry {
+                    summary: "changed same-path summary".into(),
+                    ..base.clone()
+                }
+            ),
+            "same-path action selection consumes summary"
+        );
+        assert_ne!(
+            supersede,
+            identity_of(
+                ACTION_SUPERSEDE,
+                &MemoryEntry {
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    ..base.clone()
+                }
+            ),
+            "same-path survivor selection consumes timestamp"
+        );
+        let near_dup = identity_of(ACTION_NEAR_DUP_MERGE, &base);
+        assert_ne!(
+            near_dup,
+            identity_of(
+                ACTION_NEAR_DUP_MERGE,
+                &MemoryEntry {
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    ..base.clone()
+                }
+            ),
+            "near-duplicate survivor selection consumes timestamp"
+        );
+        assert_eq!(
+            supersede,
+            identity_of(
+                ACTION_SUPERSEDE,
+                &MemoryEntry {
+                    access_count: 9,
+                    recall_count: 9,
+                    query_diversity: 9,
+                    ..base
+                }
+            ),
+            "same-path supersession must ignore unrelated recall bookkeeping"
         );
     }
 
@@ -1220,6 +1507,43 @@ mod tests {
         )
         .expect_err("stale policy must be rejected before review");
         assert!(err.to_string().contains("unsupported schema/policy"));
+    }
+
+    #[test]
+    fn validation_rejects_action_payload_missing_required_eligibility_input() {
+        let source = MemoryEntry {
+            id: "missing-archive-access-input".into(),
+            ..test_entry()
+        };
+        let mut payload = build_apply_payload(ACTION_ARCHIVE, &source, None);
+        payload.source.eligibility_access_count = None;
+        let proposal_id = lifecycle_proposal_id(&payload).expect("known action");
+        let proposal = serde_json::json!({
+            "proposal_id": proposal_id,
+            "kind": payload.review_display.kind.clone(),
+            "schema_version": payload.schema_version,
+            "policy_version": payload.policy_version.clone(),
+            "lifecycle_action": payload.lifecycle_action.clone(),
+            "source_id": payload.source.id.clone(),
+            "target_id": serde_json::Value::Null,
+            "requires_human_approval": payload.review_display.requires_human_approval,
+            "path": payload.review_display.path.clone(),
+            "rationale": payload.review_display.rationale.clone(),
+            "evidence": payload.review_display.evidence.clone(),
+            "identity": compute_lifecycle_identity(&payload),
+            "apply_payload": payload,
+        });
+
+        let err = validate_lifecycle_proposal(
+            proposal["proposal_id"].as_str().expect("proposal id"),
+            &proposal,
+        )
+        .expect_err("archive payload without access_count must refuse review/apply validation");
+        assert!(
+            err.to_string()
+                .contains("source eligibility snapshot does not match action 'archive'"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

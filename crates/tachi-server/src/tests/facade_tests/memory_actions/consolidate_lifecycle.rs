@@ -24,6 +24,105 @@ fn seed_scratch(id: &str, path: &str, text: &str, days_ago: i64) -> memcore::Mem
     e
 }
 
+async fn propose_and_approve_lifecycle_action(
+    server: &crate::server_state::MemoryServer,
+    source_id: &str,
+    path_prefix: &str,
+    action: &str,
+) -> (String, String, u32, i64) {
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some(path_prefix.to_string());
+    let proposed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(server, propose)
+            .await
+            .expect("propose lifecycle action"),
+    )
+    .expect("proposal json");
+    let proposal_id = proposed["generated"]
+        .as_array()
+        .expect("generated proposals")
+        .iter()
+        .find(|proposal| {
+            proposal["source_id"] == json!(source_id)
+                && proposal["lifecycle_action"] == json!(action)
+        })
+        .unwrap_or_else(|| panic!("expected {action} proposal for {source_id}: {proposed}"))
+        ["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+
+    let mut review = tachi_memory_params("consolidate");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(server, review)
+        .await
+        .expect("approve lifecycle action");
+
+    let (approved_raw, approved_version, source_revision) = server
+        .with_global_store_read(|store| {
+            let (raw, version) = store
+                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("approved proposal remains persisted");
+            assert_eq!(
+                serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string())?["status"],
+                json!("approved")
+            );
+            let revision = store
+                .get(source_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal source exists")
+                .revision;
+            Ok((raw, version, revision))
+        })
+        .expect("capture approved proposal identity");
+    (proposal_id, approved_raw, approved_version, source_revision)
+}
+
+async fn refuse_drifted_lifecycle_apply_without_mutation(
+    server: &crate::server_state::MemoryServer,
+    proposal_id: &str,
+    source_id: &str,
+    approved_raw: &str,
+    approved_version: u32,
+    approved_revision: i64,
+) -> memcore::MemoryEntry {
+    let mut apply = tachi_memory_params("consolidate");
+    apply.format = Some("json".to_string());
+    apply.proposal_id = Some(proposal_id.to_string());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(server, apply)
+        .await
+        .expect_err("eligibility drift must refuse apply");
+    assert!(err.contains("identity mismatch"), "unexpected error: {err}");
+
+    server
+        .with_global_store_read(|store| {
+            let proposal = store
+                .get_state_kv("memory_lifecycle_proposals", proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("refused proposal remains persisted");
+            assert_eq!(
+                proposal,
+                (approved_raw.to_string(), approved_version),
+                "refused apply must preserve the exact approved proposal row and version"
+            );
+            let source = store
+                .get(source_id)
+                .map_err(|e| e.to_string())?
+                .expect("refused source remains active");
+            assert_eq!(
+                source.revision, approved_revision,
+                "no-revision drift and refused apply must leave revision unchanged"
+            );
+            Ok(source)
+        })
+        .expect("verify eligibility-drift refusal is atomic")
+}
+
 #[tokio::test]
 async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
     let server = make_server();
@@ -1749,6 +1848,216 @@ async fn consolidate_custom_path_prefix_proposes_supersede_outside_scratch() {
     assert!(
         lifecycle.is_some(),
         "custom path_prefix=/code-review must yield supersede/merge_into for same-path dups: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn consolidate_stale_archive_refuses_no_revision_access_count_drift_atomically() {
+    let server = make_server();
+    let source_id = "14280000-0000-4000-8000-000000000001";
+    let path = "/scratch/lifecycle-access-drift";
+    let mut source = seed_scratch(
+        source_id,
+        path,
+        "Old unused archive candidate with no identifier tokens in its body",
+        400,
+    );
+    source.importance = 0.2;
+    source.access_count = 0;
+    source.recall_count = 0;
+    server
+        .with_global_store(|store| store.upsert(&source).map_err(|e| e.to_string()))
+        .expect("seed stale archive candidate");
+
+    let (proposal_id, approved_raw, approved_version, approved_revision) =
+        propose_and_approve_lifecycle_action(&server, source_id, path, "archive").await;
+
+    server
+        .with_global_store(|store| {
+            let results = store
+                .search(
+                    source_id,
+                    Some(memcore::SearchOptions {
+                        candidates_per_channel: 1,
+                        top_k: 1,
+                        path_prefix: Some(path.to_string()),
+                        record_access: true,
+                        ..Default::default()
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                results.first().map(|result| result.entry.id.as_str()),
+                Some(source_id),
+                "exact-ID production recall must reach the approved source"
+            );
+            let drifted = store
+                .get(source_id)
+                .map_err(|e| e.to_string())?
+                .expect("source remains visible after recall");
+            assert_eq!(drifted.access_count, 1);
+            assert_eq!(
+                drifted.recall_count, 0,
+                "exact-ID retrieval isolates access_count from the FTS recall counter"
+            );
+            assert_eq!(
+                drifted.revision, approved_revision,
+                "production access recording must demonstrate no-revision drift"
+            );
+            Ok(())
+        })
+        .expect("record production access drift");
+
+    let after = refuse_drifted_lifecycle_apply_without_mutation(
+        &server,
+        &proposal_id,
+        source_id,
+        &approved_raw,
+        approved_version,
+        approved_revision,
+    )
+    .await;
+    assert!(!after.archived, "refused stale archive must stay active");
+    assert_eq!(after.access_count, 1, "writer effect must remain visible");
+    assert_eq!(after.recall_count, 0);
+}
+
+#[tokio::test]
+async fn consolidate_stale_archive_refuses_no_revision_recall_count_drift_atomically() {
+    let server = make_server();
+    let source_id = "14280000-0000-4000-8000-000000000002";
+    let path = "/scratch/lifecycle-recall-drift";
+    let mut source = seed_scratch(
+        source_id,
+        path,
+        "Old unused archive candidate containing cinnabarrecallneedle",
+        400,
+    );
+    source.importance = 0.2;
+    source.access_count = 0;
+    source.recall_count = 0;
+    server
+        .with_global_store(|store| store.upsert(&source).map_err(|e| e.to_string()))
+        .expect("seed stale archive candidate");
+
+    let (proposal_id, approved_raw, approved_version, approved_revision) =
+        propose_and_approve_lifecycle_action(&server, source_id, path, "archive").await;
+
+    server
+        .with_global_store(|store| {
+            let results = store
+                .search(
+                    "cinnabarrecallneedle",
+                    Some(memcore::SearchOptions {
+                        candidates_per_channel: 1,
+                        top_k: 1,
+                        path_prefix: Some(path.to_string()),
+                        record_access: true,
+                        ..Default::default()
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                results.first().map(|result| result.entry.id.as_str()),
+                Some(source_id),
+                "FTS production recall must reach the approved source"
+            );
+            let drifted = store
+                .get(source_id)
+                .map_err(|e| e.to_string())?
+                .expect("source remains visible after recall");
+            assert_eq!(drifted.access_count, 1);
+            assert_eq!(drifted.recall_count, 1);
+            assert_eq!(
+                drifted.revision, approved_revision,
+                "production recall recording must demonstrate no-revision drift"
+            );
+
+            // The production helper necessarily advances both counters. Reset
+            // only access_count to its approved value so this discriminator's
+            // final live identity differs solely in recall_count (archive does
+            // not consume query_diversity).
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET access_count = 0 WHERE id = ?1",
+                    [source_id],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("record production recall drift");
+
+    let after = refuse_drifted_lifecycle_apply_without_mutation(
+        &server,
+        &proposal_id,
+        source_id,
+        &approved_raw,
+        approved_version,
+        approved_revision,
+    )
+    .await;
+    assert!(!after.archived, "refused stale archive must stay active");
+    assert_eq!(after.access_count, 0);
+    assert_eq!(after.recall_count, 1, "writer effect must remain visible");
+}
+
+#[tokio::test]
+async fn consolidate_promote_refuses_no_revision_query_diversity_drift_atomically() {
+    let server = make_server();
+    let source_id = "life-promote-query-diversity-drift";
+    let path = "/scratch/lifecycle-query-diversity-drift";
+    let mut source = seed_scratch(
+        source_id,
+        path,
+        "Raw candidate approved after diverse production recall",
+        5,
+    );
+    source.importance = 0.7;
+    source.recall_count = 3;
+    source.query_diversity = 3;
+    source.tier = "raw".to_string();
+    server
+        .with_global_store(|store| store.upsert(&source).map_err(|e| e.to_string()))
+        .expect("seed promotion candidate");
+
+    let (proposal_id, approved_raw, approved_version, approved_revision) =
+        propose_and_approve_lifecycle_action(&server, source_id, path, "promote_distilled").await;
+
+    server
+        .with_global_store(|store| {
+            store
+                .gc_tables(&memcore::GcConfig::default())
+                .map_err(|e| e.to_string())?;
+            let drifted = store
+                .get(source_id)
+                .map_err(|e| e.to_string())?
+                .expect("promotion source remains visible after GC reconciliation");
+            assert_eq!(drifted.recall_count, 3);
+            assert_eq!(drifted.query_diversity, 0);
+            assert_eq!(drifted.tier, "raw");
+            assert_eq!(
+                drifted.revision, approved_revision,
+                "production diversity reconciliation must demonstrate no-revision drift"
+            );
+            Ok(())
+        })
+        .expect("reconcile production query diversity");
+
+    let after = refuse_drifted_lifecycle_apply_without_mutation(
+        &server,
+        &proposal_id,
+        source_id,
+        &approved_raw,
+        approved_version,
+        approved_revision,
+    )
+    .await;
+    assert_eq!(after.tier, "raw", "refused promotion must not mutate tier");
+    assert_eq!(after.recall_count, 3);
+    assert_eq!(
+        after.query_diversity, 0,
+        "writer effect must remain visible"
     );
 }
 
