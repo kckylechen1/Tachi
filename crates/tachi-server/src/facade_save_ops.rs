@@ -9,7 +9,7 @@ use crate::facade_memory_ops::shape_save_facade_response;
 use crate::memory_search_ops::{handle_remember, handle_save_memory};
 use crate::pipeline_ops::handle_extract_facts;
 use crate::tool_params::*;
-use crate::MemoryServer;
+use crate::{DbScope, MemoryServer};
 use chrono::Utc;
 
 pub(crate) async fn handle_tachi_save(
@@ -172,7 +172,7 @@ pub(crate) async fn handle_tachi_save(
             crate::wiki_ops::validate_references(&params.references)?;
             let metadata =
                 merge_referenced_files(params.metadata.clone(), &params.files, &params.text);
-            let metadata = merge_evidence_references(metadata, &params.references);
+            let metadata = merge_existing_evidence_references(server, &params, metadata)?;
             let mem_params = SaveMemoryParams {
                 text: params.text.clone(),
                 summary: params.summary.clone().unwrap_or_default(),
@@ -274,7 +274,7 @@ fn merge_referenced_files(
     Some(serde_json::Value::Object(obj))
 }
 
-/// tachi#1288 (Fix B): dual-write validated `references[]` into
+/// tachi#1288 (Fix B): write validated `references[]` into
 /// `metadata.evidence_refs_v1` (typed, canon doc §7.1 `WikiEvidenceRefV1`
 /// shape -- same builder `tachi_wiki_write` uses via `wiki_layer_metadata`)
 /// for the plain "memory" save path, which previously had no consumer for
@@ -290,16 +290,73 @@ fn merge_evidence_references(
         return metadata;
     }
     let captured_at = Utc::now().to_rfc3339();
-    let evidence_refs_v1 = build_evidence_refs_v1(references, &captured_at);
     let mut obj = match metadata {
         Some(serde_json::Value::Object(m)) => m,
         _ => serde_json::Map::new(),
     };
+    let mut evidence_refs_v1 = obj
+        .get("evidence_refs_v1")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for new_ref in build_evidence_refs_v1(references, &captured_at) {
+        let already_present = evidence_refs_v1.iter().any(|existing| {
+            existing.get("ref").and_then(serde_json::Value::as_str)
+                == Some(new_ref.target_ref.as_str())
+        });
+        if !already_present {
+            evidence_refs_v1.push(serde_json::json!(new_ref));
+        }
+    }
     obj.insert(
         "evidence_refs_v1".to_string(),
         serde_json::json!(evidence_refs_v1),
     );
     Some(serde_json::Value::Object(obj))
+}
+
+/// Carries typed references from an existing facade-targeted memory update
+/// into the normal metadata patch before adding newly validated references.
+/// This keeps the update's ordinary metadata behavior while preventing the
+/// facade-owned `evidence_refs_v1` field from replacing persisted evidence.
+fn merge_existing_evidence_references(
+    server: &MemoryServer,
+    params: &TachiSaveParams,
+    metadata: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(id) = params.id.as_deref() else {
+        return Ok(merge_evidence_references(metadata, &params.references));
+    };
+    let existing = if let Some(project) = params.project.as_deref() {
+        server.with_named_project_store_read(project, |store| {
+            store.get(id).map_err(|error| error.to_string())
+        })?
+    } else {
+        let scope = params.scope.as_deref().unwrap_or("project");
+        let (target_db, _) = server.resolve_write_scope(scope);
+        match target_db {
+            DbScope::Global => server
+                .with_global_store_read(|store| store.get(id).map_err(|error| error.to_string()))?,
+            DbScope::Project => server.with_project_store_read(|store| {
+                store.get(id).map_err(|error| error.to_string())
+            })?,
+        }
+    };
+    let Some(existing_refs) =
+        existing.and_then(|entry| entry.metadata.get("evidence_refs_v1").cloned())
+    else {
+        return Ok(merge_evidence_references(metadata, &params.references));
+    };
+
+    let mut obj = match metadata {
+        Some(serde_json::Value::Object(obj)) => obj,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert("evidence_refs_v1".to_string(), existing_refs);
+    Ok(merge_evidence_references(
+        Some(serde_json::Value::Object(obj)),
+        &params.references,
+    ))
 }
 
 /// Extract referenced file paths from `spec:` pointer lines, e.g.
@@ -364,7 +421,7 @@ mod referenced_files_tests {
 
 #[cfg(test)]
 mod evidence_references_tests {
-    use super::merge_evidence_references;
+    use super::{handle_tachi_save, merge_evidence_references};
     use serde_json::json;
 
     /// tachi#1288 Fix B: no references → metadata passes through unchanged,
@@ -409,5 +466,71 @@ mod evidence_references_tests {
         let merged = merge_evidence_references(None, &["#42".to_string()])
             .expect("metadata created from references alone");
         assert_eq!(merged["evidence_refs_v1"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn updating_memory_preserves_and_dedupes_typed_evidence_references() {
+        let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+        let first = handle_tachi_save(
+            &server,
+            serde_json::from_value(json!({
+                "kind": "memory",
+                "text": "Initial memory records the first evidence reference.",
+                "path": "/audit/evidence-refs",
+                "force": true,
+                "references": ["#100"],
+            }))
+            .expect("first save params"),
+        )
+        .await
+        .expect("first save");
+        let id = serde_json::from_str::<serde_json::Value>(&first).expect("first save JSON")["id"]
+            .as_str()
+            .expect("first save id")
+            .to_string();
+        let original_a = server
+            .with_global_store_read(|store| store.get(&id).map_err(|error| error.to_string()))
+            .expect("load initial memory")
+            .expect("initial memory exists")
+            .metadata["evidence_refs_v1"][0]
+            .clone();
+
+        for metadata in [
+            json!({ "caller_context": "update" }),
+            json!({ "caller_context": "duplicate" }),
+        ] {
+            handle_tachi_save(
+                &server,
+                serde_json::from_value(json!({
+                    "id": id,
+                    "kind": "memory",
+                    "text": "Initial memory records the first evidence reference.",
+                    "force": true,
+                    "metadata": metadata,
+                    "references": ["#101"],
+                }))
+                .expect("update save params"),
+            )
+            .await
+            .expect("update save");
+        }
+
+        let entry = server
+            .with_global_store_read(|store| store.get(&id).map_err(|error| error.to_string()))
+            .expect("load updated memory")
+            .expect("updated memory exists");
+        let refs = entry.metadata["evidence_refs_v1"]
+            .as_array()
+            .expect("typed evidence refs present");
+        assert_eq!(refs.len(), 2, "existing A plus duplicate B must dedupe");
+        assert_eq!(refs[0], original_a, "existing typed A must be preserved");
+        assert_eq!(refs[0]["ref"], json!("#100"));
+        assert_eq!(refs[1]["ref"], json!("#101"));
+        assert_eq!(entry.metadata["caller_context"], json!("duplicate"));
+        assert!(
+            entry.metadata.get("source_refs").is_none(),
+            "memory updates must not re-enable legacy source_refs: {}",
+            entry.metadata
+        );
     }
 }
