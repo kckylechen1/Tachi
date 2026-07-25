@@ -314,7 +314,7 @@ async fn arena_collect_enforces_mission_result_named_byte_limit() {
 
 #[cfg(unix)]
 #[test]
-fn arena_collect_surfaces_linked_result_symlink_refusal() {
+fn arena_collect_refuses_linked_run_dir_symlink_escape() {
     struct TachiHomeRestore(Option<std::ffi::OsString>);
     impl Drop for TachiHomeRestore {
         fn drop(&mut self) {
@@ -362,15 +362,8 @@ fn arena_collect_surfaces_linked_result_symlink_refusal() {
         let dispatch_id = "20260725T200000Z-linked-refusal";
         let run_dir = tachi_home.path().join("runs").join(dispatch_id);
         let outside = tempfile::tempdir().expect("outside target");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        std::fs::write(
-            run_dir.join("status.json"),
-            serde_json::json!({"state": "completed"}).to_string(),
-        )
-        .unwrap();
-        std::fs::write(outside.path().join("result.md"), "outside bytes").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("result.md"), run_dir.join("result.md"))
-            .unwrap();
+        std::fs::create_dir_all(run_dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &run_dir).unwrap();
 
         let status_path = mission_dir.join("status.json");
         let mut status: Value =
@@ -378,6 +371,10 @@ fn arena_collect_surfaces_linked_result_symlink_refusal() {
         status["dispatch_id"] = json!(dispatch_id);
         status["run_dir"] = json!(run_dir);
         std::fs::write(&status_path, serde_json::to_string_pretty(&status).unwrap()).unwrap();
+        assert!(
+            !mission_dir.join("result.md").exists(),
+            "spawn must not create a mission result before collection"
+        );
 
         let mut collect = params("collect");
         collect.arena_id = Some(arena_id.clone());
@@ -396,9 +393,29 @@ fn arena_collect_surfaces_linked_result_symlink_refusal() {
         let error = mission["artifact_read_error"]
             .as_str()
             .expect("caller-visible refusal");
-        assert!(error.contains("refusing descriptor-bound read"), "{error}");
+        let expected_refusal = format!(
+            "refusing linked dispatch read: run directory {} resolves outside runs root {}",
+            outside.path().canonicalize().unwrap().display(),
+            tachi_home
+                .path()
+                .join("runs")
+                .canonicalize()
+                .unwrap()
+                .display(),
+        );
+        assert_eq!(error, expected_refusal);
+        assert!(
+            !mission_dir.join("result.md").exists(),
+            "refusing an escaped linked run must not write its result into the mission"
+        );
 
-        std::fs::remove_file(run_dir.join("result.md")).unwrap();
+        std::fs::remove_file(&run_dir).unwrap();
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({"state": "completed"}).to_string(),
+        )
+        .unwrap();
         std::fs::write(
             run_dir.join("result.md"),
             vec![b'x'; crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES],
