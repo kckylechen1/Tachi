@@ -2,6 +2,8 @@ use super::cache::{
     recall_cache_epoch, recall_cache_generation_fingerprint, recall_cache_key,
     recall_cache_read_enabled, recall_cache_ttl_secs, recall_cache_write_through,
 };
+#[cfg(test)]
+use super::cache::{run_recall_cache_race_hook, RecallCacheRacePoint};
 use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
@@ -50,9 +52,11 @@ pub(crate) async fn handle_search_memory_with_access(
     // hybrid-search (+ optional rerank) round trip. Gated behind
     // TACHI_ENABLE_RECALL_CACHE. We never key on a caller-supplied embedding
     // (the key is the query text) or cache trivial queries. The cache lives in
-    // the global DB so cross-DB merged results have a single home. A cache hit
-    // intentionally does not bump per-memory access_count (skipping the search
-    // is the whole point); hit_count on the cache row carries the telemetry.
+    // the global DB so cross-DB merged results have a single home. Searches
+    // that record access are ineligible: access_count/history participate in
+    // production ranking, so skipping their writes on a hit would change the
+    // search contract and recording them on a miss would immediately advance
+    // the authoritative generation.
     let sandboxed_search = params
         .agent_role
         .as_deref()
@@ -60,6 +64,7 @@ pub(crate) async fn handle_search_memory_with_access(
     let cache_eligible = recall_cache_read_enabled()
         && params.query_vec.is_none()
         && !sandboxed_search
+        && !record_access
         && !memcore::should_skip_query(&params.query);
     let cache_key = if cache_eligible {
         Some(recall_cache_key(
@@ -83,12 +88,14 @@ pub(crate) async fn handle_search_memory_with_access(
     // cross-process safety boundary this in-memory counter relies on.
     let epoch_at_read = recall_cache_epoch();
 
-    // Lookup precedes the one authoritative generation read per unique DB. A
-    // writer that commits between lookup and validation is therefore observed
-    // by validation; a writer that commits afterward is ordered after this
-    // read. Misses retain that single snapshot for write-through. This is safe:
-    // any later commit advances SQLite past the stored value, so the next
-    // lookup rejects the row even if this search raced the writer.
+    // Lookup precedes authoritative generation validation. For a hit, each
+    // unique DB is read once and that read is its linearization point: commits
+    // before it force a mismatch; commits after it are ordered after this
+    // search. Misses take a second snapshot after row computation and only
+    // write when both snapshots match, binding the payload to a generation at
+    // which the query result was still current. Multiple physical DBs cannot
+    // share one SQLite snapshot, so this is deliberately per-DB validation,
+    // not a claim of cross-file transactional atomicity.
     let mut cache_write_context = None;
     if let Some(ref key) = cache_key {
         let ttl = recall_cache_ttl_secs();
@@ -97,6 +104,8 @@ pub(crate) async fn handle_search_memory_with_access(
                 .recall_cache_lookup(key, ttl)
                 .map_err(|e| e.to_string())
         });
+        #[cfg(test)]
+        run_recall_cache_race_hook(RecallCacheRacePoint::AfterLookupBeforeValidation);
         match lookup {
             Ok(hit) => match recall_cache_generation_fingerprint(server, &params, project_only) {
                 Ok(current_generation) => {
@@ -148,6 +157,9 @@ pub(crate) async fn handle_search_memory_with_access(
     let serialized =
         serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))?;
 
+    #[cfg(test)]
+    run_recall_cache_race_hook(RecallCacheRacePoint::AfterQueryBeforeValidation);
+
     // ── Recall-cache write-through ───────────────────────────────────────
     // Cache the rendered rows so the next identical query short-circuits.
     // Skip empty result sets so a transiently-empty answer never masks
@@ -169,26 +181,44 @@ pub(crate) async fn handle_search_memory_with_access(
     // Discarding is always safe: the next miss just recomputes fresh.
     if let Some((key, generation_before_search)) = cache_write_context {
         if !rows.is_empty() {
-            let wrote = recall_cache_write_through(
-                server,
-                epoch_at_read,
-                &key,
-                &generation_before_search,
-                &params.query,
-                &serialized,
-                rows.len() as i64,
-                params.enable_rerank,
-            );
-            match wrote {
-                Ok(true) => {}
-                Ok(false) => {
+            match recall_cache_generation_fingerprint(server, &params, project_only) {
+                Ok(generation_after_search)
+                    if generation_after_search == generation_before_search =>
+                {
+                    let wrote = recall_cache_write_through(
+                        server,
+                        epoch_at_read,
+                        &key,
+                        &generation_after_search,
+                        &params.query,
+                        &serialized,
+                        rows.len() as i64,
+                        params.enable_rerank,
+                    );
+                    match wrote {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::debug!(
+                                "[recall_cache] discarding stale write-through for {key} — \
+                                 epoch advanced (concurrent invalidation) between read and write"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "[recall_cache] write-through failed for {key}: {error}"
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
                     tracing::debug!(
-                        "[recall_cache] discarding stale write-through for {key} — \
-                         epoch advanced (concurrent invalidation) between read and write"
+                        "[recall_cache] discarding write-through for {key} because a participating database changed while rows were computed"
                     );
                 }
                 Err(error) => {
-                    tracing::warn!("[recall_cache] write-through failed for {key}: {error}");
+                    tracing::warn!(
+                        "[recall_cache] discarding write-through because post-query generation validation failed: {error}"
+                    );
                 }
             }
         }

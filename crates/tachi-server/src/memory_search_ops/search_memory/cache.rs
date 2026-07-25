@@ -5,6 +5,8 @@ use crate::tool_params::SearchMemoryParams;
 use crate::utils::{parse_env_bool, stable_hash};
 use crate::MemoryServer;
 use serde::Serialize;
+#[cfg(test)]
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +23,91 @@ pub(super) fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
 /// flag independently, so there is exactly one place that can drift from the
 /// read/write-through gate.
 pub(super) fn recall_cache_read_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = TEST_RECALL_CACHE_ENABLED.with(Cell::get) {
+        return enabled;
+    }
     parse_env_bool("TACHI_ENABLE_RECALL_CACHE").unwrap_or(false)
+}
+
+#[cfg(test)]
+type RecallCacheRaceCallback = (RecallCacheRacePoint, Box<dyn FnOnce()>);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RECALL_CACHE_ENABLED: Cell<Option<bool>> = const { Cell::new(None) };
+    static TEST_RACE_HOOK: RefCell<Option<RecallCacheRaceCallback>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct RecallCacheTestOverride {
+    previous: Option<bool>,
+}
+
+#[cfg(test)]
+impl RecallCacheTestOverride {
+    pub(crate) fn enabled() -> Self {
+        let previous = TEST_RECALL_CACHE_ENABLED.with(|value| value.replace(Some(true)));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RecallCacheTestOverride {
+    fn drop(&mut self) {
+        TEST_RECALL_CACHE_ENABLED.with(|value| value.set(self.previous));
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecallCacheRacePoint {
+    AfterLookupBeforeValidation,
+    AfterQueryBeforeValidation,
+}
+
+#[cfg(test)]
+pub(crate) struct RecallCacheRaceHook;
+
+#[cfg(test)]
+impl RecallCacheRaceHook {
+    pub(crate) fn install(point: RecallCacheRacePoint, action: impl FnOnce() + 'static) -> Self {
+        TEST_RACE_HOOK.with(|hook| {
+            let previous = hook.replace(Some((point, Box::new(action))));
+            assert!(
+                previous.is_none(),
+                "recall-cache race hook already installed"
+            );
+        });
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RecallCacheRaceHook {
+    fn drop(&mut self) {
+        TEST_RACE_HOOK.with(|hook| {
+            hook.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(super) fn run_recall_cache_race_hook(point: RecallCacheRacePoint) {
+    let action = TEST_RACE_HOOK.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        if hook
+            .as_ref()
+            .is_some_and(|(hook_point, _)| *hook_point == point)
+        {
+            hook.take().map(|(_, action)| action)
+        } else {
+            None
+        }
+    });
+    if let Some(action) = action {
+        action();
+    }
 }
 
 #[derive(Debug, Clone)]

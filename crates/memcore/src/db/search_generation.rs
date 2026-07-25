@@ -17,7 +17,10 @@ const DELETE_TRIGGER: &str = "memory_search_generation_after_delete";
 const EDGE_INSERT_TRIGGER: &str = "memory_edge_search_generation_after_insert";
 const EDGE_UPDATE_TRIGGER: &str = "memory_edge_search_generation_after_update";
 const EDGE_DELETE_TRIGGER: &str = "memory_edge_search_generation_after_delete";
-const SEARCH_AFFECTING_UPDATE_COLUMNS: &str = "path, summary, text, importance, timestamp, valid_from, valid_until, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, revision, metadata, superseded_by, idless_identity, retention_policy, domain, tier";
+const ACCESS_INSERT_TRIGGER: &str = "memory_access_search_generation_after_insert";
+const ACCESS_UPDATE_TRIGGER: &str = "memory_access_search_generation_after_update";
+const ACCESS_DELETE_TRIGGER: &str = "memory_access_search_generation_after_delete";
+const PREVIOUS_SEARCH_AFFECTING_UPDATE_COLUMNS: &str = "path, summary, text, importance, timestamp, valid_from, valid_until, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, revision, metadata, superseded_by, idless_identity, retention_policy, domain, tier";
 
 const GENERATION_SCHEMA_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS memory_search_generation (
@@ -39,7 +42,7 @@ const GENERATION_SCHEMA_SQL: &str = r#"
     END;
 
     CREATE TRIGGER IF NOT EXISTS memory_search_generation_after_update
-    AFTER UPDATE OF path, summary, text, importance, timestamp, valid_from, valid_until, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, revision, metadata, superseded_by, idless_identity, retention_policy, domain, tier ON memories
+    AFTER UPDATE ON memories
     BEGIN
         SELECT CASE
             WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1
@@ -97,6 +100,42 @@ const GENERATION_SCHEMA_SQL: &str = r#"
         END;
         UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
     END;
+
+    CREATE TRIGGER IF NOT EXISTS memory_access_search_generation_after_insert
+    AFTER INSERT ON access_history
+    BEGIN
+        SELECT CASE
+            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1
+                THEN RAISE(ABORT, 'memory search generation row missing')
+            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807
+                THEN RAISE(ABORT, 'memory search generation exhausted')
+        END;
+        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memory_access_search_generation_after_update
+    AFTER UPDATE ON access_history
+    BEGIN
+        SELECT CASE
+            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1
+                THEN RAISE(ABORT, 'memory search generation row missing')
+            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807
+                THEN RAISE(ABORT, 'memory search generation exhausted')
+        END;
+        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memory_access_search_generation_after_delete
+    AFTER DELETE ON access_history
+    BEGIN
+        SELECT CASE
+            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1
+                THEN RAISE(ABORT, 'memory search generation row missing')
+            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807
+                THEN RAISE(ABORT, 'memory search generation exhausted')
+        END;
+        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
+    END;
 "#;
 
 /// Create the generation table and its mutation triggers, then reject any
@@ -106,8 +145,31 @@ const GENERATION_SCHEMA_SQL: &str = r#"
 /// to a rebuilt table. `CREATE ... IF NOT EXISTS` makes normal reopen/migration
 /// idempotent; a malformed existing trigger is a loud open failure.
 pub(crate) fn ensure_search_generation_schema(conn: &Connection) -> Result<(), MemoryError> {
+    migrate_previous_memory_update_trigger(conn)?;
     conn.execute_batch(GENERATION_SCHEMA_SQL)?;
     validate_search_generation_schema(conn).map(|_| ())
+}
+
+fn migrate_previous_memory_update_trigger(conn: &Connection) -> Result<(), MemoryError> {
+    let existing = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [UPDATE_TRIGGER],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(existing) = existing else {
+        return Ok(());
+    };
+    let previous = trigger_sql(
+        UPDATE_TRIGGER,
+        &format!("UPDATE OF {PREVIOUS_SEARCH_AFFECTING_UPDATE_COLUMNS}"),
+        "memories",
+    );
+    if normalize_sql(&existing) == normalize_sql(&previous) {
+        conn.execute("DROP TRIGGER memory_search_generation_after_update", [])?;
+    }
+    Ok(())
 }
 
 /// Return the persisted generation only when the complete trigger contract is
@@ -150,7 +212,10 @@ fn validate_search_generation_schema(conn: &Connection) -> Result<i64, MemoryErr
                     (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?3),
                     (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?4),
                     (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?5),
-                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?6)
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?6),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?7),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?8),
+                    (SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?9)
              FROM memory_search_generation
              WHERE id = 1
              LIMIT 1",
@@ -161,6 +226,9 @@ fn validate_search_generation_schema(conn: &Connection) -> Result<i64, MemoryErr
                 EDGE_INSERT_TRIGGER,
                 EDGE_UPDATE_TRIGGER,
                 EDGE_DELETE_TRIGGER,
+                ACCESS_INSERT_TRIGGER,
+                ACCESS_UPDATE_TRIGGER,
+                ACCESS_DELETE_TRIGGER,
             ],
             |row| {
                 Ok((
@@ -173,6 +241,9 @@ fn validate_search_generation_schema(conn: &Connection) -> Result<i64, MemoryErr
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
                     ],
                 ))
             },
@@ -202,6 +273,9 @@ fn validate_search_generation_schema(conn: &Connection) -> Result<i64, MemoryErr
         EDGE_INSERT_TRIGGER,
         EDGE_UPDATE_TRIGGER,
         EDGE_DELETE_TRIGGER,
+        ACCESS_INSERT_TRIGGER,
+        ACCESS_UPDATE_TRIGGER,
+        ACCESS_DELETE_TRIGGER,
     ]
     .into_iter()
     .zip(trigger_sql)
@@ -224,15 +298,14 @@ fn validate_search_generation_schema(conn: &Connection) -> Result<i64, MemoryErr
 fn normalizes_to_expected_trigger(name: &str, actual: &str) -> bool {
     let expected = match name {
         INSERT_TRIGGER => trigger_sql(INSERT_TRIGGER, "INSERT", "memories"),
-        UPDATE_TRIGGER => trigger_sql(
-            UPDATE_TRIGGER,
-            &format!("UPDATE OF {SEARCH_AFFECTING_UPDATE_COLUMNS}"),
-            "memories",
-        ),
+        UPDATE_TRIGGER => trigger_sql(UPDATE_TRIGGER, "UPDATE", "memories"),
         DELETE_TRIGGER => trigger_sql(DELETE_TRIGGER, "DELETE", "memories"),
         EDGE_INSERT_TRIGGER => trigger_sql(EDGE_INSERT_TRIGGER, "INSERT", "memory_edges"),
         EDGE_UPDATE_TRIGGER => trigger_sql(EDGE_UPDATE_TRIGGER, "UPDATE", "memory_edges"),
         EDGE_DELETE_TRIGGER => trigger_sql(EDGE_DELETE_TRIGGER, "DELETE", "memory_edges"),
+        ACCESS_INSERT_TRIGGER => trigger_sql(ACCESS_INSERT_TRIGGER, "INSERT", "access_history"),
+        ACCESS_UPDATE_TRIGGER => trigger_sql(ACCESS_UPDATE_TRIGGER, "UPDATE", "access_history"),
+        ACCESS_DELETE_TRIGGER => trigger_sql(ACCESS_DELETE_TRIGGER, "DELETE", "access_history"),
         _ => return false,
     };
     normalize_sql(actual) == normalize_sql(&expected)
@@ -311,15 +384,15 @@ mod tests {
             .expect("telemetry update");
         assert_eq!(
             store.search_generation().expect("after telemetry"),
-            1,
-            "search telemetry alone must not invalidate an otherwise unchanged result cache"
+            2,
+            "access_count changes ranking and must advance cache generation"
         );
 
         store
             .connection()
             .execute("UPDATE memories SET archived = 1 WHERE id = 'upsert'", [])
             .expect("archive update");
-        assert_eq!(store.search_generation().expect("after archive"), 2);
+        assert_eq!(store.search_generation().expect("after archive"), 3);
 
         let tx = store
             .connection_mut()
@@ -333,7 +406,7 @@ mod tests {
         tx.rollback().expect("rollback generation probe");
         assert_eq!(
             store.search_generation().expect("after rollback"),
-            2,
+            3,
             "a rolled-back memory mutation must not publish a cache generation"
         );
 
@@ -341,7 +414,7 @@ mod tests {
             .connection()
             .execute("DELETE FROM memories WHERE id = 'upsert'", [])
             .expect("delete");
-        assert_eq!(store.search_generation().expect("after delete"), 3);
+        assert_eq!(store.search_generation().expect("after delete"), 4);
     }
 
     #[test]

@@ -43,4 +43,8 @@ pub(crate) use search_memory::invalidate_recall_cache_after_write;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;
 pub(crate) use search_memory::search_memory_rows_with_recall_config;
+#[cfg(test)]
+pub(crate) use search_memory::{
+    RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
+};
 pub(crate) use text_scrub::{contains_secret_like, scrub_secrets, scrub_think_tags};

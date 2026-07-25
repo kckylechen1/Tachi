@@ -10,6 +10,8 @@ mod store;
 mod tests;
 
 pub(crate) use cache::invalidate_recall_cache_after_write;
+#[cfg(test)]
+pub(crate) use cache::{RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride};
 pub(crate) use exact::has_high_confidence_exact_token_top;
 pub(crate) use handlers::{handle_search_memory, handle_search_memory_with_access};
 pub(crate) use rows::{

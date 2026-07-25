@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::{MemoryEdge, MemoryEntry, MemoryStore};
 
 fn entry(id: &str, text: &str) -> MemoryEntry {
@@ -173,4 +175,147 @@ fn read_only_store_can_validate_search_generation_without_mutation() {
             .expect("validate generation read-only"),
         expected
     );
+}
+
+#[test]
+fn every_memory_entry_column_and_access_history_mutation_is_generation_covered() {
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    store
+        .upsert(&entry("audit", "dynamic trigger audit"))
+        .expect("seed memory");
+
+    let memory_fields = serde_json::to_value(entry("shape", "shape"))
+        .expect("serialize MemoryEntry")
+        .as_object()
+        .expect("MemoryEntry object")
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut stmt = store
+        .connection()
+        .prepare("PRAGMA table_info(memories)")
+        .expect("prepare memories columns");
+    let memory_columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query memories columns")
+        .collect::<Result<BTreeSet<_>, _>>()
+        .expect("collect memories columns");
+    let derived_fields = ["location", "persons", "vector"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let unmapped = memory_fields
+        .difference(&memory_columns)
+        .filter(|field| !derived_fields.contains(*field))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        unmapped.is_empty(),
+        "new MemoryEntry fields need an explicit storage/projection audit: {unmapped:?}"
+    );
+
+    let update_trigger: String = store
+        .connection()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'memory_search_generation_after_update'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("memory update trigger");
+    let normalized = update_trigger
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    assert!(normalized.contains("afterupdateonmemories"));
+    assert!(
+        !normalized.contains("updateof"),
+        "an UPDATE OF allowlist lets future result-visible columns drift outside generation coverage"
+    );
+
+    let before_access_fields = store.search_generation().expect("before access fields");
+    store
+        .connection()
+        .execute(
+            "UPDATE memories
+             SET access_count = access_count + 1,
+                 last_access = '2026-07-26T00:00:00Z',
+                 recall_count = recall_count + 1,
+                 query_diversity = query_diversity + 1
+             WHERE id = 'audit'",
+            [],
+        )
+        .expect("update result-visible access fields");
+    assert_eq!(
+        store.search_generation().expect("after access fields"),
+        before_access_fields + 1
+    );
+
+    let before_history = store.search_generation().expect("before history insert");
+    store
+        .connection()
+        .execute(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash)
+             VALUES ('audit', '2026-07-26T00:00:00Z', 'query-a')",
+            [],
+        )
+        .expect("insert access history");
+    store
+        .connection()
+        .execute(
+            "UPDATE access_history SET query_hash = 'query-b' WHERE memory_id = 'audit'",
+            [],
+        )
+        .expect("update access history");
+    store
+        .connection()
+        .execute("DELETE FROM access_history WHERE memory_id = 'audit'", [])
+        .expect("delete access history");
+    assert_eq!(
+        store.search_generation().expect("after history mutations"),
+        before_history + 3
+    );
+}
+
+#[test]
+fn known_previous_memory_update_trigger_migrates_to_all_column_coverage() {
+    let store = MemoryStore::open_in_memory().expect("open store");
+    store
+        .connection()
+        .execute_batch(
+            r#"
+            DROP TRIGGER memory_search_generation_after_update;
+            CREATE TRIGGER memory_search_generation_after_update
+            AFTER UPDATE OF path, summary, text, importance, timestamp, valid_from, valid_until, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, revision, metadata, superseded_by, idless_identity, retention_policy, domain, tier ON memories
+            BEGIN
+                SELECT CASE
+                    WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1
+                        THEN RAISE(ABORT, 'memory search generation row missing')
+                    WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807
+                        THEN RAISE(ABORT, 'memory search generation exhausted')
+                END;
+                UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;
+            END;
+            "#,
+        )
+        .expect("install previous trigger shape");
+
+    super::super::search_generation::ensure_search_generation_schema(store.connection())
+        .expect("known previous trigger must migrate");
+
+    let sql: String = store
+        .connection()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'memory_search_generation_after_update'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migrated trigger");
+    let normalized = sql
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    assert!(normalized.contains("afterupdateonmemories"));
+    assert!(!normalized.contains("updateof"));
 }

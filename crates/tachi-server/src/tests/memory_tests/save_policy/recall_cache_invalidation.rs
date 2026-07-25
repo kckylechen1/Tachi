@@ -1,10 +1,8 @@
 //! tachi#1435 slice 3 / #2059: save-side recall-cache invalidation contract.
 //!
-//! These tests exercise `handle_save_memory` at the handler level (no MCP
-//! transport) plus the `search_memory` facade, with `TACHI_ENABLE_RECALL_CACHE`
-//! flipped on for the duration of the test (env-guard + serial lock, matching
-//! the repo's existing pattern in `enrichment.rs`'s tests — the flag is
-//! process-global env state, so parallel tests must not race it).
+//! These tests exercise `handle_save_memory` and non-access-recording search at
+//! the handler level. A thread-local cache override keeps parallel tests from
+//! racing process-global environment restoration.
 //!
 //! Row A / row B bodies below are deliberately built from disjoint word sets
 //! (sharing only the needle token) rather than a single trailing-letter
@@ -18,8 +16,10 @@
 use super::*;
 use crate::facade_memory_ops::consolidate_ops::merge_into_for_project;
 use crate::memory_ops::{handle_archive_memory, handle_delete_memory, handle_memory_gc};
-use crate::memory_search_ops::handle_save_memory;
-use crate::test_support::EnvRestore;
+use crate::memory_search_ops::{
+    handle_save_memory, handle_search_memory, handle_search_memory_with_access,
+    RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
+};
 use crate::tool_params::{ArchiveMemoryParams, DeleteMemoryParams};
 use serde_json::Value;
 
@@ -88,8 +88,7 @@ async fn search_rows_with_params(
     server: &crate::server_state::MemoryServer,
     params: SearchMemoryParams,
 ) -> Vec<Value> {
-    let response = server
-        .search_memory(Parameters(params))
+    let response = handle_search_memory(server, params, false)
         .await
         .expect("search_memory");
     serde_json::from_str(&response).expect("search_memory json rows")
@@ -128,7 +127,7 @@ async fn new_save_is_visible_immediately_even_behind_a_warm_recall_cache() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let server = make_server();
     let needle = format!("RecallCacheInvalNeedle{}", uuid::Uuid::new_v4().simple());
@@ -199,7 +198,7 @@ async fn save_then_immediate_search_hits_and_receipt_declares_lexical_immediate(
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let server = make_server();
     let needle = format!("RecallCacheT2Needle{}", uuid::Uuid::new_v4().simple());
@@ -271,7 +270,7 @@ async fn exact_duplicate_save_does_not_bust_the_recall_cache() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let server = make_server();
     let path = format!(
@@ -340,7 +339,7 @@ async fn successful_save_receipt_recall_fence_is_cleared() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let server = make_server();
     let path = format!(
@@ -371,7 +370,7 @@ async fn named_project_save_clears_global_recall_cache() {
     // `TempHomeGuard::new()` — `home_test_lock()` IS that same mutex) — do
     // NOT also acquire it here, that std::sync::Mutex is not reentrant and
     // a second `.lock()` on this thread would deadlock the test.
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let (server, _temp_home) = make_server_with_temp_home();
     let project_name = format!("t6proj-{}", uuid::Uuid::new_v4().simple());
@@ -512,7 +511,7 @@ async fn delete_memory_clears_recall_cache_after_commit() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let server = make_server();
     let path = format!("/scratch/tachi/1413-delete/{}", uuid::Uuid::new_v4());
@@ -553,7 +552,7 @@ async fn archive_memory_clears_recall_cache_after_commit() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let server = make_server();
     let path = format!("/scratch/tachi/1413-archive/{}", uuid::Uuid::new_v4());
@@ -599,7 +598,7 @@ async fn memory_gc_clears_recall_cache_after_commit() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let server = make_server();
     // Seed content so gc sweeps a populated store (whether it reclaims this row
@@ -639,7 +638,7 @@ async fn consolidate_lifecycle_clears_recall_cache_after_commit() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
 
     let server = make_server();
     // Disjoint word sets beyond the shared needle so write-time near-dup
@@ -686,7 +685,7 @@ async fn consolidate_lifecycle_clears_recall_cache_after_commit() {
 #[tokio::test]
 async fn raw_memcore_write_in_one_server_invalidates_another_servers_warm_cache() {
     let (writer, _temp_home) = make_server_with_temp_home();
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
     let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
         .expect("independent reader server");
     let needle = format!(
@@ -761,16 +760,237 @@ async fn raw_memcore_write_in_one_server_invalidates_another_servers_warm_cache(
     );
 }
 
+#[tokio::test]
+async fn access_feedback_in_one_store_invalidates_another_servers_warm_ranking() {
+    let (writer, _temp_home) = make_server_with_temp_home();
+    let _cache = RecallCacheTestOverride::enabled();
+    let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
+        .expect("independent reader server");
+    let needle = format!("AccessGenerationNeedle{}", uuid::Uuid::new_v4().simple());
+    let target = handle_save_memory(
+        &writer,
+        save_params(
+            "/scratch/cache-generation/access-target",
+            &format!("{needle} alpha beta gamma delta epsilon"),
+        ),
+    )
+    .await
+    .expect("save access target");
+    let target_id = serde_json::from_str::<Value>(&target).expect("target json")["id"]
+        .as_str()
+        .expect("target id")
+        .to_string();
+    let control = handle_save_memory(
+        &writer,
+        save_params(
+            "/scratch/cache-generation/access-control",
+            &format!("{needle} cedar maple oak pine birch"),
+        ),
+    )
+    .await
+    .expect("save access control");
+    let control_id = serde_json::from_str::<Value>(&control).expect("control json")["id"]
+        .as_str()
+        .expect("control id")
+        .to_string();
+
+    let warmed = search_rows(&reader, &needle).await;
+    let warmed_target_relevance = warmed
+        .iter()
+        .find(|row| row["id"] == target_id)
+        .and_then(|row| row["relevance"].as_f64())
+        .expect("warm target relevance");
+    let warmed_control_relevance = warmed
+        .iter()
+        .find(|row| row["id"] == control_id)
+        .and_then(|row| row["relevance"].as_f64())
+        .expect("warm control relevance");
+    let warmed_order = warmed
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let cache_entries = global_recall_cache_entries(&reader);
+    assert!(cache_entries > 0, "ranking query must warm the cache");
+
+    for query in [
+        format!("{needle} alpha"),
+        format!("{needle} beta"),
+        format!("{needle} gamma"),
+    ] {
+        let mut access_params = json_search_params(&query);
+        access_params.path_prefix = Some("/scratch/cache-generation/access-target".to_string());
+        handle_search_memory_with_access(&writer, access_params, false, true)
+            .await
+            .expect("record access, recall, and query diversity in writer B");
+    }
+
+    let access_state = writer
+        .with_global_store_read(|store| {
+            store
+                .get(&target_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "access target disappeared".to_string())
+        })
+        .expect("load access feedback state");
+    assert!(access_state.access_count >= 3);
+    assert!(access_state.recall_count >= 3);
+    assert!(access_state.query_diversity >= 3);
+    assert_eq!(access_state.tier, "consolidated");
+
+    assert_eq!(
+        global_recall_cache_entries(&reader),
+        cache_entries,
+        "raw access feedback must prove generation validation, not manual eviction"
+    );
+    let refreshed = search_rows(&reader, &needle).await;
+    let refreshed_target = refreshed
+        .iter()
+        .find(|row| row["id"] == target_id)
+        .expect("refreshed target row");
+    let refreshed_control = refreshed
+        .iter()
+        .find(|row| row["id"] == control_id)
+        .expect("refreshed control row");
+    let refreshed_order = refreshed
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert!(
+        refreshed_target["relevance"].as_f64() != Some(warmed_target_relevance)
+            || refreshed_control["relevance"].as_f64() != Some(warmed_control_relevance)
+            || refreshed_order != warmed_order,
+        "access feedback must recompute the changed score instead of replaying the warm row: warm={warmed:#?} refreshed={refreshed:#?}"
+    );
+    assert_eq!(
+        refreshed.first().and_then(|row| row["id"].as_str()),
+        Some(target_id.as_str()),
+        "access_count and promoted tier must participate in refreshed ordering"
+    );
+}
+
+#[tokio::test]
+async fn mutation_after_cache_lookup_is_observed_by_generation_validation() {
+    let (writer, _temp_home) = make_server_with_temp_home();
+    let _cache = RecallCacheTestOverride::enabled();
+    let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
+        .expect("independent reader server");
+    let needle = format!("LookupRaceNeedle{}", uuid::Uuid::new_v4().simple());
+    let first = handle_save_memory(
+        &writer,
+        save_params(
+            "/scratch/cache-generation/lookup-race-first",
+            &format!("{needle} first row"),
+        ),
+    )
+    .await
+    .expect("save first row");
+    let first_id = serde_json::from_str::<Value>(&first).expect("first json")["id"]
+        .as_str()
+        .expect("first id")
+        .to_string();
+    assert!(search_rows(&reader, &needle)
+        .await
+        .iter()
+        .any(|row| row["id"] == first_id));
+
+    let mut second = writer
+        .with_global_store_read(|store| {
+            store
+                .get(&first_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "first row disappeared".to_string())
+        })
+        .expect("load second row template");
+    let second_id = format!("lookup-race-{}", uuid::Uuid::new_v4());
+    second.id = second_id.clone();
+    second.path = "/scratch/cache-generation/lookup-race-second".to_string();
+    second.text = format!("{needle} second row committed after cache lookup");
+    second.summary = second.text.clone();
+    let writer_for_hook = writer.clone();
+    let _hook = RecallCacheRaceHook::install(
+        RecallCacheRacePoint::AfterLookupBeforeValidation,
+        move || {
+            writer_for_hook
+                .with_global_store(|store| store.upsert(&second).map_err(|error| error.to_string()))
+                .expect("lookup-window writer commit");
+        },
+    );
+
+    let refreshed = search_rows(&reader, &needle).await;
+    assert!(
+        refreshed.iter().any(|row| row["id"] == second_id),
+        "a commit after lookup but before validation must force a miss: {refreshed:#?}"
+    );
+}
+
+#[tokio::test]
+async fn mutation_after_query_discards_write_through_bound_to_the_old_generation() {
+    let (writer, _temp_home) = make_server_with_temp_home();
+    let _cache = RecallCacheTestOverride::enabled();
+    let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
+        .expect("independent reader server");
+    let needle = format!("StoreRaceNeedle{}", uuid::Uuid::new_v4().simple());
+    let first = handle_save_memory(
+        &writer,
+        save_params(
+            "/scratch/cache-generation/store-race-first",
+            &format!("{needle} first row"),
+        ),
+    )
+    .await
+    .expect("save first row");
+    let first_id = serde_json::from_str::<Value>(&first).expect("first json")["id"]
+        .as_str()
+        .expect("first id")
+        .to_string();
+    let mut second = writer
+        .with_global_store_read(|store| {
+            store
+                .get(&first_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "first row disappeared".to_string())
+        })
+        .expect("load second row template");
+    let second_id = format!("store-race-{}", uuid::Uuid::new_v4());
+    second.id = second_id.clone();
+    second.path = "/scratch/cache-generation/store-race-second".to_string();
+    second.text = format!("{needle} second row committed after query");
+    second.summary = second.text.clone();
+    let writer_for_hook = writer.clone();
+    let _hook = RecallCacheRaceHook::install(
+        RecallCacheRacePoint::AfterQueryBeforeValidation,
+        move || {
+            writer_for_hook
+                .with_global_store(|store| store.upsert(&second).map_err(|error| error.to_string()))
+                .expect("query-window writer commit");
+        },
+    );
+
+    let raced = search_rows(&reader, &needle).await;
+    assert!(raced.iter().any(|row| row["id"] == first_id));
+    assert!(
+        !raced.iter().any(|row| row["id"] == second_id),
+        "the in-flight query may linearize before the concurrent commit"
+    );
+    assert_eq!(
+        global_recall_cache_entries(&reader),
+        0,
+        "pre/post generation mismatch must discard the stale write-through"
+    );
+
+    let next = search_rows(&reader, &needle).await;
+    assert!(
+        next.iter().any(|row| row["id"] == second_id),
+        "the next query must observe the commit instead of a stale cache row: {next:#?}"
+    );
+}
+
 // A missing trigger means the generation can no longer prove freshness. The
 // cache stays physically populated, but the reader must bypass it and search
 // rather than presenting a clean-looking stale hit.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn missing_generation_trigger_bypasses_a_warm_cache_instead_of_serving_stale_rows() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
     let server = make_server();
     let needle = format!("GenerationDriftNeedle{}", uuid::Uuid::new_v4().simple());
     let first = handle_save_memory(
@@ -837,7 +1057,7 @@ async fn missing_generation_trigger_bypasses_a_warm_cache_instead_of_serving_sta
 #[tokio::test]
 async fn graph_edge_write_in_one_server_invalidates_another_servers_warm_expansion() {
     let (writer, _temp_home) = make_server_with_temp_home();
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
     let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
         .expect("independent reader server");
     let needle = format!("GraphGenerationNeedle{}", uuid::Uuid::new_v4().simple());
@@ -908,7 +1128,7 @@ async fn graph_edge_write_in_one_server_invalidates_another_servers_warm_expansi
 #[tokio::test]
 async fn fts_backfill_in_one_server_invalidates_another_servers_warm_lexical_cache() {
     let (writer, _temp_home) = make_server_with_temp_home();
-    let _flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+    let _cache = RecallCacheTestOverride::enabled();
     let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
         .expect("independent reader server");
     let needle = format!("FtsRepairGenerationNeedle{}", uuid::Uuid::new_v4().simple());
