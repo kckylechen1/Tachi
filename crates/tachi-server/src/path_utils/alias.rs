@@ -323,13 +323,29 @@ pub(crate) fn validate_project_db_relpath(rel: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn canonical_db_leaf_exists_without_symlink(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "canonical repo DB path {} must not be a symlink; the documented Plan C alias is a separate managed path",
+            path.display()
+        )),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "inspect canonical repo DB path {} without following links: {error}",
+            path.display()
+        )),
+    }
+}
+
 /// Resolve `project_root` + `db_relpath` and ensure the result stays inside `project_root`.
 pub(crate) fn resolve_project_db_path(project_root: &Path, rel: &Path) -> Result<PathBuf, String> {
     validate_project_db_relpath(rel)?;
     let joined = project_root.join(rel);
+    let joined_exists = canonical_db_leaf_exists_without_symlink(&joined)?;
     let root_canon = std::fs::canonicalize(project_root)
         .map_err(|e| format!("canonicalize project_root: {e}"))?;
-    let resolved = if joined.exists() {
+    let resolved = if joined_exists {
         std::fs::canonicalize(&joined).map_err(|e| format!("canonicalize db_path: {e}"))?
     } else if let Some(parent) = joined.parent() {
         let mut existing_ancestor = parent;
@@ -350,5 +366,6 @@ pub(crate) fn resolve_project_db_path(project_root: &Path, rel: &Path) -> Result
     if !resolved.starts_with(&root_canon) {
         return Err("db_relpath escapes project_root".to_string());
     }
+    canonical_db_leaf_exists_without_symlink(&joined)?;
     Ok(resolved)
 }

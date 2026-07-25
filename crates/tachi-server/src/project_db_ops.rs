@@ -96,6 +96,7 @@ impl MemoryServer {
                 git_root.display()
             )
         })?;
+        crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
         // Registration may continue only when identity lookup proves genuine
         // absence. A successful lookup must resolve to this exact repo-local
         // DB; ambiguity, manifest failure, or a same-name standalone store is
@@ -117,6 +118,7 @@ impl MemoryServer {
         let open_result = if precommit.created_db() {
             precommit.open_db()
         } else {
+            crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
             self.with_path_store(&db_path, |_store| Ok(()))
                 .map_err(|error| format!("initialize project DB at {}: {error}", db_path.display()))
         };
@@ -1053,7 +1055,7 @@ fn preflight_project_identity(
     if !has_existing_evidence {
         return Ok(false);
     }
-    if !db_path.exists() {
+    if !crate::path_utils::canonical_db_leaf_exists_without_symlink(db_path)? {
         return Err(format!(
             "project identity '{project_name}' already has an alias or registered DB, but intended repo DB {} does not exist; refusing ownership guess",
             db_path.display()
@@ -1127,7 +1129,7 @@ pub(crate) async fn handle_tachi_init_project_db(
 
     let rel = PathBuf::from(&params.db_relpath);
     let db_path = crate::path_utils::resolve_project_db_path(&project_root, &rel)?;
-    let existed = db_path.exists();
+    let existed = crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
     let mut precommit = ProjectDbPrecommit::new(db_path.clone());
     preflight_project_identity(&db_path, &project_root, &project_name)?;
     if let Err(error) = precommit.reserve_db() {
@@ -1139,6 +1141,7 @@ pub(crate) async fn handle_tachi_init_project_db(
     // Manifest registration remains rollback-capable until hot activation
     // succeeds. Activation is the final project-state mutation.
     let activation = register_repo_local_manifest_entry_then(&db_path, &project_name, || {
+        crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
         precommit.assert_owned_db_artifacts_unchanged()?;
         let activation = server.activate_project_db(db_path.clone());
         if precommit.created_db() {
@@ -1715,6 +1718,197 @@ mod resolve_or_register_workspace_root_tests {
             assert!(
                 !escape_target.join(memcore::MEMORY_DB_FILENAME).exists(),
                 "no DB file may be created outside the git root via the symlink"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    fn assert_canonical_db_symlink_refusal_has_no_registration_side_effects(
+        repo: &std::path::Path,
+        db_path: &std::path::Path,
+        expected_link_target: &std::path::Path,
+        manifest_before: Option<&[u8]>,
+    ) {
+        let project = crate::path_utils::plan_c_dir_name_from_root(repo).expect("project identity");
+        let alias = crate::path_utils::plan_c_global_db_path(&project);
+        let manifest = crate::path_utils::tachi_home().join("manifest.json");
+
+        let metadata = std::fs::symlink_metadata(db_path).expect("canonical DB symlink preserved");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "canonical DB path must remain the original symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(db_path).expect("canonical DB symlink target"),
+            expected_link_target
+        );
+        assert_eq!(
+            std::fs::read(&manifest).ok().as_deref(),
+            manifest_before,
+            "refusal must preserve the manifest preimage"
+        );
+        assert!(
+            std::fs::symlink_metadata(&alias).is_err(),
+            "refusal must not create the separate Plan C alias"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_db_final_component_dangling_symlink_is_refused_without_side_effects() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Canonical-Dangling-Repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let external_target = root.join("external/dangling-target.db");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::os::unix::fs::symlink(&external_target, &db_path)
+                .expect("plant dangling canonical DB symlink");
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let manifest_before = std::fs::read(&manifest).ok();
+            let symlink_identity = file_identity(&db_path);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("canonical DB symlink must be rejected before reservation");
+
+            assert!(
+                error.contains("canonical repo DB path") && error.contains("must not be a symlink"),
+                "expected canonical DB symlink refusal, got: {error}"
+            );
+            assert_eq!(file_identity(&db_path), symlink_identity);
+            assert!(
+                std::fs::symlink_metadata(&external_target).is_err(),
+                "dangling external target must not be created"
+            );
+            assert_canonical_db_symlink_refusal_has_no_registration_side_effects(
+                &repo,
+                &db_path,
+                &external_target,
+                manifest_before.as_deref(),
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_db_final_component_wrong_target_symlink_is_refused_without_side_effects() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Canonical-Wrong-Target-Repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let external_target = root.join("external/wrong-target.db");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::fs::create_dir_all(external_target.parent().expect("external parent"))
+                .expect("external parent");
+            std::fs::write(&external_target, b"foreign external database").expect("external DB");
+            std::os::unix::fs::symlink(&external_target, &db_path)
+                .expect("plant wrong-target canonical DB symlink");
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let manifest_before = std::fs::read(&manifest).ok();
+            let symlink_identity = file_identity(&db_path);
+            let external_identity = file_identity(&external_target);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("canonical DB symlink must be rejected before open");
+
+            assert!(
+                error.contains("canonical repo DB path") && error.contains("must not be a symlink"),
+                "expected canonical DB symlink refusal, got: {error}"
+            );
+            assert_eq!(file_identity(&db_path), symlink_identity);
+            assert_eq!(file_identity(&external_target), external_identity);
+            assert_eq!(
+                std::fs::read(&external_target).expect("external DB preserved"),
+                b"foreign external database"
+            );
+            assert_canonical_db_symlink_refusal_has_no_registration_side_effects(
+                &repo,
+                &db_path,
+                &external_target,
+                manifest_before.as_deref(),
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_db_final_component_symlink_loop_is_refused_without_side_effects() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Canonical-Loop-Repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::os::unix::fs::symlink(&db_path, &db_path)
+                .expect("plant looped canonical DB symlink");
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let manifest_before = std::fs::read(&manifest).ok();
+            let symlink_identity = file_identity(&db_path);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("canonical DB symlink loop must be rejected before reservation");
+
+            assert!(
+                error.contains("canonical repo DB path") && error.contains("must not be a symlink"),
+                "expected canonical DB symlink refusal, got: {error}"
+            );
+            assert_eq!(file_identity(&db_path), symlink_identity);
+            assert_canonical_db_symlink_refusal_has_no_registration_side_effects(
+                &repo,
+                &db_path,
+                &db_path,
+                manifest_before.as_deref(),
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_db_final_component_normal_absence_registers_regular_db_and_plan_c_alias() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Canonical-Absent-Repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            assert!(
+                std::fs::symlink_metadata(&db_path).is_err(),
+                "canonical DB path starts genuinely absent"
+            );
+
+            let project = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("normal absent canonical DB path registers");
+
+            let db_metadata = std::fs::symlink_metadata(&db_path).expect("created canonical DB");
+            assert!(db_metadata.file_type().is_file());
+            assert!(!db_metadata.file_type().is_symlink());
+            let alias = crate::path_utils::plan_c_global_db_path(&project);
+            assert!(
+                std::fs::symlink_metadata(&alias)
+                    .expect("managed Plan C alias")
+                    .file_type()
+                    .is_symlink(),
+                "the separate documented Plan C alias remains valid"
+            );
+            assert_eq!(
+                std::fs::canonicalize(&alias).expect("resolve Plan C alias"),
+                std::fs::canonicalize(&db_path).expect("resolve canonical DB")
+            );
+            let manifest = crate::manifest::Manifest::load(
+                &crate::path_utils::tachi_home().join("manifest.json"),
+            )
+            .expect("registration manifest");
+            assert!(
+                manifest
+                    .dbs
+                    .iter()
+                    .any(|entry| entry.path == db_path.display().to_string()),
+                "normal registration records the canonical regular DB"
             );
         });
     }
