@@ -26,7 +26,7 @@ pub const ROUTE_POLICY_PROPOSAL_TARGET: &str = "route_policy_rule";
 /// Recursively re-serialize a [`Value`] into canonical form: every JSON object
 /// becomes a sorted-key `BTreeMap`, every array is canonicalized element-wise,
 /// and scalars pass through untouched. The output is deterministic regardless
-/// of the input's insertion order, which is the property the v2 content-addressed
+/// of the input's insertion order, which is the property the v3 content-addressed
 /// identity (see [`route_policy_v3_identity_payload`]) requires: two callers
 /// that built the "same" proposal from different code paths must hash to the
 /// same id, and any change to the apply payload, review evidence, policy
@@ -1065,7 +1065,7 @@ mod tests {
         assert_eq!(proposals[0]["score_delta"], json!(2.5));
     }
 
-    /// v2 schema: every route-policy proposal carries a content-addressed
+    /// v3 schema: every route-policy proposal carries a content-addressed
     /// identity input covering policy_version + target + apply_payload +
     /// evidence_review. The dispatch layer does not hash (no sha2 dep — by
     /// design); it just produces the canonical input the server layer hashes.
@@ -1118,7 +1118,7 @@ mod tests {
         assert_eq!(proposals.len(), 1);
         let proposal = &proposals[0];
 
-        // Schema marker present and on the v2 baseline.
+        // Schema marker present and on the v3 baseline.
         assert_eq!(
             proposal["schema_version"],
             json!(ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)

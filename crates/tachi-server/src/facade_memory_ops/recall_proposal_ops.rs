@@ -44,6 +44,39 @@ fn recall_config_display_drifted(value: &Value, identity_payload: &Value) -> boo
     !canonical_json_eq(&display_config_env, &bound_config_env)
 }
 
+/// Deterministic test seam for the otherwise-uncooperative config.env writer
+/// in the review protocol. It exists only in test builds and runs after the
+/// proposal CAS has executed inside its still-uncommitted transaction, but
+/// before the post-CAS source digest is read.
+#[cfg(test)]
+fn run_recall_review_post_cas_test_hook(
+    params: &TachiMemoryParams,
+    config_env_path: &Path,
+) -> Result<(), String> {
+    let Some(body) = params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("test_config_env_after_review_cas"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    std::fs::write(config_env_path, body).map_err(|e| {
+        format!(
+            "test hook edit config.env {} after review CAS: {e}",
+            config_env_path.display()
+        )
+    })
+}
+
+#[cfg(not(test))]
+fn run_recall_review_post_cas_test_hook(
+    _params: &TachiMemoryParams,
+    _config_env_path: &Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
 pub(crate) async fn handle_recall_config_proposals(
     server: &MemoryServer,
     params: &TachiMemoryParams,
@@ -119,26 +152,34 @@ pub(crate) fn handle_recall_config_review(
     let reviewed_at = Utc::now().to_rfc3339();
     let app_home = crate::cli_client::app_home_from_global_db(&server.global_db_path_buf());
     let config_env_path = app_home.join("config.env");
-    let live_source_revision = compute_recall_digest(&config_env_path)?;
+    // config.env cannot participate in SQLite atomicity. Read its relevant
+    // digest immediately before opening the review transaction, then read it
+    // again after the review CAS while that CAS is still uncommitted. Drift
+    // returns an error and drops the transaction, restoring the exact pending
+    // row and version rather than durably blessing either file state.
+    let pre_review_source_revision = compute_recall_digest(&config_env_path)?;
     let updated = server.with_global_store(|store| {
-        let (raw, version) = store
-            .get_state_kv(RECALL_CONFIG_PROPOSAL_NS, proposal_id)
+        let tx = store
+            .connection_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("open bracketed recall review tx: {e}"))?;
+        let (raw, version) = memcore::db::get_state(&tx, RECALL_CONFIG_PROPOSAL_NS, proposal_id)
             .map_err(|e| format!("load recall config proposal: {e}"))?
             .ok_or_else(|| format!("recall config proposal not found: {proposal_id}"))?;
         let mut value: Value =
             serde_json::from_str(&raw).map_err(|e| format!("parse recall config proposal: {e}"))?;
-        // Legacy proposals (pre-v2 schema) carry no content-addressed binding
+        // Legacy proposals (pre-v3 schema) carry no content-addressed binding
         // between what the human reviewed and what apply will persist, so an
         // old approval cannot be trusted to cover the current config_env.
         // Refuse loudly rather than silently inheriting that approval.
-        let is_v2 = value
+        let is_v3 = value
             .get("schema_version")
             .and_then(Value::as_u64)
             .map(|v| v == RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION)
             .unwrap_or(false);
-        if !is_v2 {
+        if !is_v3 {
             return Err(format!(
-                "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be reviewed; regenerate with action='recall_proposals' to mint a fresh pending v2 proposal"
+                "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with action='recall_proposals' to mint a fresh pending v3 proposal"
             ));
         }
         // Re-validate the persisted content_digest against the identity_payload
@@ -179,7 +220,7 @@ pub(crate) fn handle_recall_config_review(
         validate_recall_config_proposal(
             proposal_id,
             &value,
-            Some(&live_source_revision),
+            Some(&pre_review_source_revision),
         )?;
         // Review only permits pending -> approved | rejected. A terminal
         // (rejected/applied) row cannot be resurrected, and an already-approved
@@ -211,14 +252,31 @@ pub(crate) fn handle_recall_config_review(
         // hard_state version CAS: a concurrent review or a regeneration that
         // landed on the same content-addressed id must not be silently
         // overwritten. Refuse on version drift; the caller reloads and retries.
-        let cas_ok = store
-            .set_state_if_version(RECALL_CONFIG_PROPOSAL_NS, proposal_id, &next, version)
+        let cas_ok = memcore::db::set_state_if_version(
+            &tx,
+            RECALL_CONFIG_PROPOSAL_NS,
+            proposal_id,
+            &next,
+            version,
+        )
             .map_err(|e| format!("persist recall config review: {e}"))?;
         if !cas_ok {
             return Err(format!(
                 "stale_state_version: recall config proposal {proposal_id} changed before review; reload and retry"
             ));
         }
+        run_recall_review_post_cas_test_hook(params, &config_env_path)?;
+        let post_review_source_revision = compute_recall_digest(&config_env_path)?;
+        if post_review_source_revision != pre_review_source_revision {
+            // Returning before commit drops/rolls back the transaction. This
+            // is the compensating action: unlike a second durable CAS, it
+            // restores the byte-identical pending row and its exact version.
+            return Err(format!(
+                "review_source_drift: recall config.env changed across the review CAS from {pre_review_source_revision} to {post_review_source_revision}; the review transition was rolled back and the proposal remains pending"
+            ));
+        }
+        tx.commit()
+            .map_err(|e| format!("commit bracketed recall review tx: {e}"))?;
         Ok(value)
     })?;
 
@@ -353,16 +411,16 @@ fn drive_recall_apply_state_machine(
     let proposal: Value = serde_json::from_str(&proposal_json)
         .map_err(|e| format!("parse recall config proposal: {e}"))?;
 
-    // Legacy refusal: a pre-v2 row carries no content-addressed binding, so
+    // Legacy refusal: a pre-v3 row carries no content-addressed binding, so
     // its approval does not cover the current config_env payload.
-    let is_v2 = proposal
+    let is_v3 = proposal
         .get("schema_version")
         .and_then(Value::as_u64)
         .map(|v| v == RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION)
         .unwrap_or(false);
-    if !is_v2 {
+    if !is_v3 {
         return Err(format!(
-            "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be applied; regenerate with action='recall_proposals' to mint a fresh pending v2 proposal"
+            "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be applied; regenerate with action='recall_proposals' to mint a fresh pending v3 proposal"
         ));
     }
     // Re-validate the persisted content_digest against the identity_payload
@@ -608,6 +666,12 @@ fn finalize_recall_apply(
             "finalize_refused: recall config proposal {proposal_id} observed config.env digest {observed} does not match expected after_digest {expected_after_digest}; refusing to mark applied"
         ));
     }
+    // A rename can be durable as file data while the directory entry itself
+    // is not. Confirm parent-directory durability before the terminal CAS on
+    // every finalize path, including recovery after a process crash. Opening
+    // or syncing a directory may be unsupported on some platforms; that is a
+    // loud error and leaves the proposal in `applying`, never `applied`.
+    sync_recall_config_parent(config_env_path)?;
     let applied_at = Utc::now().to_rfc3339();
     let terminal = server.with_global_store(|store| {
         let (raw, version) = store
@@ -824,12 +888,12 @@ fn persist_generated_proposals(server: &MemoryServer, proposals: Vec<Value>) -> 
             {
                 if let Ok(existing_json) = serde_json::from_str::<Value>(&existing) {
                     // Preserve a prior review/apply decision ONLY when the
-                    // stored row is v2 AND carries the SAME content digest as
-                    // the freshly regenerated proposal. The v2 id already
+                    // stored row is v3 AND carries the SAME content digest as
+                    // the freshly regenerated proposal. The v3 id already
                     // collides only with itself when content is identical, so
                     // this is a belt-and-braces guard against any path that
                     // writes the same id with different content. A legacy row
-                    // (pre-v2) donates nothing — its approval was not bound to
+                    // (pre-v3) donates nothing — its approval was not bound to
                     // the current content.
                     let stored_digest = existing_json
                         .get("content_digest")
@@ -908,15 +972,15 @@ fn list_proposals(
             .unwrap_or_else(|_| json!({ "proposal_id": row.key, "raw": row.value_json }));
         value["state_version"] = json!(row.version);
         value["updated_at"] = json!(row.updated_at);
-        // Legacy proposals (pre-v2 schema) carry no content-addressed binding
+        // Legacy proposals (pre-v3 schema) carry no content-addressed binding
         // and are refused at review/apply; surface the marker here so callers
         // see *why* before they hit the refusal.
-        let is_v2 = value
+        let is_v3 = value
             .get("schema_version")
             .and_then(Value::as_u64)
             .map(|version| version == RECALL_CONFIG_PROPOSAL_SCHEMA_VERSION)
             .unwrap_or(false);
-        if !is_v2 {
+        if !is_v3 {
             value["legacy_unbound_proposal"] = json!(true);
         }
         let status = value
@@ -1159,6 +1223,8 @@ fn parse_config_env_patch(identity_payload: &Value) -> Result<BTreeMap<String, S
 ///   exposes them;
 /// * the rename is the only mutation visible to a concurrent reader, so the
 ///   file is either fully old or fully new, never partially rewritten;
+/// * the parent directory is `fsync`'d after rename so the new directory entry
+///   is confirmed durable before the proposal can finalize as applied;
 /// * the temp name carries a per-attempt uuid so two concurrent applies (which
 ///   the upper CAS already serializes) cannot collide on the same temp path.
 fn write_recall_config_env(path: &Path, values: &BTreeMap<String, String>) -> Result<(), String> {
@@ -1206,7 +1272,22 @@ fn write_recall_config_env(path: &Path, values: &BTreeMap<String, String>) -> Re
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("replace config.env {}: {e}", path.display())
-    })
+    })?;
+    sync_recall_config_parent(path)
+}
+
+fn sync_recall_config_parent(path: &Path) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "fsync config.env parent: {} has no parent directory",
+            path.display()
+        )
+    })?;
+    let directory = std::fs::File::open(parent)
+        .map_err(|e| format!("open config.env parent {} for fsync: {e}", parent.display()))?;
+    directory
+        .sync_all()
+        .map_err(|e| format!("fsync config.env parent {}: {e}", parent.display()))
 }
 
 fn tmp_path_for(path: &Path) -> PathBuf {

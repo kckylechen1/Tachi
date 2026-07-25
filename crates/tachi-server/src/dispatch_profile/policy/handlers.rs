@@ -10,7 +10,7 @@ use tachi_dispatch::policy::{
 };
 
 /// SHA-256 hex of the canonical identity payload. Used as the content-addressed
-/// half of the v2 proposal id and stored verbatim as `content_digest` so apply
+/// half of the v3 proposal id and stored verbatim as `content_digest` so apply
 /// can re-validate the persisted row was not mutated after review.
 pub(super) fn content_digest_hex(identity_payload: &Value) -> String {
     // `serde_json` does not guarantee key order across rebuilds; serialize the
@@ -81,7 +81,7 @@ pub(super) fn route_policy_v3_proposal_id(identity_payload: &Value) -> String {
 /// `true` iff the persisted row carries the exact current v3 schema marker.
 /// Older rows predate the source-revision content-addressed identity
 /// and are refused at review/apply as `legacy_unbound_proposal`.
-fn is_v2_proposal(value: &Value) -> bool {
+fn is_v3_proposal(value: &Value) -> bool {
     value
         .get("schema_version")
         .and_then(Value::as_u64)
@@ -335,7 +335,7 @@ pub(crate) fn handle_route_policy_proposals(
             let content_digest = content_digest_hex(&identity_payload);
             let id = match proposal.get("kind").and_then(Value::as_str) {
                 Some("route_policy") => route_policy_v3_proposal_id(&identity_payload),
-                // loadout_evolution proposals are out of scope for v2 in this
+                // loadout_evolution proposals are out of scope for v3 in this
                 // PR; keep their legacy id so existing tests still match.
                 _ => legacy_id.clone(),
             };
@@ -414,10 +414,10 @@ pub(crate) fn handle_route_policy_proposals(
             .unwrap_or_else(|_| json!({ "proposal_id": row.key, "raw": row.value_json }));
         value["state_version"] = json!(row.version);
         value["updated_at"] = json!(row.updated_at);
-        // Legacy proposals (those that predate the v2 schema) remain listable
+        // Legacy proposals (those that predate the v3 schema) remain listable
         // but their review/apply paths refuse loudly; surface the marker here
         // so a caller can see *why* before they hit the refusal.
-        if !is_v2_proposal(&value) {
+        if !is_v3_proposal(&value) {
             value["legacy_unbound_proposal"] = json!(true);
         }
         let status = value
@@ -475,13 +475,25 @@ pub(crate) fn handle_route_policy_review(
     };
     let reviewed_at = Utc::now().to_rfc3339();
     let updated = server.with_global_store(|store| {
-        let (raw, version) = store
-            .get_state_kv(DISPATCH_POLICY_PROPOSAL_NS, proposal_id)
+        // BEGIN IMMEDIATE takes SQLite's write reservation before any review
+        // input is read. Proposal load/version, active-rule census, source
+        // validation, pending-state check, and the review CAS all use this
+        // same connection and transaction, so no external route writer can
+        // land after validation but before the lifecycle transition.
+        let tx = store
+            .connection_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("open route policy review tx: {e}"))?;
+        let (raw, version) = memcore::db::get_state(
+            &tx,
+            DISPATCH_POLICY_PROPOSAL_NS,
+            proposal_id,
+        )
             .map_err(|e| format!("load route policy proposal: {e}"))?
             .ok_or_else(|| format!("route policy proposal not found: {proposal_id}"))?;
         let mut value: Value =
             serde_json::from_str(&raw).map_err(|e| format!("parse route policy proposal: {e}"))?;
-        // Legacy route_policy proposals (pre-v2 schema) carry no content-
+        // Legacy route_policy proposals (pre-v3 schema) carry no content-
         // addressed binding between what the human reviewed and what apply
         // will persist, so an old approval cannot be trusted to cover the
         // current payload. Refuse loudly rather than silently inheriting that
@@ -491,9 +503,9 @@ pub(crate) fn handle_route_policy_review(
             .get("kind")
             .and_then(Value::as_str)
             .unwrap_or("route_policy");
-        if kind == "route_policy" && !is_v2_proposal(&value) {
+        if kind == "route_policy" && !is_v3_proposal(&value) {
             return Err(format!(
-                "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be reviewed; regenerate with action='proposals' to mint a fresh pending v2 proposal"
+                "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with action='proposals' to mint a fresh pending v3 proposal"
             ));
         }
         // Re-validate the persisted content_digest against the identity_payload
@@ -505,8 +517,7 @@ pub(crate) fn handle_route_policy_review(
         // be detected, not just the last one. Mirrors the same check apply.rs
         // runs immediately before mutating routing state.
         if kind == "route_policy" {
-            let source_rows = store
-                .list_state(ROUTE_POLICY_RULE_NS)
+            let source_rows = memcore::db::list_state(&tx, ROUTE_POLICY_RULE_NS)
                 .map_err(|e| format!("list active route policy rules for review: {e}"))?;
             let live_source_revision = route_policy_source_revision(&source_rows);
             validate_route_policy_proposal(proposal_id, &value, Some(&live_source_revision))?;
@@ -535,15 +546,21 @@ pub(crate) fn handle_route_policy_review(
         // happened to land on the same content-addressed id) raced us and the
         // row's version moved, refuse to overwrite — the caller must reload
         // and re-decide against the current state.
-        let updated =
-            store
-                .set_state_if_version(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next, version)
-                .map_err(|e| format!("persist route policy review: {e}"))?;
+        let updated = memcore::db::set_state_if_version(
+            &tx,
+            DISPATCH_POLICY_PROPOSAL_NS,
+            proposal_id,
+            &next,
+            version,
+        )
+        .map_err(|e| format!("persist route policy review: {e}"))?;
         if !updated {
             return Err(format!(
                 "stale_state_version: route policy proposal {proposal_id} changed before review; reload and retry"
             ));
         }
+        tx.commit()
+            .map_err(|e| format!("commit route policy review tx: {e}"))?;
         Ok(value)
     })?;
 

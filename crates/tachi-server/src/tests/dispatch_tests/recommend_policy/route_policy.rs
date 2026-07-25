@@ -477,7 +477,7 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
     );
 }
 
-// ─── v2 proposal-safety discrimination tests ─────────────────────────────────
+// ─── v3 proposal-safety discrimination tests ─────────────────────────────────
 //
 // These are end-to-end tests through tachi_task / tachi_complete. They are
 // written but NOT run by this lane — the leader runs the full suite in the
@@ -486,11 +486,11 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
 
 /// Discrimination: regenerating route-policy proposals after the underlying
 /// eval evidence changed (here: a different fallback/current profile wins)
-/// MUST mint a fresh v2 proposal id and a fresh pending row, never inheriting
+/// MUST mint a fresh v3 proposal id and a fresh pending row, never inheriting
 /// the prior approval.
 ///
-/// Production path: `handle_route_policy_proposals` -> v2 content-addressed
-/// id derived from `route_policy_v2_identity_payload` (which binds the
+/// Production path: `handle_route_policy_proposals` -> v3 content-addressed
+/// id derived from `route_policy_v3_identity_payload` (which binds the
 /// apply payload's `fallback_to_current_profile` and the evidence row/limit).
 /// Pre-fix red: proposals used a deterministic id keyed only on
 /// (policy, task_type, proposed_profile), so flipping the *fallback* profile
@@ -649,7 +649,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     let first_id = first["proposal_id"].as_str().expect("id").to_string();
     assert!(
         first_id.starts_with("route_policy:v3:"),
-        "v2 id format expected, got: {first_id}"
+        "v3 id format expected, got: {first_id}"
     );
     assert_eq!(first["status"], json!("pending"));
     assert_eq!(first["schema_version"], json!(3));
@@ -669,7 +669,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         "phase-A proposal must be the cost_sensitive challenger: {first:#}"
     );
 
-    // Approve the v1-id-rotation proposal so we can prove the regenerated
+    // Approve the v3-id-rotation proposal so we can prove the regenerated
     // proposal under a different id does NOT inherit this approval.
     let mut review = task_params("review_proposal");
     review.proposal_id = Some(first_id.clone());
@@ -718,7 +718,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
         .iter()
         .find(|proposal| proposal["proposal_id"].as_str() != Some(first_id.as_str()));
     let new = any_new_id.expect(
-        "expected at least one phase-B proposal with a new v2 id after the fallback flipped; \
+        "expected at least one phase-B proposal with a new v3 id after the fallback flipped; \
          if every proposal kept the same id, the identity is not bound to the apply payload",
     );
     let new_id = new["proposal_id"].as_str().expect("id").to_string();

@@ -38,7 +38,7 @@ pub(crate) fn handle_route_policy_apply(
             .unwrap_or("route_policy");
         match kind {
             "route_policy" => {
-                // Legacy route_policy proposals (pre-v2 schema) carry no
+                // Legacy route_policy proposals (pre-v3 schema) carry no
                 // content-addressed binding, so what the human reviewed is no
                 // guarantee of what apply will persist. Refuse loudly; the row
                 // remains listable with `legacy_unbound_proposal: true` but
@@ -47,7 +47,7 @@ pub(crate) fn handle_route_policy_apply(
                     != Some(tachi_dispatch::policy::ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)
                 {
                     return Err(format!(
-                        "legacy_unbound_proposal: {proposal_id} predates the v2 content-addressed identity and cannot be applied; regenerate with action='proposals' to mint a fresh pending v2 proposal"
+                        "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be applied; regenerate with action='proposals' to mint a fresh pending v3 proposal"
                     ));
                 }
                 // Overwrite the top-level `policy_rule` / `evidence` fields
@@ -55,7 +55,7 @@ pub(crate) fn handle_route_policy_apply(
                 // immediately before persisting. `routing.rs`'s live
                 // consumer (`build_route_policy_rule_loadout`, run on every
                 // routing decision, unmodified by this PR and also reading
-                // legacy pre-v2 rows already applied before this change)
+                // legacy pre-v3 rows already applied before this change)
                 // reads `policy_rule` and `evidence` from the top level, NOT
                 // from `identity_payload` — so it cannot be repointed at the
                 // bound copy without breaking those pre-existing legacy rows.

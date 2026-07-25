@@ -132,14 +132,14 @@ fn load_route_policy_rule_loadout_classifies_persisted_rules() {
             .contains("blocked_by_risk_classifier:codex_53_fast")));
 }
 
-// ─── v2 proposal-safety discrimination tests ─────────────────────────────────
+// ─── v3 proposal-safety discrimination tests ─────────────────────────────────
 //
-// These tests pin the route-policy side of the v2 content-addressed proposal
+// These tests pin the route-policy side of the v3 content-addressed proposal
 // safety contract. They are written but not run by this lane — the leader
 // runs the full suite in the delivery worktree. Each names the production
 // path it bites and the red->green property it discriminates.
 
-/// Discrimination: a legacy (pre-v2) route_policy proposal — even one that
+/// Discrimination: a legacy (pre-v3) route_policy proposal — even one that
 /// was approved under the old schema — must be refused at apply with
 /// `legacy_unbound_proposal`, never silently inheriting the old approval.
 ///
@@ -156,7 +156,7 @@ fn legacy_approved_route_policy_proposal_cannot_be_applied() {
     let server = MemoryServer::new(db_path, None).expect("test memory server");
 
     // Seed a legacy approved proposal directly: no `schema_version`, no
-    // `identity_payload`, no `content_digest` — exactly the shape pre-v2
+    // `identity_payload`, no `content_digest` — exactly the shape pre-v3
     // persistence would have left behind.
     let proposal_id = "route_policy:cost_sensitive:fix_request:opencode_builder";
     let legacy = serde_json::json!({
@@ -235,7 +235,7 @@ fn legacy_approved_route_policy_proposal_cannot_be_applied() {
 /// Discrimination: a route_policy apply must use a real SQLite transaction
 /// so a failure between the proposal-status CAS and the route-rule write
 /// rolls back BOTH rows. This test exercises the transaction primitive
-/// directly: it seeds an approved v2 proposal, opens a transaction, succeeds
+/// directly: it seeds an approved v3 proposal, opens a transaction, succeeds
 /// the proposal write, deliberately fails the rule write, and verifies the
 /// proposal row's status is unchanged (rollback held).
 ///
@@ -253,7 +253,7 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
     ));
     let server = MemoryServer::new(db_path, None).expect("test memory server");
 
-    let proposal_id = "route_policy:v2:rollbackfixture";
+    let proposal_id = "route_policy:v3:rollbackfixture";
     let identity_payload = serde_json::json!({
         "policy_version": "test-version",
         "target": "route_policy_rule",
@@ -269,7 +269,7 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
         "proposal_id": proposal_id,
         "legacy_proposal_id": "route_policy:cost_sensitive:fix_request:opencode_builder",
         "kind": "route_policy",
-        "schema_version": 2,
+        "schema_version": 3,
         "policy_version": "test-version",
         "target": "route_policy_rule",
         "identity_payload": identity_payload.clone(),
@@ -294,7 +294,7 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
                 )
                 .map_err(|e| e.to_string())
         })
-        .expect("seed approved v2 proposal");
+        .expect("seed approved v3 proposal");
 
     // Snapshot the version so the test can simulate a "stale version" mid-tx
     // failure inside the transaction. We deliberately use a wrong expected

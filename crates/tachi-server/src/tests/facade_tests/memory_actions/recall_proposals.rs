@@ -328,9 +328,9 @@ fn test_digest_of_pairs(pairs: &[(String, String)]) -> String {
     out
 }
 
-// ─── v2 proposal-safety discrimination tests ─────────────────────────────────
+// ─── v3 proposal-safety discrimination tests ─────────────────────────────────
 //
-// These tests pin the recall-config side of the v2 content-addressed proposal
+// These tests pin the recall-config side of the v3 content-addressed proposal
 // safety contract. They are written but NOT run by this lane — the leader
 // runs the full suite in the delivery worktree. Each names the production
 // path it bites and the red->green property it discriminates.
@@ -364,17 +364,17 @@ fn seed_recall_pair(server: &crate::MemoryServer, suffix: &str) {
 /// Discrimination: a recall-config proposal whose reviewed evidence changes
 /// (here: different `case_count` / `cases` fed to the simulation) must NOT
 /// inherit a prior approval, even if the proposed `config_env` is otherwise
-/// identical. The v2 identity binds `evidence_review`, so a different
+/// identical. The v3 identity binds `evidence_review`, so a different
 /// evidence snapshot rotates the SHA-256 id and starts a fresh pending row.
 ///
 /// Production path: `build_proposals_from_simulation` ->
-/// `recall_config_v2_identity_payload` binds the simulation evidence
+/// `recall_config_v3_identity_payload` binds the simulation evidence
 /// (case_count / top_k / variant_cases / metrics) alongside the config_env.
 /// Pre-fix red: the proposal id was `recall_config:<variant>:<fnv(config_env)>`,
 /// which depended only on the config_env bytes — so an approval stamped
 /// against evidence A silently carried over to a regenerated proposal that
 /// the human had reviewed against a different evidence B.
-/// Post-fix green: the v2 id rotates when the evidence rotates, and the
+/// Post-fix green: the v3 id rotates when the evidence rotates, and the
 /// regenerated proposal at the new id starts pending.
 #[tokio::test]
 async fn recall_regen_with_changed_evidence_does_not_inherit_approval() {
@@ -425,7 +425,7 @@ async fn recall_regen_with_changed_evidence_does_not_inherit_approval() {
         .to_string();
     assert!(
         id_a.starts_with("recall_config:v3:"),
-        "v2 id format expected, got: {id_a}"
+        "v3 id format expected, got: {id_a}"
     );
     assert_eq!(proposal_a["schema_version"], json!(3));
 
@@ -490,12 +490,12 @@ async fn recall_regen_with_changed_evidence_does_not_inherit_approval() {
 
     assert_ne!(
         id_a, id_b,
-        "the v2 id must rotate when the reviewed evidence changes, even if the          config_env is otherwise identical"
+        "the v3 id must rotate when the reviewed evidence changes, even if the          config_env is otherwise identical"
     );
     assert_eq!(
         proposal_b["status"],
         json!("pending"),
-        "the regenerated proposal at the new v2 id must NOT inherit the prior approval"
+        "the regenerated proposal at the new v3 id must NOT inherit the prior approval"
     );
     assert_eq!(proposal_b["schema_version"], json!(3));
 }
@@ -850,7 +850,7 @@ TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=99
     );
 }
 
-/// Discrimination: a legacy (pre-v2) recall-config proposal — even one that
+/// Discrimination: a legacy (pre-v3) recall-config proposal — even one that
 /// was approved under the old schema — must be refused at apply with
 /// `legacy_unbound_proposal`, never silently inheriting the old approval.
 ///
@@ -1664,6 +1664,57 @@ async fn recall_source_config_drift_refuses_review_apply_and_rotates_pending_ide
         std::fs::read_to_string(&config_env_path).expect("read config after refusal"),
         "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.3\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
         "refused apply must not overwrite third-party config"
+    );
+}
+
+/// Deterministic review-race discrimination: edit config.env after the
+/// pending -> approved CAS has executed but while its SQLite transaction is
+/// still uncommitted. The post-CAS digest check must detect the edit and roll
+/// the transaction back, preserving the exact pending bytes and state version.
+#[tokio::test]
+async fn recall_review_racing_config_edit_rolls_back_exact_pending_row() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_env_path,
+        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+    )
+    .expect("seed config");
+    seed_recall_pair(&server, "review-race");
+
+    let proposal = generate_recall_source_proposal(&server, "review-race").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let before = read_recall_row(&server, &proposal_id);
+
+    let raced_body =
+        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.9\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n";
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    review.metadata = Some(json!({
+        "test_config_env_after_review_cas": raced_body,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect_err("a config edit racing review persistence must roll review back");
+    assert!(
+        err.contains("review_source_drift"),
+        "unexpected review-race error: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        before,
+        "rollback must preserve the exact pre-review pending row and state_version"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read raced config"),
+        raced_body,
+        "review refusal must not overwrite the external writer's config edit"
     );
 }
 
