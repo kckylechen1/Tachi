@@ -1,6 +1,8 @@
+use super::handler::{bounded_board_limit, bounded_run_scan_limit, BOARD_RETURN_LIMIT_HARD_MAX};
 use super::*;
 use crate::dispatch_ops::probe_harness_server_status;
 use crate::test_support::{spawn_opencode_probe_server, EnvRestore};
+use crate::tool_params::TachiBoardParams;
 use serde_json::json;
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -16,6 +18,67 @@ fn dispatch_timestamp_key_extracts_embedded_timestamp() {
         Some("20260607T045032Z".to_string())
     );
     assert_eq!(dispatch_timestamp_key(OsStr::new("mcp-smoke-test")), None);
+}
+
+#[test]
+fn board_limits_cap_oversized_requests_and_keep_zero_explicit() {
+    assert_eq!(bounded_board_limit(Some(0)), 0);
+    assert_eq!(
+        bounded_board_limit(Some(usize::MAX)),
+        BOARD_RETURN_LIMIT_HARD_MAX,
+        "the public board limit must never exceed its named hard maximum"
+    );
+    assert_eq!(
+        bounded_run_scan_limit(usize::MAX),
+        super::runs::BOARD_RUN_DIRECTORY_CANDIDATE_HARD_MAX,
+        "derived scan work must saturate before the directory-inspection maximum"
+    );
+}
+
+#[tokio::test]
+async fn board_zero_limit_returns_before_any_row_collection() {
+    let server = crate::tests::make_server();
+    let raw = handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: None,
+            limit: Some(0),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("zero-limit board response");
+    let board: serde_json::Value = serde_json::from_str(&raw).expect("board JSON");
+
+    assert_eq!(board["limit"], json!(0));
+    assert_eq!(board["count"], json!(0));
+    assert_eq!(board["tasks"], json!([]));
+}
+
+#[tokio::test]
+async fn board_oversized_limit_reports_the_hard_maximum() {
+    let server = crate::tests::make_server();
+    let raw = handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(usize::MAX),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("oversized-limit board response");
+    let board: serde_json::Value = serde_json::from_str(&raw).expect("board JSON");
+
+    assert_eq!(board["limit"], json!(BOARD_RETURN_LIMIT_HARD_MAX));
+    assert!(
+        board["count"].as_u64().unwrap_or_default() <= BOARD_RETURN_LIMIT_HARD_MAX as u64,
+        "board response exceeded its hard maximum: {board:#}"
+    );
 }
 
 #[test]

@@ -1,17 +1,36 @@
+use super::runs::read_bounded_json_file;
 use serde_json::{json, Value};
+use std::io::ErrorKind;
 
-pub(super) fn flow_dispatch_ids(flow_id: &str) -> Result<Vec<String>, String> {
+pub(super) fn flow_dispatch_ids(flow_id: &str, limit: usize) -> Result<Vec<String>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id)?;
     let status_path = run_dir.join("status.json");
-    let Some(status) = crate::task_lifecycle::read_json_file(&status_path)? else {
-        return Ok(Vec::new());
-    };
-    Ok(status
+    match std::fs::symlink_metadata(&status_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "inspect flow status {}: {error}",
+                status_path.display()
+            ));
+        }
+    }
+    let status = read_bounded_json_file(&status_path)
+        .map_err(|error| format!("read flow status {}: {error}", status_path.display()))?;
+    let dispatch_ids = status
         .get("dispatch_ids")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let newest_start = dispatch_ids.len().saturating_sub(limit);
+    Ok(dispatch_ids
+        .into_iter()
+        .skip(newest_start)
         .map(str::to_string)
         .collect())
 }

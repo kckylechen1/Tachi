@@ -1,3 +1,4 @@
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// tachi#1173 item 7: bounded, ANSI-free tail of a dispatch's terminal
@@ -11,16 +12,17 @@ use std::path::Path;
 /// `<run_dir>/result.md` when no such line/field exists. Returns `None` when
 /// neither source is available.
 const FAILURE_TAIL_MAX_BYTES: usize = 2048;
+const FAILURE_TAIL_SOURCE_READ_MAX_BYTES: u64 = 16 * 1024;
 
 pub(crate) fn read_failure_tail(run_dir: &Path) -> Option<String> {
     let raw = read_progress_output_tail(run_dir)
-        .or_else(|| std::fs::read_to_string(run_dir.join("result.md")).ok())?;
+        .or_else(|| read_bounded_tail(&run_dir.join("result.md")))?;
     let stripped = strip_ansi_escapes(&raw);
     Some(tail_at_char_boundary(&stripped, FAILURE_TAIL_MAX_BYTES))
 }
 
 fn read_progress_output_tail(run_dir: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(run_dir.join("progress.jsonl")).ok()?;
+    let content = read_bounded_tail(&run_dir.join("progress.jsonl"))?;
     content.lines().rev().find_map(|line| {
         let event: serde_json::Value = serde_json::from_str(line).ok()?;
         event
@@ -29,6 +31,24 @@ fn read_progress_output_tail(run_dir: &Path) -> Option<String> {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     })
+}
+
+fn read_bounded_tail(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let start = metadata
+        .len()
+        .saturating_sub(FAILURE_TAIL_SOURCE_READ_MAX_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut raw = String::new();
+    file.take(FAILURE_TAIL_SOURCE_READ_MAX_BYTES)
+        .read_to_string(&mut raw)
+        .ok()?;
+    Some(raw)
 }
 
 /// Returns the last `max_bytes` bytes of `s`, backed off to the nearest char
@@ -189,6 +209,21 @@ mod tests {
 
         let tail = read_failure_tail(run_dir).expect("failure tail");
         assert!(tail.contains("FAILED: no output_tail"));
+    }
+
+    #[test]
+    fn read_failure_tail_reads_the_end_of_an_oversized_result_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path();
+        std::fs::write(
+            run_dir.join("result.md"),
+            format!("{}\nFAILED: final bounded tail", "prefix ".repeat(4_000)),
+        )
+        .expect("write oversized result.md");
+
+        let tail = read_failure_tail(run_dir).expect("failure tail");
+        assert!(tail.contains("FAILED: final bounded tail"));
+        assert!(tail.len() <= FAILURE_TAIL_MAX_BYTES);
     }
 
     #[test]
