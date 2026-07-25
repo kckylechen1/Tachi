@@ -21,23 +21,6 @@ pub(super) fn dispatch_status_needs_recovery(status: &serde_json::Value) -> bool
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn pending_completion_recovery_is_not_an_orphan_failure() {
-        assert!(
-            !dispatch_status_needs_recovery(&json!({
-                "state": "TASK_STATE_WORKING",
-                "completion_recovery": {"status": "pending_canonical_outcome"},
-            })),
-            "a canonical-outcome recovery marker must remain available for replay, not be failed as an orphan"
-        );
-    }
-}
-
 /// Mark orphaned in-flight dispatch runs as failed after daemon restart.
 ///
 /// This is a terminal path in its own right (#774 round 2): the run never
@@ -157,4 +140,21 @@ pub(crate) fn recover_orphaned_dispatch_runs(server: &MemoryServer) -> Vec<Strin
         recovered.push(dispatch_id);
     }
     recovered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pending_completion_recovery_is_not_an_orphan_failure() {
+        assert!(
+            !dispatch_status_needs_recovery(&json!({
+                "state": "TASK_STATE_WORKING",
+                "completion_recovery": {"status": "pending_canonical_outcome"},
+            })),
+            "a canonical-outcome recovery marker must remain available for replay, not be failed as an orphan"
+        );
+    }
 }
