@@ -1287,14 +1287,6 @@ fn with_memory_store<T>(
     with_proposal_store(server, params, f)
 }
 
-fn with_memory_store_read<T>(
-    server: &MemoryServer,
-    params: &TachiMemoryParams,
-    f: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
-) -> Result<T, String> {
-    with_proposal_store_read(server, params, f)
-}
-
 #[cfg(test)]
 mod near_dup_threshold_tests {
     use super::{
