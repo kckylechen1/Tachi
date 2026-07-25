@@ -238,7 +238,10 @@ fn run_recall_apply_post_descriptor_sync_test_hook(
         )
     })?;
     let mut replacement = config_env_path.as_os_str().to_os_string();
-    replacement.push(format!(".post-sync-replacement-{}", uuid::Uuid::new_v4().simple()));
+    replacement.push(format!(
+        ".post-sync-replacement-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     let replacement = std::path::PathBuf::from(replacement);
     std::fs::write(&replacement, replacement_body).map_err(|err| {
         format!(

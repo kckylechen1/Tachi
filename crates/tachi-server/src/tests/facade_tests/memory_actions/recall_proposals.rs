@@ -745,8 +745,7 @@ async fn recall_apply_same_content_inode_replacement_after_sync_refuses_terminal
         .ino();
     seed_recall_pair(&server, "same-content-inode-replacement");
 
-    let proposal =
-        generate_recall_source_proposal(&server, "same-content-inode-replacement").await;
+    let proposal = generate_recall_source_proposal(&server, "same-content-inode-replacement").await;
     let proposal_id = proposal["proposal_id"]
         .as_str()
         .expect("proposal id")
@@ -800,7 +799,10 @@ async fn recall_apply_same_content_inode_replacement_after_sync_refuses_terminal
         .expect("a later descriptor-bound recovery must remain possible");
     let applied: Value = serde_json::from_str(&body).expect("apply JSON");
     assert_eq!(applied["proposal"]["status"], json!("applied"));
-    assert_eq!(applied["apply_outcome"], json!("applied_finalized_existing"));
+    assert_eq!(
+        applied["apply_outcome"],
+        json!("applied_finalized_existing")
+    );
 }
 
 /// A persisted receipt is not authority to bless arbitrary bytes. Even when
