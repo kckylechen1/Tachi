@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Amp orbs are fresh Debian 12 machines and do not include Rust. Keep this
+# bootstrap self-contained and checksum-pinned so build-seat missions can run
+# the same Cargo gates as GitHub CI without consuming Actions minutes.
+readonly RUSTUP_VERSION="1.28.2"
+readonly RUSTUP_TARGET="x86_64-unknown-linux-gnu"
+readonly RUSTUP_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+readonly RUSTUP_URL="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_TARGET}/rustup-init"
+
+if [[ "$(uname -m)" != "x86_64" ]]; then
+  echo "orb setup: unsupported architecture $(uname -m); expected x86_64" >&2
+  exit 1
+fi
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  sudo_cmd=()
+elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
+  sudo_cmd=(sudo -n)
+else
+  echo "orb setup: root or passwordless sudo is required for Debian build packages" >&2
+  exit 1
+fi
+
+"${sudo_cmd[@]}" apt-get update
+DEBIAN_FRONTEND=noninteractive "${sudo_cmd[@]}" apt-get install -y --no-install-recommends \
+  build-essential \
+  ca-certificates \
+  clang \
+  cmake \
+  curl \
+  libssl-dev \
+  pkg-config
+
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH"
+
+if [[ ! -x "$CARGO_HOME/bin/rustup" ]]; then
+  setup_tmp="$(mktemp -d)"
+  trap 'rm -rf -- "$setup_tmp"' EXIT
+  curl --fail --location --proto '=https' --tlsv1.2 \
+    --retry 5 --retry-all-errors \
+    --output "$setup_tmp/rustup-init" \
+    "$RUSTUP_URL"
+  printf '%s  %s\n' "$RUSTUP_SHA256" "$setup_tmp/rustup-init" | sha256sum --check --strict
+  chmod 0755 "$setup_tmp/rustup-init"
+  "$setup_tmp/rustup-init" -y --no-modify-path --profile minimal --default-toolchain none
+fi
+
+rustup set profile minimal
+rustup toolchain install stable --no-self-update --component rustfmt --component clippy
+rustup default stable
+
+# Setup hooks cannot export into the later agent shell. Put stable shims on the
+# orb's ordinary PATH instead of requiring every mission to source cargo/env.
+for tool in cargo rustc rustup rustfmt cargo-clippy clippy-driver; do
+  "${sudo_cmd[@]}" ln -sfn "$CARGO_HOME/bin/$tool" "/usr/local/bin/$tool"
+done
+
+if ! command -v cargo-nextest >/dev/null 2>&1; then
+  cargo install cargo-nextest --locked
+fi
+if ! command -v cargo-audit >/dev/null 2>&1; then
+  cargo install cargo-audit --locked
+fi
+
+"${sudo_cmd[@]}" ln -sfn "$CARGO_HOME/bin/cargo-nextest" /usr/local/bin/cargo-nextest
+"${sudo_cmd[@]}" ln -sfn "$CARGO_HOME/bin/cargo-audit" /usr/local/bin/cargo-audit
+
+rustc --version
+cargo --version
+cargo nextest --version
+cargo audit --version
