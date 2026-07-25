@@ -1,6 +1,5 @@
 use super::super::audit::{
-    claim_retryable_ingest_event, fail_retryable_ingest_event, ingest_audit_key,
-    insert_ingest_skip_audit, insert_required_ingest_audit, refresh_retryable_ingest_claim,
+    claim_retryable_ingest_event, ingest_audit_key, insert_ingest_skip_audit, RetryableIngestLease,
 };
 use super::*;
 
@@ -95,6 +94,14 @@ pub(super) async fn ingest_structured_event(
             "hash": event_hash
         }));
     };
+    let lease = RetryableIngestLease::start(
+        server,
+        target_db,
+        named_project.as_deref(),
+        STRUCTURED_INGEST_WORKER,
+        &event_hash,
+        claim,
+    );
 
     let path_prefix = params.path_prefix.clone().unwrap_or_else(|| {
         default_event_path_prefix(
@@ -132,54 +139,25 @@ pub(super) async fn ingest_structured_event(
         true,
     );
 
-    let save_action = |store: &mut MemoryStore| {
-        store
-            .insert_if_absent(&entry)
-            .map_err(|e| format!("Failed to save structured event: {e}"))
-    };
-    if let Err(error) = refresh_retryable_ingest_claim(
-        server,
-        target_db,
-        named_project.as_deref(),
-        STRUCTURED_INGEST_WORKER,
-        &event_hash,
-        &claim,
-    ) {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            named_project.as_deref(),
-            "ingest_event",
-            &event_hash,
-            STRUCTURED_INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "claim_ownership_lost",
-            error,
-        ));
-    }
-    let save_result = if let Some(project_name) = named_project.as_deref() {
-        server.with_named_project_store(project_name, save_action)
-    } else {
-        server.with_store_for_scope(target_db, save_action)
-    };
-
-    if let Err(error) = save_result {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            named_project.as_deref(),
-            "ingest_event",
-            &event_hash,
-            STRUCTURED_INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "durable_write_failed",
-            error,
-        ));
+    if let Err(error) = lease
+        .write_idempotent(|store| {
+            store
+                .insert_if_absent(&entry)
+                .map_err(|e| format!("Failed to save structured event: {e}"))
+        })
+        .await
+    {
+        return Err(lease
+            .fail("ingest_event", &audit_key, "durable_write_failed", error)
+            .await);
     }
 
     if should_enqueue_enrichment(&entry) {
+        if let Err(error) = lease.ensure_owned().await {
+            return Err(lease
+                .fail("ingest_event", &audit_key, "claim_ownership_lost", error)
+                .await);
+        }
         let _ =
             server
                 .enrichment_lock()
@@ -197,42 +175,7 @@ pub(super) async fn ingest_structured_event(
                 ));
     }
 
-    if let Err(error) = refresh_retryable_ingest_claim(
-        server,
-        target_db,
-        named_project.as_deref(),
-        STRUCTURED_INGEST_WORKER,
-        &event_hash,
-        &claim,
-    ) {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            named_project.as_deref(),
-            "ingest_event",
-            &event_hash,
-            STRUCTURED_INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "claim_ownership_lost",
-            error,
-        ));
-    }
-    if let Err(error) = insert_required_ingest_audit(server, "ingest_event", &audit_key, true, None)
-    {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            named_project.as_deref(),
-            "ingest_event",
-            &event_hash,
-            STRUCTURED_INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "success_audit_failed",
-            format!("structured ingest write completed but success audit failed: {error}"),
-        ));
-    }
+    lease.complete("ingest_event", &audit_key).await?;
 
     let mut response = serde_json::Map::new();
     response.insert("status".into(), json!("completed"));

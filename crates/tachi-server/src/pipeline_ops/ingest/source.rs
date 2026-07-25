@@ -1,6 +1,5 @@
 use super::super::audit::{
-    claim_retryable_ingest_event, fail_retryable_ingest_event, ingest_audit_key,
-    insert_ingest_skip_audit, insert_required_ingest_audit, refresh_retryable_ingest_claim,
+    claim_retryable_ingest_event, ingest_audit_key, insert_ingest_skip_audit, RetryableIngestLease,
 };
 use super::*;
 
@@ -81,6 +80,14 @@ pub(crate) async fn handle_ingest_source(
             "hash": event_hash,
         }));
     };
+    let lease = RetryableIngestLease::start(
+        server,
+        target_db,
+        named_project.as_deref(),
+        SOURCE_INGEST_WORKER,
+        &event_hash,
+        claim,
+    );
 
     let chunks = if params.auto_chunk {
         chunk_text(content, params.chunk_size_chars, params.chunk_overlap_chars)
@@ -91,128 +98,96 @@ pub(crate) async fn handle_ingest_source(
     let base_metadata = merge_optional_metadata(params.metadata.clone());
     let mut saved_entries: Vec<MemoryEntry> = Vec::new();
 
-    if let Err(error) = refresh_retryable_ingest_claim(
-        server,
-        target_db,
-        named_project.as_deref(),
-        SOURCE_INGEST_WORKER,
-        &event_hash,
-        &claim,
-    ) {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            named_project.as_deref(),
-            "ingest_source",
-            &event_hash,
-            SOURCE_INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "claim_ownership_lost",
-            error,
-        ));
-    }
-
-    let persist_result = {
-        let action = |store: &mut MemoryStore| {
-            for (index, chunk) in chunks.iter().enumerate() {
-                let entry_id = format!("ingest-source:{event_hash}:{index}:{}", stable_hash(chunk));
-                let chunk_path = if chunk_total <= 1 {
-                    path_prefix.clone()
-                } else {
-                    format!("{}/{}", path_prefix, index)
-                };
-                let mut metadata = crate::provenance::inject_provenance(
-                    server,
-                    base_metadata.clone(),
-                    "ingest_source",
-                    "source_ingest",
-                    Some(params.scope.as_str()),
-                    target_db,
-                    json!({
-                        "source": params.source,
-                        "source_url": params.source_url,
-                        "path_prefix": path_prefix,
-                        "chunk_index": index,
-                        "chunk_total": chunk_total,
-                        "event_hash": event_hash,
-                    }),
-                );
-                // Wiki-pathed ingests opt into cross-project routing so they
-                // can land in the global DB when no wiki project is configured
-                // (audit B11 — preferred home is the wiki project DB).
-                if chunk_path.starts_with("/wiki/") {
-                    if let Some(obj) = metadata.as_object_mut() {
-                        obj.insert("allow_cross_project".to_string(), json!(true));
-                        // #1072 fix-round (#1215 BUG 6): `ingest_source` is a
-                        // generic write path that can target ANY
-                        // `path_prefix`, including `/wiki/...`, entirely
-                        // outside `wiki_layer_metadata`'s lifecycle stamping
-                        // — a second, independent bypass alongside
-                        // `wiki_ops::ingest` the cross-vendor review named
-                        // ("generic source ingest can bypass dual-write for
-                        // /wiki prefix"). Without an explicit marker,
-                        // `derive_wiki_lifecycle`'s no-marker-present default
-                        // (`Active`, kept for pre-#1072 back-compat) would
-                        // silently promote arbitrary ingested content to
-                        // reviewed truth. Stamp it honestly: ingested content
-                        // has no review/approval step here.
-                        if !obj.contains_key("lifecycle") {
-                            obj.insert(
-                                "lifecycle".to_string(),
-                                json!(WikiLifecycleV1::PendingReview.as_str()),
-                            );
-                        }
-                        obj.entry("authority")
-                            .or_insert_with(|| json!(WikiAuthorityV1::Advisory.as_str()));
-                        obj.entry("artifact_kind")
-                            .or_insert_with(|| json!(WikiArtifactKindV1::Wiki.as_str()));
-                    }
-                }
-                let entry = build_ingest_entry(
-                    entry_id,
-                    chunk_path,
-                    chunk.clone(),
-                    params.importance.clamp(0.0, 1.0),
-                    source_label.clone(),
-                    params.scope.clone(),
-                    metadata,
-                    None,
-                    domain.clone(),
-                    params.auto_summarize,
-                );
-                store
-                    .insert_if_absent(&entry)
-                    .map_err(|e| format!("Failed to save ingested chunk: {e}"))?;
-                saved_entries.push(entry);
-            }
-            Ok(())
-        };
-
-        if let Some(project_name) = named_project.as_deref() {
-            server.with_named_project_store(project_name, action)
+    for (index, chunk) in chunks.iter().enumerate() {
+        let entry_id = format!("ingest-source:{event_hash}:{index}:{}", stable_hash(chunk));
+        let chunk_path = if chunk_total <= 1 {
+            path_prefix.clone()
         } else {
-            server.with_store_for_scope(target_db, action)
-        }
-    };
-
-    if let Err(error) = persist_result {
-        return Err(fail_retryable_ingest_event(
+            format!("{}/{}", path_prefix, index)
+        };
+        let mut metadata = crate::provenance::inject_provenance(
             server,
-            target_db,
-            named_project.as_deref(),
+            base_metadata.clone(),
             "ingest_source",
-            &event_hash,
-            SOURCE_INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "durable_write_failed",
-            error,
+            "source_ingest",
+            Some(params.scope.as_str()),
+            target_db,
+            json!({
+                "source": params.source,
+                "source_url": params.source_url,
+                "path_prefix": path_prefix,
+                "chunk_index": index,
+                "chunk_total": chunk_total,
+                "event_hash": event_hash,
+            }),
+        );
+        // Wiki-pathed ingests opt into cross-project routing so they
+        // can land in the global DB when no wiki project is configured
+        // (audit B11 — preferred home is the wiki project DB).
+        if chunk_path.starts_with("/wiki/") {
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert("allow_cross_project".to_string(), json!(true));
+                // #1072 fix-round (#1215 BUG 6): `ingest_source` is a
+                // generic write path that can target ANY
+                // `path_prefix`, including `/wiki/...`, entirely
+                // outside `wiki_layer_metadata`'s lifecycle stamping
+                // — a second, independent bypass alongside
+                // `wiki_ops::ingest` the cross-vendor review named
+                // ("generic source ingest can bypass dual-write for
+                // /wiki prefix"). Without an explicit marker,
+                // `derive_wiki_lifecycle`'s no-marker-present default
+                // (`Active`, kept for pre-#1072 back-compat) would
+                // silently promote arbitrary ingested content to
+                // reviewed truth. Stamp it honestly: ingested content
+                // has no review/approval step here.
+                if !obj.contains_key("lifecycle") {
+                    obj.insert(
+                        "lifecycle".to_string(),
+                        json!(WikiLifecycleV1::PendingReview.as_str()),
+                    );
+                }
+                obj.entry("authority")
+                    .or_insert_with(|| json!(WikiAuthorityV1::Advisory.as_str()));
+                obj.entry("artifact_kind")
+                    .or_insert_with(|| json!(WikiArtifactKindV1::Wiki.as_str()));
+            }
+        }
+        saved_entries.push(build_ingest_entry(
+            entry_id,
+            chunk_path,
+            chunk.clone(),
+            params.importance.clamp(0.0, 1.0),
+            source_label.clone(),
+            params.scope.clone(),
+            metadata,
+            None,
+            domain.clone(),
+            params.auto_summarize,
         ));
     }
 
     for entry in &saved_entries {
+        if let Err(error) = lease
+            .write_idempotent(|store: &mut MemoryStore| {
+                store
+                    .insert_if_absent(entry)
+                    .map_err(|e| format!("Failed to save ingested chunk: {e}"))
+            })
+            .await
+        {
+            return Err(lease
+                .fail("ingest_source", &audit_key, "durable_write_failed", error)
+                .await);
+        }
+    }
+
+    for entry in &saved_entries {
         if should_enqueue_enrichment(entry) {
+            if let Err(error) = lease.ensure_owned().await {
+                return Err(lease
+                    .fail("ingest_source", &audit_key, "claim_ownership_lost", error)
+                    .await);
+            }
             let _ = server.enrichment_lock().enrich_tx.try_send(
                 crate::enrichment::build_enrichment_item(
                     entry,
@@ -236,61 +211,22 @@ pub(crate) async fn handle_ingest_source(
             named_project.as_deref(),
             domain.as_deref(),
             &saved_entries,
+            &lease,
         )
         .await
         {
-            return Err(fail_retryable_ingest_event(
-                server,
-                target_db,
-                named_project.as_deref(),
-                "ingest_source",
-                &event_hash,
-                SOURCE_INGEST_WORKER,
-                &claim,
-                &audit_key,
-                "durable_link_write_failed",
-                error,
-            ));
+            return Err(lease
+                .fail(
+                    "ingest_source",
+                    &audit_key,
+                    "durable_link_write_failed",
+                    error,
+                )
+                .await);
         }
     }
 
-    if let Err(error) = refresh_retryable_ingest_claim(
-        server,
-        target_db,
-        named_project.as_deref(),
-        SOURCE_INGEST_WORKER,
-        &event_hash,
-        &claim,
-    ) {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            named_project.as_deref(),
-            "ingest_source",
-            &event_hash,
-            SOURCE_INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "claim_ownership_lost",
-            error,
-        ));
-    }
-    if let Err(error) =
-        insert_required_ingest_audit(server, "ingest_source", &audit_key, true, None)
-    {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            named_project.as_deref(),
-            "ingest_source",
-            &event_hash,
-            SOURCE_INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "success_audit_failed",
-            format!("source ingest writes completed but success audit failed: {error}"),
-        ));
-    }
+    lease.complete("ingest_source", &audit_key).await?;
 
     let mut response = serde_json::Map::new();
     response.insert("status".into(), json!("completed"));

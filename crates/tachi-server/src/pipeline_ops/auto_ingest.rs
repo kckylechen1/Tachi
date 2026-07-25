@@ -7,6 +7,7 @@ use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::IngestSourceParams;
 use crate::utils::sanitize_safe_path_name;
 
+use super::audit::RetryableIngestLease;
 use super::helpers::{default_ingest_chunk_overlap, default_ingest_chunk_size, resolve_domain};
 use super::ingest::handle_ingest_source;
 
@@ -16,6 +17,7 @@ pub(crate) async fn build_similarity_edges(
     project: Option<&str>,
     domain: Option<&str>,
     saved_entries: &[MemoryEntry],
+    lease: &RetryableIngestLease,
 ) -> Result<(), String> {
     for entry in saved_entries {
         let query = entry.text.chars().take(480).collect::<String>();
@@ -78,14 +80,10 @@ pub(crate) async fn build_similarity_edges(
                 valid_from: String::new(),
                 valid_to: None,
             };
-            let save_edge =
-                |store: &mut MemoryStore| store.add_edge(&edge).map_err(|e| format!("{e}"));
-            if let Some(project_name) = project {
-                server.with_named_project_store(project_name, save_edge)
-            } else {
-                server.with_store_for_scope(target_db, save_edge)
-            }
-            .map_err(|error| format!("persist source similarity link: {error}"))?;
+            lease
+                .write_owned(|store| store.add_edge(&edge).map_err(|e| format!("{e}")))
+                .await
+                .map_err(|error| format!("persist source similarity link: {error}"))?;
             existing_targets.insert(result.entry.id);
         }
     }

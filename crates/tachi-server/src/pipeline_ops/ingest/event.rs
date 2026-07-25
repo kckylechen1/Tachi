@@ -1,6 +1,5 @@
 use super::super::audit::{
-    claim_retryable_ingest_event, fail_retryable_ingest_event, ingest_audit_key,
-    insert_ingest_skip_audit, insert_required_ingest_audit, refresh_retryable_ingest_claim,
+    claim_retryable_ingest_event, ingest_audit_key, insert_ingest_skip_audit, RetryableIngestLease,
 };
 use super::structured_event::ingest_structured_event;
 use super::*;
@@ -70,22 +69,26 @@ pub(crate) async fn handle_ingest_event(
             "hash": event_hash
         }));
     };
+    let lease = RetryableIngestLease::start(
+        server,
+        target_db,
+        params.project.as_deref(),
+        INGEST_WORKER,
+        &event_hash,
+        claim,
+    );
 
     let facts = match server.llm.extract_facts(&combined_text).await {
         Ok(facts) => facts,
         Err(error) => {
-            return Err(fail_retryable_ingest_event(
-                server,
-                target_db,
-                params.project.as_deref(),
-                "ingest_event",
-                &event_hash,
-                INGEST_WORKER,
-                &claim,
-                &audit_key,
-                "fact_extraction_failed",
-                format!("fact extraction failed for {event_id}: {error}"),
-            ));
+            return Err(lease
+                .fail(
+                    "ingest_event",
+                    &audit_key,
+                    "fact_extraction_failed",
+                    format!("fact extraction failed for {event_id}: {error}"),
+                )
+                .await);
         }
     };
 
@@ -93,100 +96,21 @@ pub(crate) async fn handle_ingest_event(
     {
         Ok(entries) => entries,
         Err(error) => {
-            return Err(fail_retryable_ingest_event(
-                server,
-                target_db,
-                params.project.as_deref(),
-                "ingest_event",
-                &event_hash,
-                INGEST_WORKER,
-                &claim,
-                &audit_key,
-                "entry_build_failed",
-                error,
-            ));
+            return Err(lease
+                .fail("ingest_event", &audit_key, "entry_build_failed", error)
+                .await);
         }
     };
-    if let Err(error) = refresh_retryable_ingest_claim(
-        server,
-        target_db,
-        params.project.as_deref(),
-        INGEST_WORKER,
-        &event_hash,
-        &claim,
-    ) {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            params.project.as_deref(),
-            "ingest_event",
-            &event_hash,
-            INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "claim_ownership_lost",
-            error,
-        ));
-    }
-    let saved = match persist_conversation_entries(
-        server,
-        target_db,
-        params.project.as_deref(),
-        &entries,
-    ) {
+    let saved = match persist_conversation_entries(&lease, &entries).await {
         Ok(saved) => saved,
         Err(error) => {
-            return Err(fail_retryable_ingest_event(
-                server,
-                target_db,
-                params.project.as_deref(),
-                "ingest_event",
-                &event_hash,
-                INGEST_WORKER,
-                &claim,
-                &audit_key,
-                "durable_write_failed",
-                error,
-            ));
+            return Err(lease
+                .fail("ingest_event", &audit_key, "durable_write_failed", error)
+                .await);
         }
     };
 
-    if let Err(error) = refresh_retryable_ingest_claim(
-        server,
-        target_db,
-        params.project.as_deref(),
-        INGEST_WORKER,
-        &event_hash,
-        &claim,
-    ) {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            params.project.as_deref(),
-            "ingest_event",
-            &event_hash,
-            INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "claim_ownership_lost",
-            error,
-        ));
-    }
-    if let Err(error) = insert_required_ingest_audit(server, "ingest_event", &audit_key, true, None)
-    {
-        return Err(fail_retryable_ingest_event(
-            server,
-            target_db,
-            params.project.as_deref(),
-            "ingest_event",
-            &event_hash,
-            INGEST_WORKER,
-            &claim,
-            &audit_key,
-            "success_audit_failed",
-            format!("ingest writes completed but success audit failed: {error}"),
-        ));
-    }
+    lease.complete("ingest_event", &audit_key).await?;
 
     eprintln!(
         "[ingest_event] saved {saved}/{} facts for {event_id}",
@@ -252,24 +176,18 @@ pub(super) fn stable_ingest_entry_id(
     Ok(format!("ingest:{event_hash}:{}", stable_hash(&fact_key)))
 }
 
-fn persist_conversation_entries(
-    server: &MemoryServer,
-    target_db: DbScope,
-    project: Option<&str>,
+async fn persist_conversation_entries(
+    lease: &RetryableIngestLease,
     entries: &[MemoryEntry],
 ) -> Result<usize, String> {
-    let write_entries = |store: &mut MemoryStore| {
-        for (index, entry) in entries.iter().enumerate() {
-            store.insert_if_absent(entry).map_err(|error| {
-                format!("durable write failed for ingest fact row {index}: {error}")
-            })?;
-        }
-        Ok(entries.len())
-    };
-
-    if let Some(project_name) = project {
-        server.with_named_project_store(project_name, write_entries)
-    } else {
-        server.with_store_for_scope(target_db, write_entries)
+    for (index, entry) in entries.iter().enumerate() {
+        lease
+            .write_idempotent(|store| {
+                store.insert_if_absent(entry).map_err(|error| {
+                    format!("durable write failed for ingest fact row {index}: {error}")
+                })
+            })
+            .await?;
     }
+    Ok(entries.len())
 }
