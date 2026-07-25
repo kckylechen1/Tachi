@@ -75,7 +75,7 @@ pub fn cmd_restore_all(
     json_out: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rows = collect_quarantined(manifest)?;
-    let dest_entry = match resolve_one(manifest, to_db) {
+    let dest_entry = match resolve_one(manifest, to_db)? {
         Some(e) => e,
         None => {
             return Err(

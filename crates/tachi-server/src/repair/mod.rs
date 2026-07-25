@@ -258,7 +258,7 @@ async fn run_repair_sweep(
         manifest_path
     };
     let manifest = Manifest::load_or_empty(&manifest_path);
-    let entries = inventory::select_dbs(&manifest, db_filter.as_deref());
+    let entries = inventory::select_dbs(&manifest, db_filter.as_deref())?;
 
     let mut active_rules = resolve_rules(&rule_filter);
     // R5 (integrity check) is a safety gate: always run it first regardless
@@ -444,7 +444,7 @@ async fn run_fts_cli(
         Manifest::default_path(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
     };
     let manifest = Manifest::load_or_empty(&manifest_path);
-    let entries = inventory::select_dbs(&manifest, Some(db));
+    let entries = inventory::select_dbs(&manifest, Some(db))?;
     if entries.is_empty() {
         return Err(format!("no DB matched '{db}'").into());
     }
