@@ -407,6 +407,35 @@ fn snapshot_endpoint_for_action(action: &str, entry: &MemoryEntry) -> LifecycleE
     snapshot
 }
 
+fn validate_action_target_cardinality(
+    proposal_id: &str,
+    action: &str,
+    target: Option<&LifecycleEndpointSnapshot>,
+) -> Result<(), MemoryError> {
+    match action {
+        ACTION_MERGE_INTO | ACTION_SUPERSEDE | ACTION_NEAR_DUP_MERGE => {
+            if target.is_none() {
+                return Err(MemoryError::InvalidArg(format!(
+                    "v2 lifecycle proposal {proposal_id} action '{action}' requires exactly one target"
+                )));
+            }
+        }
+        ACTION_ARCHIVE | ACTION_PROMOTE_DISTILLED => {
+            if target.is_some() {
+                return Err(MemoryError::InvalidArg(format!(
+                    "v2 lifecycle proposal {proposal_id} action '{action}' requires no target"
+                )));
+            }
+        }
+        other => {
+            return Err(MemoryError::InvalidArg(format!(
+                "v2 lifecycle proposal {proposal_id} has unsupported lifecycle_action '{other}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_action_eligibility_shape(
     proposal_id: &str,
     action: &str,
@@ -512,6 +541,11 @@ pub fn validate_lifecycle_proposal(
             "v2 lifecycle proposal {proposal_id} uses unsupported schema/policy version"
         )));
     }
+    validate_action_target_cardinality(
+        proposal_id,
+        &payload.lifecycle_action,
+        payload.target.as_ref(),
+    )?;
     validate_action_eligibility_shape(
         proposal_id,
         &payload.lifecycle_action,
@@ -1092,6 +1126,31 @@ fn apply_lifecycle_proposal_once(
 mod tests {
     use super::*;
 
+    fn proposal_from_payload(payload: &LifecycleApplyPayload) -> (String, serde_json::Value) {
+        let proposal_id = lifecycle_proposal_id(payload).expect("known action");
+        let proposal = serde_json::json!({
+            "proposal_id": proposal_id.clone(),
+            "kind": payload.review_display.kind.clone(),
+            "schema_version": payload.schema_version,
+            "policy_version": payload.policy_version.clone(),
+            "lifecycle_action": payload.lifecycle_action.clone(),
+            "status": "pending",
+            "source_id": payload.source.id.clone(),
+            "target_id": payload
+                .target
+                .as_ref()
+                .map(|target| serde_json::json!(target.id.clone()))
+                .unwrap_or(serde_json::Value::Null),
+            "requires_human_approval": payload.review_display.requires_human_approval,
+            "path": payload.review_display.path.clone(),
+            "rationale": payload.review_display.rationale.clone(),
+            "evidence": payload.review_display.evidence.clone(),
+            "identity": compute_lifecycle_identity(payload),
+            "apply_payload": payload,
+        });
+        (proposal_id, proposal)
+    }
+
     #[test]
     fn identity_is_deterministic_and_stable_under_rebuild() {
         let entry = MemoryEntry {
@@ -1547,6 +1606,89 @@ mod tests {
     }
 
     #[test]
+    fn validation_and_review_reject_wrong_target_cardinality_for_every_action() {
+        for (action, target_is_present, expected_requirement) in [
+            (ACTION_MERGE_INTO, false, "requires exactly one target"),
+            (ACTION_SUPERSEDE, false, "requires exactly one target"),
+            (ACTION_NEAR_DUP_MERGE, false, "requires exactly one target"),
+            (ACTION_ARCHIVE, true, "requires no target"),
+            (ACTION_PROMOTE_DISTILLED, true, "requires no target"),
+        ] {
+            let mut store = MemoryStore::open_in_memory().expect("open test store");
+            let source = MemoryEntry {
+                id: format!("wrong-cardinality-source-{action}"),
+                path: format!("/scratch/wrong-cardinality/{action}"),
+                ..test_entry()
+            };
+            let target = MemoryEntry {
+                id: format!("wrong-cardinality-target-{action}"),
+                path: format!("/scratch/wrong-cardinality/{action}"),
+                ..test_entry()
+            };
+            store.upsert(&source).expect("seed source");
+            store.upsert(&target).expect("seed target");
+            let source = store
+                .get(&source.id)
+                .expect("load source")
+                .expect("source exists");
+            let target = store
+                .get(&target.id)
+                .expect("load target")
+                .expect("target exists");
+            let payload =
+                build_apply_payload(action, &source, target_is_present.then_some(&target));
+            let (proposal_id, proposal) = proposal_from_payload(&payload);
+            let expected_error = format!(
+                "Invalid argument: v2 lifecycle proposal {proposal_id} action '{action}' {expected_requirement}"
+            );
+
+            let validation_error = validate_lifecycle_proposal(&proposal_id, &proposal)
+                .expect_err("self-consistent wrong-cardinality payload must fail validation");
+            assert_eq!(validation_error.to_string(), expected_error);
+
+            let proposal_raw = serde_json::to_string(&proposal).expect("serialize proposal");
+            store
+                .set_state(LIFECYCLE_PROPOSAL_NS, &proposal_id, &proposal_raw)
+                .expect("persist pending malformed proposal");
+            let proposal_before = store
+                .get_state_kv(LIFECYCLE_PROPOSAL_NS, &proposal_id)
+                .expect("load pending proposal")
+                .expect("pending proposal exists");
+            let review_error = review_lifecycle_proposal(
+                &store,
+                &proposal_id,
+                LifecycleReviewDecision::Approved,
+                None,
+            )
+            .expect_err("wrong-cardinality proposal must not become approved");
+            assert_eq!(review_error.to_string(), expected_error);
+            assert_eq!(
+                store
+                    .get_state_kv(LIFECYCLE_PROPOSAL_NS, &proposal_id)
+                    .expect("reload refused proposal")
+                    .expect("refused proposal remains"),
+                proposal_before,
+                "review refusal must preserve the exact pending row and version for {action}"
+            );
+
+            let source_after = store
+                .get(&source.id)
+                .expect("reload source")
+                .expect("source remains");
+            let target_after = store
+                .get(&target.id)
+                .expect("reload target")
+                .expect("target remains");
+            assert_eq!(source_after.archived, source.archived);
+            assert_eq!(source_after.revision, source.revision);
+            assert_eq!(source_after.tier, source.tier);
+            assert_eq!(target_after.archived, target.archived);
+            assert_eq!(target_after.revision, target.revision);
+            assert_eq!(target_after.tier, target.tier);
+        }
+    }
+
+    #[test]
     fn apply_rolls_back_memory_when_proposal_stamp_aborts() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         let source = MemoryEntry {
@@ -1625,27 +1767,7 @@ mod tests {
     /// Seed a v2 proposal for `payload` into `hard_state` and drive it to
     /// `approved`, the state `apply_lifecycle_proposal` requires.
     fn persist_and_approve(store: &MemoryStore, payload: &LifecycleApplyPayload) -> String {
-        let proposal_id = lifecycle_proposal_id(payload).expect("known action");
-        let proposal = serde_json::json!({
-            "proposal_id": proposal_id.clone(),
-            "kind": payload.review_display.kind.clone(),
-            "schema_version": payload.schema_version,
-            "policy_version": payload.policy_version.clone(),
-            "lifecycle_action": payload.lifecycle_action.clone(),
-            "status": "pending",
-            "source_id": payload.source.id.clone(),
-            "target_id": payload
-                .target
-                .as_ref()
-                .map(|t| serde_json::json!(t.id.clone()))
-                .unwrap_or(serde_json::Value::Null),
-            "requires_human_approval": payload.review_display.requires_human_approval,
-            "path": payload.review_display.path.clone(),
-            "rationale": payload.review_display.rationale.clone(),
-            "evidence": payload.review_display.evidence.clone(),
-            "identity": compute_lifecycle_identity(payload),
-            "apply_payload": payload,
-        });
+        let (proposal_id, proposal) = proposal_from_payload(payload);
         store
             .set_state(
                 LIFECYCLE_PROPOSAL_NS,
