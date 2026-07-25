@@ -7,11 +7,33 @@
 # must provide these command-line tools before this hook is invoked.
 set -euo pipefail
 
-export PATH="${CARGO_HOME:-${HOME}/.cargo}/bin:${PATH}"
+export PATH="${PATH}:${CARGO_HOME:-${HOME}/.cargo}/bin"
 export RUSTUP_AUTO_INSTALL=0
 
 readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3 node npm)
 readonly REQUIRED_RUST_COMPONENTS=(clippy rustfmt)
+setup_source="${BASH_SOURCE[0]}"
+setup_parent="${setup_source%/*}"
+if [[ "${setup_parent}" == "${setup_source}" ]]; then
+  setup_parent=.
+fi
+readonly SETUP_DIR="$(cd -- "${setup_parent}" && pwd -P)"
+readonly REPO_ROOT="$(cd -- "${SETUP_DIR}/.." && pwd -P)"
+readonly RUST_TOOLCHAIN_FILE="${REPO_ROOT}/rust-toolchain.toml"
+
+toolchain_channels=()
+toolchain_channel_pattern='^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)"[[:space:]]*$'
+while IFS= read -r line; do
+  if [[ "${line}" =~ ${toolchain_channel_pattern} ]]; then
+    toolchain_channels+=("${BASH_REMATCH[1]}")
+  fi
+done <"${RUST_TOOLCHAIN_FILE}"
+
+if ((${#toolchain_channels[@]} != 1)); then
+  printf 'setup: FAILED -- rust-toolchain.toml must declare exactly one exact semver channel\n' >&2
+  exit 1
+fi
+readonly REQUIRED_RUST_VERSION="${toolchain_channels[0]}"
 
 missing=()
 
@@ -29,7 +51,21 @@ if command -v node >/dev/null 2>&1 && node_version="$(node --version 2>/dev/null
   fi
 fi
 
+if command -v rustc >/dev/null 2>&1; then
+  rustc_version="$(cd -- "${REPO_ROOT}" && rustc --version 2>/dev/null || true)"
+  read -r rustc_name rustc_actual _ <<<"${rustc_version}"
+  if [[ "${rustc_name:-}" != rustc || "${rustc_actual:-}" != "${REQUIRED_RUST_VERSION}" ]]; then
+    missing+=("rustc=${rustc_actual:-unknown}(required:${REQUIRED_RUST_VERSION})")
+  fi
+fi
+
 if command -v cargo >/dev/null 2>&1; then
+  cargo_version="$(cd -- "${REPO_ROOT}" && cargo --version 2>/dev/null || true)"
+  read -r cargo_name cargo_actual _ <<<"${cargo_version}"
+  if [[ "${cargo_name:-}" != cargo || "${cargo_actual:-}" != "${REQUIRED_RUST_VERSION}" ]]; then
+    missing+=("cargo=${cargo_actual:-unknown}(required:${REQUIRED_RUST_VERSION})")
+  fi
+
   for component in "${REQUIRED_RUST_COMPONENTS[@]}"; do
     case "${component}" in
       clippy) cargo_subcommand="clippy" ;;
@@ -40,8 +76,8 @@ if command -v cargo >/dev/null 2>&1; then
         ;;
     esac
 
-    if ! cargo "${cargo_subcommand}" --version >/dev/null 2>&1; then
-      missing+=("${component}")
+    if ! (cd -- "${REPO_ROOT}" && cargo "${cargo_subcommand}" --version >/dev/null 2>&1); then
+      missing+=("${component}@rust-${REQUIRED_RUST_VERSION}")
     fi
   done
 fi
@@ -58,7 +94,7 @@ for tool in "${REQUIRED_TOOLS[@]}"; do
 done
 for component in "${REQUIRED_RUST_COMPONENTS[@]}"; do
   case "${component}" in
-    clippy) cargo clippy --version ;;
-    rustfmt) cargo fmt --version ;;
+    clippy) (cd -- "${REPO_ROOT}" && cargo clippy --version) ;;
+    rustfmt) (cd -- "${REPO_ROOT}" && cargo fmt --version) ;;
   esac
 done

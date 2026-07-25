@@ -52,10 +52,65 @@ jobs:
           fi
 
           remote_action_pattern="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+['\"]?[[:alnum:]][[:alnum:]_.-]*/[[:alnum:]][[:alnum:]_.-]*([^@[:space:]'\"]*)@"
-          nextest_action_pattern="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+['\"]?taiki-e/install-action@"
-          pinned_version_action_pattern="uses:[[:space:]]+['\"]?[^@'\"]+@[0-9a-f]{40}['\"]?[[:space:]]+#[[:space:]]+v[0-9]+(\.[0-9]+){0,2}[[:space:]]*$"
-          pinned_nextest_action_pattern="uses:[[:space:]]+['\"]?taiki-e/install-action@[0-9a-f]{40}['\"]?[[:space:]]+#[[:space:]]+releases/nextest snapshot [0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]*$"
-          pinned_action_pattern="(${pinned_version_action_pattern})|(${pinned_nextest_action_pattern})"
+          approved_action_pins=(
+            'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0'
+            'actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0'
+            'actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1'
+            'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5'
+            'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1'
+            'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0'
+            'actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0'
+            'actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0'
+            'actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0'
+            'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1'
+            'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2'
+            'softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2'
+            'taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25'
+          )
+          declare -A approved_pin_lookup=()
+          declare -A approved_ref_sha=()
+          declare -A approved_pin_uses=()
+
+          build_action_policy() {
+            approved_pin_lookup=()
+            approved_ref_sha=()
+            approved_pin_uses=()
+            local declaration action remainder sha label ref_key
+            for declaration in "$@"; do
+              action="${declaration%%@*}"
+              remainder="${declaration#*@}"
+              sha="${remainder%% *}"
+              label="${declaration#* # }"
+              ref_key="${action}|${label}"
+              if [[ -n "${approved_pin_lookup["${declaration}"]+present}" ]]; then
+                return 1
+              fi
+              if [[ -n "${approved_ref_sha["${ref_key}"]+present}" \
+                && "${approved_ref_sha["${ref_key}"]}" != "${sha}" ]]; then
+                return 1
+              fi
+              approved_pin_lookup["${declaration}"]=1
+              approved_ref_sha["${ref_key}"]="${sha}"
+              approved_pin_uses["${declaration}"]=0
+            done
+          }
+
+          action_is_approved() {
+            [[ -n "${approved_pin_lookup["$1"]+present}" ]]
+          }
+
+          duplicate_pin='actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5'
+          conflicting_pin='actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5'
+          if build_action_policy "${duplicate_pin}" "${duplicate_pin}" \
+            || build_action_policy "${duplicate_pin}" "${conflicting_pin}"; then
+            echo 'action policy accepted a stale duplicate mapping' >&2
+            exit 1
+          fi
+          if ! build_action_policy "${approved_action_pins[@]}"; then
+            echo 'audited action mapping contains a duplicate or conflicting ref' >&2
+            exit 1
+          fi
+
           cargo_install_pattern='^[[:space:]]*(run:[[:space:]]+)?(sudo[[:space:]]+)?cargo([[:space:]]+\+[^[:space:]]+)?[[:space:]]+install[[:space:]]+'
           pinned_cargo_pattern='--version [0-9]+\.[0-9]+\.[0-9]+ .*--locked([[:space:]]|$)'
           docker_action_pattern='uses:[[:space:]]+.*docker://'
@@ -66,16 +121,13 @@ jobs:
           moving_rustup_pattern='^[[:space:]]*(run:[[:space:]]+)?(sudo[[:space:]]+)?rustup.*(^|[^[:alnum:]_.-])(stable|beta|nightly)([^[:alnum:]_.-]|$)'
 
           if ! printf '%s\n' '      - uses: actions/checkout@v5' | grep -Eq "${remote_action_pattern}" \
-            || printf '%s\n' '      - uses: actions/checkout@v5' | grep -Eq "${pinned_action_pattern}" \
             || ! printf '%s\n' '    uses: owner/repo/.github/workflows/reuse.yml@main' | grep -Eq "${remote_action_pattern}" \
-            || ! printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5' | grep -Eq "${pinned_action_pattern}" \
-            || ! printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.0.1' | grep -Eq "${pinned_action_pattern}" \
-            || printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.0.1.2' | grep -Eq "${pinned_action_pattern}" \
-            || printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # not-a-ref' | grep -Eq "${pinned_action_pattern}" \
-            || printf '%s\n' '      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # releases/nextest snapshot 2026-07-25' | grep -Eq "${pinned_action_pattern}" \
-            || ! printf '%s\n' '      - uses: taiki-e/install-action@0123456789abcdef0123456789abcdef01234567 # releases/nextest snapshot 2026-07-25' | grep -Eq "${pinned_action_pattern}" \
-            || printf '%s\n' '      - uses: taiki-e/install-action@0123456789abcdef0123456789abcdef01234567 # releases/nextest snapshot 2026-7-25' | grep -Eq "${pinned_action_pattern}" \
-            || printf '%s\n' '      - uses: taiki-e/install-action@0123456789abcdef0123456789abcdef01234567 # v2' | grep -Eq "${pinned_nextest_action_pattern}"; then
+            || ! action_is_approved 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5' \
+            || action_is_approved 'actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5' \
+            || action_is_approved 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0' \
+            || action_is_approved 'unknown/action@0123456789abcdef0123456789abcdef01234567 # v1' \
+            || action_is_approved 'actions/checkout@v5 # v5' \
+            || ! action_is_approved 'taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25'; then
             echo 'remote-action policy self-test failed' >&2
             exit 1
           fi
@@ -118,16 +170,20 @@ jobs:
             exit 1
           fi
 
-          if grep -hE "${remote_action_pattern}" "${policy_files[@]}" \
-            | grep -Ev "${pinned_action_pattern}"; then
-            echo 'remote GitHub actions require an immutable SHA and version comment' >&2
-            exit 1
-          fi
-          if grep -hE "${nextest_action_pattern}" "${policy_files[@]}" \
-            | grep -Ev "${pinned_nextest_action_pattern}"; then
-            echo 'taiki-e/install-action requires a dated releases/nextest snapshot comment' >&2
-            exit 1
-          fi
+          while IFS= read -r action_line; do
+            declaration="$(printf '%s\n' "${action_line}" | sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+//; s/[[:space:]]+$//')"
+            if ! action_is_approved "${declaration}"; then
+              printf 'remote action is not in the audited mapping: %s\n' "${declaration}" >&2
+              exit 1
+            fi
+            approved_pin_uses["${declaration}"]=$((approved_pin_uses["${declaration}"] + 1))
+          done < <(grep -hE "${remote_action_pattern}" "${policy_files[@]}" || true)
+          for declaration in "${approved_action_pins[@]}"; do
+            if ((approved_pin_uses["${declaration}"] == 0)); then
+              printf 'audited action mapping is stale and unused: %s\n' "${declaration}" >&2
+              exit 1
+            fi
+          done
           if grep -hE "${cargo_install_pattern}" "${policy_files[@]}" \
             | grep -Ev -- "${pinned_cargo_pattern}"; then
             echo 'cargo installs require an exact version and --locked' >&2
@@ -175,8 +231,17 @@ jobs:
           done
           printf '%s\n' \
             '#!/bin/sh' \
-            'if [ -n "${SIMULATE_MISSING_COMPONENT:-}" ] && [ "${1:-}" = "${SIMULATE_MISSING_COMPONENT}" ]; then exit 1; fi' \
-            'exit 0' >"${setup_stub_dir}/cargo"
+            'case "${1:-}" in' \
+            '  --version) printf "cargo %s (fake)\n" "${SIMULATE_CARGO_VERSION:-1.97.0}" ;;' \
+            '  clippy|fmt)' \
+            '    if [ -n "${SIMULATE_MISSING_COMPONENT:-}" ] && [ "$1" = "${SIMULATE_MISSING_COMPONENT}" ]; then exit 1; fi' \
+            '    printf "%s fake\n" "$1"' \
+            '    ;;' \
+            '  *) exit 0 ;;' \
+            'esac' >"${setup_stub_dir}/cargo"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'printf "rustc %s (fake)\n" "${SIMULATE_RUSTC_VERSION:-1.97.0}"' >"${setup_stub_dir}/rustc"
           printf '%s\n' \
             '#!/bin/sh' \
             'printf "%s\n" "${SIMULATE_NODE_VERSION:-v20.0.0}"' >"${setup_stub_dir}/node"
@@ -185,6 +250,8 @@ jobs:
           run_fake_setup() {
             SIMULATE_MISSING_COMPONENT="${1:-}" \
               SIMULATE_NODE_VERSION="${2:-v20.0.0}" \
+              SIMULATE_RUSTC_VERSION="${3:-1.97.0}" \
+              SIMULATE_CARGO_VERSION="${4:-1.97.0}" \
               CARGO_HOME="${setup_test_root}/cargo-home" \
               PATH="${setup_stub_dir}" \
               /bin/bash .agents/setup >"${setup_test_root}/output" 2>&1
@@ -220,6 +287,16 @@ jobs:
             echo 'setup rejected supported Node v20' >&2
             exit 1
           fi
+          if run_fake_setup "" v20.0.0 1.96.0 1.97.0; then
+            echo 'setup accepted a mismatched effective rustc' >&2
+            exit 1
+          fi
+          grep -F 'rustc=1.96.0(required:1.97.0)' "${setup_test_root}/output"
+          if run_fake_setup "" v20.0.0 1.97.0 1.96.0; then
+            echo 'setup accepted a mismatched effective cargo' >&2
+            exit 1
+          fi
+          grep -F 'cargo=1.96.0(required:1.97.0)' "${setup_test_root}/output"
 
   rust:
     name: Rust workspace
