@@ -7,7 +7,40 @@ use tokio::sync::{oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::server_state::{DbScope, MemoryServer};
+use crate::shared_defs::{push_dead_letter_with_limits, should_enqueue_dlq, DeadLetter};
 use crate::utils::stable_hash;
+
+pub(crate) fn enqueue_dead_letter(
+    server: &MemoryServer,
+    tool_name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    error: String,
+) {
+    if !should_enqueue_dlq(
+        tool_name,
+        arguments.as_ref(),
+        server.tool_router.has_route(tool_name),
+    ) {
+        eprintln!(
+            "[dlq] refusing unclassified or non-replayable background failure for '{tool_name}'"
+        );
+        return;
+    }
+
+    let dead_letter = DeadLetter {
+        id: uuid::Uuid::new_v4().to_string(),
+        tool_name: tool_name.to_string(),
+        arguments,
+        error,
+        error_category: "internal".to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        retry_count: 0,
+        max_retries: 3,
+        status: "pending".to_string(),
+    };
+    let mut queue = server.dead_letters_lock();
+    push_dead_letter_with_limits(&mut queue, dead_letter, Utc::now());
+}
 
 const INGEST_CLAIM_LEASE_SECS: i64 = 5 * 60;
 const INGEST_HEARTBEAT_INTERVAL: Duration =
@@ -842,6 +875,23 @@ pub(crate) fn release_retryable_ingest_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f1098_background_dlq_enqueue_refuses_native_mutations() {
+        let server = crate::tests::make_server();
+
+        enqueue_dead_letter(
+            &server,
+            "ingest_event",
+            None,
+            "injected background failure".to_string(),
+        );
+
+        assert!(
+            server.dead_letters_lock().is_empty(),
+            "native mutation must not bypass typed DLQ admission through the background enqueue helper"
+        );
+    }
 
     fn graph_entry(id: &str, text: &str) -> memcore::MemoryEntry {
         memcore::MemoryEntry {

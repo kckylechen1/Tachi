@@ -18,14 +18,14 @@
 //!    every classification lookup in this module receives the canonical name,
 //!    never the raw wire name. A remote/relay route can no longer bypass
 //!    mutation classification by shape alone.
-//! 2. **Every state-changing facade action defaults to `Mutating`/`Unsafe`.**
+//! 2. **Only explicitly typed read-only routes may replay.**
 //!    [`facade_action_effect`] is whitelist-shaped: it enumerates the actions
 //!    that are provably read-only (cited against their param-doc evidence
-//!    inline below) and everything else — including an action this module
-//!    has never seen — falls through to the conservative default. Conservative
-//!    misclassification only costs cache-hit-rate or retry throughput;
-//!    aggressive misclassification replays an unsafe mutation, which is the
-//!    more expensive failure mode this ruling forecloses.
+//!    inline below). Standalone cacheable routes use the same typed
+//!    `READ_ONLY_SAFE` metadata; all other routes — including an action or
+//!    proxy alias this module has never seen — are refused by the DLQ gate.
+//!    Conservative refusal only costs retry throughput; an aggressive allow
+//!    can replay an unsafe mutation.
 //!
 //! Cache eligibility keeps its own whole-tool-name granularity (unchanged
 //! from pre-#1098: a facade call invalidates the cache regardless of which
@@ -35,19 +35,10 @@
 //! the single source both `server_state::cache` and the completeness tests
 //! below read from, not a fourth independently-authored list.
 //!
-//! PR #1213 fix round (codex cross-vendor review, 2026-07-17): closed a
-//! direct-route fail-open for `remember`/`extract_facts`/`ingest_event`
-//! (checkpoint 4, [`STANDALONE_UNSAFE_ROUTES`]'s doc comment), and replaced
-//! the tautological "does every known facade action classify" completeness
-//! test (checkpoint 3 — trivially always true by clause 2's default-deny)
-//! with a direct-tool-route completeness gate
-//! (`f1098_every_cache_invalidating_standalone_route_is_triaged_for_replay_safety`)
-//! that CAN fail: every standalone entry in `CACHE_INVALIDATING_TOOLS` must
-//! be explicitly triaged into either `STANDALONE_UNSAFE_ROUTES` or the
-//! documented `KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS` allowlist. The
-//! latter enumerates pre-existing (pre-#1098) standalone fail-open gaps that
-//! were not part of the owner's 2026-07-17 adjudication and are therefore
-//! flagged, not silently fixed, per the issue's behavior-freeze boundary.
+//! The cache-invalidating inventory is also explicit replay metadata: every
+//! standalone entry is `Mutating`/`Unsafe`, while an unlisted route has no
+//! replay authority at all. This keeps a new mutator from inheriting a legacy
+//! allow merely because the route inventory was not updated yet.
 
 use serde_json::Value;
 
@@ -98,8 +89,8 @@ impl ActionEffectMetadata {
     };
 
     /// Only an explicitly `Safe` action may be auto-retried through the DLQ.
-    fn dlq_replay_unsafe(self) -> bool {
-        !matches!(self.replay, ReplaySafety::Safe)
+    fn permits_dlq_replay(self) -> bool {
+        matches!(self.replay, ReplaySafety::Safe)
     }
 }
 
@@ -215,25 +206,10 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
 /// The first nine entries are ported verbatim from the pre-#1098
 /// `shared_defs::NON_IDEMPOTENT_TOOL_NAMES`.
 ///
-/// `remember` / `extract_facts` / `ingest_event` are a fix-round addition
-/// (codex review, PR #1213, checkpoint 4): all three are cache-invalidating
-/// (`CACHE_INVALIDATING_TOOLS` above already treats them as state-mutating)
-/// but were absent here, so a canonicalized/proxied route whose tail
-/// resolves to one of these three names (e.g. `remote__remember`) fell
-/// through both `STANDALONE_UNSAFE_ROUTES` and every `facade_action_effect`
-/// match arm to `dlq_mutation_is_unsafe`'s `.unwrap_or(false)` — misclassified
-/// safe-to-replay, letting `retry_dispatch` auto-retry a mutation via
-/// `proxy_call_internal`. A *native* call to any of the three never reaches
-/// this table at all (`should_enqueue_dlq`'s `is_native_route` short-circuit
-/// excludes it before `dlq_mutation_is_unsafe` is even consulted; see
-/// `server_handler.rs`'s DLQ capture call site), so this fix only changes
-/// behavior for the proxied/remote path, matching the owner's 2026-07-17
-/// ruling's "native-route behavior remains unchanged" clause. This is the
-/// same class of pre-existing standalone-route gap as
-/// `KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS` below (neither list item was
-/// named in `NON_IDEMPOTENT_TOOL_NAMES` pre-#1098) — these three are fixed
-/// because codex's checkpoint 4 named them with a live execution trace; the
-/// rest are flagged, not fixed, pending separate adjudication.
+/// `remember` / `extract_facts` / `ingest_event` remain named here as direct
+/// hard denials. Other cache-invalidating standalone routes receive the same
+/// `Mutating`/`Unsafe` metadata in [`dlq_replay_metadata`], so aliases and
+/// future registration cannot fall through to an implicit safe replay.
 const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
     "save_memory",
     "tachi_save",
@@ -386,29 +362,49 @@ fn facade_action_effect(
 
 // ─── Public authority entry points ───────────────────────────────────────────
 
-/// Returns true when replaying `tool_name` through the DLQ could duplicate
-/// writes. Canonicalizes `tool_name` (clause 1) before consulting either the
-/// standalone-route table or the gated-facade table (clause 2's default-deny
-/// applies only within a facade this module recognizes — a tool name outside
-/// both tables is unchanged from pre-#1098 and returns `false`, i.e. not
-/// flagged unsafe, matching legacy behavior for arbitrary external routes).
-pub(crate) fn dlq_mutation_is_unsafe(
+/// Returns the explicit typed effect/replay classification used for DLQ
+/// admission. `None` is deliberately not an implicit read: callers must deny
+/// replay and surface the missing authority rather than preserving an
+/// unclassified proxy or newly registered route as safe.
+pub(crate) fn dlq_replay_metadata(
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, Value>>,
-) -> bool {
+) -> Option<ActionEffectMetadata> {
     let canonical = canonical_route_name(tool_name);
-
-    if STANDALONE_UNSAFE_ROUTES.contains(&canonical) {
-        return true;
-    }
-
     let action = arguments
         .and_then(|args| args.get("action"))
         .and_then(Value::as_str);
 
-    facade_action_effect(canonical, action)
-        .map(ActionEffectMetadata::dlq_replay_unsafe)
-        .unwrap_or(false)
+    facade_action_effect(canonical, action).or_else(|| {
+        if STANDALONE_UNSAFE_ROUTES.contains(&canonical)
+            || CACHE_INVALIDATING_TOOLS.contains(&canonical)
+        {
+            Some(ActionEffectMetadata::MUTATING_UNSAFE)
+        } else if CACHEABLE_TOOLS.contains(&canonical) {
+            Some(ActionEffectMetadata::READ_ONLY_SAFE)
+        } else {
+            None
+        }
+    })
+}
+
+/// The sole DLQ allow condition: a route must have an explicit typed
+/// read-only/safe classification after canonicalization. Unknown names,
+/// unreviewed aliases, and future actions fail closed.
+pub(crate) fn dlq_replay_is_explicitly_safe(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, Value>>,
+) -> bool {
+    dlq_replay_metadata(tool_name, arguments).is_some_and(ActionEffectMetadata::permits_dlq_replay)
+}
+
+/// Compatibility predicate for callers that only need a deny decision. An
+/// unclassified route is unsafe for automatic replay, not safe by omission.
+pub(crate) fn dlq_mutation_is_unsafe(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, Value>>,
+) -> bool {
+    !dlq_replay_is_explicitly_safe(tool_name, arguments)
 }
 
 #[cfg(test)]
@@ -518,12 +514,11 @@ mod tests {
     }
 
     #[test]
-    fn f1098_a_tool_outside_the_known_universe_is_unchanged() {
-        // Not a standalone route, not a recognized facade — legacy default
-        // (`false`) is preserved; #1098 does not widen classification to
-        // arbitrary external/unknown tool names.
-        assert!(!dlq_unsafe("some_other_mcp_servers_tool", Some("anything")));
-        assert!(!dlq_unsafe("some_other_mcp_servers_tool", None));
+    fn f1098_a_tool_outside_the_known_universe_fails_closed() {
+        // A proxy or dynamically registered route without typed metadata is
+        // never treated as a read merely because it is absent from old lists.
+        assert!(dlq_unsafe("some_other_mcp_servers_tool", Some("anything")));
+        assert!(dlq_unsafe("some_other_mcp_servers_tool", None));
     }
 
     // ── Behavior-freeze: previously-classified read-only actions stay safe ─
@@ -627,114 +622,19 @@ mod tests {
         assert_all_classified("tachi_verify", &verify_actions);
     }
 
-    /// #1098 direct-route completeness (acceptance: "every ... direct tool
-    /// route ... has effect/replay metadata or fails a completeness test").
-    /// Facade actions are default-deny by construction —
-    /// `facade_action_effect`'s final arm means `is_some()` is trivially
-    /// always true for a known facade and cannot, by itself, tell a reviewed
-    /// classification from an unclassified one; that structural guarantee
-    /// (not a test) is what makes facade-action coverage total (codex review,
-    /// PR #1213, checkpoint 3).
-    ///
-    /// A *standalone* route has no such default: a canonical name that is
-    /// neither in `STANDALONE_UNSAFE_ROUTES` nor a recognized facade silently
-    /// falls through `facade_action_effect`'s `_ => None` arm to
-    /// `dlq_mutation_is_unsafe`'s `.unwrap_or(false)` — legacy "outside the
-    /// known universe" behavior
-    /// (`f1098_a_tool_outside_the_known_universe_is_unchanged`) — even when
-    /// the tool provably mutates state. That is exactly the checkpoint-4 bug
-    /// this fix round closed for `remember`/`extract_facts`/`ingest_event`.
-    ///
-    /// This test makes the rest of that class of gap structurally visible
-    /// instead of silent: every standalone (non-facade) entry in
-    /// `CACHE_INVALIDATING_TOOLS` — this module's own typed authority for
-    /// "this route mutates state" — must land in EITHER
-    /// `STANDALONE_UNSAFE_ROUTES` OR the explicit,
-    /// individually-commented `KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS`
-    /// allowlist below. A future tool added to `CACHE_INVALIDATING_TOOLS`
-    /// that lands in neither fails this test instead of disappearing into
-    /// the same silent fail-open path unnoticed.
+    /// Every cache-invalidating standalone route is now typed as
+    /// `Mutating`/`Unsafe`; no pending-adjudication allowlist may preserve an
+    /// automatic-replay hole for a newly registered mutator.
     #[test]
     fn f1098_every_cache_invalidating_standalone_route_is_triaged_for_replay_safety() {
-        const KNOWN_FACADES: &[&str] = &[
-            "tachi_memory",
-            "tachi_event",
-            "tachi_wiki",
-            "tachi_task",
-            "tachi_gh",
-            "tachi_shell",
-            "tachi_skill",
-            "tachi_verify",
-            "tachi_domain_adapter",
-            "tachi_handoff",
-            "tachi_orchestrator",
-            "tachi_arena",
-            "tachi_sandbox",
-            "tachi_complete",
-        ];
         for name in CACHE_INVALIDATING_TOOLS {
-            if KNOWN_FACADES.contains(name) {
-                // Facade actions are triaged by `facade_action_effect`, not
-                // by this whole-tool-name gate.
-                continue;
-            }
-            assert!(
-                STANDALONE_UNSAFE_ROUTES.contains(name)
-                    || KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS.contains(name),
-                "'{name}' invalidates the cache (mutates state per this module's own \
-                 typed authority) but is neither in STANDALONE_UNSAFE_ROUTES nor \
-                 documented as a pending-adjudication gap in \
-                 KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS — triage it into one of \
-                 the two instead of leaving it silently unclassified"
+            assert_eq!(
+                dlq_replay_metadata(name, None),
+                Some(ActionEffectMetadata::MUTATING_UNSAFE),
+                "'{name}' invalidates the cache and must be explicitly unsafe to replay"
             );
         }
     }
-
-    /// #1098 (PR #1213 fix round, codex checkpoint 4): standalone routes that
-    /// `CACHE_INVALIDATING_TOOLS` already marks as state-mutating but that
-    /// were ALSO already replay-classified `false` (safe) pre-#1098 — absent
-    /// from the legacy `NON_IDEMPOTENT_TOOL_NAMES` this module's
-    /// `STANDALONE_UNSAFE_ROUTES` ported verbatim. This fail-open gap
-    /// pre-dates #1098; it is not the specific bypass the owner's
-    /// 2026-07-17 adjudication comment named (that comment named
-    /// *facade-action* gaps — tachi_memory's
-    /// gc/claim/release/sticky_leave/sticky_check, tachi_event's
-    /// emit/project/promote — all closed by clause 2's default-deny).
-    /// Closing every entry here is a separate, unadjudicated behavior change
-    /// (the same category `CACHE_INVALIDATING_TOOLS`'s own doc comment
-    /// already carves out for the tachi_gh/tachi_event cache-invalidation
-    /// gap as "not part of #1098's scope") — flagged here per the issue's "a
-    /// mismatch discovered in the baseline is flagged for adjudication; do
-    /// not silently normalize" boundary, not silently fixed by this fix
-    /// round. `remember`/`extract_facts`/`ingest_event` were the three
-    /// codex's checkpoint 4 named with a live execution trace and are fixed
-    /// (removed from this list, added to `STANDALONE_UNSAFE_ROUTES`); the
-    /// rest are flagged, not fixed.
-    const KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS: &[&str] = &[
-        "hub_register",
-        "hub_quick_add",
-        "hub_review",
-        "hub_set_active_version",
-        "hub_export_skills",
-        "skill_evolve",
-        "capture_session",
-        "archive_memory",
-        "compact_rollup",
-        "compact_session_memory",
-        "sync_memories",
-        "vc_register",
-        "vc_bind",
-        "hub_feedback",
-        "sandbox_set_rule",
-        "sandbox_set_policy",
-        "tachi_init_project_db",
-        "post_card",
-        "update_card",
-        "distill_trajectory",
-        "tachi_unstick",
-        "wiki_lint",
-        "tachi_wiki_ingest",
-    ];
 
     /// #1098: `ActionEffect::ReadOnly` must only ever pair with
     /// `ReplaySafety::Safe` — the type only exposes one constructor for that

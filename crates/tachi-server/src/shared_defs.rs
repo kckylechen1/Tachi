@@ -70,6 +70,13 @@ pub(super) fn dlq_mutation_is_unsafe(
     crate::action_effect::dlq_mutation_is_unsafe(tool_name, arguments)
 }
 
+pub(super) fn dlq_replay_is_explicitly_safe(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    crate::action_effect::dlq_replay_is_explicitly_safe(tool_name, arguments)
+}
+
 pub(super) fn should_enqueue_dlq(
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -81,7 +88,7 @@ pub(super) fn should_enqueue_dlq(
     {
         return false;
     }
-    if is_native_route || dlq_mutation_is_unsafe(tool_name, arguments) {
+    if is_native_route || !dlq_replay_is_explicitly_safe(tool_name, arguments) {
         return false;
     }
     true
@@ -354,10 +361,11 @@ mod dlq_tests {
     }
 
     #[test]
-    fn should_enqueue_dlq_skips_native_and_mutating_tools() {
+    fn should_enqueue_dlq_requires_an_explicit_safe_effect() {
         assert!(!should_enqueue_dlq("save_memory", None, true));
         assert!(!should_enqueue_dlq("hub_call", None, false));
-        assert!(should_enqueue_dlq("remote__echo", None, false));
+        assert!(!should_enqueue_dlq("remote__echo", None, false));
+        assert!(!should_enqueue_dlq("remote__unknown", None, false));
     }
 
     /// #1098: the owner's adjudication comment named this exact call shape —

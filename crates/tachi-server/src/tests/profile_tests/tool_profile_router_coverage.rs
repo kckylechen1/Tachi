@@ -435,14 +435,66 @@ fn f1098_cache_policy_entries_are_live_registered_routes() {
     }
 }
 
+fn action_arguments_from_live_schema(
+    tool: &rmcp::model::Tool,
+) -> Vec<Option<serde_json::Map<String, serde_json::Value>>> {
+    let schema = serde_json::to_value(&tool.input_schema)
+        .expect("live MCP tool input schema must serialize for DLQ coverage");
+    let Some(actions) = schema
+        .pointer("/properties/action/enum")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return vec![None];
+    };
+
+    actions
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|action| {
+            Some(serde_json::Map::from_iter([(
+                "action".to_string(),
+                serde_json::Value::String(action.to_string()),
+            )]))
+        })
+        .collect()
+}
+
+/// #1098 / #1170 ratchet: enumerate the live registered router and each
+/// facade's advertised action enum. A route is admitted only when the actual
+/// typed authority marks it Safe; absent metadata has the same fail-closed
+/// outcome, and the retry boundary names that missing authority to callers.
+#[test]
+fn f1098_live_router_replay_admission_is_explicit_or_fail_closed() {
+    for tool in native_route_definitions() {
+        let tool_name = tool.name.to_string();
+        for arguments in action_arguments_from_live_schema(&tool) {
+            let native_admission =
+                crate::shared_defs::should_enqueue_dlq(&tool_name, arguments.as_ref(), true);
+            assert!(
+                !native_admission,
+                "native route '{tool_name}' must never enter the generic DLQ"
+            );
+
+            if tool_name.starts_with("dlq_")
+                || tool_name.starts_with("ghost_")
+                || tool_name == "get_pipeline_status"
+            {
+                continue;
+            }
+
+            assert_eq!(
+                crate::shared_defs::should_enqueue_dlq(&tool_name, arguments.as_ref(), false,),
+                crate::action_effect::dlq_replay_is_explicitly_safe(&tool_name, arguments.as_ref(),),
+                "live route '{tool_name}' must be admitted only by explicit typed replay metadata"
+            );
+        }
+    }
+}
+
 /// #1098 acceptance: "dynamically enumerate every ... direct tool route;
-/// every routable operation has effect/replay metadata or fails a
-/// completeness test." `dlq_mutation_is_unsafe` is a total function (a
-/// canonicalized name outside its known universe defaults to `false`,
-/// matching legacy behavior for unrecognized routes) — this dynamically
-/// walks the real, live router and proves the classification pass runs
-/// clean (no panic) end to end for every tool name the server actually
-/// exposes today, native or facade.
+/// every routable operation has effect/replay metadata or fails closed." This
+/// dynamically walks the real, live router and proves the deny predicate runs
+/// clean end to end for every tool name the server actually exposes today.
 ///
 /// codex review (PR #1213, checkpoint 3): the pre-fix-round version of this
 /// test discarded the boolean result, proving only "did not panic". It now
