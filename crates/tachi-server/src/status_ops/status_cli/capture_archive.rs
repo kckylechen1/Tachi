@@ -884,12 +884,66 @@ mod tests {
         entry
     }
 
+    fn seed_entry(store: &mut MemoryStore, entry: &MemoryEntry) {
+        let mut entry = entry.clone();
+        let (metadata_patch, mutations) = {
+            let metadata = entry
+                .metadata
+                .as_object_mut()
+                .expect("fixture metadata object");
+            let mut mutations = Vec::new();
+
+            if let Some(source_refs) = metadata.remove("source_refs") {
+                for source_ref in source_refs.as_array().expect("fixture source_refs array") {
+                    mutations.push(
+                        memcore::db::ValidatedReferenceMutation::capture_source(
+                            source_ref["ref_type"]
+                                .as_str()
+                                .expect("fixture source ref_type")
+                                .to_string(),
+                            source_ref["ref_id"]
+                                .as_str()
+                                .expect("fixture source ref_id")
+                                .to_string(),
+                            source_ref["revision"].as_str().map(str::to_string),
+                        )
+                        .expect("validated fixture capture source reference"),
+                    );
+                }
+            }
+
+            if let Some(evidence_refs) = metadata.remove("evidence_refs_v1") {
+                for evidence_ref in evidence_refs
+                    .as_array()
+                    .expect("fixture evidence refs array")
+                {
+                    mutations.push(
+                        memcore::db::ValidatedReferenceMutation::evidence(
+                            evidence_ref["ref"]
+                                .as_str()
+                                .expect("fixture evidence ref")
+                                .to_string(),
+                            AS_OF_TEXT.to_string(),
+                            None,
+                        )
+                        .expect("validated fixture evidence reference"),
+                    );
+                }
+            }
+
+            (metadata.clone(), mutations)
+        };
+        store
+            .upsert_with_validated_reference_mutations(&entry, None, &metadata_patch, &mutations)
+            .expect("seed entry with validated references");
+    }
+
     fn database(entries: &[MemoryEntry]) -> (TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("temp database directory");
         let path = dir.path().join("memory.db");
         let mut store = MemoryStore::open(path.to_str().expect("UTF-8 path")).expect("open store");
         for entry in entries {
-            store.upsert(entry).expect("seed entry");
+            seed_entry(&mut store, entry);
         }
         drop(store);
         (dir, path)
@@ -1055,9 +1109,10 @@ mod tests {
     fn apply_time_transaction_rechecks_new_reviewed_evidence() {
         let (_dir, path) = database(&[capture("candidate")]);
         let mut store = MemoryStore::open(path.to_str().unwrap()).expect("open writer");
-        store
-            .upsert(&approved_evidence("review", "capture-session:candidate"))
-            .expect("insert protection evidence");
+        seed_entry(
+            &mut store,
+            &approved_evidence("review", "capture-session:candidate"),
+        );
 
         let revision = store
             .get("capture-session:candidate")
@@ -1146,7 +1201,7 @@ mod tests {
             "ttl_days": null
         });
         let mut store = MemoryStore::open(path.to_str().unwrap()).expect("open writer");
-        store.upsert(&unrelated).expect("seed unrelated capture");
+        seed_entry(&mut store, &unrelated);
         assert!(store
             .archive_memory(&unrelated.id)
             .expect("archive unrelated capture"));
