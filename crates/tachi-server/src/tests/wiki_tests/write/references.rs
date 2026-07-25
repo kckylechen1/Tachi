@@ -109,22 +109,12 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
     );
 }
 
-// H2 fix (narrow flake isolation): the `include_patterns=true` path calls
-// `list_available_named_projects()` → `tachi_home().join("projects")`, which
-// re-reads `TACHI_HOME` from the env. A parallel `TempHomeGuard` test can
-// repoint `TACHI_HOME` mid-test and make this test see the wrong project set.
-// Holding the process-wide home test lock across the whole body serializes
-// against any `TempHomeGuard` user, so this test's env reads stay consistent.
-// `await_holding_lock` is intentionally allowed: the lock MUST be held across
-// the awaits to serialize env reads against parallel tests — that is the fix.
-// (Full hardening — snapshotting `tachi_home()` per-process so no env mutation
-// can affect identity resolution — is tracked as a separate follow-up; this PR
-// fixes the flake at its source.)
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn tachi_wiki_write_can_attach_projected_pattern_refs() {
-    let _home_lock = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let server = make_server();
+    // Pattern discovery consults named-project state under TACHI_HOME. Keep
+    // this fixture isolated so a real older checkout DB cannot become an
+    // accidental dependency of a global wiki-write regression test.
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     server
         .with_global_store(|store| {
             let mut pattern = make_entry("wiki-pattern-ref-row");

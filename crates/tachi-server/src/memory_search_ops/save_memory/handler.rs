@@ -345,6 +345,9 @@ async fn handle_save_memory_impl(
         .unwrap_or_else(|| timestamp.clone());
     let requested_scope = params.scope.clone();
     let named_project = params.project.clone();
+    if let Some(project) = named_project.as_deref() {
+        server.prepare_named_project_store_for_write(project)?;
+    }
     let (target_db, warning) = if named_project.is_some() {
         (DbScope::Project, None) // Will use named project below
     } else {

@@ -632,18 +632,25 @@ fn open_legacy_db_with_persons_and_location() -> (tempfile::NamedTempFile, std::
 /// unchanged. Then a real (unarmed) run must apply and stamp cleanly.
 #[test]
 fn legacy_column_work_rolls_back_with_stamp_on_injected_failure() {
-    let (tmp, path) = open_legacy_db_with_persons_and_location();
-    let path_str = tmp.path().to_str().expect("utf8 tmp path").to_string();
+    let (_tmp, path) = open_legacy_db_with_persons_and_location();
 
     super::test_hooks::arm_fail_after_legacy_work();
-    // Match rather than expect_err: MemoryStore (the Ok variant) is not
-    // Debug, and we don't want to derive Debug on a struct holding live
-    // connections (see the round-2 fixup for the same pattern elsewhere in
-    // this test suite).
-    let err = match crate::MemoryStore::open_with_label(&path_str, "global") {
-        Ok(_) => panic!("armed injection must fail init_schema_with_label_mut"),
-        Err(e) => e,
-    };
+    let mut migration_conn = Connection::open(&path).expect("open migration fixture");
+    let reference_guard = crate::db::register_reserved_reference_write_guard(&migration_conn)
+        .expect("register reference guard");
+    crate::db::install_reserved_reference_authorizer(&migration_conn, Some(&reference_guard))
+        .expect("install authorizer");
+    let migration_authorization =
+        crate::db::authorize_schema_migration(&reference_guard).expect("authorize test migration");
+    let err = super::init_schema_with_label_mut(
+        &mut migration_conn,
+        "global",
+        &path,
+        &crate::db::DbOpenContext::create_fresh(),
+    )
+    .expect_err("armed injection must fail init_schema_with_label_mut");
+    drop(migration_authorization);
+    drop(migration_conn);
     assert!(
         err.to_string().contains("injected failure"),
         "unexpected error: {err}"
@@ -726,8 +733,22 @@ fn legacy_column_work_rolls_back_with_stamp_on_injected_failure() {
 
     // 5. A real (unarmed) run now proceeds cleanly: legacy work applied,
     //    migrations run, and the DB ends up stamped at the current version.
-    let _store =
-        crate::MemoryStore::open_with_label(&path_str, "global").expect("unarmed run must succeed");
+    let mut migration_conn = Connection::open(&path).expect("reopen migration fixture");
+    let reference_guard = crate::db::register_reserved_reference_write_guard(&migration_conn)
+        .expect("register reference guard");
+    crate::db::install_reserved_reference_authorizer(&migration_conn, Some(&reference_guard))
+        .expect("install authorizer");
+    let migration_authorization =
+        crate::db::authorize_schema_migration(&reference_guard).expect("authorize test migration");
+    super::init_schema_with_label_mut(
+        &mut migration_conn,
+        "global",
+        &path,
+        &crate::db::DbOpenContext::create_fresh(),
+    )
+    .expect("unarmed run must succeed");
+    drop(migration_authorization);
+    drop(migration_conn);
     let verify = Connection::open(&path).expect("reopen to verify success run");
     let has_persons_after: bool = verify
         .query_row(

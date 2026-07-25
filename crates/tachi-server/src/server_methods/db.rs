@@ -461,6 +461,16 @@ impl MemoryServer {
             .with_path_store_with_label(&db_path, project_name, f)
     }
 
+    /// Establish the write-capable named-project state before a write facade
+    /// performs any read-before-write lookup. This is the only route that may
+    /// consume the runtime's exact v22-to-v23 guard migration authority.
+    pub(crate) fn prepare_named_project_store_for_write(
+        &self,
+        project_name: &str,
+    ) -> Result<(), String> {
+        self.with_named_project_store(project_name, |_| Ok(()))
+    }
+
     pub(crate) fn resolve_write_scope(&self, requested: &str) -> (DbScope, Option<String>) {
         if requested == "global" {
             (DbScope::Global, None)

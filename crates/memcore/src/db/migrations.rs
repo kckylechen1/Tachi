@@ -42,6 +42,9 @@
 //! - v22: `memories_symbolic_fts` trigram projection create + full rebuild
 //!   (#1331) — versioned so stamped-v21 DBs cannot silently acquire the
 //!   table via idempotent init DDL without a migration stamp/authority gate.
+//! - v23: canonical reserved evidence-reference guard triggers — versioned so
+//!   a legitimate v22 DB upgrades under migration authority while a damaged
+//!   v23 inventory is refused rather than silently repaired.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -53,10 +56,9 @@
 //! written by a newer kernel fails loudly instead of silently proceeding
 //! against data/columns it doesn't understand yet.
 //!
-//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 18
-//! sentinel migrations (v1..v18) plus the pre-sentinel baseline schema (v0),
-//! so the current stamp is 18. Bump this const (and add a `vN` doc line
-//! above) whenever a new migration is appended to [`run_data_migrations`].
+//! [`EXPECTED_SCHEMA_VERSION`] counts the sentinel migration sequence above.
+//! Bump this const (and add a `vN` doc line above) whenever a new migration is
+//! appended to [`run_data_migrations`].
 //!
 //! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
 //!
@@ -85,7 +87,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 22;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 23;
 
 mod basic;
 mod cross_db;
@@ -157,6 +159,31 @@ pub struct MigrationReport {
     pub mirror_eval_tables_created: usize,
     pub identity_workclaim_columns_added: usize,
     pub memories_symbolic_fts_rows: usize,
+    pub reserved_reference_guards_installed: usize,
+}
+
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use crate::error::MemoryError;
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAIL_AFTER_V23_GUARD_INSTALL: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn arm_fail_after_v23_guard_install() {
+        FAIL_AFTER_V23_GUARD_INSTALL.with(|flag| flag.set(true));
+    }
+
+    pub(super) fn fail_after_v23_guard_install() -> Result<(), MemoryError> {
+        let armed = FAIL_AFTER_V23_GUARD_INSTALL.with(|flag| flag.replace(false));
+        if armed {
+            return Err(MemoryError::InvalidArg(
+                "test_hooks: injected failure after v23 guard install".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
@@ -164,6 +191,14 @@ pub struct MigrationReport {
 pub fn read_schema_version(conn: &Connection) -> Result<u32, MemoryError> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     Ok(version.max(0) as u32)
+}
+
+/// Inspect a database's version without creating or mutating it. Runtime
+/// write routers use this only to recognize the one narrowly authorized
+/// v22-to-v23 evidence-guard upgrade before opening a named project store.
+pub fn read_schema_version_at_path(db_path: &Path) -> Result<u32, MemoryError> {
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    read_schema_version(&conn)
 }
 
 /// Persist `version` as the schema version stamp (`PRAGMA user_version`).
@@ -530,7 +565,22 @@ pub(crate) fn run_data_migrations_in_tx(
     )?
     .unwrap_or(0);
 
+    report.reserved_reference_guards_installed = apply_versioned_migration(
+        conn,
+        "v23_reserved_reference_guards",
+        migrate_v23_reserved_reference_guards,
+    )?
+    .unwrap_or(0);
+
     Ok(report)
+}
+
+fn migrate_v23_reserved_reference_guards(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::install_reserved_reference_guard(conn)?;
+    #[cfg(test)]
+    test_hooks::fail_after_v23_guard_install()?;
+    crate::db::validate_persistent_trigger_inventory(conn, true)?;
+    Ok(2)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -1548,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_open_permits_older_stamped_db() {
+    fn read_only_open_refuses_older_stamped_db_until_migrated() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         {
             let _ = crate::db::enable_simple_auto_extension();
@@ -1560,10 +1610,21 @@ mod tests {
         }
 
         let path = tmp.path().to_str().expect("utf8 tmp path");
-        // Read-only opens never migrate; an older-stamped DB must still be
-        // readable (only NEWER-than-supported is fatal).
-        crate::MemoryStore::open_read_only(path)
-            .expect("read-only open of an older-stamped DB must succeed");
+        let err = match crate::MemoryStore::open_read_only(path) {
+            Ok(_) => panic!("read-only open must not consume an older schema"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                err,
+                MemoryError::SchemaMigrationOptInRequired {
+                    stored,
+                    expected,
+                    ..
+                } if stored + 1 == expected
+            ),
+            "older read-only DB must fail as migration-required, got: {err}"
+        );
     }
 
     #[test]
@@ -1683,6 +1744,7 @@ mod tests {
         "v20_mirror_eval",
         "v21_identity_workclaim_spine",
         "v22_memories_symbolic_fts",
+        "v23_reserved_reference_guards",
     ];
 
     /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner
@@ -1721,7 +1783,8 @@ mod tests {
     }
 
     /// #1331 BUG 3: stamped-v21 DBs must not silently acquire
-    /// `memories_symbolic_fts` under Deny; Allow must create+backfill and stamp 22.
+    /// `memories_symbolic_fts` under Deny; Allow must create+backfill v22 and
+    /// continue through the current schema stamp.
     #[test]
     fn v21_to_v22_symbolic_fts_requires_authority_and_stamps() {
         use crate::db::{init_schema_with_label_mut, DbOpenContext};
@@ -1788,7 +1851,10 @@ mod tests {
         )
         .expect("Allow must migrate v21 → v22");
         let verify = Connection::open(&path).unwrap();
-        assert_eq!(read_schema_version(&verify).unwrap(), 22);
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
         assert!(was_run(&verify, "v22_memories_symbolic_fts").unwrap());
         let rows: i64 = verify
             .query_row("SELECT COUNT(*) FROM memories_symbolic_fts", [], |r| {
@@ -1798,6 +1864,165 @@ mod tests {
         assert!(
             rows >= 1,
             "v22 must backfill existing memories into the symbolic projection"
+        );
+    }
+
+    #[test]
+    fn v22_to_v23_installs_reserved_reference_guards_and_stamps() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision legacy fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open legacy fixture");
+            conn.execute(
+                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+                params![MIGRATION_NS, "v23_reserved_reference_guards"],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
+                 DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
+                 PRAGMA user_version = 22;",
+            )
+            .unwrap();
+        }
+
+        let store = crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "guide-project",
+            &DbOpenContext::open_existing_allow("test:v23-evidence-guards"),
+        )
+        .expect("authorized v22 migration must install evidence guards");
+        drop(store);
+
+        let verify = Connection::open(&path).expect("verify migrated DB");
+        assert_eq!(read_schema_version(&verify).unwrap(), 23);
+        assert!(was_run(&verify, "v23_reserved_reference_guards").unwrap());
+        let trigger_count: i64 = verify
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name IN (
+                       'memories_reserved_refs_insert_guard',
+                       'memories_reserved_refs_update_guard'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_count, 2, "v23 canonical guard inventory");
+    }
+
+    #[test]
+    fn v23_guard_install_failure_rolls_back_triggers_sentinel_and_stamp() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision current fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open legacy fixture");
+            conn.execute(
+                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+                params![MIGRATION_NS, "v23_reserved_reference_guards"],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
+                 DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
+                 PRAGMA user_version = 22;",
+            )
+            .unwrap();
+        }
+
+        test_hooks::arm_fail_after_v23_guard_install();
+        let err = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "guide-project",
+            &DbOpenContext::open_existing_allow("test:v23-rollback"),
+        ) {
+            Ok(_) => panic!("injected v23 guard failure must abort migration"),
+            Err(error) => error,
+        };
+        assert!(
+            err.to_string()
+                .contains("injected failure after v23 guard install"),
+            "unexpected injected migration error: {err}"
+        );
+
+        let verify = Connection::open(&path).expect("verify rolled-back DB");
+        assert_eq!(read_schema_version(&verify).unwrap(), 22);
+        assert!(!was_run(&verify, "v23_reserved_reference_guards").unwrap());
+        let trigger_count: i64 = verify
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name IN (
+                       'memories_reserved_refs_insert_guard',
+                       'memories_reserved_refs_update_guard'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            trigger_count, 0,
+            "failed migration must roll guard DDL back"
+        );
+    }
+
+    #[test]
+    fn stamped_v23_with_missing_guards_is_refused_even_with_migration_authority() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision current fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open current fixture");
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
+                 DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
+                 PRAGMA user_version = 23;",
+            )
+            .unwrap();
+        }
+
+        let err = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "guide-project",
+            &DbOpenContext::open_existing_allow("test:must-not-repair-v23"),
+        ) {
+            Ok(_) => panic!("a damaged v23 DB must not be repaired during open"),
+            Err(error) => error,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("unsafe persistent trigger inventory")
+                && message.contains("memories_reserved_refs_insert_guard"),
+            "damaged current DB must fail as unsafe inventory, got: {err}"
+        );
+
+        let verify = Connection::open(&path).expect("verify refused DB");
+        assert_eq!(read_schema_version(&verify).unwrap(), 23);
+        let trigger_count: i64 = verify
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            trigger_count, 0,
+            "refusal must not repair trigger inventory"
         );
     }
 

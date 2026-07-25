@@ -40,6 +40,11 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     apply_connection_pragmas(conn)?;
     init_schema_inner(conn)?;
+    // This bare entry point is fresh, private in-memory/test setup and does
+    // not participate in the file-backed version-stamp lifecycle. Mirror the
+    // v23 migration's canonical guards here only after the final memories
+    // table exists; operational file opens install them through v23 below.
+    install_reserved_reference_guard(conn)?;
     super::validate_persistent_trigger_inventory(conn, true)
 }
 
@@ -319,10 +324,6 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // triggers during that migration. The trigger is the cross-process cache
     // authority; drift is an open failure, never a silently stale cache hit.
     crate::db::search_generation::ensure_search_generation_schema(conn)?;
-    // Table rebuilds above drop triggers. Install the reserved-reference guard
-    // only after the final canonical `memories` table exists.
-    install_reserved_reference_guard(conn)?;
-
     ensure_optimization_indexes(conn);
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
@@ -542,7 +543,15 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         )
         .ok();
     if let Some(sql) = existing_sql.as_deref() {
-        let has_source_check = sql.contains("CHECK (source") || sql.contains("CHECK(source");
+        // SQLite preserves formatting in sqlite_schema. Canonical rebuild SQL
+        // writes `CHECK (` and `source` on separate lines, so a raw substring
+        // probe falsely rebuilt the table on every open and dropped its
+        // triggers. Remove formatting whitespace before testing the shape.
+        let compact_sql: String = sql
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace())
+            .collect();
+        let has_source_check = compact_sql.contains("CHECK(source");
         // #964: 'sticky' is the newest category value: check it (not 'eval')
         // so DBs stamped before the sticky category was added re-run this
         // rebuild once, same idempotent-sentinel pattern as every prior

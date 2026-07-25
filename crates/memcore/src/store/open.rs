@@ -113,8 +113,15 @@ impl MemoryStore {
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         let existing_application_schema = has_existing_application_schema(&conn)?;
-        let may_install_required_triggers = !existing_application_schema || ctx.migration_allowed();
-        db::validate_persistent_trigger_inventory(&conn, !may_install_required_triggers)?;
+        let stored_schema_version = db::migrations::read_schema_version(&conn)?;
+        // Missing guards are legitimate only before the versioned v23
+        // migration (or on a truly empty fresh DB). Unexpected/tampered
+        // definitions are always rejected. A partial unstamped application
+        // schema remains strict and cannot claim fresh-build authority.
+        let is_stamped_older_schema =
+            (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version);
+        let allow_missing_pre_migration = !existing_application_schema || is_stamped_older_schema;
+        db::validate_persistent_trigger_inventory(&conn, !allow_missing_pre_migration)?;
         // Both labelled and unlabelled opens run schema init + data migrations
         // through init_schema_with_label_mut so the pre-migration backup and
         // post-migration fingerprint marker apply uniformly. Previously the
@@ -150,9 +157,8 @@ impl MemoryStore {
     /// immediately after opening, before any read touches it — read-only
     /// callers (CLI diagnostics, the server's read pool) must not be able to
     /// silently read columns/rows a newer kernel wrote and this kernel
-    /// doesn't understand. An *older*-stamped DB is fine here: read-only opens
-    /// never run migrations, so there's nothing to bring forward, and old
-    /// data must stay readable by newer kernels.
+    /// doesn't understand. Older stamped DBs also refuse with the typed
+    /// migration-required error: read-only opens never repair or migrate.
     ///
     /// This does not affect `crate::db::doctor_probe`, which never routes
     /// through `MemoryStore` — it opens raw `rusqlite::Connection`s directly
@@ -166,6 +172,17 @@ impl MemoryStore {
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         db::migrations::check_schema_version_gate(&conn)?;
+        let stored_schema_version = db::migrations::read_schema_version(&conn)?;
+        if (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version) {
+            // Older legitimate DBs may lack guards, but an unexpected or
+            // spoofed trigger is unsafe at every version and must remain loud.
+            db::validate_persistent_trigger_inventory(&conn, false)?;
+        }
+        db::migrations::check_db_open_context_gate(
+            &conn,
+            std::path::Path::new(db_path),
+            &DbOpenContext::open_existing_deny(),
+        )?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
         let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
         Ok(Self {
@@ -190,7 +207,6 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
-        db::validate_persistent_trigger_inventory(&conn, true)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
             return Err(MemoryError::InvalidArg(format!(
@@ -198,6 +214,7 @@ impl MemoryStore {
                 db::migrations::EXPECTED_SCHEMA_VERSION
             )));
         }
+        db::validate_persistent_trigger_inventory(&conn, true)?;
         // A version stamp is not proof of shape. Prepare the complete memories
         // projection exact-dedupe reads and writes before returning a writable
         // handle; this validates only and deliberately performs no
@@ -443,7 +460,7 @@ mod exact_dedupe_open_tests {
     }
 
     #[test]
-    fn authorized_schema_migration_may_reinstall_missing_reference_guards() {
+    fn authorized_v22_migration_installs_missing_reference_guards() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("authorized-migration.db");
         drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
@@ -452,7 +469,11 @@ mod exact_dedupe_open_tests {
         offline
             .execute_batch(
                 "DROP TRIGGER memories_reserved_refs_insert_guard;
-                 DROP TRIGGER memories_reserved_refs_update_guard;",
+                 DROP TRIGGER memories_reserved_refs_update_guard;
+                 DELETE FROM hard_state
+                  WHERE namespace = 'migrations'
+                    AND key = 'v23_reserved_reference_guards';
+                 PRAGMA user_version = 22;",
             )
             .unwrap();
         drop(offline);
@@ -462,6 +483,26 @@ mod exact_dedupe_open_tests {
             .expect("authorized migration repairs canonical guards");
         db::validate_persistent_trigger_inventory(store.connection(), true)
             .expect("authorized migration restores complete canonical inventory");
+        assert_eq!(
+            db::migrations::read_schema_version(store.connection()).unwrap(),
+            db::migrations::EXPECTED_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn current_schema_reopen_preserves_canonical_reference_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("current-reopen.db");
+        drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+        let offline = Connection::open(&path).unwrap();
+        db::validate_persistent_trigger_inventory(&offline, true)
+            .expect("fresh committed DB has canonical guards before reopen");
+        drop(offline);
+
+        let reopened = MemoryStore::open(&path.to_string_lossy())
+            .expect("current schema with canonical guards must reopen");
+        db::validate_persistent_trigger_inventory(reopened.connection(), true)
+            .expect("current reopen preserves canonical guards");
     }
 
     #[test]

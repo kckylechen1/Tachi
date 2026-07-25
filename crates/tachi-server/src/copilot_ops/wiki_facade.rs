@@ -30,6 +30,9 @@ pub(crate) async fn handle_tachi_wiki_write(
     let use_named_project =
         requested_project.is_some() || default_named_project_available(server, &project_name);
     let target_project = use_named_project.then(|| project_name.clone());
+    if let Some(project) = target_project.as_deref() {
+        server.prepare_named_project_store_for_write(project)?;
+    }
     let summary = params
         .summary
         .clone()

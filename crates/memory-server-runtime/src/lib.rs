@@ -817,11 +817,9 @@ impl DbRuntime {
             return Ok(state);
         }
 
-        let state = ProjectDbState::open(
-            key.clone(),
-            configured_memory_read_pool_size(),
-            &self.schema_migration,
-        )?;
+        let migration = self.named_project_write_migration_authority(&key);
+        let state =
+            ProjectDbState::open(key.clone(), configured_memory_read_pool_size(), &migration)?;
         let mut guard = self
             .attached_project_dbs
             .write()
@@ -832,6 +830,28 @@ impl DbRuntime {
             .or_insert_with(|| AttachedProjectEntry::new(state))
             .state
             .clone())
+    }
+
+    /// Dynamic named-project attachment is a write boundary. Permit exactly
+    /// the v22-to-v23 guard migration when the process otherwise carries
+    /// `Deny`; no other historical or future schema transition gains ambient
+    /// authority. The resulting state is cached, so this authority is used at
+    /// most once per attached library and never escapes as a raw connection.
+    fn named_project_write_migration_authority(&self, db_path: &Path) -> MigrationAuthority {
+        if !matches!(self.schema_migration, MigrationAuthority::Deny) {
+            return self.schema_migration.clone();
+        }
+        if memcore::db::migrations::EXPECTED_SCHEMA_VERSION == 23
+            && matches!(
+                memcore::db::migrations::read_schema_version_at_path(db_path),
+                Ok(22)
+            )
+        {
+            return MigrationAuthority::Allow {
+                approved_by: "runtime:named-project-write:v23-evidence-guards".to_string(),
+            };
+        }
+        MigrationAuthority::Deny
     }
 
     /// Read-then-touch a cached entry's last-used timestamp and clone its
@@ -1257,9 +1277,9 @@ fn next_recency_tick() -> u64 {
 impl ProjectDbState {
     /// Open a project DB with an explicit #1119 [`MigrationAuthority`]. A
     /// project DB is always opened with [`OpenIntent::OpenExisting`] — it is
-    /// operational data, never a fresh-provisioning target here — so the only
-    /// degree of freedom is whether this process may migrate an older-schema
-    /// project DB forward (`Allow`) or must refuse (`Deny`, fail-closed).
+    /// operational data, never a fresh-provisioning target here. Authority is
+    /// normally the deploy-time value; dynamic named-project write attachment
+    /// may instead pass the exact v22-to-v23 guard-migration authority above.
     pub fn open(
         db_path: PathBuf,
         read_pool_size: usize,
