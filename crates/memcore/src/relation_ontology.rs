@@ -29,12 +29,28 @@
 //! allow-list left open. Growing the set past four requires an explicit
 //! #772/S2 ontology adjudication, tripwired below.
 //!
-//! Enforcement lives at memcore's single edge-write choke point,
-//! [`crate::db::add_edge`] — every `INSERT INTO memory_edges` in the
-//! workspace funnels through it (verified via
-//! `rg 'INSERT INTO memory_edges'`). Wild strings already sitting in a DB
-//! from before this branch stay readable (`get_edges` / `graph_expand` never
-//! filter on legality) — only the write path is gated.
+//! Enforcement lives at memcore's edge-write choke point,
+//! [`crate::db::add_edge`] — every write that mints an edge from *caller
+//! input* funnels through it. It is not literally every `INSERT INTO
+//! memory_edges` in the workspace: re-keying and repair statements write the
+//! table with raw SQL and never reach this validator (re-verified 2026-07-26,
+//! #1460) —
+//!
+//! - `crate::store::exact_dedupe::transfer_edges_to_winner` — re-points an
+//!   existing row's endpoint, carrying its stored relation verbatim;
+//! - `tachi-server`'s `repair::memory_hygiene` R12 rules — hard-coded
+//!   `distilled_from` / `supersedes` literals;
+//! - `tachi-server`'s `repair::plan_c::copy_common_rows` — column-wise merge
+//!   of an attached alias DB.
+//!
+//! None of the three takes a relation from a request/caller string — the
+//! first two carry an already-stored value or an [`ONTOLOGY_V1`] literal
+//! (`distilled_from`, `supersedes`), the third copies rows out of another
+//! Tachi DB file — so the ontology stays closed against *newly minted* wild
+//! strings. What they do mean is that nothing downstream may assume a stored
+//! row passed through here. Wild strings already sitting in a DB from
+//! before this branch stay readable (`get_edges` / `graph_expand` never filter
+//! on legality) — only the write path is gated.
 
 use crate::error::MemoryError;
 
