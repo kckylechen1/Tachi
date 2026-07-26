@@ -61,7 +61,7 @@ async fn vault_api_key_lease_does_not_decrypt_unrelated_provider_secrets() {
 }
 
 #[tokio::test]
-async fn vault_api_key_pool_shrink_removes_orphaned_members() {
+async fn vault_api_key_pool_shrink_refuses_to_delete_surplus_members() {
     let server = make_server();
 
     server
@@ -87,7 +87,7 @@ async fn vault_api_key_pool_shrink_removes_orphaned_members() {
         .await
         .expect("initial pool set should succeed");
 
-    let shrunk = server
+    let err = server
         .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
             prefix: "SHRINK_API_KEY".to_string(),
             agent_id: None,
@@ -97,13 +97,9 @@ async fn vault_api_key_pool_shrink_removes_orphaned_members() {
             allowed_agents: None,
         }))
         .await
-        .expect("shrinking pool should succeed");
-    let shrunk_json: serde_json::Value = serde_json::from_str(&shrunk).expect("shrunk JSON");
-    assert_eq!(shrunk_json["members"], json!(["SHRINK_API_KEY_1"]));
-    assert_eq!(
-        shrunk_json["removed_members"],
-        json!(["SHRINK_API_KEY_2", "SHRINK_API_KEY_3"])
-    );
+        .expect_err("default pool replacement must refuse to delete surplus members");
+    assert!(err.contains("SHRINK_API_KEY_2"), "{err}");
+    assert!(err.contains("SHRINK_API_KEY_3"), "{err}");
 
     let listed = server
         .vault_list(Parameters(VaultListParams {
@@ -119,8 +115,8 @@ async fn vault_api_key_pool_shrink_removes_orphaned_members() {
         .filter_map(|entry| entry["name"].as_str())
         .collect::<Vec<_>>();
     assert!(names.contains(&"SHRINK_API_KEY_1"), "{names:?}");
-    assert!(!names.contains(&"SHRINK_API_KEY_2"), "{names:?}");
-    assert!(!names.contains(&"SHRINK_API_KEY_3"), "{names:?}");
+    assert!(names.contains(&"SHRINK_API_KEY_2"), "{names:?}");
+    assert!(names.contains(&"SHRINK_API_KEY_3"), "{names:?}");
 
     let leased = server
         .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
@@ -129,8 +125,8 @@ async fn vault_api_key_pool_shrink_removes_orphaned_members() {
             agent_id: None,
         }))
         .await
-        .expect("lease should use remaining key");
+        .expect("lease should use the intact original pool");
     let leased_json: serde_json::Value = serde_json::from_str(&leased).expect("lease JSON");
     assert_eq!(leased_json["key_id"], json!("SHRINK_API_KEY_1"));
-    assert_eq!(leased_json["env"]["SHRINK_API_KEY"], json!("shrink-key-1b"));
+    assert_eq!(leased_json["env"]["SHRINK_API_KEY"], json!("shrink-key-1"));
 }

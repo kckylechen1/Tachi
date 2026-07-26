@@ -58,6 +58,35 @@ Existing docs also point in this direction:
 
 - `docs/engineering/architecture/agent-credential-surfaces.md`
 - `docs/engineering/architecture/credentialed-dispatch-profiles.md`
+
+### Credential precedence and observable custody
+
+This is the canonical precedence contract for provider materialization:
+
+- Durable daemon self-materialization is **Vault-wins**. If a configured or
+  inherited value for the same key differs, the daemon warns with the key name
+  and the `tachi vault set NAME` remediation only; it never logs either value.
+  Identical values are not a conflict and do not warn.
+- `tachi vault exec` and default/fill-missing legacy child injection are
+  **caller-wins/fill-missing**. Existing caller values remain intact; Vault
+  materialization supplies only absent names. The explicit legacy setting
+  `TACHI_VAULT_CHILD_ENV=all` is an opt-in operator override that replaces
+  inherited names; it is neither the default nor silent. Credential-profile
+  materializers follow the precedence declared by their explicit profile
+  contract.
+- A persistent OpenCode `apiKey` must be an `{env:NAME}` reference. The
+  decrypted credential belongs in a bounded runtime environment, not in an
+  OpenCode config file.
+- `tachi vault doctor --providers` is read-only. Without an explicit password
+  source it remains metadata-only and reports value comparison as `UNKNOWN`.
+  With `--stdin-password`, `--keychain`, or `--password-file`, it may
+  decrypt only provider-referenced Vault entries through the report-only path,
+  compare fixed-size hashes in memory, and emit only `MATCH`/`MISMATCH`;
+  it never touches access counters/timestamps, refreshes provider caches, or
+  prints values, digests, lengths, or sensitive alias targets. The CLI cannot
+  observe external OAuth stores or the daemon's live last-known-good cache, so
+  source completeness remains `INCOMPLETE` and an unobservable source remains
+  `UNKNOWN`—never `CLEAN`, `dead`, or `orphaned`.
 - `docs/engineering/architecture/credential-adapters-cleanup.md`
 - `docs/engineering/architecture/agent-host-substrate.md`
 
@@ -324,7 +353,8 @@ The intake planner should classify each candidate:
 - `merge_alias`
 - `promote_to_pool`
 - `mark_auth_failed`
-- `remove_or_archive_orphan`
+- `unverified_external_state` (never a removal recommendation merely because
+  a supported discovery source did not observe the entry)
 
 It should also detect semantic duplicates. Examples from the current Vault:
 

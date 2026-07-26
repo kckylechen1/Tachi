@@ -1,4 +1,4 @@
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::Path;
 
 /// Message shown when an interactive password prompt is needed but no TTY is
@@ -161,33 +161,72 @@ pub(super) fn read_password_file(
     path: &Path,
     insecure_password_file: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read password file {}: {e}", path.display()))?;
-    let password = raw.lines().next().unwrap_or_default().trim().to_string();
+    let path_metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("Failed to inspect password file {}: {e}", path.display()))?;
+    if path_metadata.file_type().is_symlink() {
+        return Err(format!("Password file {} must not be a symlink", path.display()).into());
+    }
+    if !path_metadata.file_type().is_file() {
+        return Err(format!("Password file {} must be a regular file", path.display()).into());
+    }
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode & 0o077 != 0 {
-                if insecure_password_file {
-                    eprintln!(
-                        "WARNING: password file {} is readable by group/other (mode {:o}); prefer 0600",
-                        path.display(),
-                        mode
-                    );
-                } else {
-                    return Err(format!(
-                        "Password file {} is readable by group/other (mode {:o}). Set permissions to 0600 or pass --insecure-password-file.",
-                        path.display(),
-                        mode
-                    )
-                    .into());
-                }
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|e| {
+                format!(
+                    "Failed to open password file {} safely: {e}",
+                    path.display()
+                )
+            })?;
+        let opened_metadata = file
+            .metadata()
+            .map_err(|e| format!("Failed to inspect password file {}: {e}", path.display()))?;
+        if !opened_metadata.file_type().is_file() {
+            return Err(format!("Password file {} must be a regular file", path.display()).into());
+        }
+        if opened_metadata.dev() != path_metadata.dev()
+            || opened_metadata.ino() != path_metadata.ino()
+        {
+            return Err(format!(
+                "Password file {} changed during safety validation",
+                path.display()
+            )
+            .into());
+        }
+        let mode = opened_metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            if insecure_password_file {
+                eprintln!(
+                    "WARNING: password file {} is readable by group/other (mode {:o}); prefer 0600",
+                    path.display(),
+                    mode
+                );
+            } else {
+                return Err(format!(
+                    "Password file {} is readable by group/other (mode {:o}). Set permissions to 0600 or pass --insecure-password-file.",
+                    path.display(),
+                    mode
+                )
+                .into());
             }
         }
+        let mut raw = String::new();
+        file.read_to_string(&mut raw)
+            .map_err(|e| format!("Failed to read password file {}: {e}", path.display()))?;
+        Ok(raw.lines().next().unwrap_or_default().trim().to_string())
     }
 
-    Ok(password)
+    #[cfg(not(unix))]
+    {
+        let mut raw = String::new();
+        std::fs::File::open(path)
+            .and_then(|mut file| file.read_to_string(&mut raw))
+            .map_err(|e| format!("Failed to read password file {}: {e}", path.display()))?;
+        Ok(raw.lines().next().unwrap_or_default().trim().to_string())
+    }
 }

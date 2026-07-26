@@ -299,6 +299,10 @@ fn password_file_rejects_group_or_other_readable() {
     let msg = err.to_string();
     assert!(msg.contains("readable by group/other"), "{msg}");
     assert!(msg.contains("--insecure-password-file"), "{msg}");
+    assert!(
+        !msg.contains("correct horse battery staple"),
+        "password content leaked"
+    );
 }
 
 #[test]
@@ -324,6 +328,35 @@ fn password_file_accepts_owner_only() {
     let password = read_password_file(&password_file, false)
         .expect("owner-only password file should be accepted");
     assert_eq!(password, "correct horse battery staple");
+}
+
+#[test]
+#[cfg(unix)]
+fn password_file_rejects_symlink_without_reading_target() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("target.txt");
+    let link = dir.path().join("password.txt");
+    let sentinel = "R12-SYMLINK-PASSWORD-MUST-NOT-LEAK";
+    std::fs::write(&target, format!("{sentinel}\n")).expect("target password file");
+    make_owner_only(&target);
+    symlink(&target, &link).expect("password symlink");
+
+    let err = read_password_file(&link, false).expect_err("password symlink must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("symlink"), "{msg}");
+    assert!(!msg.contains(sentinel), "password content leaked in error");
+}
+
+#[test]
+fn password_file_rejects_non_regular_file_before_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let err = read_password_file(dir.path(), true)
+        .expect_err("a directory must not be accepted as a password file");
+    let msg = err.to_string();
+    assert!(msg.contains("regular file"), "{msg}");
+    assert!(!msg.contains("password content"), "content leaked in error");
 }
 
 // tachi#1175: without a TTY, `rpassword::prompt_password` fails opening

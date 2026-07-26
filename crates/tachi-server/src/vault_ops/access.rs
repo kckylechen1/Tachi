@@ -5,11 +5,11 @@ use memcore::vault::{
     api_key_pool_member_index, VaultEntry, VaultKeyHealth, VaultKeyRotation, SECRET_TYPE_API_KEY,
 };
 use memcore::MemoryStore;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
-use super::session::{ensure_vault_unlocked, with_vault_key};
+use super::session::{ensure_vault_unlocked, with_vault_key, with_vault_key_for_provider_refresh};
 
 #[derive(Debug)]
 pub(super) enum VaultOpsError {
@@ -273,26 +273,22 @@ pub(super) fn load_unlocked_vault_secrets(
 pub(crate) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
 ) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
-    // Materialize / env injection: each successfully decrypted pool member is an access.
-    load_unlocked_api_key_secret_pools_filtered(server, None, true)
+    load_unlocked_api_key_secret_pools_filtered(server, None)
 }
 
 pub(super) fn load_unlocked_api_key_secret_pool(
     server: &MemoryServer,
     logical_name: &str,
 ) -> Result<Vec<tachi_llm::ProviderSecret>, String> {
-    // Lease path: do not bump here. The lease handler's single vault_touch_entry
-    // is the only +1 for the selected key (avoids double-count with pool load).
-    load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name), false)
+    load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name))
         .map(|mut pools| pools.remove(logical_name).unwrap_or_default())
 }
 
 fn load_unlocked_api_key_secret_pools_filtered(
     server: &MemoryServer,
     only_logical_name: Option<&str>,
-    record_access: bool,
 ) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
-    with_vault_key(server, |key| {
+    with_vault_key_for_provider_refresh(server, |key| {
         let (entries, rotations, key_health_rows) = server
             .with_global_store(|store| {
                 let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
@@ -339,6 +335,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
 
         let mut pools: HashMap<String, Vec<tachi_llm::ProviderSecret>> = HashMap::new();
         let mut rotation_members: HashSet<String> = HashSet::new();
+        let mut materialized_key_ids: BTreeSet<String> = BTreeSet::new();
 
         let is_unusable =
             |logical_name: &str, key_id: &str, now: &chrono::DateTime<chrono::Utc>| {
@@ -412,17 +409,10 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 let key_id = entry.name.clone();
                 rotation_members.insert(key_id.clone());
                 pool.push(tachi_llm::ProviderSecret {
-                    key_id: entry.name,
+                    key_id: key_id.clone(),
                     value,
                 });
-                // Only after successful decrypt + inclusion in the returned pool.
-                if record_access {
-                    server
-                        .with_global_store(|store| {
-                            record_successful_vault_access(store, &key_id, None)
-                        })
-                        .map_err(|e| format!("Failed to update access stats: {e}"))?;
-                }
+                materialized_key_ids.insert(key_id);
             }
             if !pool.is_empty() {
                 pools.insert(rotation.prefix, pool);
@@ -449,21 +439,29 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
             if !value.trim().is_empty() {
                 let key_id = entry.name.clone();
-                pools.entry(key_id.clone()).or_insert_with(|| {
-                    vec![tachi_llm::ProviderSecret {
-                        key_id: entry.name,
+                if let std::collections::hash_map::Entry::Vacant(slot) = pools.entry(key_id.clone())
+                {
+                    slot.insert(vec![tachi_llm::ProviderSecret {
+                        key_id: key_id.clone(),
                         value,
-                    }]
-                });
-                // Only after successful decrypt + inclusion in the returned pool.
-                if record_access {
-                    server
-                        .with_global_store(|store| {
-                            record_successful_vault_access(store, &key_id, None)
-                        })
-                        .map_err(|e| format!("Failed to update access stats: {e}"))?;
+                    }]);
+                    materialized_key_ids.insert(key_id);
                 }
             }
+        }
+
+        // Decode, UTF-8 validation, filtering, and pool construction must all
+        // succeed before access metadata changes. One store call performs one
+        // atomic SQLite batch, so any touch failure rolls back every delta.
+        if !materialized_key_ids.is_empty() {
+            let key_ids = materialized_key_ids.into_iter().collect::<Vec<_>>();
+            server
+                .with_global_store(|store| {
+                    store
+                        .vault_touch_entries_atomic(&key_ids)
+                        .map_err(|e| e.to_string())
+                })
+                .map_err(|e| format!("Failed to record provider key access batch: {e}"))?;
         }
 
         Ok(pools)

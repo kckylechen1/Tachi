@@ -73,7 +73,7 @@ impl super::super::super::LlmClient {
             health.updated_at = now_utc;
             health.clone()
         };
-        state.cooldowns.remove(&selected.key_id);
+        state.remove_cooldown(&selected.logical_name, &selected.key_id);
         state.set_health_snapshot(
             &selected.logical_name,
             &selected.key_id,
@@ -97,7 +97,7 @@ impl super::super::super::LlmClient {
             .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.cooldowns.insert(selected.key_id.clone(), until);
+        state.set_cooldown(&selected.logical_name, &selected.key_id, until);
         let persisted = {
             let health = state.get_or_insert_health(&selected.logical_name, &selected.key_id);
             health.status = HEALTH_RATE_LIMITED.to_string();
@@ -142,10 +142,12 @@ impl super::super::super::LlmClient {
 
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
-    pub fn mark_provider_key_rate_limited_for_tests(&self, key_id: &str, retry_after: Option<u64>) {
-        let logical_name = crate::provider_names::parse_rotation_member_name(key_id)
-            .map(|(prefix, _)| prefix)
-            .unwrap_or(key_id);
+    pub fn mark_provider_key_rate_limited_for_tests(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+        retry_after: Option<u64>,
+    ) {
         let selected = SelectedProviderSecret {
             logical_name: logical_name.to_string(),
             key_id: key_id.to_string(),
@@ -167,7 +169,7 @@ impl super::super::super::LlmClient {
                 .provider_state
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.cooldowns.remove(key_id);
+            state.remove_cooldown(logical_name, key_id);
             let health = state.get_or_insert_health(logical_name, key_id);
             health.status = HEALTH_RATE_LIMITED.to_string();
             health.cooldown_until = Some(past.to_rfc3339());

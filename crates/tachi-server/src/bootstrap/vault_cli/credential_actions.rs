@@ -3,6 +3,22 @@ use crate::bootstrap::{open_cli_store, open_cli_store_read_only};
 use std::path::PathBuf;
 use tachi_bootstrap::cli::VaultAction;
 
+fn validate_provider_doctor_password_sources(
+    stdin_password: bool,
+    keychain: bool,
+    password_file: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let selected =
+        usize::from(stdin_password) + usize::from(keychain) + usize::from(password_file.is_some());
+    if selected > 1 {
+        return Err(
+            "provider doctor accepts exactly one password source: --stdin-password, --keychain, or --password-file"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn run_credential_action(
     global_db_path: &PathBuf,
     action: VaultAction,
@@ -113,10 +129,39 @@ pub(super) fn run_credential_action(
             profile,
             consumer,
             config,
+            stdin_password,
+            keychain,
+            password_file,
+            insecure_password_file,
         } => {
             if providers {
+                validate_provider_doctor_password_sources(
+                    stdin_password,
+                    keychain,
+                    password_file.as_deref(),
+                )?;
                 let store = open_cli_store_read_only(global_db_path)?;
-                return super::providers_doctor::run_providers_doctor(&store, opencode_config);
+                let compare_values = stdin_password || keychain || password_file.is_some();
+                let vault_key = if compare_values {
+                    let vault_config = store
+                        .vault_get_config()
+                        .map_err(|e| format!("vault_get_config: {e}"))?
+                        .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
+                    Some(super::keys::read_verified_vault_key(
+                        &vault_config,
+                        stdin_password,
+                        keychain,
+                        password_file.as_deref(),
+                        insecure_password_file,
+                    )?)
+                } else {
+                    None
+                };
+                return super::providers_doctor::run_providers_doctor(
+                    &store,
+                    opencode_config,
+                    vault_key.as_ref().map(|key| key.bytes()),
+                );
             }
             let profile = profile.ok_or_else(|| {
                 "`tachi vault doctor` requires --profile (unless --providers)".to_string()
@@ -146,5 +191,22 @@ pub(super) fn run_credential_action(
             Ok(())
         }
         _ => unreachable!("credential action router received non-credential action"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_provider_doctor_password_sources;
+    use std::path::Path;
+
+    #[test]
+    fn provider_doctor_runtime_rejects_multiple_password_sources() {
+        let err = validate_provider_doctor_password_sources(
+            true,
+            false,
+            Some(Path::new("fixture-password")),
+        )
+        .expect_err("runtime defense must reject ambiguous password sources");
+        assert!(err.contains("exactly one password source"), "{err}");
     }
 }

@@ -35,7 +35,21 @@ impl MemoryStore {
     ) -> Result<Vec<String>, MemoryError> {
         let tx = self.conn.transaction()?;
         let existing_entries = db::vault_list_entries_by_type(&tx, SECRET_TYPE_API_KEY)?;
-        let mut removed_members = Vec::new();
+        let mut surplus_members: Vec<String> = existing_entries
+            .iter()
+            .filter(|entry| {
+                api_key_pool_member_index(&entry.name, prefix)
+                    .is_some_and(|idx| idx > entries.len())
+            })
+            .map(|entry| entry.name.clone())
+            .collect();
+        surplus_members.sort();
+        if !surplus_members.is_empty() {
+            return Err(MemoryError::InvalidArg(format!(
+                "refusing API-key pool shrink for '{prefix}': default replacement would delete surplus members [{}]; archive or remove those named members explicitly",
+                surplus_members.join(", ")
+            )));
+        }
 
         for entry in entries {
             let mut entry = entry.clone();
@@ -45,17 +59,9 @@ impl MemoryStore {
             db::vault_upsert_entry(&tx, &entry)?;
         }
 
-        for entry in existing_entries {
-            if api_key_pool_member_index(&entry.name, prefix).is_some_and(|idx| idx > entries.len())
-                && db::vault_delete_entry(&tx, &entry.name)?
-            {
-                removed_members.push(entry.name);
-            }
-        }
-
         db::vault_set_rotation(&tx, rotation)?;
         tx.commit()?;
-        Ok(removed_members)
+        Ok(Vec::new())
     }
 
     /// Import a Vault sync bundle atomically.
@@ -138,6 +144,18 @@ impl MemoryStore {
     /// don't race a follow-up SELECT.
     pub fn vault_touch_entry(&self, name: &str) -> Result<i64, MemoryError> {
         db::vault_touch_entry(&self.conn, name)
+    }
+
+    /// Touch all named secrets in one atomic SQLite transaction. The bounded
+    /// loop deliberately lives inside that single transaction so a missing
+    /// entry or database failure rolls back every access-count increment.
+    pub fn vault_touch_entries_atomic(&mut self, names: &[String]) -> Result<(), MemoryError> {
+        let tx = self.conn.transaction()?;
+        for name in names {
+            db::vault_touch_entry(&tx, name)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Insert a vault audit record.
@@ -244,23 +262,8 @@ mod tests {
         }
     }
 
-    /// tachi#1110: `vault_import_bundle_unchecked` is a storage-leaf
-    /// primitive with no `vault-kit` dependency (the #1106 layering ruling),
-    /// so it has no opinion on whether `kdf_params`/`kdf_algorithm` are a
-    /// *supported* KDF profile — it persists whatever `VaultConfig` it is
-    /// given verbatim. That is the documented contract the `_unchecked`
-    /// suffix names; the validating gate lives one layer up, in
-    /// `tachi-server`'s `bootstrap::vault_sync::import_validated_vault_bundle`
-    /// (which memcore cannot see or depend on).
-    ///
-    /// Structural-discrimination note: this is a rename, not new persistence
-    /// logic — the primitive had this exact no-validation behavior under its
-    /// pre-#1110 name `vault_import_bundle` too, so there is no prior
-    /// revision of this method that behaved differently to diff against
-    /// (behavioral-red-then-green is not applicable to a pure rename). This
-    /// test instead pins the contract the new name asserts, so a future
-    /// change that quietly adds validation here (which would violate the
-    /// #1106 layering ruling by requiring a `vault-kit` dependency) goes red.
+    /// Metadata-only timestamp listing must not require ciphertext fields and
+    /// must preserve the same ordering and timestamps as the full entry list.
     #[test]
     fn vault_list_entry_timestamps_returns_name_and_updated_at_only() {
         let store = MemoryStore::open_in_memory().expect("open test store");
@@ -296,6 +299,23 @@ mod tests {
         assert_eq!(timestamps, from_full);
     }
 
+    /// tachi#1110: `vault_import_bundle_unchecked` is a storage-leaf
+    /// primitive with no `vault-kit` dependency (the #1106 layering ruling),
+    /// so it has no opinion on whether `kdf_params`/`kdf_algorithm` are a
+    /// *supported* KDF profile — it persists whatever `VaultConfig` it is
+    /// given verbatim. That is the documented contract the `_unchecked`
+    /// suffix names; the validating gate lives one layer up, in
+    /// `tachi-server`'s `bootstrap::vault_sync::import_validated_vault_bundle`
+    /// (which memcore cannot see or depend on).
+    ///
+    /// Structural-discrimination note: this is a rename, not new persistence
+    /// logic — the primitive had this exact no-validation behavior under its
+    /// pre-#1110 name `vault_import_bundle` too, so there is no prior
+    /// revision of this method that behaved differently to diff against
+    /// (behavioral-red-then-green is not applicable to a pure rename). This
+    /// test instead pins the contract the new name asserts, so a future
+    /// change that quietly adds validation here (which would violate the
+    /// #1106 layering ruling by requiring a `vault-kit` dependency) goes red.
     #[test]
     fn vault_import_bundle_unchecked_persists_unsupported_kdf_params_raw() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
@@ -383,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn vault_replace_api_key_pool_removes_orphaned_members_atomically() {
+    fn vault_replace_api_key_pool_refuses_to_delete_surplus_members() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         store
             .vault_replace_api_key_pool(
@@ -396,30 +416,31 @@ mod tests {
             )
             .expect("seed pool");
 
-        let removed = store
+        let err = store
             .vault_replace_api_key_pool(
                 "SHRINK_API_KEY",
                 &[test_entry("SHRINK_API_KEY_1")],
                 &test_rotation("SHRINK_API_KEY", 1),
             )
-            .expect("shrink pool");
+            .expect_err("default pool replacement must refuse to delete a surplus member");
 
-        assert_eq!(removed, vec!["SHRINK_API_KEY_2"]);
+        assert!(err.to_string().contains("SHRINK_API_KEY_2"), "{err}");
         assert!(store
             .vault_get_entry("SHRINK_API_KEY_1")
             .expect("read retained member")
             .is_some());
         assert!(store
             .vault_get_entry("SHRINK_API_KEY_2")
-            .expect("read removed member")
-            .is_none());
+            .expect("read protected surplus member")
+            .is_some());
         assert_eq!(
             store
                 .vault_get_rotation("SHRINK_API_KEY")
                 .expect("read rotation")
                 .expect("rotation exists")
                 .total_keys,
-            1
+            2,
+            "refused shrink must leave the existing rotation untouched"
         );
     }
 }

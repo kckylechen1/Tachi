@@ -243,7 +243,7 @@ fn candidate_from_value(
     vault_names: &HashSet<String>,
 ) -> Candidate {
     let in_vault = vault_names.contains(logical_name);
-    let classification = classify(logical_name, value);
+    let classification = classify(logical_name, secret_type, value);
     let suggested_action = suggested_action(&classification, in_vault);
     Candidate {
         source_path: source_path.to_string_lossy().to_string(),
@@ -257,15 +257,27 @@ fn candidate_from_value(
     }
 }
 
-fn classify(logical_name: &str, value: &str) -> String {
+fn classify(logical_name: &str, secret_type: &str, value: &str) -> String {
+    if secret_type != SECRET_TYPE_API_KEY {
+        return "external_auth_unknown".to_string();
+    }
     if parse_vault_alias(value).is_some() {
         return "vault_reference".to_string();
+    }
+    if logical_name.contains("LONGPORT") || logical_name.contains("LONGBRIDGE") {
+        return "review".to_string();
+    }
+    if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
+        return "boolean".to_string();
+    }
+    if value.starts_with("https://") || value.starts_with("http://") {
+        return "url".to_string();
     }
     if is_lane_config(logical_name) {
         return "lane_config".to_string();
     }
-    if logical_name.contains("LONGPORT") || logical_name.contains("LONGBRIDGE") {
-        return "review".to_string();
+    if is_config_name(logical_name) {
+        return "config".to_string();
     }
     "api_key".to_string()
 }
@@ -274,6 +286,8 @@ fn suggested_action(classification: &str, in_vault: bool) -> String {
     match classification {
         "vault_reference" => "vault_reference",
         "lane_config" => "lane_config",
+        "boolean" | "url" | "config" => "config",
+        "external_auth_unknown" => "review",
         "review" => "review",
         _ if in_vault => "already_present",
         _ => "import_new",
@@ -286,6 +300,19 @@ fn is_lane_config(name: &str) -> bool {
         .iter()
         .any(|prefix| name.starts_with(prefix));
     has_lane_prefix && !name.ends_with("_API_KEY")
+}
+
+fn is_config_name(name: &str) -> bool {
+    [
+        "_BASE_URL",
+        "_URL",
+        "_MODEL",
+        "_BACKEND",
+        "_TIMEOUT",
+        "_ENABLED",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
 }
 
 fn alias_family(name: &str) -> Option<&'static str> {
@@ -365,10 +392,11 @@ const ACTION_SKIP: &str = "skip_existing_same_fingerprint";
 const ACTION_IMPORT_NEW: &str = "import_new";
 const ACTION_MERGE_ALIAS: &str = "merge_alias";
 const ACTION_MARK_AUTH_FAILED: &str = "mark_auth_failed";
-const ACTION_REMOVE_ORPHAN: &str = "remove_or_archive_orphan";
 const ACTION_LANE_CONFIG: &str = "lane_config";
+const ACTION_CONFIG: &str = "config";
 const ACTION_VAULT_REFERENCE: &str = "vault_reference";
 const ACTION_REVIEW: &str = "review";
+const ACTION_UNVERIFIED_EXTERNAL_STATE: &str = "unverified_external_state";
 
 #[derive(Debug, Clone, Serialize)]
 struct PlannedCandidate {
@@ -379,7 +407,7 @@ struct PlannedCandidate {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct PlanOrphan {
+struct PlanUnobserved {
     name: String,
     action: String,
     rationale: String,
@@ -389,7 +417,7 @@ struct PlanOrphan {
 struct PlanReport {
     candidates: Vec<PlannedCandidate>,
     notes: Vec<DiscoveryNote>,
-    orphans: Vec<PlanOrphan>,
+    unobserved: Vec<PlanUnobserved>,
 }
 
 fn plan_report(
@@ -443,35 +471,25 @@ fn plan_report(
         .iter()
         .map(|candidate| candidate.logical_name.as_str())
         .collect();
-    let mut orphan_names: Vec<&String> = vault_names
+    let mut unobserved_names: Vec<&String> = vault_names
         .iter()
         .filter(|name| !discovered_names.contains(name.as_str()))
         .filter(|name| !is_lane_config(name))
         .collect();
-    orphan_names.sort();
-    let orphans = orphan_names
+    unobserved_names.sort();
+    let unobserved = unobserved_names
         .into_iter()
-        .map(|name| {
-            if auth_failed.contains(name) {
-                PlanOrphan {
-                    name: name.clone(),
-                    action: ACTION_MARK_AUTH_FAILED.to_string(),
-                    rationale: "vault key-health marks this orphan entry auth_failed".to_string(),
-                }
-            } else {
-                PlanOrphan {
-                    name: name.clone(),
-                    action: ACTION_REMOVE_ORPHAN.to_string(),
-                    rationale: "vault entry with no discovered source".to_string(),
-                }
-            }
+        .map(|name| PlanUnobserved {
+            name: name.clone(),
+            action: ACTION_UNVERIFIED_EXTERNAL_STATE.to_string(),
+            rationale: "not observed by supported read-only sources; it may be held by an external OAuth or client store, so no removal or dead-state conclusion is safe".to_string(),
         })
         .collect();
 
     PlanReport {
         candidates: planned,
         notes: discovery.notes,
-        orphans,
+        unobserved,
     }
 }
 
@@ -486,6 +504,21 @@ fn plan_action(
         return (
             ACTION_LANE_CONFIG,
             "lane configuration, not an independent API key".to_string(),
+        );
+    }
+    if matches!(
+        candidate.classification.as_str(),
+        "boolean" | "url" | "config"
+    ) {
+        return (
+            ACTION_CONFIG,
+            "configuration value, not an independent API key".to_string(),
+        );
+    }
+    if candidate.classification == "external_auth_unknown" {
+        return (
+            ACTION_REVIEW,
+            "external auth material is observable only as metadata here; its lifecycle and effective source are unknown".to_string(),
         );
     }
     if candidate.classification == "vault_reference" {
@@ -584,7 +617,7 @@ fn render_plan_human(report: &PlanReport) -> String {
             note.code, note.source, note.message
         ));
     }
-    if report.candidates.is_empty() && report.orphans.is_empty() {
+    if report.candidates.is_empty() && report.unobserved.is_empty() {
         out.push_str("(no intake candidates to plan)\n");
         return out;
     }
@@ -604,10 +637,10 @@ fn render_plan_human(report: &PlanReport) -> String {
             ));
         }
     }
-    for orphan in &report.orphans {
+    for entry in &report.unobserved {
         out.push_str(&format!(
-            "ORPHAN\t{}\t{}\t{}\n",
-            orphan.name, orphan.action, orphan.rationale
+            "UNOBSERVED\t{}\t{}\t{}\n",
+            entry.name, entry.action, entry.rationale
         ));
     }
     out
@@ -821,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn vault_intake_g_a6_orphan_marked_remove_or_archive() {
+    fn vault_intake_g_a6_unobserved_entry_never_suggests_removal() {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         seed_vault_entry(home.path(), "LEGACY_API_KEY");
@@ -832,12 +865,12 @@ mod tests {
             &home.path().join(".tachi/global/memory.db"),
             None,
         );
-        let orphan = report
-            .orphans
+        let unobserved = report
+            .unobserved
             .iter()
-            .find(|orphan| orphan.name == "LEGACY_API_KEY")
-            .expect("orphan present");
-        assert_eq!(orphan.action, "remove_or_archive_orphan");
+            .find(|entry| entry.name == "LEGACY_API_KEY")
+            .expect("unobserved entry present");
+        assert_eq!(unobserved.action, "unverified_external_state");
         assert!(report
             .candidates
             .iter()
@@ -1024,6 +1057,36 @@ mod tests {
     }
 
     #[test]
+    fn vault_intake_types_config_url_boolean_and_api_key_without_importing_config() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            "API_BASE_URL=https://api.example.test\nPROVIDER_ENABLED=true\nSUMMARY_MODEL=qwen\nEXTRACT_API_KEY=fixture\n",
+        );
+
+        let rows = discover_candidates(home.path(), cwd.path());
+        assert_eq!(candidate(&rows, "API_BASE_URL").classification, "url");
+        assert_eq!(candidate(&rows, "API_BASE_URL").suggested_action, "config");
+        assert_eq!(
+            candidate(&rows, "PROVIDER_ENABLED").classification,
+            "boolean"
+        );
+        assert_eq!(
+            candidate(&rows, "PROVIDER_ENABLED").suggested_action,
+            "config"
+        );
+        assert_eq!(
+            candidate(&rows, "SUMMARY_MODEL").classification,
+            "lane_config"
+        );
+        assert_eq!(
+            candidate(&rows, "EXTRACT_API_KEY").classification,
+            "api_key"
+        );
+    }
+
+    #[test]
     fn vault_intake_gv4_alias_family_is_advisory() {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
@@ -1052,7 +1115,8 @@ mod tests {
         let row = candidate(&report.candidates, "codex.auth");
 
         assert_eq!(row.secret_type, "json_blob");
-        assert_eq!(row.classification, "api_key");
+        assert_eq!(row.classification, "external_auth_unknown");
+        assert_eq!(row.suggested_action, "review");
         let json = render_json(&report).expect("json");
         assert!(!json.contains(raw), "JSON echoed auth blob: {json}");
         assert!(!render_human(&report).contains(raw));

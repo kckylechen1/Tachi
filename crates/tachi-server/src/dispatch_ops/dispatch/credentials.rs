@@ -23,18 +23,18 @@ pub(super) fn unlocked_vault_child_env_map(
         return HashMap::new();
     };
 
-    let fill_missing_only = std::env::var("TACHI_VAULT_CHILD_ENV")
+    let override_existing = std::env::var("TACHI_VAULT_CHILD_ENV")
         .ok()
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
-                "fill_missing" | "missing_only" | "preserve_env"
+                "all" | "full" | "legacy" | "legacy_all" | "override"
             )
         })
         .unwrap_or(false);
     let mut env = HashMap::new();
     for (name, value) in secrets {
-        if fill_missing_only && std::env::var_os(&name).is_some() {
+        if !override_existing && std::env::var_os(&name).is_some() {
             continue;
         }
         env.insert(name, value);

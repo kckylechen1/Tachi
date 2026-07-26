@@ -67,6 +67,71 @@ fn vault_exec_cli_parses_allow_unauthenticated_opt_in() {
 }
 
 #[test]
+fn vault_providers_doctor_parses_explicit_report_only_password_source() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "doctor",
+        "--providers",
+        "--opencode-config",
+        "/tmp/opencode-fixture.json",
+        "--password-file",
+        "/tmp/vault-password-fixture",
+    ])
+    .expect("provider doctor comparison invocation should parse");
+
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Vault {
+            action: VaultAction::Doctor {
+                providers: true,
+                opencode_config: Some(config),
+                password_file: Some(password),
+                ..
+            }
+        }) if config == std::path::Path::new("/tmp/opencode-fixture.json")
+            && password == std::path::Path::new("/tmp/vault-password-fixture")
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "tachi",
+            "vault",
+            "doctor",
+            "--profile",
+            "fixture",
+            "--consumer",
+            "fixture",
+            "--stdin-password"
+        ])
+        .is_err(),
+        "provider comparison password sources must not attach to profile doctor mode"
+    );
+}
+
+#[test]
+fn vault_providers_doctor_rejects_multiple_password_sources() {
+    for args in [
+        vec!["--stdin-password", "--keychain"],
+        vec![
+            "--stdin-password",
+            "--password-file",
+            "/tmp/vault-password-fixture",
+        ],
+        vec![
+            "--keychain",
+            "--password-file",
+            "/tmp/vault-password-fixture",
+        ],
+    ] {
+        let mut argv = vec!["tachi", "vault", "doctor", "--providers"];
+        argv.extend(args);
+        let err = Cli::try_parse_from(argv)
+            .expect_err("provider doctor password sources must be mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+}
+
+#[test]
 fn exact_dedupe_cli_is_nested_under_repair_dedupe() {
     let parsed = Cli::try_parse_from([
         "tachi",

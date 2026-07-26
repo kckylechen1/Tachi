@@ -226,13 +226,18 @@ pub(crate) async fn handle_vault_lease_api_key(
         })?;
 
         advance_rotation_after_key(server, &params.name, &selected.key_id)?;
+        let selected_key_id = selected.key_id.clone();
         let access_count = server
-            .with_global_store(|store| {
+            .with_global_store_read(|store| {
                 store
-                    .vault_touch_entry(&selected.key_id)
-                    .map_err(|e| e.to_string())
+                    .vault_get_entry(&selected_key_id)
+                    .map_err(|e| e.to_string())?
+                    .map(|entry| entry.access_count)
+                    .ok_or_else(|| {
+                        format!("leased key '{selected_key_id}' disappeared after materialization")
+                    })
             })
-            .unwrap_or(0);
+            .map_err(|e| format!("read materialized key access count: {e}"))?;
 
         success_audit_detail = Some(
             json!({

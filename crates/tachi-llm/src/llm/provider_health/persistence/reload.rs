@@ -87,7 +87,7 @@ impl super::super::super::LlmClient {
                 let still_cooling =
                     availability == KeyAvailability::Cooldown && remaining_seconds.unwrap_or(0) > 0;
                 if !still_cooling {
-                    state.cooldowns.remove(&key_id);
+                    state.remove_cooldown(&logical_name, &key_id);
                 }
                 state.set_health_entry_with_snapshot(logical_name, key_id, incoming, snapshot);
             }

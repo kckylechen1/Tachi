@@ -20,7 +20,7 @@ impl super::super::LlmClient {
             for offset in 0..entries.len() {
                 let idx = (start + offset) % entries.len();
                 let entry = &entries[idx];
-                if state.cooldowns.contains_key(&entry.key_id) {
+                if state.is_cooling_down(key, &entry.key_id) {
                     continue;
                 }
 
@@ -65,7 +65,7 @@ impl super::super::LlmClient {
                     KeyAvailability::Available => false,
                 };
 
-                if unusable || state.cooldowns.contains_key(*key) {
+                if unusable || state.is_cooling_down(key, key) {
                     return None;
                 }
                 Self::first_env(&[*key])
@@ -119,8 +119,7 @@ impl super::super::LlmClient {
             (0..entries.len()).find_map(|offset| {
                 let entry = &entries[(start + offset) % entries.len()];
                 let in_active_cooldown = state
-                    .cooldowns
-                    .get(&entry.key_id)
+                    .cooldown_until(key, &entry.key_id)
                     .is_some_and(|until| *until > now);
                 let (availability, remaining_seconds) =
                     Self::key_health_blocked_in_state(&state, key, &entry.key_id, now_utc);
@@ -137,8 +136,10 @@ impl super::super::LlmClient {
 
         vault_value.or_else(|| {
             keys.iter().find_map(|key| {
-                let in_active_cooldown =
-                    state.cooldowns.get(*key).is_some_and(|until| *until > now);
+                // Env-fallback path: the logical key IS its own member id.
+                let in_active_cooldown = state
+                    .cooldown_until(key, key)
+                    .is_some_and(|until| *until > now);
                 let (availability, remaining_seconds) =
                     Self::key_health_blocked_in_state(&state, key, key, now_utc);
                 if in_active_cooldown
@@ -207,7 +208,7 @@ impl super::super::LlmClient {
             if !has_env_value {
                 return false;
             }
-            if state.cooldowns.contains_key(*key) {
+            if state.is_cooling_down(key, key) {
                 return false;
             }
             let (availability, remaining_seconds) =
@@ -225,7 +226,7 @@ impl super::super::LlmClient {
         if entry.value.trim().is_empty() {
             return false;
         }
-        if state.cooldowns.contains_key(&entry.key_id) {
+        if state.is_cooling_down(logical_key, &entry.key_id) {
             return false;
         }
         let (availability, remaining_seconds) =
@@ -269,8 +270,7 @@ impl super::super::LlmClient {
                     }
                     configured += 1;
                     if let Some(until) = state
-                        .cooldowns
-                        .get(&entry.key_id)
+                        .cooldown_until(key, &entry.key_id)
                         .filter(|until| **until > now)
                     {
                         Self::remember_min_retry_delay(
@@ -300,7 +300,7 @@ impl super::super::LlmClient {
                     continue;
                 }
                 configured += 1;
-                if let Some(until) = state.cooldowns.get(*key).filter(|until| **until > now) {
+                if let Some(until) = state.cooldown_until(key, key).filter(|until| **until > now) {
                     Self::remember_min_retry_delay(
                         &mut retry_after,
                         until.saturating_duration_since(now),
@@ -367,7 +367,10 @@ impl super::super::LlmClient {
         state: &ProviderState,
     ) -> KeyRetryStatus {
         let mut retry_after = None;
-        if let Some(until) = state.cooldowns.get(key_id).filter(|until| **until > now) {
+        if let Some(until) = state
+            .cooldown_until(logical_name, key_id)
+            .filter(|until| **until > now)
+        {
             Self::remember_min_retry_delay(&mut retry_after, until.saturating_duration_since(now));
         }
 
