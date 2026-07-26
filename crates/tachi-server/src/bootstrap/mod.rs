@@ -101,16 +101,41 @@ pub(super) const SETUP_API_KEYS: [SetupApiKey; 6] = [
     },
     SetupApiKey {
         key: "MINIMAX_API_KEY",
-        label:
-            "MiniMax distill/summary — DEPRECATED (Phase 2: routed via Claude pool + SiliconFlow)",
+        label: "MiniMax distill/summary — DEPRECATED compatibility key",
         deprecated: true,
     },
     SetupApiKey {
         key: "REASONING_API_KEY",
-        label: "GLM-5.1 reasoning lane — DEPRECATED (Phase 2: skill-evolve uses Claude pool)",
+        label: "GLM-5.1 reasoning lane — DEPRECATED compatibility key",
         deprecated: true,
     },
 ];
+
+#[cfg(test)]
+mod setup_api_key_tests {
+    use super::SETUP_API_KEYS;
+
+    #[test]
+    fn deprecated_compatibility_keys_do_not_claim_active_routing() {
+        for key in ["MINIMAX_API_KEY", "REASONING_API_KEY"] {
+            let entry = SETUP_API_KEYS
+                .iter()
+                .find(|entry| entry.key == key)
+                .expect("deprecated setup key must remain listed");
+            assert!(entry.deprecated, "{key} must remain deprecated");
+            assert!(
+                entry.label.contains("DEPRECATED compatibility key"),
+                "{key} must be described only as a compatibility key: {}",
+                entry.label
+            );
+            assert!(
+                !entry.label.contains("Claude pool"),
+                "{key} must not claim routing through the retired pool: {}",
+                entry.label
+            );
+        }
+    }
+}
 
 pub(super) const DEFAULT_STANDARD_PROFILE_NOTICE: &str =
     "No profile specified; defaulting to 'standard'. Set TACHI_PROFILE=admin to restore legacy full surface (148 tools).";

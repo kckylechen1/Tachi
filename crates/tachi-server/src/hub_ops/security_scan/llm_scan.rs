@@ -133,14 +133,12 @@ async fn two_vote_provider_scan(server: &MemoryServer, payload: &str) -> (String
     )
 }
 
-/// One strong-tier vote: provider (reasoning lane, no Claude-CLI-first
-/// behavior — see `LlmClient::call_reasoning_llm_provider_only`'s doc
-/// comment) first; on Err, the Claude CLI pool as a fallback for the
-/// rollout cycle (#1087 point 4). Both paths go through
-/// `ClaudePool::call`/`call_via_provider` so the run-directory artifact
-/// contract (`prompt.md`/`result.md`/`status.json`) is written on the
-/// provider-success path too, not just on CLI fallback — a successful
-/// vote is still an audit-surface event for a security scan (#1214 BUG#1).
+/// One strong-tier vote through the configured reasoning provider only.
+/// `llm_recorder` preserves the run-directory artifact contract
+/// (`prompt.md`/`result.md`/`status.json`) around the provider call. A provider
+/// error returns to `two_vote_provider_scan`, which substitutes a fail-closed
+/// sentinel when one vote is unavailable (or the fail-closed default when both
+/// votes fail), so this security path has no CLI fallback.
 async fn one_vote(
     server: &MemoryServer,
     payload: &str,

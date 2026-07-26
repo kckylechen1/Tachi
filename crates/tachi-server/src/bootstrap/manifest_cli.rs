@@ -15,6 +15,15 @@ fn default_scan_roots(home: &Path, app_home: &Path, git_root: Option<&PathBuf>) 
     roots
 }
 
+fn model_lane_lines() -> [&'static str; 4] {
+    [
+        "embedding: voyage-4 (1024d), key=VOYAGE_API_KEY",
+        "rerank: rerank-2.5, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY",
+        "extract/summary: Qwen/Qwen3.5-27B via SiliconFlow-compatible chat",
+        "distill/reasoning: configured API/provider lanes with cross-provider fallback; full-chain exhaustion records LANE_OUTAGE",
+    ]
+}
+
 /// Read-only: opens the global (and project, if present) hub stores directly
 /// via `MemoryStore::open_read_only` — deliberately NOT a full `MemoryServer`
 /// (which spins up LLM clients / pools we don't need for a lint pass). Missing
@@ -220,10 +229,9 @@ pub(super) async fn run_doctor_command(
             println!("  live probes skipped (pass --probe-keys to test providers)");
         }
         println!("\n=== model lanes ===");
-        println!("  embedding: voyage-4 (1024d), key=VOYAGE_API_KEY");
-        println!("  rerank: rerank-2.5, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY");
-        println!("  extract/summary: Qwen/Qwen3.5-27B via SiliconFlow-compatible chat");
-        println!("  distill/reasoning: Claude CLI first, chat fallback lanes");
+        for line in model_lane_lines() {
+            println!("  {line}");
+        }
         if let Some(remediation) = &daily_remediation {
             println!("\n=== daily pipeline remediation ===");
             println!("{remediation}");
@@ -240,6 +248,15 @@ mod tests {
     fn manifest_path_lives_directly_under_app_home() {
         let app_home = std::path::Path::new("/tmp/tachi-app-home");
         assert_eq!(manifest_path(app_home), app_home.join("manifest.json"));
+    }
+
+    #[test]
+    fn model_lane_lines_describe_configured_provider_routing() {
+        let rendered = model_lane_lines().join("\n");
+        assert!(rendered.contains("configured API/provider lanes"));
+        assert!(rendered.contains("cross-provider fallback"));
+        assert!(rendered.contains("LANE_OUTAGE"));
+        assert!(!rendered.contains("Claude CLI first"));
     }
 
     fn test_hub_capability(id: &str, cap_type: &str, definition: &str) -> memcore::HubCapability {
