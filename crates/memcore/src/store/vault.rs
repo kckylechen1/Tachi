@@ -443,4 +443,62 @@ mod tests {
             "refused shrink must leave the existing rotation untouched"
         );
     }
+
+    /// `vault_touch_entries_atomic` is the batch that #1393 introduced so a
+    /// provider-pool load records every member's access in one transaction.
+    /// Its whole point is all-or-nothing, so the rollback needs a test that can
+    /// actually run: injecting the failure with `CREATE TEMP TRIGGER` cannot,
+    /// because `install_reserved_reference_authorizer` denies DDL on these
+    /// connections — a fixture built that way fails with `not authorized`
+    /// before it ever reaches the code under test.
+    ///
+    /// A missing name is a deterministic failure with no DDL at all:
+    /// `vault_touch_entry` reads its post-touch count via `RETURNING`, so an
+    /// UPDATE that matches no row surfaces as `QueryReturnedNoRows`.
+    #[test]
+    fn vault_touch_entries_atomic_rolls_back_every_touch_when_one_name_is_missing() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        for name in ["TOUCH_ROLLBACK_1", "TOUCH_ROLLBACK_2"] {
+            store
+                .vault_upsert_entry(&test_entry(name))
+                .expect("seed entry");
+        }
+        store
+            .vault_touch_entry("TOUCH_ROLLBACK_1")
+            .expect("first touch succeeds");
+        let baseline = |store: &MemoryStore, name: &str| {
+            store
+                .vault_get_entry(name)
+                .expect("read entry")
+                .expect("entry exists")
+                .access_count
+        };
+        let before_1 = baseline(&store, "TOUCH_ROLLBACK_1");
+        let before_2 = baseline(&store, "TOUCH_ROLLBACK_2");
+        assert_eq!(before_1, 1, "fixture: first member was touched once");
+        assert_eq!(before_2, 0);
+
+        let err = store
+            .vault_touch_entries_atomic(&[
+                "TOUCH_ROLLBACK_1".to_string(),
+                "TOUCH_ROLLBACK_2".to_string(),
+                "TOUCH_ROLLBACK_ABSENT".to_string(),
+            ])
+            .expect_err("a name with no row must fail the batch");
+        assert!(
+            !err.to_string().is_empty(),
+            "the batch must surface the underlying failure"
+        );
+
+        assert_eq!(
+            baseline(&store, "TOUCH_ROLLBACK_1"),
+            before_1,
+            "the successful earlier touch in the same batch must roll back"
+        );
+        assert_eq!(
+            baseline(&store, "TOUCH_ROLLBACK_2"),
+            before_2,
+            "no member may keep a partial increment"
+        );
+    }
 }
