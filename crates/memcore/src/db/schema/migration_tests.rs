@@ -494,9 +494,11 @@ fn last_use_at_survives_the_check_constraint_rebuild_on_both_paths() {
         "legacy DB must end up with last_use_at after init_schema"
     );
     let value: Option<String> = legacy
-        .query_row("SELECT last_use_at FROM memories WHERE id='row1'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT last_use_at FROM memories WHERE id='row1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(
         value, None,
