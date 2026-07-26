@@ -101,9 +101,50 @@ pub fn add_component_governance_edge_with_provenance(
     write_edge_row(conn, edge, relation.as_str(), provenance)
 }
 
+/// Normalize an incoming edge weight into the `[0.0, 1.0]` band the graph
+/// scorer already assumes (#1460).
+///
+/// Non-finite input (`NaN`, `±inf`) is **malformed, not merely large**: it
+/// collapses to `0.0` rather than saturating at the upper bound. `+inf` is
+/// therefore stored as zero influence, not as maximum influence — this gate
+/// exists because untrusted writers reach this field, so the malformed case
+/// fails closed. It is also the rule the shipped seed-weight path already
+/// uses (`scorer/graph.rs:99`), and one subsystem must not carry two
+/// answers for the same malformed value.
+///
+/// The finiteness check must also come *before* the clamp: `f64::clamp`
+/// propagates `NaN` rather than pinning it to a bound, so a bare `clamp`
+/// would let `NaN` reach the column and, from there,
+/// `graph_spreading_activation_with_seed_weights`' edge term
+/// (`scorer/graph.rs`), which multiplies `edge.weight` without a finiteness
+/// guard of its own and whose `propagated <= 0.0` skip is false for `NaN`.
+///
+/// This is a write-time gate only — it does not retire the read-time clamp.
+/// Legacy rows predate any clamp, and the raw-SQL edge writers listed on
+/// [`write_edge_row`] never pass through here, so reads still cannot assume a
+/// stored weight was governed.
+fn clamp_edge_weight(weight: f64) -> f64 {
+    if weight.is_finite() {
+        weight.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// Shared INSERT/UPSERT for the edge write doors above. `relation` is the
 /// (already-validated) relation string to persist; all timestamp normalization
-/// is identical across every entry point.
+/// is identical across every entry point, and the weight is clamped into
+/// `[0.0, 1.0]` by [`clamp_edge_weight`] (#1460) so semi-trusted callers (e.g.
+/// the continuity timeline projection, which lifts `weight` straight out of an
+/// event payload) cannot seed an out-of-band activation multiplier.
+///
+/// This is the choke point for *typed* edge writes, not for every statement
+/// that touches the table. Known raw-SQL writers that do **not** funnel
+/// through here (verified 2026-07-26): `store::exact_dedupe`'s
+/// `transfer_edges_to_winner` (re-keys existing rows, carrying their stored
+/// weight verbatim), `tachi-server`'s `repair::memory_hygiene` R12 rules and
+/// `repair::plan_c`'s `copy_common_rows` alias merge. None of them mints a new
+/// weight from caller input, but they are why the read-side clamp stays.
 ///
 /// Invariant (#774): the `memory_edges` upsert (mutable working projection) and
 /// the append-only `edge_observations` row land together — either both persist
@@ -140,6 +181,7 @@ fn write_edge_row(
         .filter(|s| !s.is_empty())
         .map(normalize_utc_iso_or_now);
     let meta_str = serde_json::to_string(&edge.metadata).unwrap_or_else(|_| "{}".to_string());
+    let weight = clamp_edge_weight(edge.weight);
 
     conn.execute_batch("SAVEPOINT write_edge_row")?;
     let result = (|| -> Result<(), MemoryError> {
@@ -148,7 +190,7 @@ fn write_edge_row(
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                ON CONFLICT(source_id, target_id, relation)
                DO UPDATE SET weight = ?4, metadata = ?5, created_at = ?6, valid_from = ?7, valid_to = ?8"#,
-            params![edge.source_id, edge.target_id, relation, edge.weight, meta_str, created, valid_from, valid_to],
+            params![edge.source_id, edge.target_id, relation, weight, meta_str, created, valid_from, valid_to],
         )?;
         append_edge_observation(conn, edge, relation, provenance)?;
         Ok(())

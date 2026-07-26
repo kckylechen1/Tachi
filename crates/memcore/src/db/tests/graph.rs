@@ -849,3 +849,154 @@ fn delete_cascades_edges() {
     let edges = get_edges(&conn, "del-e2", "both", None).unwrap();
     assert!(edges.is_empty(), "edges should be cleaned up on delete");
 }
+
+/// Read the weight column exactly as it sits on disk — no `get_edges` decode,
+/// no scorer clamp — so these tests can only pass if the *write* path stored a
+/// governed value. Returns `None` when the column is NULL (which is what
+/// SQLite stores for a bound `NaN`).
+fn stored_weight(conn: &Connection, source: &str, target: &str, relation: &str) -> Option<f64> {
+    conn.query_row(
+        "SELECT weight FROM memory_edges WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+        params![source, target, relation],
+        |row| row.get::<_, Option<f64>>(0),
+    )
+    .unwrap()
+}
+
+fn clamp_edge(source: &str, target: &str, weight: f64) -> MemoryEdge {
+    MemoryEdge {
+        source_id: source.into(),
+        target_id: target.into(),
+        relation: "causes".into(),
+        weight,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    }
+}
+
+/// #1460: `write_edge_row` clamps `weight` into `[0, 1]` at write time.
+/// Writers such as the continuity timeline projection lift `weight` straight
+/// out of an event payload, so an out-of-range value must be stored clamped —
+/// not stored raw and only tamed later by the read-side clamp.
+#[test]
+fn add_edge_clamps_out_of_range_weight_at_write_time() {
+    let mut conn = make_conn();
+    for id in ["clamp-src", "clamp-hi", "clamp-lo", "clamp-ok"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+
+    add_edge(&conn, &clamp_edge("clamp-src", "clamp-hi", 42.0)).unwrap();
+    add_edge(&conn, &clamp_edge("clamp-src", "clamp-lo", -3.5)).unwrap();
+    add_edge(&conn, &clamp_edge("clamp-src", "clamp-ok", 0.25)).unwrap();
+
+    assert_eq!(
+        stored_weight(&conn, "clamp-src", "clamp-hi", "causes"),
+        Some(1.0),
+        "weight above the band must be stored clamped to 1.0, not raw"
+    );
+    assert_eq!(
+        stored_weight(&conn, "clamp-src", "clamp-lo", "causes"),
+        Some(0.0),
+        "negative weight must be stored clamped to 0.0, not raw"
+    );
+    assert_eq!(
+        stored_weight(&conn, "clamp-src", "clamp-ok", "causes"),
+        Some(0.25),
+        "in-band weight must be stored untouched"
+    );
+}
+
+/// The `ON CONFLICT ... DO UPDATE SET weight = ?4` arm binds the same
+/// parameter as the INSERT, so re-observing an existing edge must not be able
+/// to smuggle an out-of-range weight past the gate.
+#[test]
+fn add_edge_clamps_out_of_range_weight_on_upsert() {
+    let mut conn = make_conn();
+    for id in ["clamp-up-src", "clamp-up-tgt"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+
+    add_edge(&conn, &clamp_edge("clamp-up-src", "clamp-up-tgt", 0.5)).unwrap();
+    assert_eq!(
+        stored_weight(&conn, "clamp-up-src", "clamp-up-tgt", "causes"),
+        Some(0.5)
+    );
+
+    add_edge(&conn, &clamp_edge("clamp-up-src", "clamp-up-tgt", 9.5)).unwrap();
+    assert_eq!(
+        stored_weight(&conn, "clamp-up-src", "clamp-up-tgt", "causes"),
+        Some(1.0),
+        "the DO UPDATE arm must clamp too, not just the INSERT"
+    );
+}
+
+/// Every non-finite weight — `NaN`, `+inf`, `-inf` alike — is treated as
+/// **malformed input and collapses to `0.0`**, not as a very large weight that
+/// saturates at the upper bound. Two reasons this is the frozen direction:
+///
+/// - it is what the shipped seed-weight path already does
+///   (`scorer/graph.rs:99`: `if weight.is_finite() { *weight } else { 0.0 }
+///   .clamp(0.0, 1.0)`), and one subsystem must not hold two rules for the
+///   same malformed value;
+/// - #1460 exists because untrusted writers influence this field, so the
+///   malformed case must fail **closed** (zero influence) rather than open
+///   (maximum edge weight).
+///
+/// Mechanically the guard must also come first: `f64::clamp` propagates `NaN`
+/// rather than pinning it to a bound, and SQLite has no NaN — a bound `NaN`
+/// lands as NULL, which then breaks the `get_edges` f64 decode.
+#[test]
+fn add_edge_collapses_non_finite_weight_to_zero() {
+    let mut conn = make_conn();
+    for id in [
+        "clamp-nan-src",
+        "clamp-nan-tgt",
+        "clamp-posinf-tgt",
+        "clamp-neginf-tgt",
+    ] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+
+    for (target, weight) in [
+        ("clamp-nan-tgt", f64::NAN),
+        ("clamp-posinf-tgt", f64::INFINITY),
+        ("clamp-neginf-tgt", f64::NEG_INFINITY),
+    ] {
+        add_edge(&conn, &clamp_edge("clamp-nan-src", target, weight)).unwrap();
+        assert_eq!(
+            stored_weight(&conn, "clamp-nan-src", target, "causes"),
+            Some(0.0),
+            "non-finite weight ({weight}) is malformed input: it must fail closed to 0.0 \
+             (matching scorer/graph.rs:99), never saturate to the upper bound — and never \
+             land as NULL, which is what SQLite stores for a bound NaN"
+        );
+    }
+
+    // And the rows stay decodable through the normal read door.
+    let edges = get_edges(&conn, "clamp-nan-src", "outgoing", None).unwrap();
+    assert_eq!(edges.len(), 3);
+}
+
+/// The typed governance door shares `write_edge_row`, so it inherits the same
+/// clamp — the gate lives at the choke point, not on one caller.
+#[test]
+fn component_governance_edge_clamps_weight_too() {
+    let mut conn = make_conn();
+    for id in ["clamp-cg-src", "clamp-cg-tgt"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+
+    let edge = MemoryEdge {
+        relation: "IGNORED".into(),
+        ..clamp_edge("clamp-cg-src", "clamp-cg-tgt", 7.0)
+    };
+    add_component_governance_edge(&conn, &edge, ComponentGovernanceRelation::Owns).unwrap();
+
+    assert_eq!(
+        stored_weight(&conn, "clamp-cg-src", "clamp-cg-tgt", "owns"),
+        Some(1.0),
+        "the grandfathered typed door must clamp as well"
+    );
+}
