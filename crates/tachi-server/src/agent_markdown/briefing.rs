@@ -262,9 +262,32 @@ pub(crate) fn format_briefing(
         }
     }
 
+    let kanban_incomplete = kanban_has_incomplete_evidence(kanban);
     if let Some(tasks) = kanban.get("tasks").and_then(Value::as_array) {
-        if !tasks.is_empty() {
+        if !tasks.is_empty() || kanban_incomplete {
             out.push("\n### Kanban [AUTHORITY: WORKFLOW STATE]".to_string());
+            if kanban_incomplete {
+                let warning = kanban
+                    .get("warning")
+                    .and_then(Value::as_str)
+                    .filter(|warning| !warning.is_empty())
+                    .unwrap_or("board response is incomplete");
+                out.push(format!(
+                    "- [INCOMPLETE] {}",
+                    md_escape(&compact_text_line(warning, 240))
+                ));
+                if let Some(reasons) = kanban.get("incomplete_reasons").and_then(Value::as_array) {
+                    let reasons = reasons
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|reason| md_escape(&compact_text_line(reason, 100)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !reasons.is_empty() {
+                        out.push(format!("- incomplete reasons: {reasons}"));
+                    }
+                }
+            }
             for task in tasks.iter().take(kanban_cap) {
                 let summary = task
                     .get("summary")
@@ -415,6 +438,10 @@ fn briefing_next_step(
         return "`tachi_memory(action='alerts')` to inspect operational warnings before deeper work."
             .to_string();
     }
+    if kanban_has_incomplete_evidence(kanban) {
+        return "`tachi_task(action='board', format='json')` to inspect incomplete board evidence before dispatching new tasks."
+            .to_string();
+    }
     if kanban
         .get("tasks")
         .and_then(Value::as_array)
@@ -433,4 +460,19 @@ fn briefing_next_step(
         "`tachi_memory(action='search', scope='all', query='{}')` if project-scoped results look sparse.",
         compact_text_line(query, 80).replace('\'', "")
     )
+}
+
+fn kanban_has_incomplete_evidence(kanban: &Value) -> bool {
+    kanban
+        .get("incomplete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || kanban
+            .get("warning")
+            .and_then(Value::as_str)
+            .is_some_and(|warning| !warning.is_empty())
+        || kanban
+            .get("incomplete_reasons")
+            .and_then(Value::as_array)
+            .is_some_and(|reasons| !reasons.is_empty())
 }

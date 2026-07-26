@@ -6,13 +6,11 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let temp_runs = tempfile::tempdir().expect("temp run root");
-    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
-    let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
     let server = make_server();
+    let runs_root = crate::dispatch_ops::runs_dir_for_server(&server);
+    let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", &runs_root);
     let flow_id = "flow_20260608T000000Z_feature_briefing_test";
-    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("valid flow id");
+    let run_dir = runs_root.join(flow_id);
     std::fs::create_dir_all(&run_dir).expect("create flow run dir");
     std::fs::write(
         run_dir.join("instruction.md"),
@@ -29,6 +27,16 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
         .expect("status json"),
     )
     .expect("write status");
+    crate::task_lifecycle::mark_task_dispatch(
+        flow_id,
+        "dispatch-feature-briefing",
+        json!({
+            "agent": "custom",
+            "profile": "codex_55_review",
+            "task": "feature briefing handoff",
+        }),
+    )
+    .expect("link feature briefing dispatch to its flow descriptor");
 
     server
         .with_global_store(|store| {

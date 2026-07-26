@@ -283,6 +283,7 @@ fn update_outcome_row(
     new: &NewDispatchOutcome,
 ) -> Result<DispatchOutcomeRow, MemoryError> {
     let now = normalize_utc_iso_or_now("");
+    let idempotency_key = derive_idempotency_key(&new.dispatch_id, new.task_type.as_deref());
     let evidence_refs_json =
         serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
     let identity_receipt_json = new
@@ -313,7 +314,8 @@ fn update_outcome_row(
             retry_count = ?10, error_class = ?11, issue_ref = ?12, pr_ref = ?13,
             flow_id = ?14, cost_tokens = ?15, cost_usd = ?16, verification_present = ?17,
              diff_present = ?18, evidence_refs = ?19,
-             identity_receipt = COALESCE(identity_receipt, ?20), updated_at = ?21
+             identity_receipt = COALESCE(identity_receipt, ?20), updated_at = ?21,
+             idempotency_key = ?23
          WHERE outcome_id = ?1",
         params![
             outcome_id,
@@ -338,6 +340,7 @@ fn update_outcome_row(
             identity_receipt_json,
             now,
             normalize_basis(&new.identity_attribution_basis),
+            idempotency_key,
         ],
     )?;
     get_outcome(conn, outcome_id)?.ok_or_else(|| {
@@ -358,72 +361,100 @@ pub fn upsert_outcome(
     new: &NewDispatchOutcome,
 ) -> Result<DispatchOutcomeRow, MemoryError> {
     let idempotency_key = derive_idempotency_key(&new.dispatch_id, new.task_type.as_deref());
+    let now = normalize_utc_iso_or_now("");
+    let evidence_refs_json =
+        serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
+    let identity_receipt_json = new
+        .identity_receipt
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let retry_count = new.retry_count as i64;
+    let cost_tokens = new.cost_tokens.map(|v| v as i64);
 
-    let existing_id: Option<String> = conn
-        .query_row(
-            "SELECT outcome_id FROM dispatch_outcomes WHERE idempotency_key = ?1",
-            params![idempotency_key],
-            |r| r.get(0),
-        )
-        .optional()?;
-
-    match existing_id {
-        Some(outcome_id) => update_outcome_row(conn, &outcome_id, new),
-        None => {
-            let now = normalize_utc_iso_or_now("");
-            let evidence_refs_json =
-                serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
-            let identity_receipt_json = new
-                .identity_receipt
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?;
-            let retry_count = new.retry_count as i64;
-            let cost_tokens = new.cost_tokens.map(|v| v as i64);
-            conn.execute(
-                "INSERT INTO dispatch_outcomes
-                 (outcome_id, dispatch_id, eval_memory_id, model, vendor, role, seat,
-                  task_type, execution_outcome, reported_outcome, retry_count, error_class,
-                  issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, verification_present,
-                   diff_present, evidence_refs, identity_receipt, identity_attribution_basis,
-                   idempotency_key, created_at, updated_at)
-                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24)",
-                params![
-                    new.outcome_id,
-                    new.dispatch_id,
-                    new.eval_memory_id,
-                    new.model,
-                    new.vendor,
-                    new.role,
-                    new.seat,
-                    new.task_type,
-                    new.execution_outcome,
-                    new.reported_outcome,
-                    retry_count,
-                    new.error_class,
-                    new.issue_ref,
-                    new.pr_ref,
-                    new.flow_id,
-                    cost_tokens,
-                    new.cost_usd,
-                    new.verification_present as i64,
-                    new.diff_present as i64,
-                    evidence_refs_json,
-                    identity_receipt_json,
-                    normalize_basis(&new.identity_attribution_basis),
-                    idempotency_key,
-                    now,
-                ],
-            )?;
-            get_outcome(conn, &new.outcome_id)?.ok_or_else(|| {
-                MemoryError::InvalidArg(format!(
-                    "dispatch_outcomes row {} vanished immediately after insert",
-                    new.outcome_id
-                ))
-            })
-        }
-    }
+    // The unique idempotency key is the arbitration point. Keeping the
+    // conflict update in this one statement closes the former SELECT -> INSERT
+    // race between concurrent tachi_complete calls for the same logical row.
+    conn.execute(
+        "INSERT INTO dispatch_outcomes
+         (outcome_id, dispatch_id, eval_memory_id, model, vendor, role, seat,
+          task_type, execution_outcome, reported_outcome, retry_count, error_class,
+          issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, verification_present,
+           diff_present, evidence_refs, identity_receipt, identity_attribution_basis,
+           idempotency_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24)
+         ON CONFLICT(idempotency_key) DO UPDATE SET
+            eval_memory_id = excluded.eval_memory_id,
+            model = CASE WHEN dispatch_outcomes.identity_receipt IS NOT NULL
+                         THEN dispatch_outcomes.model ELSE excluded.model END,
+            vendor = CASE WHEN dispatch_outcomes.identity_receipt IS NOT NULL
+                          THEN dispatch_outcomes.vendor ELSE excluded.vendor END,
+            role = CASE WHEN dispatch_outcomes.identity_receipt IS NOT NULL
+                        THEN dispatch_outcomes.role ELSE excluded.role END,
+            seat = CASE WHEN dispatch_outcomes.identity_receipt IS NOT NULL
+                        THEN dispatch_outcomes.seat ELSE excluded.seat END,
+            identity_attribution_basis =
+                CASE WHEN dispatch_outcomes.identity_receipt IS NOT NULL
+                     THEN dispatch_outcomes.identity_attribution_basis
+                     ELSE excluded.identity_attribution_basis END,
+            task_type = excluded.task_type,
+            execution_outcome = excluded.execution_outcome,
+            reported_outcome = excluded.reported_outcome,
+            retry_count = excluded.retry_count,
+            error_class = excluded.error_class,
+            issue_ref = excluded.issue_ref,
+            pr_ref = excluded.pr_ref,
+            flow_id = excluded.flow_id,
+            cost_tokens = excluded.cost_tokens,
+            cost_usd = excluded.cost_usd,
+            verification_present = excluded.verification_present,
+            diff_present = excluded.diff_present,
+            evidence_refs = excluded.evidence_refs,
+            identity_receipt = COALESCE(dispatch_outcomes.identity_receipt, excluded.identity_receipt),
+            updated_at = excluded.updated_at",
+        params![
+            new.outcome_id,
+            new.dispatch_id,
+            new.eval_memory_id,
+            new.model,
+            new.vendor,
+            new.role,
+            new.seat,
+            new.task_type,
+            new.execution_outcome,
+            new.reported_outcome,
+            retry_count,
+            new.error_class,
+            new.issue_ref,
+            new.pr_ref,
+            new.flow_id,
+            cost_tokens,
+            new.cost_usd,
+            new.verification_present as i64,
+            new.diff_present as i64,
+            evidence_refs_json,
+            identity_receipt_json,
+            normalize_basis(&new.identity_attribution_basis),
+            idempotency_key,
+            now,
+        ],
+    )?;
+    conn.query_row(
+        &format!("SELECT {SELECT_COLUMNS} FROM dispatch_outcomes WHERE idempotency_key = ?1"),
+        params![derive_idempotency_key(
+            &new.dispatch_id,
+            new.task_type.as_deref()
+        )],
+        row_to_outcome,
+    )
+    .optional()?
+    .ok_or_else(|| {
+        MemoryError::InvalidArg(format!(
+            "dispatch_outcomes row for {} vanished immediately after upsert",
+            new.dispatch_id
+        ))
+    })
 }
 
 /// True if any `dispatch_outcomes` row already exists for `dispatch_id`

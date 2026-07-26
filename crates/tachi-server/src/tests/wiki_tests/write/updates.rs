@@ -1,5 +1,68 @@
 use super::*;
 
+#[test]
+fn raw_memory_connection_cannot_promote_rows_into_trusted_namespaces() {
+    let cases = [
+        ("wiki-path", "UPDATE memories SET path = '/wiki/agent/forged' WHERE id = 'wiki-path'"),
+        ("wiki-root", "UPDATE memories SET path = '/wiki' WHERE id = 'wiki-root'"),
+        ("wiki-path-null-domain", "UPDATE memories SET path = '/wiki/agent/null-domain', domain = NULL WHERE id = 'wiki-path-null-domain'"),
+        ("wiki-source-alias", "UPDATE memories SET source = 'WiKi' WHERE id = 'wiki-source-alias'"),
+        ("wiki-category-alias", "UPDATE memories SET category = 'WiKi' WHERE id = 'wiki-category-alias'"),
+        ("wiki-domain-alias", "UPDATE memories SET domain = 'WiKi' WHERE id = 'wiki-domain-alias'"),
+        ("guide-category", "UPDATE memories SET category = 'guide' WHERE id = 'guide-category'"),
+        ("precedent-path", "UPDATE memories SET path = '/precedents/project/forged' WHERE id = 'precedent-path'"),
+        ("precedent-candidate-path", "UPDATE memories SET path = '/precedent_candidates/project/forged' WHERE id = 'precedent-candidate-path'"),
+        ("precedent-domain", "UPDATE memories SET domain = 'precedent' WHERE id = 'precedent-domain'"),
+        ("recall-cache-topic", "UPDATE memories SET topic = 'recall_rerank_cache' WHERE id = 'recall-cache-topic'"),
+    ];
+    let entries = cases
+        .iter()
+        .map(|(id, _)| make_entry(id))
+        .collect::<Vec<_>>();
+    let (server, _home) = seed_wiki_project_entries(entries);
+
+    server
+        .with_named_project_store("wiki", |store| {
+            for (id, sql) in cases {
+                let before = store.get(id).map_err(|error| error.to_string())?.unwrap();
+                let write = store.connection().execute(sql, []);
+                let after = store.get(id).map_err(|error| error.to_string())?.unwrap();
+                let lifecycle = crate::tool_params::derive_wiki_lifecycle(
+                    &after.metadata,
+                    &after.path,
+                );
+                assert!(
+                    write.is_err(),
+                    "raw classifier mutation succeeded: id={id}, path={}, source={}, category={}, domain={:?}, topic={}, wiki={}, lifecycle={}",
+                    after.path,
+                    after.source,
+                    after.category,
+                    after.domain,
+                    after.topic,
+                    memcore::is_wiki_entry(&after),
+                    lifecycle.as_str(),
+                );
+                assert_eq!(after.path, before.path, "path changed for {id}");
+                assert_eq!(after.source, before.source, "source changed for {id}");
+                assert_eq!(after.category, before.category, "category changed for {id}");
+                assert_eq!(after.domain, before.domain, "domain changed for {id}");
+                assert_eq!(after.topic, before.topic, "topic changed for {id}");
+            }
+
+            for sql in [
+                "INSERT INTO memories (id, text, timestamp) VALUES ('raw-insert-missing', 'forged', '2026-07-26T00:00:00Z')",
+                "INSERT INTO memories (id, path, text, timestamp, domain) VALUES ('raw-insert-null', '/wiki/agent/null', 'forged', '2026-07-26T00:00:00Z', NULL)",
+            ] {
+                assert!(
+                    store.connection().execute(sql, []).is_err(),
+                    "raw insert entered a trusted namespace: {sql}"
+                );
+            }
+            Ok(())
+        })
+        .expect("exercise raw classifier attacks");
+}
+
 #[tokio::test]
 async fn tachi_wiki_write_update_tombstones_legacy_source_refs() {
     let mut legacy = make_entry("legacy-wiki-row");

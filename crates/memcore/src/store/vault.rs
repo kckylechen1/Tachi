@@ -331,9 +331,11 @@ mod tests {
 
     #[test]
     fn vault_replace_api_key_pool_rolls_back_when_rotation_write_fails() {
-        let mut store = MemoryStore::open_in_memory().expect("open test store");
-        store
-            .conn
+        let dir = tempfile::tempdir().expect("vault rollback temp dir");
+        let path = dir.path().join("memory.db");
+        let mut store = MemoryStore::open(&path.to_string_lossy()).expect("open test store");
+        let offline = rusqlite::Connection::open(&path).expect("open offline trigger fixture");
+        offline
             .execute_batch(
                 "CREATE TRIGGER fail_pool_rotation
                  BEFORE INSERT ON vault_key_rotations
@@ -343,6 +345,7 @@ mod tests {
                  END;",
             )
             .expect("install failure trigger");
+        drop(offline);
 
         let err = store
             .vault_replace_api_key_pool(

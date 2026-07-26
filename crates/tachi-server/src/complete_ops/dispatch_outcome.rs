@@ -167,19 +167,15 @@ pub(crate) fn record_complete_outcome(
     // the full mechanism.
     let write_result = if let Some(project) = params.project.as_deref().filter(|s| !s.is_empty()) {
         server.with_named_project_store(project, |store| {
-            memcore::upsert_outcome_reconciling_terminal_placeholder(
-                store.connection(),
-                &new_outcome,
-            )
-            .map_err(|e| e.to_string())
+            store
+                .upsert_dispatch_outcome(&new_outcome)
+                .map_err(|e| e.to_string())
         })
     } else {
         server.with_store_for_scope(scope, |store| {
-            memcore::upsert_outcome_reconciling_terminal_placeholder(
-                store.connection(),
-                &new_outcome,
-            )
-            .map_err(|e| e.to_string())
+            store
+                .upsert_dispatch_outcome(&new_outcome)
+                .map_err(|e| e.to_string())
         })
     };
 
@@ -767,12 +763,15 @@ pub(crate) fn record_terminal_failure_outcome(
         ..Default::default()
     };
 
-    let write_fn = |conn: &rusqlite::Connection| {
+    let write_fn = |store: &mut memcore::MemoryStore| {
         // First-writer-wins: skip if this dispatch already has an outcome row.
-        if memcore::outcome_exists_for_dispatch(conn, dispatch_id).map_err(|e| e.to_string())? {
+        if memcore::outcome_exists_for_dispatch(store.connection(), dispatch_id)
+            .map_err(|e| e.to_string())?
+        {
             return Ok(false);
         }
-        memcore::upsert_outcome(conn, &new_outcome)
+        store
+            .upsert_dispatch_outcome(&new_outcome)
             .map(|_| true)
             .map_err(|e| e.to_string())
     };
@@ -781,10 +780,10 @@ pub(crate) fn record_terminal_failure_outcome(
     // fallback, same as the complete path prioritizes `params.project` over
     // `params.scope`.
     let write_result = if let Some(project) = project.map(str::trim).filter(|s| !s.is_empty()) {
-        server.with_named_project_store(project, |store| write_fn(store.connection()))
+        server.with_named_project_store(project, write_fn)
     } else {
         let (scope, _) = server.resolve_write_scope("");
-        server.with_store_for_scope(scope, |store| write_fn(store.connection()))
+        server.with_store_for_scope(scope, write_fn)
     };
     if let Err(error) = write_result {
         tracing::warn!(
@@ -800,6 +799,7 @@ pub(crate) fn record_terminal_failure_outcome(
 mod tests {
     use super::*;
     use crate::tool_params::{AdjudicationParams, SignatureRecordParams, TachiCompleteParams};
+    use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 
     fn base_params() -> TachiCompleteParams {
         TachiCompleteParams {
@@ -845,10 +845,234 @@ mod tests {
         (server, dir)
     }
 
+    fn test_server_with_db_path() -> (MemoryServer, tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_db = dir.path().join("global.sqlite");
+        let server = MemoryServer::new(global_db.clone(), None).expect("server");
+        (server, dir, global_db)
+    }
+
+    fn hold_immediate_lock_for(db_path: PathBuf, duration: Duration) -> thread::JoinHandle<()> {
+        let (locked_tx, locked_rx) = mpsc::sync_channel(0);
+        let handle = thread::spawn(move || {
+            let conn = rusqlite::Connection::open(db_path).expect("open lock connection");
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .expect("hold write lock");
+            locked_tx.send(()).expect("signal write lock");
+            thread::sleep(duration);
+            conn.execute_batch("COMMIT").expect("release write lock");
+        });
+        locked_rx.recv().expect("wait for write lock");
+        handle
+    }
+
+    fn hold_immediate_lock_until_released(
+        db_path: PathBuf,
+    ) -> (mpsc::SyncSender<()>, thread::JoinHandle<()>) {
+        let (locked_tx, locked_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let handle = thread::spawn(move || {
+            let conn = rusqlite::Connection::open(db_path).expect("open lock connection");
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .expect("hold write lock");
+            locked_tx.send(()).expect("signal write lock");
+            release_rx.recv().expect("wait to release write lock");
+            conn.execute_batch("COMMIT").expect("release write lock");
+        });
+        locked_rx.recv().expect("wait for write lock");
+        (release_tx, handle)
+    }
+
+    fn pre_retry_completion_status(server: &MemoryServer, dispatch_id: &str) -> Value {
+        let outcome = memcore::NewDispatchOutcome {
+            outcome_id: uuid::Uuid::new_v4().to_string(),
+            dispatch_id: dispatch_id.to_string(),
+            vendor: "codex".to_string(),
+            task_type: Some("fix_request".to_string()),
+            execution_outcome: "completed".to_string(),
+            reported_outcome: Some("success".to_string()),
+            evidence_refs: json!(["github delivery already durable"]),
+            identity_attribution_basis: "unknown".to_string(),
+            ..Default::default()
+        };
+        match server.with_global_store(|store| {
+            memcore::upsert_outcome_reconciling_terminal_placeholder(store.connection(), &outcome)
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(row) => json!({"recorded": true, "outcome_id": row.outcome_id}),
+            Err(error) => json!({"recorded": false, "error": error}),
+        }
+    }
+
     // #1096 leaf-2a: local `with_tachi_home` replaced by the shared,
     // panic-safe `crate::test_support::with_tachi_home` (see its doc comment
     // for why the old local copy here was unsound under a panicking `f`).
     use crate::test_support::with_tachi_home;
+
+    /// Discrimination: the former direct writer returns `recorded=false` once
+    /// SQLite's first busy timeout elapses; the labelled MemoryStore writer
+    /// retries the same local reconciliation and returns `recorded=true` when
+    /// that holder releases during its bounded window.
+    #[test]
+    fn completion_outcome_retries_after_initial_busy_timeout_without_events() {
+        let (server, _dir, db_path) = test_server_with_db_path();
+        let mut params = base_params();
+        params.dispatch_id = Some("dispatch-lock-release".to_string());
+        crate::gh_ops::reset_github_command_runner_call_count();
+        let event_count_before = server
+            .with_global_store_read(|store| {
+                store
+                    .list_tachi_events(&memcore::TachiEventQuery::default())
+                    .map(|events| events.len())
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read append-only event sink before reconciliation");
+
+        // The shared connection waits five seconds inside SQLite before the
+        // memory-layer retry gets a chance. Release only after that first wait
+        // has elapsed, while the retry policy is still live.
+        let red_holder = hold_immediate_lock_for(db_path.clone(), Duration::from_millis(5_500));
+        let red_status = pre_retry_completion_status(&server, "dispatch-lock-release");
+        red_holder.join().expect("pre-retry lock holder completes");
+        eprintln!("RED pre-retry completion status: {red_status}");
+        assert_eq!(
+            red_status["recorded"],
+            json!(false),
+            "the unwrapped pre-fix persistence write must surface the SQLite lock"
+        );
+
+        let holder = hold_immediate_lock_for(db_path, Duration::from_millis(5_500));
+        let status = record_complete_outcome(
+            &server,
+            &params,
+            "eval-lock-release",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &["github delivery already durable".to_string()],
+        );
+        holder.join().expect("lock holder completes");
+        eprintln!("GREEN retrying completion status: {status}");
+
+        assert_eq!(
+            status["recorded"],
+            json!(true),
+            "completion must reconcile locally after the SQLite holder releases: {status}"
+        );
+        let event_count_after = server
+            .with_global_store_read(|store| {
+                store
+                    .list_tachi_events(&memcore::TachiEventQuery::default())
+                    .map(|events| events.len())
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read append-only event sink after reconciliation");
+        assert_eq!(
+            event_count_after, event_count_before,
+            "outcome reconciliation must not append delivery or continuity events"
+        );
+        assert_eq!(
+            crate::gh_ops::github_command_runner_call_count(),
+            0,
+            "local lock reconciliation must not call the GitHub command runner"
+        );
+    }
+
+    #[test]
+    fn completion_outcome_lock_exhaustion_is_loud_and_does_not_append_events() {
+        let (server, _dir, db_path) = test_server_with_db_path();
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .busy_timeout(Duration::from_millis(1))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("shorten test busy timeout");
+        let (release_lock, holder) = hold_immediate_lock_until_released(db_path);
+        let status = record_complete_outcome(
+            &server,
+            &base_params(),
+            "eval-lock-exhausted",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &["github delivery already durable".to_string()],
+        );
+        release_lock.send(()).expect("release exhausted lock");
+        holder.join().expect("lock holder completes");
+
+        assert_eq!(status["recorded"], json!(false));
+        let error = status["error"].as_str().expect("loud retry error");
+        assert!(
+            error.contains("retry_memory_locked(op=dispatch_outcomes_upsert, db_label=global)"),
+            "lock exhaustion must identify the bounded retry and DB label: {error}"
+        );
+        let event_count = server
+            .with_global_store_read(|store| {
+                store
+                    .list_tachi_events(&memcore::TachiEventQuery::default())
+                    .map(|events| events.len())
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read append-only event sink after exhaustion");
+        assert_eq!(
+            event_count, 0,
+            "failed local reconciliation must not append continuity or delivery events"
+        );
+    }
+
+    #[test]
+    fn replayed_completion_keeps_outcome_id_and_one_canonical_row() {
+        let (server, _dir) = test_server();
+        let mut params = base_params();
+        params.dispatch_id = Some("dispatch-completion-replay".to_string());
+        let first = record_complete_outcome(
+            &server,
+            &params,
+            "eval-replay",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &["delivery already durable".to_string()],
+        );
+        let second = record_complete_outcome(
+            &server,
+            &params,
+            "eval-replay",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &["delivery already durable".to_string()],
+        );
+
+        assert_eq!(first["recorded"], json!(true));
+        assert_eq!(second["recorded"], json!(true));
+        assert_eq!(first["outcome_id"], second["outcome_id"]);
+        let count: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes \
+                         WHERE dispatch_id = 'dispatch-completion-replay' \
+                           AND task_type = 'fix_request'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count replayed canonical outcome rows");
+        assert_eq!(count, 1);
+    }
 
     #[test]
     fn writes_canonical_row_with_expected_fields() {

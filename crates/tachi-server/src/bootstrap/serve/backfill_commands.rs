@@ -114,8 +114,11 @@ fn all_project_backfill_targets(home: &Path) -> Result<Vec<PathBuf>, Box<dyn Err
         .dbs
         .into_iter()
         .filter(|entry| entry.owner == "tachi" && entry.allow_write && entry.schema_kind == "tachi")
-        .map(|entry| PathBuf::from(entry.path))
-        .collect();
+        .map(|entry| {
+            crate::path_utils::manifest_db_leaf_exists(&entry)?;
+            Ok(PathBuf::from(entry.path))
+        })
+        .collect::<Result<_, String>>()?;
     if targets.is_empty() {
         return Err("--all-projects found no manifest-owned writable Tachi databases".into());
     }

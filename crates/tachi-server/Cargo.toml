@@ -118,6 +118,7 @@ vault-kit = { path = "../vault-kit" }
 
 [dev-dependencies]
 tempfile = "3"
+memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }
 tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
 # Dev-dep only, so `cargo build --release` never sees this feature. It
 # makes vault-kit's `test_support::derive_cheap` (m=64 KiB vs the

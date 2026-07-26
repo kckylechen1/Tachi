@@ -11,7 +11,9 @@ use super::config::{resolve_candidate_scan_limit, resolve_processed_scan_limit};
 fn is_wiki_project_db(server: &MemoryServer) -> bool {
     server
         .project_db_path_buf()
-        .and_then(|path| crate::path_utils::named_project_for_db_path(&path))
+        .and_then(|path| {
+            crate::path_utils::named_project_for_db_path_in_home(&path, &server.tachi_home_dir())
+        })
         .is_some_and(|name| name.eq_ignore_ascii_case("wiki"))
 }
 

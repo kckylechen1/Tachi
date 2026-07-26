@@ -57,7 +57,9 @@ impl MemoryStore {
         };
 
         let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("update_with_revision", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::update_with_revision(
                 &mut self.conn,
                 id,
@@ -88,7 +90,9 @@ impl MemoryStore {
             None
         };
         let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("update_enrichment_fields", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::update_enrichment_fields(
                 &mut self.conn,
                 id,
@@ -108,17 +112,23 @@ impl MemoryStore {
         stage: &str,
         error: &str,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::record_enrichment_failure(&self.conn, id, stage, error)
     }
 
     /// Set write-side keyword enrichment status (`enriched`/`pending`/`skipped`/`failed`).
     pub fn set_keyword_enrichment_status(&self, id: &str, status: &str) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::set_keyword_enrichment_status(&self.conn, id, status)
     }
 
     /// Stamp `keywords_status=pending` only when current status is absent or already
     /// pending — never overwrite a terminal status (`enriched`/`skipped`/`failed`).
     pub fn set_keyword_enrichment_pending_if_unset(&self, id: &str) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::set_keyword_enrichment_pending_if_unset(&self.conn, id)
     }
 
@@ -137,6 +147,8 @@ impl MemoryStore {
         let now = now_utc_iso();
         let max_attempts = ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS;
         let limit = limit.min(256) as i64;
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let tx = self.conn.transaction()?;
 
         let rows = {
@@ -299,7 +311,8 @@ impl MemoryStore {
     /// Backfill FTS index for entries missing from memories_fts.
     /// Returns the number of rows inserted.
     pub fn backfill_fts_missing(&mut self) -> Result<usize, MemoryError> {
-        let inserted = self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let inserted = tx.execute(
             r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
                SELECT
                  id, path, summary, text,
@@ -309,21 +322,25 @@ impl MemoryStore {
                WHERE id NOT IN (SELECT id FROM memories_fts)"#,
             [],
         )?;
-        let _ = self.conn.execute(
+        let symbolic_inserted = tx.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT id, path, summary, text, keywords, entities, topic
                FROM memories
                WHERE id NOT IN (SELECT id FROM memories_symbolic_fts)"#,
             [],
         )?;
+        if inserted + symbolic_inserted > 0 {
+            crate::db::bump_search_generation(&tx)?;
+        }
+        tx.commit()?;
         Ok(inserted)
     }
 
     /// Full FTS rebuild. Use this when the FTS table is stale or corrupted.
     pub fn rebuild_fts_full(&mut self) -> Result<usize, MemoryError> {
-        self.conn
-            .execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
-        self.conn.execute_batch(
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
+        tx.execute_batch(
             r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                    id UNINDEXED,
                    path,
@@ -334,7 +351,7 @@ impl MemoryStore {
                    tokenize = 'simple'
                );"#,
         )?;
-        let inserted = self.conn.execute(
+        let inserted = tx.execute(
             r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
                SELECT
                  id, path, summary, text,
@@ -343,9 +360,8 @@ impl MemoryStore {
                FROM memories"#,
             [],
         )?;
-        self.conn
-            .execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")?;
-        self.conn.execute_batch(
+        tx.execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")?;
+        tx.execute_batch(
             r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_symbolic_fts USING fts5(
                    id,
                    path,
@@ -357,12 +373,14 @@ impl MemoryStore {
                    tokenize = 'trigram case_sensitive 0'
                );"#,
         )?;
-        let _ = self.conn.execute(
+        let _ = tx.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT id, path, summary, text, keywords, entities, topic
                FROM memories"#,
             [],
         )?;
+        crate::db::bump_search_generation(&tx)?;
+        tx.commit()?;
         Ok(inserted)
     }
 
@@ -379,5 +397,131 @@ impl MemoryStore {
             |r| r.get(0),
         )?;
         Ok((total, with_vec))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+    use serde_json::json;
+
+    fn test_entry(id: &str) -> crate::MemoryEntry {
+        crate::MemoryEntry {
+            id: id.to_string(),
+            path: "/test/enrichment".to_string(),
+            summary: "enrichment authorization fixture".to_string(),
+            text: "enrichment authorization fixture text".to_string(),
+            importance: 0.7,
+            timestamp: "2026-07-26T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: "enrichment".to_string(),
+            keywords: vec!["seed-keyword".to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    fn assert_sqlite_authorization_denied(result: Result<usize, rusqlite::Error>, context: &str) {
+        assert!(
+            matches!(
+                &result,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ffi::ErrorCode::AuthorizationForStatementDenied
+                        && error.extended_code == rusqlite::ffi::SQLITE_AUTH
+            ),
+            "{context}: expected SQLITE_AUTH, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn enrichment_update_is_authorized_without_leaking_raw_metadata_write_access() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let entry = test_entry("enrichment-authorization");
+        store.upsert(&entry).expect("seed entry");
+
+        let raw_before = store.connection().execute(
+            "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+            params![r#"{"raw_before":true}"#, &entry.id],
+        );
+        assert_sqlite_authorization_denied(
+            raw_before,
+            "raw connection must not mutate protected metadata before typed enrichment",
+        );
+
+        let keywords = vec!["enriched-keyword".to_string()];
+        assert!(
+            store
+                .update_enrichment_fields(
+                    &entry.id,
+                    None,
+                    None,
+                    Some(&keywords),
+                    None,
+                    entry.revision
+                )
+                .expect("typed enrichment update"),
+            "matching revision must accept the typed enrichment write"
+        );
+
+        let stored = store
+            .get(&entry.id)
+            .expect("load enriched entry")
+            .expect("enriched entry exists");
+        assert_eq!(stored.keywords, keywords);
+
+        let raw_after = store.connection().execute(
+            "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+            params![r#"{"raw_after":true}"#, &entry.id],
+        );
+        assert_sqlite_authorization_denied(
+            raw_after,
+            "typed enrichment authorization must end before raw metadata writes resume",
+        );
+    }
+
+    #[test]
+    fn enrichment_update_rejects_stale_revision_without_mutation() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let entry = test_entry("enrichment-stale-revision");
+        store.upsert(&entry).expect("seed entry");
+
+        let stale_keywords = vec!["stale-keyword".to_string()];
+        assert!(
+            !store
+                .update_enrichment_fields(
+                    &entry.id,
+                    None,
+                    None,
+                    Some(&stale_keywords),
+                    None,
+                    entry.revision + 1,
+                )
+                .expect("stale typed enrichment update"),
+            "stale revision must be rejected"
+        );
+
+        let stored = store
+            .get(&entry.id)
+            .expect("load entry after stale update")
+            .expect("entry exists after stale update");
+        assert_eq!(stored.keywords, entry.keywords);
+        assert_eq!(stored.revision, entry.revision);
     }
 }

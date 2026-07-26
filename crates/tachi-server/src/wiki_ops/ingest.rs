@@ -346,13 +346,19 @@ fn persist_wiki_ingest_entry(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
     old_id: Option<&str>,
+    reference_appends: &[memcore::db::ValidatedReferenceMutation],
 ) -> Result<(), String> {
+    let metadata_patch = entry.metadata.as_object().cloned().unwrap_or_default();
     store
         .with_immutable_supersession_transaction(|replacement| {
             if let Some(old_id) = old_id {
                 replacement.claim_immutable_supersession(old_id, &entry.id)?;
             }
-            replacement.upsert(entry)?;
+            replacement.upsert_with_validated_reference_mutations(
+                entry,
+                &metadata_patch,
+                reference_appends,
+            )?;
             if let Some(old_id) = old_id {
                 replacement.archive_claimed_source(old_id)?;
             }
@@ -409,6 +415,23 @@ pub(crate) async fn handle_wiki_ingest(
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let evidence_refs_v1 = build_evidence_refs_v1(std::slice::from_ref(&params.source), &timestamp);
+    let reference_appends = evidence_refs_v1
+        .into_iter()
+        .map(|reference| {
+            let target_kind = reference
+                .target_kind
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| format!("serialize wiki ingest target kind: {error}"))?
+                .and_then(|value| value.as_str().map(str::to_string));
+            memcore::db::ValidatedReferenceMutation::evidence(
+                reference.target_ref,
+                reference.captured_at,
+                target_kind,
+            )
+            .map_err(|error| format!("validate wiki ingest reference: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let entry = MemoryEntry {
         id: id.clone(),
@@ -450,7 +473,6 @@ pub(crate) async fn handle_wiki_ingest(
             "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
             "authority": WikiAuthorityV1::Advisory.as_str(),
             "artifact_kind": WikiArtifactKindV1::Wiki.as_str(),
-            "evidence_refs_v1": evidence_refs_v1,
         }),
         vector: None,
         retention_policy: Some("permanent".to_string()),
@@ -482,7 +504,7 @@ pub(crate) async fn handle_wiki_ingest(
             }
         };
 
-        persist_wiki_ingest_entry(store, &entry, old_id.as_deref())
+        persist_wiki_ingest_entry(store, &entry, old_id.as_deref(), &reference_appends)
     })?;
 
     let mut related = Vec::new();
@@ -662,7 +684,7 @@ mod immutable_supersession_tests {
             .supersede_memory(&old.id, &canonical.id)
             .expect("seed immutable predecessor edge"));
 
-        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id))
+        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id), &[])
             .expect_err("conflicted predecessor must refuse wiki candidate");
         assert!(err.contains("immutable supersession CAS"), "err: {err}");
         let old_after = store

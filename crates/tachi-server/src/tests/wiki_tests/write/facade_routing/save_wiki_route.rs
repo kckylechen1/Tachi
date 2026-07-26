@@ -1,8 +1,9 @@
 use super::*;
+use crate::tests::make_server_with_temp_home;
 
 #[tokio::test]
 async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
 
     let response = server
         .tachi_save(Parameters(TachiSaveParams {

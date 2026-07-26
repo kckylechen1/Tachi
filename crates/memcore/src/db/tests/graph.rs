@@ -61,6 +61,81 @@ fn graph_get_edges_returns_row_decode_errors() {
 }
 
 #[test]
+fn graph_limited_queries_stop_in_sql_before_decoding_rows_past_the_ceiling() {
+    let mut conn = make_conn();
+    for id in ["limit-root", "limit-good-a", "limit-good-b", "limit-z-bad"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+    for target in ["limit-good-a", "limit-good-b"] {
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "limit-root".into(),
+                target_id: target.into(),
+                relation: "supports".into(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO memory_edges
+         (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+         VALUES (?1, ?2, ?3, ?4, '{}', ?5, ?5, NULL)",
+        rusqlite::params![
+            "limit-root",
+            "limit-z-bad",
+            "supports",
+            "not-a-number",
+            "2026-07-25T00:00:00Z"
+        ],
+    )
+    .unwrap();
+
+    let edges = get_edges_limited(&conn, "limit-root", "outgoing", None, 2).unwrap();
+    assert_eq!(edges.len(), 2);
+    assert!(get_edges_limited(&conn, "limit-root", "outgoing", None, 0)
+        .unwrap()
+        .is_empty());
+
+    let expanded = graph_expand_limited(&conn, &["limit-root".into()], 1, None, 2).unwrap();
+    assert_eq!(expanded.edges.len(), 2);
+    assert_eq!(expanded.entries.len(), 2);
+}
+
+#[test]
+fn graph_limited_queries_do_not_let_seen_parent_edges_consume_the_budget() {
+    let mut conn = make_conn();
+    for id in ["a-root", "z-child", "z-grandchild"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+    for (source_id, target_id) in [("a-root", "z-child"), ("z-child", "z-grandchild")] {
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: source_id.into(),
+                target_id: target_id.into(),
+                relation: "supports".into(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+    }
+
+    let expanded = graph_expand_limited(&conn, &["a-root".into()], 2, None, 2).unwrap();
+    assert_eq!(expanded.edges.len(), 2);
+    assert_eq!(expanded.entries.len(), 2);
+}
+
+#[test]
 fn graph_expand_bfs() {
     let mut conn = make_conn();
     // Create chain: a -> b -> c

@@ -37,8 +37,9 @@ impl MemoryServer {
     /// caller, the same silent-cross-project-fallback disease class #1120
     /// exists to close. Named-project routing (`with_named_project_store*` /
     /// `resolve_named_project_db_path`) opens by path per call and does not
-    /// depend on that slot at all — `with_path_store` below is enough to force
-    /// the DB file (and its schema) into existence.
+    /// depend on that slot at all. Fresh DBs are initialized through the
+    /// reversible precommit below; preexisting DBs retain `with_path_store`
+    /// so the server's configured migration authority remains authoritative.
     pub(crate) fn resolve_or_register_workspace_root(
         &self,
         raw_root: &str,
@@ -95,27 +96,40 @@ impl MemoryServer {
                 git_root.display()
             )
         })?;
+        crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
         // Registration may continue only when identity lookup proves genuine
         // absence. A successful lookup must resolve to this exact repo-local
         // DB; ambiguity, manifest failure, or a same-name standalone store is
         // an error, never a reason to create/open another DB.
-        if preflight_project_identity(&db_path, &git_root, &project_name)? {
+        let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+        let already_resolved =
+            preflight_project_identity(&db_path, &git_root, &project_name, &self.tachi_home_dir())?;
+        if !already_resolved {
+            if let Err(error) = precommit.reserve_db() {
+                return Err(precommit.abort(error));
+            }
+        }
+        if let Err(error) = precommit.ensure_alias(&git_root, &project_name, &self.tachi_home_dir())
+        {
+            return Err(precommit.abort(error));
+        }
+        if already_resolved {
+            precommit.commit();
             return Ok(project_name);
         }
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "create project db parent directory at {}: {e}",
-                    parent.display()
-                )
-            })?;
+        let open_result = if precommit.created_db() {
+            precommit.open_db()
+        } else {
+            crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
+            self.with_path_store(&db_path, |_store| Ok(()))
+                .map_err(|error| format!("initialize project DB at {}: {error}", db_path.display()))
+        };
+        if let Err(error) = open_result {
+            return Err(precommit.abort(error));
         }
-        // Force the DB file (and its schema) into existence via the same
-        // per-path attach cache every named-project call goes through — see
-        // the doc comment above for why this, and not `activate_project_db`.
-        self.with_path_store(&db_path, |_store| Ok(()))
-            .map_err(|e| format!("initialize project db at {}: {e}", db_path.display()))?;
-
+        if let Err(error) = precommit.assert_owned_db_artifacts_unchanged() {
+            return Err(precommit.abort(error));
+        }
         // Primary registration: write a manifest entry so
         // `resolve_named_project_db_path` can find this DB by name
         // independent of the Plan C symlink below — the manifest-recorded
@@ -125,57 +139,29 @@ impl MemoryServer {
         // finding [2], #1207: `ensure_plan_c_symlink` is a no-op `Skipped` on
         // non-Unix hosts, so a project registered only via the symlink could
         // never be reopened there).
-        register_repo_local_manifest_entry(&db_path, &project_name)?;
-
-        // Secondary/legacy addressing: the `~/.tachi/projects/<name>/`
-        // symlink alias. `ensure_plan_c_symlink` is a no-op `Skipped` on
-        // non-Unix hosts (see its own cfg-gated definitions in
-        // `path_utils/symlink.rs`) — safe to call unconditionally here,
-        // unlike `handle_tachi_init_project_db` below, which surfaces the
-        // platform split in its caller-facing note.
-        match crate::path_utils::ensure_plan_c_symlink(&db_path, &git_root) {
-            crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                tracing::warn!(
-                    target: "tachi::project_db::auto_register",
-                    path = %path.display(),
-                    error = %error,
-                    project = %project_name,
-                    "workspace-root auto-registration created the project DB but the Plan C \
-                     alias symlink failed; the project remains reachable by its repo-local path"
-                );
-            }
-            crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                tracing::warn!(
-                    target: "tachi::project_db::auto_register",
-                    project = %project_name,
-                    "{}",
-                    issue.warning_message()
-                );
-            }
-            // Exhaustive on purpose (no `_` catch-all): a future new
-            // `PlanCLinkOutcome` variant must force a deliberate decision
-            // here about whether it needs its own warning, not silently fall
-            // into "nothing to log" the way a wildcard arm would.
-            crate::path_utils::PlanCLinkOutcome::AlreadyLinked
-            | crate::path_utils::PlanCLinkOutcome::Created(_)
-            | crate::path_utils::PlanCLinkOutcome::Skipped(_) => {}
+        let registration = register_repo_local_manifest_entry_then_in_home(
+            &db_path,
+            &project_name,
+            &self.tachi_home_dir(),
+            || {
+                precommit.assert_owned_db_artifacts_unchanged()?;
+                let resolved = self
+                    .resolve_server_named_project_db_path(&project_name)
+                    .map_err(|err| {
+                        format!(
+                    "project db was created at {} but is not resolvable by its derived name \
+                         '{project_name}': {err}",
+                    db_path.display()
+                )
+                    })?;
+                precommit.assert_owned_db_artifacts_unchanged()?;
+                Ok(resolved)
+            },
+        );
+        if let Err(error) = registration {
+            return Err(precommit.abort(error));
         }
-
-        // The whole point of auto-registration is a project name the caller
-        // can immediately reopen (review finding [2], #1207: "initialization
-        // returns a project name that cannot be reopened" is a bug). Verify
-        // reachability through the exact resolver every subsequent
-        // named-project call uses, and fail loudly instead of returning a
-        // name that silently cannot be reopened (e.g. the manifest write
-        // above also failed for some reason on top of a non-Unix/no-symlink
-        // host).
-        Self::resolve_named_project_db_path(&project_name).map_err(|err| {
-            format!(
-                "project db was created at {} but is not resolvable by its derived name \
-                 '{project_name}': {err}",
-                db_path.display()
-            )
-        })?;
+        precommit.commit();
 
         // Loud by design (#1120): first-contact auto-registration is a
         // meaningful state change (a new DB file on disk) and must be visible
@@ -196,32 +182,110 @@ impl MemoryServer {
     }
 }
 
-/// Register a just-created repo-local `<git_root>/.tachi/tachi-memory.db` in the
-/// manifest so [`MemoryServer::resolve_named_project_db_path`] can find it by
-/// name independent of the (Unix-only, best-effort) Plan C symlink — see
-/// `server_methods/db.rs::resolve_named_project_db_path`'s doc comment: the
-/// manifest-recorded repo-local path is the addressing scheme's PRIMARY
-/// resolution path, the symlink is a legacy/secondary fallback.
-///
-/// Mirrors the single-entry registration shape
-/// `bootstrap/tidy/migration.rs::update_manifest_after_migration` writes for
-/// its own callers; unlike that helper this never removes or rewrites any
-/// entry but the one it is registering, and refuses to silently fabricate a
-/// fresh empty manifest over a manifest file that exists but fails to parse
-/// (an unreadable/corrupt manifest is an error here, not "no entries yet" —
-/// overwriting it via `load_or_empty` would silently drop every other
-/// registered project's entry).
-pub(crate) fn register_repo_local_manifest_entry(
+pub(crate) fn register_repo_local_manifest_entry_in_home(
     db_path: &std::path::Path,
     project_name: &str,
+    tachi_home: &std::path::Path,
 ) -> Result<(), String> {
-    let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
+    let manifest_path = tachi_home.join("manifest.json");
     let _process_guard = manifest_registration_mutex()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     with_manifest_registration_file_lock(&manifest_path, || {
         register_repo_local_manifest_entry_locked(db_path, project_name, &manifest_path)
     })
+}
+
+pub(crate) fn register_repo_local_manifest_entry_then_in_home<T>(
+    db_path: &std::path::Path,
+    project_name: &str,
+    tachi_home: &std::path::Path,
+    after_registration: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let manifest_path = tachi_home.join("manifest.json");
+    let _process_guard = manifest_registration_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    with_manifest_registration_file_lock(&manifest_path, || {
+        let preimage = match std::fs::read(&manifest_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "read manifest preimage {}: {error}",
+                    manifest_path.display()
+                ));
+            }
+        };
+        register_repo_local_manifest_entry_locked(db_path, project_name, &manifest_path)?;
+        let written_state = std::fs::read(&manifest_path).map_err(|error| {
+            format!(
+                "read manifest transaction state {} after registration: {error}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest_changed = preimage.as_ref() != Some(&written_state);
+        match after_registration() {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let rollback = if manifest_changed {
+                    restore_manifest_preimage_if_unchanged(
+                        &manifest_path,
+                        &written_state,
+                        preimage.as_deref(),
+                    )
+                } else {
+                    Ok(())
+                };
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(format!(
+                        "{error}; manifest rollback at {} also failed: {rollback}",
+                        manifest_path.display()
+                    )),
+                }
+            }
+        }
+    })
+}
+
+fn restore_manifest_preimage_if_unchanged(
+    manifest_path: &std::path::Path,
+    written_state: &[u8],
+    preimage: Option<&[u8]>,
+) -> Result<(), String> {
+    let current = match std::fs::read(manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "manifest {} disappeared after this transaction wrote it; refusing to restore or remove a non-cooperating writer's state",
+                manifest_path.display()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "read manifest {} before rollback ownership check: {error}",
+                manifest_path.display()
+            ));
+        }
+    };
+    if current != written_state {
+        return Err(format!(
+            "manifest {} changed after this transaction wrote it; refusing to overwrite or remove non-cooperating writer data",
+            manifest_path.display()
+        ));
+    }
+    match preimage {
+        Some(bytes) => crate::utils::write_owner_only_file_atomic(manifest_path, bytes),
+        None => match std::fs::remove_file(manifest_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
+                "manifest {} disappeared during rollback after ownership check; refusing to assume it remained transaction-owned",
+                manifest_path.display()
+            )),
+            Err(error) => Err(format!("remove {}: {error}", manifest_path.display())),
+        },
+    }
 }
 
 fn manifest_registration_mutex() -> &'static std::sync::Mutex<()> {
@@ -322,6 +386,653 @@ fn register_repo_local_manifest_entry_locked(
         .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()))
 }
 
+struct ProjectDbPrecommit {
+    db_path: PathBuf,
+    created_db_artifacts: Vec<OwnedDbArtifact>,
+    created_alias: Option<OwnedSymlink>,
+    created_dirs: Vec<OwnedDirectory>,
+    db_artifacts_preexisting: Vec<(PathBuf, bool)>,
+    finished: bool,
+}
+
+impl ProjectDbPrecommit {
+    fn new(db_path: PathBuf) -> Self {
+        let db_artifacts_preexisting = sqlite_owned_paths(&db_path)
+            .into_iter()
+            .map(|path| {
+                let exists = std::fs::symlink_metadata(&path).is_ok();
+                (path, exists)
+            })
+            .collect();
+        Self {
+            db_path,
+            created_db_artifacts: Vec::new(),
+            created_alias: None,
+            created_dirs: Vec::new(),
+            db_artifacts_preexisting,
+            finished: false,
+        }
+    }
+
+    fn ensure_alias(
+        &mut self,
+        project_root: &std::path::Path,
+        project_name: &str,
+        tachi_home: &std::path::Path,
+    ) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            let alias =
+                crate::path_utils::plan_c_alias_db_for_root_in_home(project_root, tachi_home)
+                    .map_err(|error| {
+                        format!("resolve Plan C alias for '{project_name}': {error}")
+                    })?;
+            let parent = alias.parent().ok_or_else(|| {
+                format!("Plan C alias {} has no parent directory", alias.display())
+            })?;
+            create_directories_tracked(parent, &mut self.created_dirs).map_err(|error| {
+                format!(
+                    "create Plan C alias parent directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        match crate::path_utils::ensure_plan_c_symlink_in_home(
+            &self.db_path,
+            project_root,
+            tachi_home,
+        ) {
+            crate::path_utils::PlanCLinkOutcome::Created(path) => {
+                self.created_alias = Some(OwnedSymlink::snapshot(path)?);
+                Ok(())
+            }
+            crate::path_utils::PlanCLinkOutcome::AlreadyLinked
+            | crate::path_utils::PlanCLinkOutcome::Skipped(_) => Ok(()),
+            crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
+                Err(issue.warning_message())
+            }
+            crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
+                Err(issue.warning_message())
+            }
+            crate::path_utils::PlanCLinkOutcome::Failed { path, error } => Err(format!(
+                "Plan C alias symlink failed at {} for project '{}': {}; refusing initialization success",
+                path.display(),
+                project_name,
+                error
+            )),
+        }
+    }
+
+    fn reserve_db(&mut self) -> Result<(), String> {
+        let parent = self.db_path.parent().ok_or_else(|| {
+            format!(
+                "project DB path {} has no parent directory",
+                self.db_path.display()
+            )
+        })?;
+        create_directories_tracked(parent, &mut self.created_dirs).map_err(|error| {
+            format!(
+                "create project DB parent directory {}: {error}",
+                parent.display()
+            )
+        })?;
+
+        if self.db_was_preexisting() {
+            return Ok(());
+        }
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&self.db_path)
+        {
+            Ok(file) => {
+                self.created_db_artifacts
+                    .push(OwnedDbArtifact::from_open_file(self.db_path.clone(), file)?);
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
+                "project DB {} appeared after preflight; refusing to adopt an unreserved database",
+                self.db_path.display()
+            )),
+            Err(error) => Err(format!(
+                "atomically reserve project DB at {}: {error}",
+                self.db_path.display()
+            )),
+        }
+    }
+
+    fn created_db(&self) -> bool {
+        !self.created_db_artifacts.is_empty()
+    }
+
+    fn db_was_preexisting(&self) -> bool {
+        self.db_artifacts_preexisting
+            .iter()
+            .find(|(path, _)| path == &self.db_path)
+            .is_some_and(|(_, preexisting)| *preexisting)
+    }
+
+    fn open_db(&mut self) -> Result<(), String> {
+        self.run_open_attempt(|db_path| {
+            let db_path_str = db_path
+                .to_str()
+                .ok_or_else(|| format!("project DB path is not UTF-8: {}", db_path.display()))?;
+            let store = memcore::MemoryStore::open(db_path_str).map_err(|error| {
+                format!("initialize project DB at {}: {error}", db_path.display())
+            })?;
+            drop(store);
+            Ok(())
+        })
+    }
+
+    fn run_open_attempt<T>(
+        &mut self,
+        attempt: impl FnOnce(&std::path::Path) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.assert_owned_db_artifacts_unchanged()?;
+        let result = attempt(&self.db_path);
+        self.finish_open_attempt(result)
+    }
+
+    fn finish_open_attempt<T>(&mut self, result: Result<T, String>) -> Result<T, String> {
+        if !self.created_db() {
+            return result;
+        }
+        let observation = self.refresh_owned_db_artifacts_after_open_attempt();
+        match (result, observation) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(observation_error)) => Err(observation_error),
+            (Err(error), Err(observation_error)) => Err(format!(
+                "{error}; post-open ownership observation also failed: {observation_error}"
+            )),
+        }
+    }
+
+    fn assert_owned_db_artifacts_unchanged(&self) -> Result<(), String> {
+        for artifact in &self.created_db_artifacts {
+            artifact.assert_unchanged()?;
+        }
+        Ok(())
+    }
+
+    fn refresh_owned_db_artifacts_after_open_attempt(&mut self) -> Result<(), String> {
+        let db_artifact = self
+            .created_db_artifacts
+            .iter_mut()
+            .find(|artifact| artifact.path() == self.db_path)
+            .ok_or_else(|| {
+                format!(
+                    "reserved project DB {} lost its ownership handle during initialization; refusing cleanup",
+                    self.db_path.display()
+                )
+            })?;
+        db_artifact.refresh_same_object_state()?;
+
+        let mut discovered = Vec::new();
+        for (path, preexisting) in &self.db_artifacts_preexisting {
+            if *preexisting
+                || !path.exists()
+                || self
+                    .created_db_artifacts
+                    .iter()
+                    .any(|artifact| artifact.path() == path)
+            {
+                continue;
+            }
+            discovered.push(OwnedDbArtifact::snapshot(path.clone())?);
+        }
+        self.created_db_artifacts.extend(discovered);
+        Ok(())
+    }
+
+    fn commit(mut self) {
+        self.finished = true;
+    }
+
+    fn abort(mut self, error: String) -> String {
+        let rollback_errors = self.rollback();
+        self.finished = true;
+        if rollback_errors.is_empty() {
+            error
+        } else {
+            format!(
+                "{error}; rollback also reported: {}",
+                rollback_errors.join("; ")
+            )
+        }
+    }
+
+    fn rollback(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Some(alias) = self.created_alias.take() {
+            if let Err(error) = alias.remove_if_unchanged() {
+                errors.push(error);
+            }
+        }
+
+        for artifact in std::mem::take(&mut self.created_db_artifacts) {
+            if let Err(error) = artifact.remove_if_unchanged() {
+                errors.push(error);
+            }
+        }
+
+        for directory in self.created_dirs.drain(..).rev() {
+            if let Err(error) = directory.remove_if_empty_and_unchanged() {
+                errors.push(error);
+            }
+        }
+        errors
+    }
+}
+
+impl Drop for ProjectDbPrecommit {
+    fn drop(&mut self) {
+        if !self.finished {
+            for error in self.rollback() {
+                eprintln!("[project-db] rollback failure: {error}");
+            }
+        }
+    }
+}
+
+fn create_directories_tracked(
+    path: &std::path::Path,
+    created: &mut Vec<OwnedDirectory>,
+) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        create_directories_tracked(parent, created)?;
+    }
+    match std::fs::create_dir(path) {
+        Ok(()) => {
+            created
+                .push(OwnedDirectory::snapshot(path.to_path_buf()).map_err(std::io::Error::other)?);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileObjectIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(not(unix))]
+    len: u64,
+    #[cfg(not(unix))]
+    modified: Option<std::time::SystemTime>,
+}
+
+fn file_object_identity(metadata: &std::fs::Metadata) -> FileObjectIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        FileObjectIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        FileObjectIdentity {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OwnedFile {
+    path: PathBuf,
+    object_identity: FileObjectIdentity,
+    contents: Vec<u8>,
+    handle: std::fs::File,
+}
+
+impl OwnedFile {
+    fn snapshot(path: PathBuf) -> Result<Self, String> {
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .map_err(|error| {
+                format!(
+                    "open created DB artifact {} for ownership: {error}",
+                    path.display()
+                )
+            })?;
+        Self::from_open_file(path, handle)
+    }
+
+    fn from_open_file(path: PathBuf, handle: std::fs::File) -> Result<Self, String> {
+        let object_identity = file_object_identity(&handle.metadata().map_err(|error| {
+            format!(
+                "inspect held created DB artifact {}: {error}",
+                path.display()
+            )
+        })?);
+        let mut owned = Self {
+            path,
+            object_identity,
+            contents: Vec::new(),
+            handle,
+        };
+        owned.refresh_same_object_state()?;
+        Ok(owned)
+    }
+
+    fn stable_current_contents(&self) -> Result<Vec<u8>, String> {
+        let held_identity = file_object_identity(&self.handle.metadata().map_err(|error| {
+            format!(
+                "inspect held created DB artifact {}: {error}",
+                self.path.display()
+            )
+        })?);
+        let path_identity_before = regular_file_identity(&self.path)?;
+        if held_identity != self.object_identity || path_identity_before != self.object_identity {
+            return Err(format!(
+                "created DB artifact {} no longer resolves to this transaction's held object",
+                self.path.display()
+            ));
+        }
+
+        let read_contents = || -> Result<Vec<u8>, String> {
+            use std::io::{Read, Seek};
+
+            let mut reader = self.handle.try_clone().map_err(|error| {
+                format!(
+                    "clone held created DB artifact {} for reading: {error}",
+                    self.path.display()
+                )
+            })?;
+            reader.rewind().map_err(|error| {
+                format!(
+                    "rewind held created DB artifact {}: {error}",
+                    self.path.display()
+                )
+            })?;
+            let mut contents = Vec::new();
+            reader.read_to_end(&mut contents).map_err(|error| {
+                format!(
+                    "read held created DB artifact {}: {error}",
+                    self.path.display()
+                )
+            })?;
+            Ok(contents)
+        };
+        let contents = read_contents()?;
+        let verified_contents = read_contents()?;
+        let path_identity_after = regular_file_identity(&self.path)?;
+        if contents != verified_contents || path_identity_after != self.object_identity {
+            return Err(format!(
+                "created DB artifact {} changed while recording held ownership state",
+                self.path.display()
+            ));
+        }
+        Ok(contents)
+    }
+
+    fn refresh_same_object_state(&mut self) -> Result<(), String> {
+        self.contents = self.stable_current_contents()?;
+        Ok(())
+    }
+
+    fn assert_unchanged(&self) -> Result<(), String> {
+        match self.stable_current_contents() {
+            Ok(current) if current == self.contents => Ok(()),
+            Ok(_) => Err(format!(
+                "created DB artifact {} no longer matches this transaction's object and contents; preserving foreign data",
+                self.path.display()
+            )),
+            Err(error) => Err(format!(
+                "cannot prove created DB artifact {} is still transaction-owned ({error}); preserving foreign data",
+                self.path.display()
+            )),
+        }
+    }
+
+    fn remove_if_unchanged(self) -> Result<(), String> {
+        self.assert_unchanged()?;
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "remove transaction-owned DB artifact {}: {error}",
+                self.path.display()
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum OwnedDbArtifact {
+    File(OwnedFile),
+    Symlink(OwnedSymlink),
+}
+
+impl OwnedDbArtifact {
+    fn from_open_file(path: PathBuf, file: std::fs::File) -> Result<Self, String> {
+        OwnedFile::from_open_file(path, file).map(Self::File)
+    }
+
+    fn snapshot(path: PathBuf) -> Result<Self, String> {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect created DB artifact {}: {error}", path.display()))?;
+        if metadata.file_type().is_file() {
+            return OwnedFile::snapshot(path).map(Self::File);
+        }
+        if metadata.file_type().is_symlink() {
+            return OwnedSymlink::snapshot(path).map(Self::Symlink);
+        }
+        Err(format!(
+            "created DB artifact {} is neither a regular file nor a symlink; preserving foreign data",
+            path.display()
+        ))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        match self {
+            Self::File(file) => &file.path,
+            Self::Symlink(symlink) => &symlink.path,
+        }
+    }
+
+    fn refresh_same_object_state(&mut self) -> Result<(), String> {
+        match self {
+            Self::File(file) => file.refresh_same_object_state(),
+            Self::Symlink(symlink) => {
+                let current = OwnedSymlink::snapshot(symlink.path.clone())?;
+                if current.object_identity != symlink.object_identity
+                    || current.target != symlink.target
+                {
+                    return Err(format!(
+                        "created DB artifact {} changed identity during initialization; refusing ownership guess",
+                        symlink.path.display()
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn assert_unchanged(&self) -> Result<(), String> {
+        match self {
+            Self::File(file) => file.assert_unchanged(),
+            Self::Symlink(symlink) => symlink.assert_unchanged(),
+        }
+    }
+
+    fn remove_if_unchanged(self) -> Result<(), String> {
+        match self {
+            Self::File(file) => file.remove_if_unchanged(),
+            Self::Symlink(symlink) => symlink.remove_if_unchanged(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OwnedSymlink {
+    path: PathBuf,
+    object_identity: FileObjectIdentity,
+    target: PathBuf,
+}
+
+impl OwnedSymlink {
+    fn snapshot(path: PathBuf) -> Result<Self, String> {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect created alias {}: {error}", path.display()))?;
+        if !metadata.file_type().is_symlink() {
+            return Err(format!(
+                "created alias {} is no longer a symlink; preserving foreign data",
+                path.display()
+            ));
+        }
+        let object_identity = file_object_identity(&metadata);
+        let target = std::fs::read_link(&path)
+            .map_err(|error| format!("read created alias {}: {error}", path.display()))?;
+        let verified = std::fs::symlink_metadata(&path).map_err(|error| {
+            format!(
+                "re-inspect created alias {} to verify ownership snapshot: {error}",
+                path.display()
+            )
+        })?;
+        if !verified.file_type().is_symlink() || object_identity != file_object_identity(&verified)
+        {
+            return Err(format!(
+                "created alias {} changed while recording ownership; preserving foreign data",
+                path.display()
+            ));
+        }
+        Ok(Self {
+            path,
+            object_identity,
+            target,
+        })
+    }
+
+    fn assert_unchanged(&self) -> Result<(), String> {
+        match Self::snapshot(self.path.clone()) {
+            Ok(current)
+                if current.object_identity == self.object_identity && current.target == self.target =>
+            {
+                Ok(())
+            }
+            Ok(_) => Err(format!(
+                "created alias {} no longer matches this transaction's symlink state; preserving foreign data",
+                self.path.display()
+            )),
+            Err(error) => Err(format!(
+                "cannot prove created alias {} is still transaction-owned ({error}); preserving foreign data",
+                self.path.display()
+            )),
+        }
+    }
+
+    fn remove_if_unchanged(self) -> Result<(), String> {
+        self.assert_unchanged()?;
+        std::fs::remove_file(&self.path).map_err(|error| {
+            format!(
+                "remove transaction-owned alias {}: {error}",
+                self.path.display()
+            )
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OwnedDirectory {
+    path: PathBuf,
+    object_identity: FileObjectIdentity,
+}
+
+impl OwnedDirectory {
+    fn snapshot(path: PathBuf) -> Result<Self, String> {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect created directory {}: {error}", path.display()))?;
+        if !metadata.is_dir() {
+            return Err(format!(
+                "created directory {} is no longer a directory; preserving foreign data",
+                path.display()
+            ));
+        }
+        Ok(Self {
+            path,
+            object_identity: file_object_identity(&metadata),
+        })
+    }
+
+    fn remove_if_empty_and_unchanged(self) -> Result<(), String> {
+        let current = Self::snapshot(self.path.clone()).map_err(|error| {
+            format!(
+                "cannot prove created directory {} is still transaction-owned ({error}); preserving foreign data",
+                self.path.display()
+            )
+        })?;
+        if current.object_identity != self.object_identity {
+            return Err(format!(
+                "created directory {} changed identity; preserving foreign data",
+                self.path.display()
+            ));
+        }
+        let mut entries = std::fs::read_dir(&self.path).map_err(|error| {
+            format!("inspect created directory {}: {error}", self.path.display())
+        })?;
+        if entries.next().is_some() {
+            return Err(format!(
+                "created directory {} is no longer empty; preserving foreign data",
+                self.path.display()
+            ));
+        }
+        match std::fs::remove_dir(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "remove transaction-owned directory {}: {error}",
+                self.path.display()
+            )),
+        }
+    }
+}
+
+fn regular_file_identity(path: &std::path::Path) -> Result<FileObjectIdentity, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    Ok(file_object_identity(&metadata))
+}
+
+fn sqlite_owned_paths(db_path: &std::path::Path) -> Vec<PathBuf> {
+    let mut wal = db_path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = db_path.as_os_str().to_os_string();
+    shm.push("-shm");
+    let mut journal = db_path.as_os_str().to_os_string();
+    journal.push("-journal");
+    let mut marker = db_path.as_os_str().to_os_string();
+    marker.push(".migration-marker");
+    let mut paths = vec![
+        PathBuf::from(wal),
+        PathBuf::from(shm),
+        PathBuf::from(journal),
+        PathBuf::from(marker),
+        db_path.to_path_buf(),
+    ];
+    if db_path.file_name().and_then(|name| name.to_str()) == Some(memcore::MEMORY_DB_FILENAME) {
+        paths.push(db_path.with_file_name(memcore::LEGACY_MEMORY_DB_FILENAME));
+    }
+    paths
+}
+
 /// Prove that every existing identity source for `project_name` points to the
 /// intended repo-local DB before any store is opened. Returns `true` when the
 /// intended DB is already registered and usable, `false` only for genuine
@@ -331,16 +1042,27 @@ fn preflight_project_identity(
     db_path: &std::path::Path,
     project_root: &std::path::Path,
     project_name: &str,
+    tachi_home: &std::path::Path,
 ) -> Result<bool, String> {
-    let resolved = MemoryServer::resolve_existing_named_project_db_path(project_name)?;
+    let resolved =
+        MemoryServer::resolve_existing_named_project_db_path_in_home(project_name, tachi_home)?;
     let already_resolved = resolved.is_some();
-    let alias = crate::path_utils::plan_c_alias_db_for_root(project_root)?;
-    let alias_exists = std::fs::symlink_metadata(&alias).is_ok();
+    let alias_exists =
+        match crate::path_utils::inspect_plan_c_alias_in_home(db_path, project_root, tachi_home) {
+            crate::path_utils::PlanCAliasInspection::Absent => false,
+            crate::path_utils::PlanCAliasInspection::MatchingSymlink => true,
+            crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
+                return Err(issue.warning_message());
+            }
+            crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
+                return Err(issue.warning_message());
+            }
+        };
     let has_existing_evidence = resolved.is_some() || alias_exists;
     if !has_existing_evidence {
         return Ok(false);
     }
-    if !db_path.exists() {
+    if !crate::path_utils::canonical_db_leaf_exists_without_symlink(db_path)? {
         return Err(format!(
             "project identity '{project_name}' already has an alias or registered DB, but intended repo DB {} does not exist; refusing ownership guess",
             db_path.display()
@@ -363,21 +1085,6 @@ fn preflight_project_identity(
             return Err(format!(
                 "project identity '{project_name}' resolves to unrelated DB {}; expected {}",
                 existing.display(),
-                expected.display()
-            ));
-        }
-    }
-    if alias_exists {
-        let alias_identity = std::fs::canonicalize(&alias).map_err(|err| {
-            format!(
-                "project alias cannot be canonicalized at {}: {err}",
-                alias.display()
-            )
-        })?;
-        if alias_identity != expected {
-            return Err(format!(
-                "project identity '{project_name}' has divergent alias {}; expected {}",
-                alias.display(),
                 expected.display()
             ));
         }
@@ -429,53 +1136,58 @@ pub(crate) async fn handle_tachi_init_project_db(
 
     let rel = PathBuf::from(&params.db_relpath);
     let db_path = crate::path_utils::resolve_project_db_path(&project_root, &rel)?;
-    let existed = db_path.exists();
-    preflight_project_identity(&db_path, &project_root, &project_name)?;
-    if let Some(parent) = db_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("create project db dir: {e}"))?;
+    let existed = crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
+    let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+    preflight_project_identity(
+        &db_path,
+        &project_root,
+        &project_name,
+        &server.tachi_home_dir(),
+    )?;
+    if let Err(error) = precommit.reserve_db() {
+        return Err(precommit.abort(error));
     }
-
-    // Hot-activate the project DB on the running server (no restart needed)
-    let was_new_activation = server.activate_project_db(db_path.clone())?;
-
-    register_repo_local_manifest_entry(&db_path, &project_name)?;
-
-    let mut plan_c_note: Option<String> = None;
-    if let Some(safe_name) = crate::path_utils::plan_c_dir_name_from_root(&project_root) {
-        let global_link = crate::path_utils::plan_c_global_db_path(&safe_name);
-        #[cfg(unix)]
-        {
-            match crate::path_utils::ensure_plan_c_symlink(&db_path, &project_root) {
-                crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                    plan_c_note = Some(issue.warning_message());
-                }
-                crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                    plan_c_note = Some(format!(
-                        "Plan C global symlink failed at {}: {}",
-                        path.display(),
-                        error
-                    ));
-                }
-                _ => {
-                    plan_c_note = Some(format!(
-                        "Global symlink: {} -> {}",
-                        global_link.display(),
-                        db_path.display()
-                    ));
-                }
+    if let Err(error) =
+        precommit.ensure_alias(&project_root, &project_name, &server.tachi_home_dir())
+    {
+        return Err(precommit.abort(error));
+    }
+    // Manifest registration remains rollback-capable until hot activation
+    // succeeds. Activation is the final project-state mutation.
+    let activation = register_repo_local_manifest_entry_then_in_home(
+        &db_path,
+        &project_name,
+        &server.tachi_home_dir(),
+        || {
+            crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
+            precommit.assert_owned_db_artifacts_unchanged()?;
+            let activation = server.activate_project_db(db_path.clone());
+            if precommit.created_db() {
+                precommit.finish_open_attempt(activation)
+            } else {
+                activation
             }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = safe_name;
-            plan_c_note = Some(
-                "Plan C global symlink skipped on non-Unix hosts; use db_path directly."
-                    .to_string(),
-            );
-        }
-    }
+        },
+    );
+    let was_new_activation = match activation {
+        Ok(value) => value,
+        Err(error) => return Err(precommit.abort(error)),
+    };
+    precommit.commit();
+
+    let plan_c_note = if cfg!(unix) {
+        Some(format!(
+            "Global symlink: {} -> {}",
+            crate::path_utils::plan_c_global_db_path_in_home(
+                &server.tachi_home_dir(),
+                &project_name,
+            )
+            .display(),
+            db_path.display()
+        ))
+    } else {
+        Some("Plan C global symlink skipped on non-Unix hosts; use db_path directly.".to_string())
+    };
 
     let activation_note = if was_new_activation {
         "Project DB is now active on this server instance. No restart needed."
@@ -487,7 +1199,17 @@ pub(crate) async fn handle_tachi_init_project_db(
         None => activation_note.to_string(),
     };
 
-    serde_json::to_string(&json!({
+    let plan_c_split_brain = match crate::path_utils::inspect_plan_c_alias_in_home(
+        &db_path,
+        &project_root,
+        &server.tachi_home_dir(),
+    ) {
+        crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => Some(issue),
+        crate::path_utils::PlanCAliasInspection::Absent
+        | crate::path_utils::PlanCAliasInspection::MatchingSymlink
+        | crate::path_utils::PlanCAliasInspection::Integrity(_) => None,
+    };
+    Ok(serde_json::to_string(&json!({
         "initialized": true,
         "created": !existed,
         "active": true,
@@ -496,10 +1218,10 @@ pub(crate) async fn handle_tachi_init_project_db(
         "project": project_name,
         "db_path": db_path.display().to_string(),
         "db_relpath": rel.display().to_string(),
-        "plan_c_split_brain": crate::path_utils::plan_c_split_brain(&db_path, &project_root),
+        "plan_c_split_brain": plan_c_split_brain,
         "note": note,
     }))
-    .map_err(|e| format!("serialize: {e}"))
+    .expect("serializing a serde_json::Value cannot fail"))
 }
 
 #[cfg(test)]
@@ -528,6 +1250,239 @@ mod resolve_or_register_workspace_root_tests {
     fn make_server(fixture_root: &std::path::Path) -> MemoryServer {
         let global_db = fixture_root.join("home/global/memory.db");
         MemoryServer::new(global_db, None).expect("construct isolated server")
+    }
+
+    #[cfg(unix)]
+    fn install_permission_denied_symlink_hook() -> crate::path_utils::PlanCSymlinkHookGuard {
+        crate::path_utils::install_plan_c_symlink_hook_for_test(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected Plan C symlink permission denial",
+            ))
+        })
+    }
+
+    #[cfg(unix)]
+    fn file_identity(path: &std::path::Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path).expect("path metadata");
+        (metadata.dev(), metadata.ino())
+    }
+
+    #[cfg(unix)]
+    fn replace_file_atomically(path: &std::path::Path, bytes: &[u8]) -> (u64, u64) {
+        let replacement = path.with_extension("foreign-replacement");
+        std::fs::write(&replacement, bytes).expect("write foreign replacement");
+        std::fs::rename(&replacement, path).expect("replace file atomically");
+        file_identity(path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_rollback_race_foreign_db_after_preflight_is_refused() {
+        with_test_home(|root| {
+            let repo = root.join("Foreign-After-Preflight-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let project =
+                crate::path_utils::plan_c_dir_name_from_root(&repo).expect("project identity");
+            let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+
+            assert!(
+                !preflight_project_identity(
+                    &db_path,
+                    &repo,
+                    &project,
+                    &crate::path_utils::tachi_home(),
+                )
+                .expect("preflight genuine absence"),
+                "fixture must reach the post-preflight reservation race"
+            );
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::fs::write(&db_path, b"foreign database after preflight")
+                .expect("foreign DB appears after preflight");
+            let foreign_identity = file_identity(&db_path);
+
+            let reservation = precommit
+                .reserve_db()
+                .expect_err("a DB that appears after preflight must not be adopted");
+            let error = precommit.abort(reservation);
+
+            assert!(error.contains("appeared after preflight"), "{error}");
+            assert_eq!(
+                std::fs::read(&db_path).expect("foreign DB preserved"),
+                b"foreign database after preflight"
+            );
+            assert_eq!(file_identity(&db_path), foreign_identity);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_rollback_race_foreign_db_replacement_is_preserved() {
+        with_test_home(|root| {
+            let db_path = root.join("Replacement-Repo/.tachi/tachi-memory.db");
+            let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+            precommit.reserve_db().expect("reserve transaction DB");
+            let reserved_identity = file_identity(&db_path);
+            let foreign_identity = replace_file_atomically(&db_path, b"foreign replacement");
+            assert_ne!(
+                reserved_identity, foreign_identity,
+                "replacement must change inode"
+            );
+
+            let error = precommit.abort("injected failure after foreign replacement".to_string());
+
+            assert!(error.contains("rollback also reported"), "{error}");
+            assert_eq!(
+                std::fs::read(&db_path).expect("foreign replacement preserved"),
+                b"foreign replacement"
+            );
+            assert_eq!(file_identity(&db_path), foreign_identity);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_open_failure_removes_owned_sqlite_state() {
+        with_test_home(|root| {
+            let db_path = root.join("Open-Failure-Repo/.tachi/tachi-memory.db");
+            let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+            let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
+            let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+            precommit.reserve_db().expect("reserve transaction DB");
+
+            let failure = precommit
+                .run_open_attempt(|path| {
+                    let store = memcore::MemoryStore::open(path.to_str().expect("UTF-8 DB path"))
+                        .expect("SQLite mutates the reserved DB before the injected failure");
+                    drop(store);
+                    std::fs::write(&wal_path, b"transaction WAL").expect("inject WAL residue");
+                    std::fs::write(&shm_path, b"transaction SHM").expect("inject SHM residue");
+                    Err::<(), _>("injected failure after SQLite mutation".to_string())
+                })
+                .expect_err("injected open failure");
+            let error = precommit.abort(failure);
+
+            assert_eq!(error, "injected failure after SQLite mutation", "{error}");
+            assert!(!db_path.exists(), "owned DB residue must be removed");
+            assert!(!wal_path.exists(), "owned WAL residue must be removed");
+            assert!(!shm_path.exists(), "owned SHM residue must be removed");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_open_failure_preserves_foreign_db_replacement() {
+        with_test_home(|root| {
+            let db_path = root.join("Open-Failure-Replaced-Repo/.tachi/tachi-memory.db");
+            let mut precommit = ProjectDbPrecommit::new(db_path.clone());
+            precommit.reserve_db().expect("reserve transaction DB");
+            let reserved_identity = file_identity(&db_path);
+
+            let mut foreign_identity = None;
+            let failure = precommit
+                .run_open_attempt(|path| {
+                    let store = memcore::MemoryStore::open(path.to_str().expect("UTF-8 DB path"))
+                        .expect("SQLite mutates the reserved DB before the injected failure");
+                    drop(store);
+                    foreign_identity = Some(replace_file_atomically(
+                        path,
+                        b"foreign replacement during failed SQLite open",
+                    ));
+                    Err::<(), _>("injected failure after foreign replacement".to_string())
+                })
+                .expect_err("injected open failure");
+            let foreign_identity = foreign_identity.expect("foreign inode");
+            assert_ne!(reserved_identity, foreign_identity, "replacement inode");
+
+            let error = precommit.abort(failure);
+
+            assert!(error.contains("rollback also reported"), "{error}");
+            assert_eq!(
+                std::fs::read(&db_path).expect("foreign DB preserved"),
+                b"foreign replacement during failed SQLite open"
+            );
+            assert_eq!(file_identity(&db_path), foreign_identity);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_rollback_race_manifest_replacement_preserves_preexisting_manifest() {
+        with_test_home(|root| {
+            let db_path = root.join("Manifest-Race-Repo/.tachi/tachi-memory.db");
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::fs::write(&db_path, b"reserved DB").expect("DB");
+            let manifest = root.join("manifest.json");
+            crate::manifest::Manifest::empty()
+                .save(&manifest)
+                .expect("seed manifest preimage");
+            let preimage = std::fs::read(&manifest).expect("manifest preimage");
+            let mut foreign_identity = None;
+
+            let error = register_repo_local_manifest_entry_then_in_home(
+                &db_path,
+                "ManifestRace",
+                root,
+                || {
+                    foreign_identity = Some(replace_file_atomically(
+                        &manifest,
+                        b"foreign manifest replacement",
+                    ));
+                    Err::<(), _>("injected post-registration failure".to_string())
+                },
+            )
+            .expect_err("foreign manifest replacement must make rollback loud");
+
+            assert!(error.contains("manifest rollback"), "{error}");
+            assert_eq!(
+                std::fs::read(&manifest).expect("foreign manifest preserved"),
+                b"foreign manifest replacement"
+            );
+            assert_ne!(std::fs::read(&manifest).unwrap(), preimage);
+            assert_eq!(
+                file_identity(&manifest),
+                foreign_identity.expect("foreign inode")
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_rollback_race_manifest_replacement_preserves_new_manifest() {
+        with_test_home(|root| {
+            let db_path = root.join("New-Manifest-Race-Repo/.tachi/tachi-memory.db");
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::fs::write(&db_path, b"reserved DB").expect("DB");
+            let manifest = root.join("manifest.json");
+            let mut foreign_identity = None;
+
+            let error = register_repo_local_manifest_entry_then_in_home(
+                &db_path,
+                "NewManifestRace",
+                root,
+                || {
+                    foreign_identity = Some(replace_file_atomically(
+                        &manifest,
+                        b"foreign manifest replacement",
+                    ));
+                    Err::<(), _>("injected post-registration failure".to_string())
+                },
+            )
+            .expect_err("foreign manifest replacement must make rollback loud");
+
+            assert!(error.contains("manifest rollback"), "{error}");
+            assert_eq!(
+                std::fs::read(&manifest).expect("foreign manifest preserved"),
+                b"foreign manifest replacement"
+            );
+            assert_eq!(
+                file_identity(&manifest),
+                foreign_identity.expect("foreign inode")
+            );
+        });
     }
 
     #[test]
@@ -559,6 +1514,125 @@ mod resolve_or_register_workspace_root_tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_auto_permission_failure_leaves_no_project_state() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Auto-Permission-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let _hook = install_permission_denied_symlink_hook();
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("symlink permission failure must refuse auto-registration");
+
+            assert!(error.contains("permission denial"), "{error}");
+            assert!(!db_path.exists(), "failed precommit must remove its DB");
+            assert!(
+                !repo.join(".tachi").exists(),
+                "failed precommit must remove its DB parent"
+            );
+            assert!(
+                !manifest.exists(),
+                "failed precommit must not leave a manifest"
+            );
+            assert_eq!(server.project_db_path_buf(), None);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_auto_eexist_wrong_target_is_rollback_safe_and_retry_refuses() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Auto-Wrong-Target-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let user_target = root.join("user-owned.db");
+            std::fs::write(&user_target, b"user-owned").expect("user target");
+            let hook_target = user_target.clone();
+            let _hook = crate::path_utils::install_plan_c_symlink_hook_for_test(move |alias| {
+                std::os::unix::fs::symlink(&hook_target, alias)
+            });
+
+            let first = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("racing wrong-target alias must refuse auto-registration");
+            assert!(first.contains("Plan C alias integrity failure"), "{first}");
+            assert!(!db_path.exists(), "failed precommit must remove its DB");
+            assert!(!repo.join(".tachi").exists(), "DB parent must not remain");
+            assert!(!manifest.exists(), "manifest must not remain");
+            assert_eq!(std::fs::read(&user_target).unwrap(), b"user-owned");
+            drop(_hook);
+
+            let retry = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("persistent wrong-target alias must refuse retry");
+            assert!(retry.contains("Plan C alias integrity failure"), "{retry}");
+            assert!(!db_path.exists());
+            assert!(!manifest.exists());
+            assert_eq!(std::fs::read(&user_target).unwrap(), b"user-owned");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_auto_accepts_matching_concurrent_symlink() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Auto-Matching-Race-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let hook_db = db_path.clone();
+            let _hook = crate::path_utils::install_plan_c_symlink_hook_for_test(move |alias| {
+                std::os::unix::fs::symlink(&hook_db, alias)
+            });
+
+            let project = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("matching concurrent alias must be accepted");
+
+            assert!(db_path.exists());
+            assert!(crate::path_utils::plan_c_global_db_path(&project).is_symlink());
+            assert!(crate::path_utils::tachi_home()
+                .join("manifest.json")
+                .exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_precommit_auto_already_resolved_still_requires_alias_confirmation() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Auto-Resolved-Alias-Gate-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let project = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("initial registration");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let alias = crate::path_utils::plan_c_global_db_path(&project);
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let db_before = std::fs::read(&db_path).expect("DB preimage");
+            let manifest_before = std::fs::read(&manifest).expect("manifest preimage");
+            std::fs::remove_file(&alias).expect("remove alias to exercise recreation gate");
+            let _hook = install_permission_denied_symlink_hook();
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("resolved project must not bypass alias confirmation");
+
+            assert!(error.contains("permission denial"), "{error}");
+            assert_eq!(std::fs::read(&db_path).unwrap(), db_before);
+            assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+            assert!(!alias.exists());
+        });
+    }
+
     #[test]
     fn concurrent_manifest_registrations_preserve_both_projects() {
         with_test_home(|root| {
@@ -569,13 +1643,15 @@ mod resolve_or_register_workspace_root_tests {
                 std::fs::write(db, b"db").expect("DB");
             }
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let home = root.to_path_buf();
             let handles = [(alpha, "Alpha"), (beta, "Beta")]
                 .into_iter()
                 .map(|(db, project)| {
                     let barrier = std::sync::Arc::clone(&barrier);
+                    let home = home.clone();
                     std::thread::spawn(move || {
                         barrier.wait();
-                        register_repo_local_manifest_entry(&db, project)
+                        register_repo_local_manifest_entry_in_home(&db, project, &home)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -587,10 +1663,8 @@ mod resolve_or_register_workspace_root_tests {
                     .expect("register");
             }
 
-            let manifest = crate::manifest::Manifest::load(
-                &crate::path_utils::tachi_home().join("manifest.json"),
-            )
-            .expect("manifest");
+            let manifest =
+                crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
             let mut scopes = manifest
                 .dbs
                 .iter()
@@ -688,10 +1762,201 @@ mod resolve_or_register_workspace_root_tests {
         });
     }
 
+    #[cfg(unix)]
+    fn assert_canonical_db_symlink_refusal_has_no_registration_side_effects(
+        repo: &std::path::Path,
+        db_path: &std::path::Path,
+        expected_link_target: &std::path::Path,
+        manifest_before: Option<&[u8]>,
+    ) {
+        let project = crate::path_utils::plan_c_dir_name_from_root(repo).expect("project identity");
+        let alias = crate::path_utils::plan_c_global_db_path(&project);
+        let manifest = crate::path_utils::tachi_home().join("manifest.json");
+
+        let metadata = std::fs::symlink_metadata(db_path).expect("canonical DB symlink preserved");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "canonical DB path must remain the original symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(db_path).expect("canonical DB symlink target"),
+            expected_link_target
+        );
+        assert_eq!(
+            std::fs::read(&manifest).ok().as_deref(),
+            manifest_before,
+            "refusal must preserve the manifest preimage"
+        );
+        assert!(
+            std::fs::symlink_metadata(&alias).is_err(),
+            "refusal must not create the separate Plan C alias"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_db_final_component_dangling_symlink_is_refused_without_side_effects() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Canonical-Dangling-Repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let external_target = root.join("external/dangling-target.db");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::os::unix::fs::symlink(&external_target, &db_path)
+                .expect("plant dangling canonical DB symlink");
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let manifest_before = std::fs::read(&manifest).ok();
+            let symlink_identity = file_identity(&db_path);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("canonical DB symlink must be rejected before reservation");
+
+            assert!(
+                error.contains("canonical repo DB path") && error.contains("must not be a symlink"),
+                "expected canonical DB symlink refusal, got: {error}"
+            );
+            assert_eq!(file_identity(&db_path), symlink_identity);
+            assert!(
+                std::fs::symlink_metadata(&external_target).is_err(),
+                "dangling external target must not be created"
+            );
+            assert_canonical_db_symlink_refusal_has_no_registration_side_effects(
+                &repo,
+                &db_path,
+                &external_target,
+                manifest_before.as_deref(),
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_db_final_component_wrong_target_symlink_is_refused_without_side_effects() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Canonical-Wrong-Target-Repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            let external_target = root.join("external/wrong-target.db");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::fs::create_dir_all(external_target.parent().expect("external parent"))
+                .expect("external parent");
+            std::fs::write(&external_target, b"foreign external database").expect("external DB");
+            std::os::unix::fs::symlink(&external_target, &db_path)
+                .expect("plant wrong-target canonical DB symlink");
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let manifest_before = std::fs::read(&manifest).ok();
+            let symlink_identity = file_identity(&db_path);
+            let external_identity = file_identity(&external_target);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("canonical DB symlink must be rejected before open");
+
+            assert!(
+                error.contains("canonical repo DB path") && error.contains("must not be a symlink"),
+                "expected canonical DB symlink refusal, got: {error}"
+            );
+            assert_eq!(file_identity(&db_path), symlink_identity);
+            assert_eq!(file_identity(&external_target), external_identity);
+            assert_eq!(
+                std::fs::read(&external_target).expect("external DB preserved"),
+                b"foreign external database"
+            );
+            assert_canonical_db_symlink_refusal_has_no_registration_side_effects(
+                &repo,
+                &db_path,
+                &external_target,
+                manifest_before.as_deref(),
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_db_final_component_symlink_loop_is_refused_without_side_effects() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Canonical-Loop-Repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
+            std::os::unix::fs::symlink(&db_path, &db_path)
+                .expect("plant looped canonical DB symlink");
+            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let manifest_before = std::fs::read(&manifest).ok();
+            let symlink_identity = file_identity(&db_path);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("canonical DB symlink loop must be rejected before reservation");
+
+            assert!(
+                error.contains("canonical repo DB path") && error.contains("must not be a symlink"),
+                "expected canonical DB symlink refusal, got: {error}"
+            );
+            assert_eq!(file_identity(&db_path), symlink_identity);
+            assert_canonical_db_symlink_refusal_has_no_registration_side_effects(
+                &repo,
+                &db_path,
+                &db_path,
+                manifest_before.as_deref(),
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_db_final_component_normal_absence_registers_regular_db_and_plan_c_alias() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Canonical-Absent-Repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            assert!(
+                std::fs::symlink_metadata(&db_path).is_err(),
+                "canonical DB path starts genuinely absent"
+            );
+
+            let project = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("normal absent canonical DB path registers");
+
+            let db_metadata = std::fs::symlink_metadata(&db_path).expect("created canonical DB");
+            assert!(db_metadata.file_type().is_file());
+            assert!(!db_metadata.file_type().is_symlink());
+            let alias = crate::path_utils::plan_c_global_db_path(&project);
+            assert!(
+                std::fs::symlink_metadata(&alias)
+                    .expect("managed Plan C alias")
+                    .file_type()
+                    .is_symlink(),
+                "the separate documented Plan C alias remains valid"
+            );
+            assert_eq!(
+                std::fs::canonicalize(&alias).expect("resolve Plan C alias"),
+                std::fs::canonicalize(&db_path).expect("resolve canonical DB")
+            );
+            let manifest = crate::manifest::Manifest::load(
+                &crate::path_utils::tachi_home().join("manifest.json"),
+            )
+            .expect("registration manifest");
+            assert!(
+                manifest
+                    .dbs
+                    .iter()
+                    .any(|entry| entry.path == db_path.display().to_string()),
+                "normal registration records the canonical regular DB"
+            );
+        });
+    }
+
     /// Review finding [2] (#1207): auto-registration must not return a
     /// project name that later becomes unreachable once the Plan C symlink
     /// (Unix-only, best-effort) is gone — e.g. it was never created at all on
-    /// a non-Unix host. The manifest entry `register_repo_local_manifest_entry`
+    /// a non-Unix host. The manifest entry `register_repo_local_manifest_entry_in_home`
     /// writes is the primary, symlink-independent addressing path.
     #[test]
     fn project_remains_resolvable_after_the_plan_c_symlink_is_broken() {
@@ -756,6 +2021,43 @@ mod resolve_or_register_workspace_root_tests {
                 std::fs::canonicalize(&db_path).expect("canonicalize db_path"),
                 "resolved path must be the repo-local DB auto-registration just created"
             );
+        });
+    }
+
+    #[test]
+    fn auto_registered_fresh_project_survives_strict_named_read_open() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Fresh-Read-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(db_path.parent().expect("project db parent"))
+                .expect("create project db parent");
+            std::fs::File::create(&db_path).expect("reserve empty project db path");
+            let name = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("auto-register fresh named project from reserved empty db");
+            drop(server);
+
+            let reopened = make_server(root);
+            let trigger_count = reopened
+                .with_named_project_store_read(&name, |store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT count(*) FROM main.sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name IN (
+                                   'memories_reserved_refs_insert_guard',
+                                   'memories_reserved_refs_update_guard'
+                               )",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .expect("strict read-open of the newly registered named project");
+            assert_eq!(trigger_count, 2, "fresh named-project guard inventory");
         });
     }
 
@@ -864,6 +2166,41 @@ mod resolve_or_register_workspace_root_tests {
             assert!(error.contains("refusing ownership guess"), "{error}");
             assert!(!local_db.exists(), "no repo DB may be opened or created");
             assert_eq!(std::fs::read(standalone).unwrap(), b"standalone");
+        });
+    }
+
+    #[test]
+    fn workspace_registration_refuses_ambiguous_alias_identity_before_db_open() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Ambiguous-Alias-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("repo");
+            let current =
+                crate::path_utils::plan_c_dir_name_from_root(&repo).expect("current identity");
+            let previous = crate::path_utils::plan_c_previous_dir_name_from_root(&repo)
+                .expect("previous identity");
+            assert_ne!(
+                current, previous,
+                "fixture needs distinct alias generations"
+            );
+            for (name, contents) in [
+                (&current, b"current".as_slice()),
+                (&previous, b"previous".as_slice()),
+            ] {
+                let alias = crate::path_utils::plan_c_global_db_path(name);
+                std::fs::create_dir_all(alias.parent().unwrap()).expect("alias parent");
+                std::fs::write(alias, contents).expect("divergent alias DB");
+            }
+            let local_db = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+
+            let error = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("ambiguous aliases must refuse auto-registration");
+            assert!(error.contains("ambiguous"), "{error}");
+            assert!(
+                !local_db.exists(),
+                "identity refusal must occur before repo-local DB creation"
+            );
         });
     }
 

@@ -210,7 +210,7 @@ pub(super) async fn handle_spawn(
     } else {
         None
     };
-    let final_status = read_json_file(&status_path)?;
+    let final_status = read_required_mission_status(arena_id, &mission_id)?;
     let compact_status = compact_mission_status(&final_status);
 
     serde_json::to_string(&json!({

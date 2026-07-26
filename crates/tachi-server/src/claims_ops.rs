@@ -780,7 +780,7 @@ pub(crate) fn handle_manual_release(
         _ => {
             return Err(
                 "tachi_memory(action='release') requires claim_id or dispatch_id".to_string(),
-            )
+            );
         }
     };
     let outcome = server.with_global_store(|store| {
@@ -1313,14 +1313,15 @@ mod tests {
     fn canonical_claim_surfaces_persistence_error_without_receipt() {
         let server = make_server();
         admit_agent_connection(&server, Some("agent.alpha".to_string()), true).unwrap();
-        server
-            .with_global_store(|store| {
-                store
-                    .connection_mut()
+        crate::test_support::with_unrestricted_fixture_connection(
+            &server.global_db_path_buf(),
+            |connection| {
+                connection
                     .execute("DROP TABLE session_claims", [])
-                    .map_err(|err| err.to_string())
-            })
-            .unwrap();
+                    .map(|_| ())
+            },
+        )
+        .unwrap();
         let err = handle_task_claim(&server, &claim_params())
             .expect_err("persistence failure must be returned");
         assert!(err.contains("session_claims"), "{err}");

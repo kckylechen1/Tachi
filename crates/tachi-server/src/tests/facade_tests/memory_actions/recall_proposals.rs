@@ -1,6 +1,26 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
+fn make_server_with_temp_home() -> (crate::MemoryServer, crate::tests::TempHomeGuard) {
+    crate::tests::ensure_test_env();
+    let mut temp_home = crate::tests::TempHomeGuard::new();
+    temp_home.temp_home = temp_home
+        .temp_home
+        .canonicalize()
+        .expect("canonicalize recall test home");
+    std::env::set_var("HOME", &temp_home.temp_home);
+    std::env::set_var("TACHI_HOME", temp_home.temp_home.join(".tachi"));
+    std::env::set_var("TACHI_RUN_ROOT", temp_home.temp_home.join(".tachi/runs"));
+
+    let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
+    std::fs::create_dir_all(global_db.parent().expect("global db parent"))
+        .expect("create global db dir");
+    crate::tests::copy_template_db(&global_db);
+    let server = crate::MemoryServer::new(global_db, None).expect("failed to create test server");
+    (server, temp_home)
+}
+
 #[tokio::test]
 async fn tachi_memory_recall_proposals_review_and_apply_config_env() {
     let (server, temp_home) = make_server_with_temp_home();
@@ -264,62 +284,28 @@ async fn recall_proposal_reject_stamps_a_ttl_immediately() {
 }
 
 /// Local mirror of `recall_proposal_ops::compute_recall_digest`. The recovery
-/// path recomputes this same digest on the live config.env and compares it to
-/// the applying_receipt's before/after digests, so the receipt we stamp in
-/// these tests must use the identical algorithm. Kept local (rather than
-/// reaching into the production module) to avoid broadening this PR's file
-/// scope to facade_memory_ops/mod.rs.
+/// path fingerprints the complete config.env source and compares it to the
+/// applying_receipt's before/after digests, so the receipt we stamp in these
+/// tests must use the identical algorithm. Kept local (rather than reaching
+/// into the production module) to avoid broadening this PR's file scope to
+/// facade_memory_ops/mod.rs.
 fn test_recall_digest_of(path: &std::path::Path) -> String {
-    use sha2::{Digest, Sha256};
     let body = match std::fs::read_to_string(path) {
         Ok(body) => body,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => panic!("read config.env {}: {err}", path.display()),
     };
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((raw_key, raw_value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = raw_key.trim();
-        if !key.starts_with("TACHI_RECALL_") {
-            continue;
-        }
-        pairs.push((key.to_string(), raw_value.trim().to_string()));
-    }
-    pairs.sort();
-    let mut hasher = Sha256::new();
-    for (key, value) in &pairs {
-        hasher.update(key.as_bytes());
-        hasher.update(b"=");
-        hasher.update(value.as_bytes());
-        hasher.update(b"\n");
-    }
-    let bytes = hasher.finalize();
-    let mut out = String::with_capacity(2 * bytes.len());
-    for byte in bytes {
-        out.push_str(&format!("{:02x}", byte));
-    }
-    out
+    test_config_env_digest(&body)
 }
 
-/// Local mirror of `recall_proposal_ops::digest_of_pairs`. Used by the
-/// third-party-drift test to compute the projected `after_digest` WITHOUT
-/// mutating the config file (so we can prove the recovery path distinguishes
-/// "file still at before" from "file at the would-be after").
-fn test_digest_of_pairs(pairs: &[(String, String)]) -> String {
+/// Local mirror of `recall_proposal_ops::digest_config_env_source`. Used by
+/// the recovery test to compute an `after_digest` without mutating the config
+/// file, so the receipt covers the same complete source that production will
+/// replace.
+fn test_config_env_digest(body: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    for (key, value) in pairs {
-        hasher.update(key.as_bytes());
-        hasher.update(b"=");
-        hasher.update(value.as_bytes());
-        hasher.update(b"\n");
-    }
+    hasher.update(body.as_bytes());
     let bytes = hasher.finalize();
     let mut out = String::with_capacity(2 * bytes.len());
     for byte in bytes {
@@ -500,8 +486,8 @@ async fn recall_regen_with_changed_evidence_does_not_inherit_approval() {
     assert_eq!(proposal_b["schema_version"], json!(3));
 }
 
-/// Discrimination: a recall-config apply that crashed between the atomic
-/// rename and the finalize CAS must recover to `applied` exactly once when
+/// Discrimination: a recall-config apply that crashed between the descriptor
+/// append and the finalize CAS must recover to `applied` exactly once when
 /// the apply is re-driven. The recovery path reads the live config.env
 /// digest, observes it equals the receipt's `after_digest`, and finalizes
 /// idempotently — never re-writing the file, never refusing.
@@ -579,7 +565,7 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
         .expect("approve");
 
     // Simulate the crash mid-apply: the proposal row is in `applying` with a
-    // receipt, and the config file has already been mutated to the after
+    // receipt, and the config file has already been appended to the after
     // state. We compute the same digests the production code would, then
     // hand-stamp the row.
     let patch: std::collections::BTreeMap<String, String> = proposal["config_env"]
@@ -589,17 +575,21 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
         .map(|(k, v)| (k.clone(), v.as_str().expect("string").to_string()))
         .collect();
     let before_digest = test_recall_digest_of(&config_env_path);
-    // Apply the patch by hand so we can capture the after_digest.
-    let tmp = config_env_path.with_extension("env.crash-tmp");
+    let before_len =
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n"
+            .len();
+    let append_payload =
+        "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n";
+    // Append the patch by hand so we can capture the after_digest.
     std::fs::write(
-        &tmp,
+        &config_env_path,
         "VOYAGE_API_KEY=vault:VOYAGE_API_KEY
-TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6
+TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
 TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
+TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6
 ",
     )
-    .expect("write tmp");
-    let _ = std::fs::rename(&tmp, &config_env_path);
+    .expect("write simulated appended state");
     let after_digest = test_recall_digest_of(&config_env_path);
 
     server
@@ -614,6 +604,8 @@ TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
                 "attempt_id": "crash-recovery-fixture",
                 "before_digest": before_digest,
                 "after_digest": after_digest,
+                "before_len": before_len,
+                "append_payload": append_payload,
                 "updated_keys": patch.keys().cloned().collect::<Vec<_>>(),
                 "started_at": "2026-07-25T00:00:00Z",
             });
@@ -647,6 +639,252 @@ TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
         applied["attempt_id"],
         json!("crash-recovery-fixture"),
         "the terminal receipt carries the original attempt id, not a new one"
+    );
+}
+
+/// A complete append is not durable merely because recovery can read it.
+/// Simulate interruption after the full descriptor write but before file
+/// fsync, then prove recovery cannot become terminal while its descriptor
+/// fsync gate is injected to fail.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_completed_recovery_fsyncs_file_before_terminal_state() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "completed-recovery-fsync");
+
+    let proposal = generate_recall_source_proposal(&server, "completed-recovery-fsync").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let append_payload =
+        "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n";
+    let expected_after = format!("{source}{append_payload}");
+    let mut first_apply = tachi_memory_params("apply_recall_proposals");
+    first_apply.proposal_id = Some(proposal_id.clone());
+    first_apply.confirm = true;
+    first_apply.metadata = Some(json!({
+        "test_crash_after_recall_write_before_file_sync": true,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, first_apply)
+        .await
+        .expect_err("fixture must interrupt after the full write and before file fsync");
+    assert!(
+        err.contains("injected_crash_before_recall_file_sync"),
+        "unexpected pre-fsync interruption: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read complete unsynced append"),
+        expected_after
+    );
+    let applying_row = read_recall_row(&server, &proposal_id);
+
+    let mut blocked_retry = tachi_memory_params("apply_recall_proposals");
+    blocked_retry.proposal_id = Some(proposal_id.clone());
+    blocked_retry.confirm = true;
+    blocked_retry.metadata = Some(json!({
+        "test_fail_completed_recovery_file_sync": true,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, blocked_retry)
+        .await
+        .expect_err("recovery file fsync failure must block terminal state");
+    assert!(
+        err.contains("injected_completed_recovery_file_sync_failure"),
+        "unexpected recovery fsync refusal: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        applying_row,
+        "failed recovery fsync must leave the applying receipt recoverable"
+    );
+
+    let mut retry = tachi_memory_params("apply_recall_proposals");
+    retry.format = Some("json".to_string());
+    retry.proposal_id = Some(proposal_id);
+    retry.confirm = true;
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, retry)
+        .await
+        .expect("recovery with successful descriptor fsync must finalize");
+    let applied: Value = serde_json::from_str(&body).expect("apply JSON");
+    assert_eq!(applied["proposal"]["status"], json!("applied"));
+    assert_eq!(
+        applied["apply_outcome"],
+        json!("applied_finalized_existing")
+    );
+}
+
+/// A pathname digest alone cannot prove that the descriptor which synced the
+/// approved append still backs config.env. Replacing the pathname with a new,
+/// same-byte inode after that sync must refuse the terminal CAS, leaving the
+/// receipt recoverable for a later descriptor-bound retry.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_same_content_inode_replacement_after_sync_refuses_terminal_cas() {
+    use std::os::unix::fs::MetadataExt;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    let original_inode = std::fs::metadata(&config_env_path)
+        .expect("seed config metadata")
+        .ino();
+    seed_recall_pair(&server, "same-content-inode-replacement");
+
+    let proposal = generate_recall_source_proposal(&server, "same-content-inode-replacement").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let expected_after = format!(
+        "{source}TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n"
+    );
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    apply.metadata = Some(json!({
+        "test_replace_config_env_after_append_sync_before_terminal_cas": true,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("same-content inode replacement must block terminal applied state");
+    assert!(
+        err.contains("source_identity_drift"),
+        "unexpected post-sync replacement refusal: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read same-content replacement"),
+        expected_after,
+        "the replacement must prove content digest equality alone is insufficient"
+    );
+    assert_ne!(
+        std::fs::metadata(&config_env_path)
+            .expect("replacement metadata")
+            .ino(),
+        original_inode,
+        "the test seam must replace config.env with a distinct inode"
+    );
+    let (applying_row, _) = read_recall_row(&server, &proposal_id);
+    let applying: Value = serde_json::from_str(&applying_row).expect("applying row JSON");
+    assert_eq!(applying["status"], json!("applying"));
+    assert!(applying["applying_receipt"].is_object());
+
+    let mut retry = tachi_memory_params("apply_recall_proposals");
+    retry.format = Some("json".to_string());
+    retry.proposal_id = Some(proposal_id);
+    retry.confirm = true;
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, retry)
+        .await
+        .expect("a later descriptor-bound recovery must remain possible");
+    let applied: Value = serde_json::from_str(&body).expect("apply JSON");
+    assert_eq!(applied["proposal"]["status"], json!("applied"));
+    assert_eq!(
+        applied["apply_outcome"],
+        json!("applied_finalized_existing")
+    );
+}
+
+/// A persisted receipt is not authority to bless arbitrary bytes. Even when
+/// its forged after_digest equals the live third-party source, recovery must
+/// reject a receipt suffix that omits the separator required by the approved
+/// no-final-newline source.
+#[tokio::test]
+async fn recall_apply_forged_after_digest_cannot_finalize_third_party_source() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1";
+    std::fs::write(&config_env_path, source).expect("seed approved source");
+    seed_recall_pair(&server, "forged-after-digest");
+
+    let proposal = generate_recall_source_proposal(&server, "forged-after-digest").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let append_payload =
+        "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n";
+    let third_party = format!("{source}{append_payload}");
+    std::fs::write(&config_env_path, &third_party).expect("write third-party source");
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|err| err.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["status"] = json!("applying");
+            value["applying_receipt"] = json!({
+                "attempt_id": "forged-after-digest-fixture",
+                "before_digest": test_config_env_digest(source),
+                "after_digest": test_config_env_digest(&third_party),
+                "before_len": source.len(),
+                "append_payload": append_payload,
+                "updated_keys": [
+                    "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
+                    "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR",
+                ],
+                "started_at": "2026-07-25T00:00:00Z",
+            });
+            store
+                .set_state(
+                    "recall_config_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize forged receipt"),
+                )
+                .map_err(|err| err.to_string())
+        })
+        .expect("persist forged receipt");
+    let applying_row = read_recall_row(&server, &proposal_id);
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("forged after_digest must not authorize third-party bytes");
+    assert!(
+        err.contains("invalid_applying_receipt"),
+        "unexpected forged-receipt refusal: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        applying_row,
+        "refusal must leave the applying receipt recoverable"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read third-party source"),
+        third_party,
+        "recovery refusal must not rewrite third-party bytes"
     );
 }
 
@@ -727,31 +965,17 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
         .expect("approve");
 
     let before_digest = test_recall_digest_of(&config_env_path);
-    // Compute the projected after_digest WITHOUT mutating the file: hand-apply
-    // the patch to a throwaway copy and hash it.
-    let projected = {
-        let mut pairs: Vec<(String, String)> = vec![(
-            "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR".to_string(),
-            "0.1".to_string(),
-        )];
-        let mut seen = std::collections::BTreeSet::new();
-        for pair in pairs.iter_mut() {
-            if pair.0 == "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR" {
-                pair.1 = "0.6".to_string();
-            }
-            seen.insert(pair.0.clone());
-        }
-        if !seen.contains("TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS") {
-            pairs.push((
-                "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS".to_string(),
-                "4".to_string(),
-            ));
-        }
-        pairs.sort();
-        // Hash the projected pairs with the same algorithm the production
-        // recovery path will use when it reads the post-rename file.
-        test_digest_of_pairs(&pairs)
-    };
+    let before_len =
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n"
+            .len();
+    let append_payload =
+        "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n";
+    // Compute the projected after_digest WITHOUT mutating the file. The
+    // append protocol preserves the source and adds the approved assignments
+    // in deterministic key order.
+    let projected = test_config_env_digest(
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n",
+    );
 
     // (a) before-digest retry: file still at before state, row at applying
     // with receipt. Apply should redo the write and finalize.
@@ -767,6 +991,8 @@ TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1
                 "attempt_id": "retry-fixture",
                 "before_digest": before_digest,
                 "after_digest": projected,
+                "before_len": before_len,
+                "append_payload": append_payload,
                 "updated_keys": [
                     "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR",
                     "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
@@ -820,6 +1046,8 @@ TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=99
                 "attempt_id": "drift-fixture",
                 "before_digest": before_digest,
                 "after_digest": projected,
+                "before_len": before_len,
+                "append_payload": append_payload,
                 "updated_keys": [
                     "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR",
                     "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
@@ -929,6 +1157,23 @@ async fn generate_recall_source_proposal(
     server: &crate::MemoryServer,
     suffix: &str,
 ) -> serde_json::Value {
+    let proposals = recall_source_proposal_params(suffix);
+    let body = crate::facade_memory_ops::handle_tachi_memory(server, proposals)
+        .await
+        .expect("generate recall proposal");
+    let parsed: Value = serde_json::from_str(&body).expect("recall proposal JSON");
+    parsed["proposals"]
+        .as_array()
+        .and_then(|proposals| {
+            proposals
+                .iter()
+                .find(|proposal| proposal["variant"] == json!("or-fallback-0.6"))
+        })
+        .cloned()
+        .expect("recall source proposal")
+}
+
+fn recall_source_proposal_params(suffix: &str) -> crate::tool_params::TachiMemoryParams {
     let mut proposals = tachi_memory_params("recall_proposals");
     proposals.format = Some("json".to_string());
     proposals.scope = Some("memory".to_string());
@@ -948,19 +1193,7 @@ async fn generate_recall_source_proposal(
             },
         }],
     }));
-    let body = crate::facade_memory_ops::handle_tachi_memory(server, proposals)
-        .await
-        .expect("generate recall proposal");
-    let parsed: Value = serde_json::from_str(&body).expect("recall proposal JSON");
-    parsed["proposals"]
-        .as_array()
-        .and_then(|proposals| {
-            proposals
-                .iter()
-                .find(|proposal| proposal["variant"] == json!("or-fallback-0.6"))
-        })
-        .cloned()
-        .expect("recall source proposal")
+    proposals
 }
 
 fn test_recall_content_digest(identity_payload: &Value) -> String {
@@ -1664,6 +1897,864 @@ async fn recall_source_config_drift_refuses_review_apply_and_rotates_pending_ide
         std::fs::read_to_string(&config_env_path).expect("read config after refusal"),
         "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.3\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
         "refused apply must not overwrite third-party config"
+    );
+}
+
+/// Discrimination: recall proposal identity binds the complete config.env
+/// source it can later rewrite. A provider/Vault-only edit must refuse review
+/// and approved apply without changing proposal state or overwriting that
+/// provider edit, while regeneration mints a distinct pending id.
+#[tokio::test]
+async fn recall_provider_config_drift_refuses_review_apply_and_rotates_pending_identity() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:provider-at-generation\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+    )
+    .expect("seed config");
+    seed_recall_pair(&server, "source-drift");
+
+    let first = generate_recall_source_proposal(&server, "source-drift").await;
+    let first_id = first["proposal_id"].as_str().expect("first id").to_string();
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:provider-before-review\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+    )
+    .expect("third-party config edit before review");
+
+    let (before_review, before_review_version) = read_recall_row(&server, &first_id);
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(first_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect_err("review after config drift must refuse");
+    assert!(
+        err.contains("source_state_drift"),
+        "unexpected review error: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &first_id),
+        (before_review, before_review_version),
+        "review refusal must leave the pending row untouched"
+    );
+
+    let regenerated = generate_recall_source_proposal(&server, "source-drift").await;
+    let regenerated_id = regenerated["proposal_id"]
+        .as_str()
+        .expect("regenerated id")
+        .to_string();
+    assert_ne!(
+        first_id, regenerated_id,
+        "source revision must rotate the id"
+    );
+    assert_eq!(regenerated["status"], json!("pending"));
+
+    let mut approve = tachi_memory_params("review_recall_proposal");
+    approve.proposal_id = Some(regenerated_id.clone());
+    approve.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, approve)
+        .await
+        .expect("approve regenerated proposal");
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:provider-before-apply\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+    )
+    .expect("third-party config edit after approval");
+
+    let (before_apply, before_apply_version) = read_recall_row(&server, &regenerated_id);
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(regenerated_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("approved proposal must refuse after config drift");
+    assert!(
+        err.contains("source_state_drift"),
+        "unexpected apply error: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &regenerated_id),
+        (before_apply, before_apply_version),
+        "apply refusal must leave the approved row untouched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read config after refusal"),
+        "VOYAGE_API_KEY=vault:provider-before-apply\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n",
+        "refused apply must not overwrite the concurrent provider/Vault edit"
+    );
+}
+
+/// Discrimination: an atomic config replacement must retain restrictive
+/// existing permissions. The old `File::create` temp path honored the process
+/// umask and commonly replaced a private 0600 config with mode 0644.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_preserves_private_config_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n",
+    )
+    .expect("seed private config");
+    std::fs::set_permissions(&config_env_path, std::fs::Permissions::from_mode(0o600))
+        .expect("restrict config.env to owner-only mode");
+    seed_recall_pair(&server, "private-mode");
+
+    let proposal = generate_recall_source_proposal(&server, "private-mode").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve private-config proposal");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id);
+    apply.confirm = true;
+    crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("apply private-config proposal");
+
+    assert_eq!(
+        std::fs::metadata(&config_env_path)
+            .expect("read rewritten config mode")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "atomic replacement must not downgrade a private config.env to 0644"
+    );
+}
+
+/// Discrimination: a provider replacement that lands after the apply receipt
+/// is stamped but immediately before the config mutation must not be replaced
+/// by stale whole-file bytes. The hook atomically renames a new inode over the
+/// final path; apply must refuse identity drift and preserve it verbatim.
+#[tokio::test]
+async fn recall_apply_provider_edit_in_final_window_is_not_overwritten() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_env_path,
+        "VOYAGE_API_KEY=vault:provider-before\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n",
+    )
+    .expect("seed config");
+    seed_recall_pair(&server, "provider-final-window");
+
+    let proposal = generate_recall_source_proposal(&server, "provider-final-window").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let raced_body =
+        "VOYAGE_API_KEY=vault:provider-raced\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    apply.metadata = Some(json!({
+        "test_config_env_before_recall_append": raced_body,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("provider edit in the final mutation window must refuse");
+    assert!(
+        err.contains("source_identity_drift"),
+        "unexpected final-window error: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read raced config"),
+        raced_body,
+        "identity refusal must preserve the replacement inode's bytes verbatim"
+    );
+    let (raw, _) = read_recall_row(&server, &proposal_id);
+    let row: Value = serde_json::from_str(&raw).expect("applying row JSON");
+    assert_eq!(row["status"], json!("applying"));
+    assert!(
+        row["applying_receipt"].is_object(),
+        "the refusal must retain a recoverable applying receipt: {row}"
+    );
+}
+
+/// A config.env symlink does not provide a stable object identity for the
+/// proposal/apply protocol. Refuse before following it, leave the target bytes
+/// untouched, and keep the approved proposal row byte-identical.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_refuses_symlinked_config_env_loudly() {
+    use std::os::unix::fs::symlink;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "symlink-config");
+
+    let proposal = generate_recall_source_proposal(&server, "symlink-config").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+    let before_row = read_recall_row(&server, &proposal_id);
+
+    let target = config_env_path.with_extension("env.real");
+    std::fs::rename(&config_env_path, &target).expect("move config to symlink target");
+    symlink(&target, &config_env_path).expect("symlink config.env");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("symlinked config.env must refuse");
+    assert!(
+        err.contains("symlink_config_refused"),
+        "unexpected symlink refusal: {err}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&config_env_path)
+            .expect("symlink metadata")
+            .file_type()
+            .is_symlink(),
+        "refusal must not replace the symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read symlink target"),
+        source,
+        "refusal must not mutate the symlink target"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        before_row,
+        "symlink refusal must not mutate the approved proposal row"
+    );
+}
+
+/// Every parent component is part of the config identity boundary. Even when
+/// an outside config has byte-identical approved content, a symlinked `.tachi`
+/// parent must refuse before the approved proposal or outside file changes.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_refuses_symlinked_config_parent_before_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_parent = temp_home.temp_home.join(".tachi");
+    let config_env_path = config_parent.join("config.env");
+    std::fs::create_dir_all(&config_parent).expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "symlink-parent");
+
+    let proposal = generate_recall_source_proposal(&server, "symlink-parent").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+    let before_row = read_recall_row(&server, &proposal_id);
+
+    let displaced_parent = temp_home.temp_home.join(".tachi.displaced");
+    std::fs::rename(&config_parent, &displaced_parent).expect("displace real config parent");
+    let outside = tempfile::tempdir().expect("outside config dir");
+    let outside_config = outside.path().join("config.env");
+    std::fs::write(&outside_config, source).expect("seed byte-identical outside config");
+    symlink(outside.path(), &config_parent).expect("symlink config parent outside");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("symlinked config parent must refuse before apply mutation");
+    assert!(
+        err.contains("symlink_config_parent_refused"),
+        "unexpected parent-symlink refusal: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        before_row,
+        "parent-symlink refusal must leave the approved row byte-identical"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_config).expect("read outside config"),
+        source,
+        "parent traversal refusal must not append to the outside config"
+    );
+    assert_eq!(
+        std::fs::read_to_string(displaced_parent.join("config.env"))
+            .expect("read displaced config"),
+        source,
+        "parent traversal refusal must not mutate the displaced real config"
+    );
+}
+
+/// If the verified parent is replaced by a symlink after the applying receipt
+/// is stamped, re-opening the component chain must refuse before descriptor
+/// append. The outside target survives and the row remains recoverable.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_parent_replacement_race_refuses_without_outside_write() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_parent = temp_home.temp_home.join(".tachi");
+    let config_env_path = config_parent.join("config.env");
+    std::fs::create_dir_all(&config_parent).expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "parent-replacement-race");
+
+    let proposal = generate_recall_source_proposal(&server, "parent-replacement-race").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let outside = tempfile::tempdir().expect("outside config dir");
+    let outside_config = outside.path().join("config.env");
+    std::fs::write(&outside_config, source).expect("seed byte-identical outside config");
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    apply.metadata = Some(json!({
+        "test_config_parent_symlink_before_recall_append": outside.path().display().to_string(),
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("parent replacement race must refuse before append");
+    assert!(
+        err.contains("symlink_config_parent_refused"),
+        "unexpected parent replacement refusal: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_config).expect("read outside config"),
+        source,
+        "replacement race must not append through the new parent symlink"
+    );
+    let (raw, _) = read_recall_row(&server, &proposal_id);
+    let row: Value = serde_json::from_str(&raw).expect("applying row JSON");
+    assert_eq!(row["status"], json!("applying"));
+    assert!(row["applying_receipt"].is_object());
+}
+
+/// Non-Unix has no equivalent to the descriptor/no-follow identity protocol.
+/// Refusal must happen before the approved row can be stamped applying.
+#[cfg(not(unix))]
+#[tokio::test]
+async fn recall_apply_non_unix_refuses_before_applying_stamp() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "non-unix-refusal");
+
+    let proposal = generate_recall_source_proposal(&server, "non-unix-refusal").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+    let before_row = read_recall_row(&server, &proposal_id);
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("non-Unix apply must refuse before stamping");
+    assert!(
+        err.contains("unsupported_platform"),
+        "unexpected platform refusal: {err}"
+    );
+    assert_eq!(
+        read_recall_row(&server, &proposal_id),
+        before_row,
+        "platform refusal must leave the approved row byte-identical"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read config"),
+        source,
+        "platform refusal must not mutate config.env"
+    );
+}
+
+/// The complete config source is bounded before hashing or proposal creation.
+/// The exact boundary remains readable; one additional byte refuses loudly.
+#[tokio::test]
+async fn recall_config_env_read_limit_accepts_boundary_and_refuses_over_limit() {
+    let max_config_bytes = memcore::recall_config::MAX_RECALL_CONFIG_ENV_BYTES;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let boundary = format!("#{}\n", "x".repeat(max_config_bytes - 2));
+    assert_eq!(boundary.len(), max_config_bytes);
+    std::fs::write(&config_env_path, &boundary).expect("write boundary config");
+    seed_recall_pair(&server, "config-size-boundary");
+    let _ = generate_recall_source_proposal(&server, "config-size-boundary").await;
+
+    let over_limit = format!("{boundary}x");
+    std::fs::write(&config_env_path, &over_limit).expect("write oversized config");
+    seed_recall_pair(&server, "config-size-over");
+    let err = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        recall_source_proposal_params("config-size-over"),
+    )
+    .await
+    .expect_err("oversized config.env must refuse before proposal persistence");
+    assert!(
+        err.contains("config_env_too_large"),
+        "unexpected oversized-config refusal: {err}"
+    );
+    assert_eq!(
+        std::fs::metadata(&config_env_path)
+            .expect("oversized config metadata")
+            .len() as usize,
+        max_config_bytes + 1,
+        "refusal must not rewrite the oversized source"
+    );
+}
+
+/// Appending recall assignments must handle a source without a final newline
+/// without joining keys, preserve every original byte, and rely on the same
+/// last-declaration-wins parser used by production RecallConfig loading.
+#[tokio::test]
+async fn recall_apply_appends_after_missing_final_newline_with_last_value_winning() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1";
+    std::fs::write(&config_env_path, source).expect("seed config without final newline");
+    seed_recall_pair(&server, "no-final-newline");
+
+    let proposal = generate_recall_source_proposal(&server, "no-final-newline").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id);
+    apply.confirm = true;
+    crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("apply appended config");
+
+    let body = std::fs::read_to_string(&config_env_path).expect("read appended config");
+    assert_eq!(
+        body,
+        format!(
+            "{source}\nTACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n"
+        ),
+        "append protocol must preserve the source byte prefix and delimit the new assignments"
+    );
+    let effective = memcore::RecallConfig::from_config_env_source(&body);
+    assert_eq!(
+        effective.or_fallback_fts_score_factor, 0.6,
+        "the appended declaration must be the effective production RecallConfig value"
+    );
+    assert_eq!(effective.or_fallback_fts_max_terms, 4);
+}
+
+/// Missing config.env is a valid empty source revision. The append protocol
+/// creates it privately and writes only the approved recall assignments.
+#[tokio::test]
+async fn recall_apply_creates_missing_config_env_privately() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    assert!(
+        !config_env_path.exists(),
+        "fixture requires a missing config.env"
+    );
+    seed_recall_pair(&server, "missing-config");
+
+    let proposal = generate_recall_source_proposal(&server, "missing-config").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id);
+    apply.confirm = true;
+    crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("apply missing config");
+
+    let effective: std::collections::HashMap<String, String> =
+        dotenvy::from_path_iter(&config_env_path)
+            .expect("open created config with shipped dotenv parser")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse created config")
+            .into_iter()
+            .collect();
+    assert_eq!(
+        effective.len(),
+        2,
+        "only approved recall keys may be created"
+    );
+    assert_eq!(
+        effective.get("TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR"),
+        Some(&"0.6".to_string())
+    );
+    assert_eq!(
+        effective.get("TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS"),
+        Some(&"4".to_string())
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&config_env_path)
+                .expect("created config metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "new config.env must be owner-only"
+        );
+    }
+}
+
+/// If another writer creates config.env after the approved missing-file check
+/// but before our exclusive create, its bytes and permissions are outside the
+/// approved lifecycle. Losing O_EXCL must refuse instead of reopening it.
+#[cfg(unix)]
+#[tokio::test]
+async fn recall_apply_missing_file_create_race_refuses_competitor_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    assert!(
+        !config_env_path.exists(),
+        "fixture requires missing config.env"
+    );
+    seed_recall_pair(&server, "missing-create-race");
+
+    let proposal = generate_recall_source_proposal(&server, "missing-create-race").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve missing-file proposal");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    apply.metadata = Some(json!({
+        "test_create_config_env_before_exclusive_create": true,
+    }));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("losing exclusive create must refuse the competitor file");
+    assert!(
+        err.contains("third_party_drift"),
+        "unexpected create-race refusal: {err}"
+    );
+    assert_eq!(
+        std::fs::read(&config_env_path).expect("read competitor file"),
+        b"",
+        "competitor-created bytes must remain untouched"
+    );
+    assert_eq!(
+        std::fs::metadata(&config_env_path)
+            .expect("competitor metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644,
+        "apply must not normalize or replace competitor permissions"
+    );
+    let (raw, _) = read_recall_row(&server, &proposal_id);
+    let row: Value = serde_json::from_str(&raw).expect("applying row JSON");
+    assert_eq!(row["status"], json!("applying"));
+    assert!(row["applying_receipt"].is_object());
+}
+
+/// A crash can leave only a prefix of the receipt-bound append on disk. The
+/// recovery path may resume exactly that suffix only after proving the
+/// original source prefix and every already-written append byte.
+#[tokio::test]
+async fn recall_apply_partial_append_recovers_without_replacing_source() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "VOYAGE_API_KEY=vault:provider\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "partial-append-recovery");
+
+    let proposal = generate_recall_source_proposal(&server, "partial-append-recovery").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let append_payload =
+        "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n";
+    let after = format!("{source}{append_payload}");
+    let partial_len = append_payload
+        .find("SCORE_FACTOR")
+        .expect("partial boundary");
+    std::fs::write(
+        &config_env_path,
+        format!("{source}{}", &append_payload[..partial_len]),
+    )
+    .expect("write crash-partial append");
+
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["status"] = json!("applying");
+            value["applying_receipt"] = json!({
+                "attempt_id": "partial-append-fixture",
+                "before_digest": test_config_env_digest(source),
+                "after_digest": test_config_env_digest(&after),
+                "before_len": source.len(),
+                "append_payload": append_payload,
+                "updated_keys": [
+                    "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
+                    "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR",
+                ],
+                "started_at": "2026-07-25T00:00:00Z",
+            });
+            let next = serde_json::to_string(&value).expect("serialize applying row");
+            store
+                .set_state("recall_config_proposals", &proposal_id, &next)
+                .map_err(|e| e.to_string())
+        })
+        .expect("stamp partial applying receipt");
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.format = Some("json".to_string());
+    apply.proposal_id = Some(proposal_id);
+    apply.confirm = true;
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("resume receipt-bound partial append");
+    let applied: Value = serde_json::from_str(&body).expect("apply JSON");
+    assert_eq!(applied["apply_outcome"], json!("applied_retried"));
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read recovered config"),
+        after,
+        "recovery must preserve the original source and append only the missing receipt-bound suffix"
+    );
+}
+
+/// Persisted recovery receipts are untrusted state. Oversized append payloads
+/// and impossible before lengths must refuse before another file or row write.
+#[tokio::test]
+async fn recall_apply_refuses_oversized_persisted_receipt_without_mutation() {
+    const EXPECTED_MAX_RECALL_APPEND_PAYLOAD_BYTES: usize = 64 * 1024;
+    let max_config_bytes = memcore::recall_config::MAX_RECALL_CONFIG_ENV_BYTES;
+
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env_path = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let source = "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n";
+    std::fs::write(&config_env_path, source).expect("seed config");
+    seed_recall_pair(&server, "oversized-receipt");
+    let proposal = generate_recall_source_proposal(&server, "oversized-receipt").await;
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve proposal");
+
+    let oversized_payload = "x".repeat(EXPECTED_MAX_RECALL_APPEND_PAYLOAD_BYTES + 1);
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["status"] = json!("applying");
+            value["applying_receipt"] = json!({
+                "attempt_id": "oversized-payload-fixture",
+                "before_digest": test_config_env_digest(source),
+                "after_digest": "0".repeat(64),
+                "before_len": source.len(),
+                "append_payload": oversized_payload,
+                "updated_keys": [],
+                "started_at": "2026-07-25T00:00:00Z",
+            });
+            store
+                .set_state(
+                    "recall_config_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize oversized receipt"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("persist oversized receipt");
+    let oversized_row = read_recall_row(&server, &proposal_id);
+
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("oversized append payload must refuse");
+    assert!(
+        err.contains("applying_receipt_too_large"),
+        "unexpected oversized-receipt refusal: {err}"
+    );
+    assert_eq!(read_recall_row(&server, &proposal_id), oversized_row);
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read unchanged config"),
+        source
+    );
+
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["applying_receipt"]["append_payload"] = json!(
+                "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\nTACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n"
+            );
+            value["applying_receipt"]["before_len"] = json!(max_config_bytes + 1);
+            store
+                .set_state(
+                    "recall_config_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize oversized length"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("persist oversized before_len");
+    let oversized_len_row = read_recall_row(&server, &proposal_id);
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("oversized before_len must refuse");
+    assert!(
+        err.contains("applying_receipt_too_large"),
+        "unexpected oversized-before_len refusal: {err}"
+    );
+    assert_eq!(read_recall_row(&server, &proposal_id), oversized_len_row);
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read unchanged config"),
+        source
+    );
+
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv("recall_config_proposals", &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("proposal row");
+            let mut value: Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["applying_receipt"]["before_len"] = json!("not-a-number");
+            store
+                .set_state(
+                    "recall_config_proposals",
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize malformed length"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("persist malformed before_len");
+    let malformed_row = read_recall_row(&server, &proposal_id);
+    let mut apply = tachi_memory_params("apply_recall_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect_err("malformed before_len must refuse");
+    assert!(
+        err.contains("malformed_applying_receipt"),
+        "unexpected malformed-receipt refusal: {err}"
+    );
+    assert_eq!(read_recall_row(&server, &proposal_id), malformed_row);
+    assert_eq!(
+        std::fs::read_to_string(&config_env_path).expect("read unchanged config"),
+        source
     );
 }
 

@@ -8,6 +8,7 @@
 //! rolls every earlier mutation back.
 
 use rusqlite::{Transaction, TransactionBehavior};
+use serde_json::{Map, Value};
 
 use crate::{
     db,
@@ -21,6 +22,7 @@ use crate::{
 pub struct ImmutableSupersessionTransaction<'tx> {
     tx: Transaction<'tx>,
     vec_available: bool,
+    reserved_reference_write: db::ReservedReferenceWriteFlag,
 }
 
 impl<'tx> ImmutableSupersessionTransaction<'tx> {
@@ -33,6 +35,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         source_id: &str,
         target_id: &str,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let changed = db::supersede_memory(&self.tx, source_id, target_id)?;
         if !changed {
             return Err(MemoryError::InvalidArg(format!(
@@ -44,11 +48,36 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
 
     /// Persist an entry inside the replacement transaction.
     pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::upsert_within_tx(&self.tx, entry, self.vec_available, None).map(|_| ())
+    }
+
+    /// Persist an entry with server-authorized, shape-validated reference
+    /// appends inside the same replacement transaction.
+    pub fn upsert_with_validated_reference_mutations(
+        &mut self,
+        entry: &MemoryEntry,
+        metadata_patch: &Map<String, Value>,
+        mutations: &[db::ValidatedReferenceMutation],
+    ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::upsert_with_validated_reference_mutations_within_tx(
+            &self.tx,
+            entry,
+            self.vec_available,
+            None,
+            metadata_patch,
+            mutations,
+        )
+        .map(|_| ())
     }
 
     /// Archive a source after its supersession claim has succeeded.
     pub fn archive_claimed_source(&mut self, source_id: &str) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         if !db::archive_memory(&self.tx, source_id)? {
             return Err(MemoryError::InvalidArg(format!(
                 "archive claimed source failed for {source_id}"
@@ -75,6 +104,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         scope: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::save_derived_with_id(
             &self.tx, id, text, path, summary, importance, source, scope, metadata,
         )
@@ -93,6 +124,7 @@ impl MemoryStore {
         mut operation: impl FnMut(&mut ImmutableSupersessionTransaction<'_>) -> Result<T, MemoryError>,
     ) -> Result<T, MemoryError> {
         let db_label = self.db_label.clone();
+        let reserved_reference_write = self.reserved_reference_write.clone();
         db::retry_memory_locked("immutable_supersession", &db_label, || {
             let tx = self
                 .conn
@@ -100,6 +132,7 @@ impl MemoryStore {
             let mut replacement = ImmutableSupersessionTransaction {
                 tx,
                 vec_available: self.vec_available,
+                reserved_reference_write: reserved_reference_write.clone(),
             };
             let result = operation(&mut replacement)?;
             replacement.tx.commit()?;

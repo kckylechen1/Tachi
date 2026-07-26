@@ -54,7 +54,7 @@ pub(crate) async fn handle_get_memory(
 
     if params.project.is_none() {
         if let Some(project_name) = crate::memory_search_ops::resolve_workspace_named_project() {
-            if crate::memory_search_ops::named_project_db_exists(&project_name) {
+            if crate::memory_search_ops::named_project_db_exists(server, &project_name) {
                 let project_entry =
                     server.with_named_project_store_read(&project_name, |store| {
                         store
@@ -261,9 +261,17 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "vec_available": server.project_vec_available(),
         })
     });
-    let plan_c_split_brain = project_db_path
-        .as_ref()
-        .and_then(|path| crate::path_utils::plan_c_split_brain_for_local_db(path.as_path()));
+    let (plan_c_split_brain, plan_c_alias_integrity) = match project_db_path.as_deref() {
+        Some(path) => {
+            match crate::path_utils::inspect_plan_c_alias_for_local_db_in_home(path, &app_home) {
+                crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => (Some(issue), None),
+                crate::path_utils::PlanCAliasInspection::Integrity(issue) => (None, Some(issue)),
+                crate::path_utils::PlanCAliasInspection::Absent
+                | crate::path_utils::PlanCAliasInspection::MatchingSymlink => (None, None),
+            }
+        }
+        None => (None, None),
+    };
     let binding = crate::memory_search_ops::library_binding_receipt(server, None);
 
     serde_json::to_string(&json!({
@@ -287,6 +295,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "project": project,
             "single_db_mode": !server.has_project_db(),
             "plan_c_split_brain": plan_c_split_brain,
+            "plan_c_alias_integrity": plan_c_alias_integrity,
         },
         "binding": binding,
         "env": {
@@ -557,4 +566,35 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
     }
 
     serde_json::to_string(&results).map_err(|e| format!("Failed to serialize: {}", e))
+}
+
+#[cfg(test)]
+mod env_drift_tests {
+    use super::*;
+    use crate::test_support::EnvRestore;
+
+    #[tokio::test]
+    // The process-global TACHI_HOME override must remain serialized through
+    // the awaited runtime-info operation.
+    #[allow(clippy::await_holding_lock)]
+    async fn runtime_info_alias_health_stays_bound_after_environment_drift() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let project_root = crate::utils::find_project_git_root().expect("test project root");
+        let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+            .expect("test project identity");
+        let (server, project_db) = crate::tests::make_server_with_project_fixture(&project_name);
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        crate::tests::create_split_brain_alias(ambient_home.path(), &project_db);
+        let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        let output = handle_runtime_info(&server)
+            .await
+            .expect("runtime info after environment drift");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("runtime info JSON");
+
+        assert!(value["databases"]["plan_c_split_brain"].is_null());
+        assert!(value["databases"]["plan_c_alias_integrity"].is_null());
+    }
 }

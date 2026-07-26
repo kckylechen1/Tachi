@@ -12,6 +12,8 @@ impl MemoryStore {
     /// Archive low-importance memories that were never accessed and are older
     /// than 60 days, sparing permanent/pinned/durable retention policies.
     pub fn archive_stale_low_value_memories(&self) -> Result<usize, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         Ok(self.conn.execute(
             "UPDATE memories
              SET archived = 1, updated_at = datetime('now')
@@ -46,6 +48,8 @@ impl MemoryStore {
     /// recall from diverse queries (the same gate as `record_access`); a raw
     /// note must not be promoted merely because it was accessed often.
     pub fn promote_diversely_recalled_raw_memories(&self) -> Result<usize, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         Ok(self.conn.execute(
             "UPDATE memories
              SET tier = 'consolidated', updated_at = datetime('now')
@@ -120,6 +124,8 @@ impl MemoryStore {
     /// Pin importance and durable retention once a memory passes the
     /// promotion score gate.
     pub fn promote_memory_to_durable(&self, id: &str) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         self.conn.execute(
             "UPDATE memories
              SET importance = 0.7, retention_policy = 'durable', updated_at = datetime('now')

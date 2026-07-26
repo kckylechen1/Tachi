@@ -5,6 +5,12 @@ use super::*;
 const RECOVERED_ORPHAN_ERROR_CLASS: &str = "recovered_orphan";
 
 pub(super) fn dispatch_status_needs_recovery(status: &serde_json::Value) -> bool {
+    // `completion_recovery` is a durable handoff to a later tachi_complete
+    // replay, not evidence that a dead dispatch should be converted to an
+    // orphan failure. Its canonical outcome is intentionally still pending.
+    if status.get("completion_recovery").is_some() {
+        return false;
+    }
     if status.get("exit_code").is_some() {
         return false;
     }
@@ -134,4 +140,21 @@ pub(crate) fn recover_orphaned_dispatch_runs(server: &MemoryServer) -> Vec<Strin
         recovered.push(dispatch_id);
     }
     recovered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pending_completion_recovery_is_not_an_orphan_failure() {
+        assert!(
+            !dispatch_status_needs_recovery(&json!({
+                "state": "TASK_STATE_WORKING",
+                "completion_recovery": {"status": "pending_canonical_outcome"},
+            })),
+            "a canonical-outcome recovery marker must remain available for replay, not be failed as an orphan"
+        );
+    }
 }

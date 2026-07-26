@@ -1,4 +1,5 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde_json::{Map, Value};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::MemoryError;
@@ -330,6 +331,311 @@ pub enum IdlessUpsertResult {
     Duplicate { id: String },
 }
 
+/// Shape-validated reserved-reference mutation accepted by the atomic merge.
+///
+/// Construction proves only that the value has a normalized supported wire
+/// shape. It does not confer authority; callers must authorize the source at
+/// their own boundary before selecting this mutation API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedReferenceMutation {
+    operation: ReservedReferenceOperation,
+}
+
+pub const MAX_REFERENCE_BYTES: usize = 4_096;
+pub const MAX_REFERENCE_ID_BYTES: usize = 1_024;
+pub const MAX_REFERENCE_KIND_BYTES: usize = 64;
+pub const MAX_REFERENCE_TIMESTAMP_BYTES: usize = 64;
+pub const MAX_REFERENCE_HASH_BYTES: usize = 1_024;
+pub const MAX_REFERENCE_SECTION_BYTES: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReservedReferenceOperation {
+    Append {
+        target: ReservedReferenceTarget,
+        value: Value,
+    },
+    EnsureEmptyEvidenceRefsV1,
+    TombstoneLegacySourceRefs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservedReferenceTarget {
+    EvidenceRefsV1,
+    SourceRefs,
+}
+
+impl ReservedReferenceTarget {
+    fn metadata_key(self) -> &'static str {
+        match self {
+            Self::EvidenceRefsV1 => "evidence_refs_v1",
+            Self::SourceRefs => "source_refs",
+        }
+    }
+}
+
+impl ValidatedReferenceMutation {
+    pub fn evidence(
+        reference: String,
+        captured_at: String,
+        target_kind: Option<String>,
+    ) -> Result<Self, MemoryError> {
+        let reference = normalize_required_bounded(reference, "evidence ref", MAX_REFERENCE_BYTES)?;
+        let captured_at = normalize_timestamp(captured_at, "evidence captured_at")?;
+        let target_kind = target_kind
+            .map(|kind| {
+                normalize_required_lower_bounded(
+                    kind,
+                    "evidence target_kind",
+                    MAX_REFERENCE_KIND_BYTES,
+                )
+            })
+            .transpose()?;
+        if let Some(kind) = target_kind.as_deref() {
+            if !matches!(
+                kind,
+                "issue"
+                    | "comment"
+                    | "pr"
+                    | "commit"
+                    | "canonical_doc"
+                    | "episodic_memory"
+                    | "wiki"
+                    | "guide"
+                    | "precedent"
+                    | "eval"
+                    | "runtime"
+            ) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "unsupported evidence target_kind: {kind}"
+                )));
+            }
+        }
+        let mut object = Map::new();
+        object.insert("ref".to_string(), Value::String(reference));
+        object.insert("captured_at".to_string(), Value::String(captured_at));
+        if let Some(kind) = target_kind {
+            object.insert("target_kind".to_string(), Value::String(kind));
+        }
+        Ok(Self {
+            operation: ReservedReferenceOperation::Append {
+                target: ReservedReferenceTarget::EvidenceRefsV1,
+                value: Value::Object(object),
+            },
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn precedent_source(
+        relation: String,
+        target_kind: String,
+        target_ref: String,
+        comment_id: Option<String>,
+        updated_at: Option<String>,
+        body_hash: Option<String>,
+        commit_sha: Option<String>,
+        section_or_span: Option<String>,
+    ) -> Result<Self, MemoryError> {
+        let relation = normalize_required_lower_bounded(
+            relation,
+            "source ref relation",
+            MAX_REFERENCE_KIND_BYTES,
+        )?;
+        if !matches!(
+            relation.as_str(),
+            "derived_from" | "supports" | "contradicts" | "supersedes" | "applies_to"
+        ) {
+            return Err(MemoryError::InvalidArg(format!(
+                "unsupported source ref relation: {relation}"
+            )));
+        }
+        let target_kind = normalize_required_lower_bounded(
+            target_kind,
+            "source ref target_kind",
+            MAX_REFERENCE_KIND_BYTES,
+        )?;
+        if !matches!(
+            target_kind.as_str(),
+            "issue" | "comment" | "pr" | "commit" | "canonical_doc" | "verification"
+        ) {
+            return Err(MemoryError::InvalidArg(format!(
+                "unsupported source ref target_kind: {target_kind}"
+            )));
+        }
+        let target_ref =
+            normalize_required_bounded(target_ref, "source ref target_ref", MAX_REFERENCE_BYTES)?;
+        let comment_id = normalize_optional_bounded(
+            comment_id,
+            "source ref comment_id",
+            MAX_REFERENCE_ID_BYTES,
+        )?;
+        let updated_at = normalize_optional_timestamp(updated_at, "source ref updated_at")?;
+        let body_hash = normalize_optional_bounded(
+            body_hash,
+            "source ref body_hash",
+            MAX_REFERENCE_HASH_BYTES,
+        )?;
+        let commit_sha = normalize_optional_bounded(
+            commit_sha,
+            "source ref commit_sha",
+            MAX_REFERENCE_HASH_BYTES,
+        )?;
+        let section_or_span = normalize_optional_bounded(
+            section_or_span,
+            "source ref section_or_span",
+            MAX_REFERENCE_SECTION_BYTES,
+        )?;
+        if target_kind == "comment" && comment_id.is_none() {
+            return Err(MemoryError::InvalidArg(
+                "comment source ref requires comment_id".to_string(),
+            ));
+        }
+        match target_kind.as_str() {
+            "commit" if commit_sha.is_none() => {
+                return Err(MemoryError::InvalidArg(
+                    "commit source ref requires commit_sha".to_string(),
+                ));
+            }
+            "comment" | "issue" | "pr" | "canonical_doc" | "verification"
+                if body_hash.is_none() =>
+            {
+                return Err(MemoryError::InvalidArg(format!(
+                    "{target_kind} source ref requires body_hash"
+                )));
+            }
+            _ => {}
+        }
+        let mut object = Map::new();
+        object.insert("relation".to_string(), Value::String(relation));
+        object.insert("target_kind".to_string(), Value::String(target_kind));
+        object.insert("target_ref".to_string(), Value::String(target_ref));
+        for (key, value) in [
+            ("comment_id", comment_id),
+            ("updated_at", updated_at),
+            ("body_hash", body_hash),
+            ("commit_sha", commit_sha),
+            ("section_or_span", section_or_span),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.to_string(), Value::String(value));
+            }
+        }
+        Ok(Self {
+            operation: ReservedReferenceOperation::Append {
+                target: ReservedReferenceTarget::SourceRefs,
+                value: Value::Object(object),
+            },
+        })
+    }
+
+    pub fn capture_source(
+        ref_type: String,
+        ref_id: String,
+        revision: Option<String>,
+    ) -> Result<Self, MemoryError> {
+        let ref_type = normalize_required_lower_bounded(
+            ref_type,
+            "capture source ref_type",
+            MAX_REFERENCE_KIND_BYTES,
+        )?;
+        if !matches!(ref_type.as_str(), "turn" | "compact_window") {
+            return Err(MemoryError::InvalidArg(format!(
+                "unsupported capture source ref_type: {ref_type}"
+            )));
+        }
+        let ref_id =
+            normalize_required_bounded(ref_id, "capture source ref_id", MAX_REFERENCE_ID_BYTES)?;
+        let revision = normalize_optional_bounded(
+            revision,
+            "capture source revision",
+            MAX_REFERENCE_ID_BYTES,
+        )?;
+        let mut object = Map::new();
+        object.insert("ref_type".to_string(), Value::String(ref_type));
+        object.insert("ref_id".to_string(), Value::String(ref_id));
+        if let Some(revision) = revision {
+            object.insert("revision".to_string(), Value::String(revision));
+        }
+        Ok(Self {
+            operation: ReservedReferenceOperation::Append {
+                target: ReservedReferenceTarget::SourceRefs,
+                value: Value::Object(object),
+            },
+        })
+    }
+
+    /// Trusted wiki migration marker: establish the canonical typed field
+    /// when no evidence values exist yet.
+    pub fn ensure_empty_evidence_refs_v1() -> Self {
+        Self {
+            operation: ReservedReferenceOperation::EnsureEmptyEvidenceRefsV1,
+        }
+    }
+
+    /// Trusted wiki migration marker: retain the historical explicit null
+    /// tombstone so readers cannot fall back to stale legacy provenance.
+    pub fn tombstone_legacy_source_refs() -> Self {
+        Self {
+            operation: ReservedReferenceOperation::TombstoneLegacySourceRefs,
+        }
+    }
+}
+
+fn normalize_required_bounded(
+    value: String,
+    field: &str,
+    max_bytes: usize,
+) -> Result<String, MemoryError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} must be non-empty"
+        )));
+    }
+    if value.len() > max_bytes {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} exceeds {max_bytes} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} contains control characters"
+        )));
+    }
+    Ok(value)
+}
+
+fn normalize_required_lower_bounded(
+    value: String,
+    field: &str,
+    max_bytes: usize,
+) -> Result<String, MemoryError> {
+    normalize_required_bounded(value, field, max_bytes).map(|value| value.to_ascii_lowercase())
+}
+
+fn normalize_optional_bounded(
+    value: Option<String>,
+    field: &str,
+    max_bytes: usize,
+) -> Result<Option<String>, MemoryError> {
+    value
+        .map(|value| normalize_required_bounded(value, field, max_bytes))
+        .transpose()
+}
+
+fn normalize_timestamp(value: String, field: &str) -> Result<String, MemoryError> {
+    let value = normalize_required_bounded(value, field, MAX_REFERENCE_TIMESTAMP_BYTES)?;
+    normalize_utc_iso(&value)
+}
+
+fn normalize_optional_timestamp(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>, MemoryError> {
+    value
+        .map(|value| normalize_timestamp(value, field))
+        .transpose()
+}
+
 /// Result of an atomic insert-only memory write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertMemoryResult {
@@ -338,7 +644,7 @@ pub enum InsertMemoryResult {
 }
 
 /// Insert or update a memory entry (and its embedding vector if provided).
-pub fn upsert(
+pub(crate) fn upsert(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
@@ -346,13 +652,1456 @@ pub fn upsert(
     upsert_with_idless_identity(conn, entry, vec_available, None).map(|_| ())
 }
 
-/// Insert `entry` only when its id is absent. The existence decision and all
-/// main/FTS/vector writes share the same transaction, so an `Existing` result
-/// never mutates any representation of the winning row.
-pub fn insert_if_absent(
+const RESERVED_REFERENCE_KEYS: [&str; 2] = ["evidence_refs_v1", "source_refs"];
+
+fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
+    let Some(mut object) = metadata.as_object().cloned() else {
+        return metadata.clone();
+    };
+    for key in RESERVED_REFERENCE_KEYS {
+        object.remove(key);
+    }
+    Value::Object(object)
+}
+
+fn read_existing_metadata(
+    tx: &rusqlite::Transaction<'_>,
+    entry_id: &str,
+) -> Result<Option<Value>, MemoryError> {
+    tx.query_row(
+        "SELECT metadata FROM memories WHERE id = ?1",
+        params![entry_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|raw| serde_json::from_str::<Value>(&raw))
+    .transpose()
+    .map_err(Into::into)
+}
+
+fn merge_ordinary_reserved_metadata(
+    tx: &rusqlite::Transaction<'_>,
+    entry_id: &str,
+    incoming: &Value,
+) -> Result<Value, MemoryError> {
+    let mut sanitized = strip_untrusted_reserved_metadata(incoming);
+    let Some(existing) = read_existing_metadata(tx, entry_id)? else {
+        return Ok(sanitized);
+    };
+    let Some(existing_object) = existing.as_object() else {
+        return Ok(sanitized);
+    };
+    let reserved = RESERVED_REFERENCE_KEYS
+        .into_iter()
+        .filter_map(|key| existing_object.get(key).cloned().map(|value| (key, value)))
+        .collect::<Vec<_>>();
+    if reserved.is_empty() {
+        return Ok(sanitized);
+    }
+    let mut object = sanitized.as_object().cloned().unwrap_or_default();
+    for (key, value) in reserved {
+        object.insert(key.to_string(), value);
+    }
+    sanitized = Value::Object(object);
+    Ok(sanitized)
+}
+
+fn atomic_evidence_path_validation_disabled() -> bool {
+    matches!(
+        std::env::var("TACHI_DISABLE_PATH_VALIDATION")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
+impl crate::MemoryStore {
+    /// Save through the normal upsert body while atomically preserving and
+    /// mutating reserved reference metadata. The validated mutations and
+    /// metadata patch are separate arguments so caller-controlled metadata
+    /// cannot impersonate an authorized server reference write.
+    pub fn upsert_with_validated_reference_mutations(
+        &mut self,
+        entry: &MemoryEntry,
+        idless_identity: Option<&str>,
+        metadata_patch: &Map<String, Value>,
+        mutations: &[ValidatedReferenceMutation],
+    ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+        self.upsert_with_validated_reference_mutations_and_metadata_removals(
+            entry,
+            idless_identity,
+            metadata_patch,
+            &[],
+            mutations,
+        )
+    }
+
+    /// Trusted metadata-removal counterpart used when a server-side policy
+    /// must atomically delete caller-forged authority while preserving typed
+    /// reference metadata. Reserved reference keys cannot be removed here.
+    pub fn upsert_with_validated_reference_mutations_and_metadata_removals(
+        &mut self,
+        entry: &MemoryEntry,
+        idless_identity: Option<&str>,
+        metadata_patch: &Map<String, Value>,
+        metadata_removals: &[&str],
+        mutations: &[ValidatedReferenceMutation],
+    ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+        if self.path_validation && !atomic_evidence_path_validation_disabled() {
+            let allow_cross = entry
+                .metadata
+                .get("allow_cross_project")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if let Err(error) =
+                crate::path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
+            {
+                eprintln!(
+                    "warning: path-routing validation rejected write db_label={} path={} error={}",
+                    self.db_label, entry.path, error
+                );
+                return Err(MemoryError::InvalidArg(error.to_string()));
+            }
+        }
+
+        let db_label = self.db_label.clone();
+        let vec_available = self.vec_available;
+        let authorization = self.reserved_reference_write.clone();
+        crate::db::retry_memory_locked("upsert_validated_reference_mutations", &db_label, || {
+            let _authorization = crate::db::authorize_reserved_reference_write(&authorization)?;
+            upsert_with_validated_reference_mutations(
+                &mut self.conn,
+                entry,
+                vec_available,
+                idless_identity,
+                metadata_patch,
+                metadata_removals,
+                mutations,
+            )
+        })
+    }
+
+    /// Insert-only counterpart to [`Self::upsert_with_validated_reference_mutations`].
+    /// Construction validates shape only; the server remains responsible for
+    /// deciding whether the source is authorized before calling this method.
+    pub fn insert_if_absent_with_validated_reference_mutations(
+        &mut self,
+        entry: &MemoryEntry,
+        metadata_patch: &Map<String, Value>,
+        mutations: &[ValidatedReferenceMutation],
+    ) -> Result<InsertMemoryResult, MemoryError> {
+        if self.path_validation && !atomic_evidence_path_validation_disabled() {
+            let allow_cross = entry
+                .metadata
+                .get("allow_cross_project")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            crate::path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
+                .map_err(|error| MemoryError::InvalidArg(error.to_string()))?;
+        }
+        let db_label = self.db_label.clone();
+        let vec_available = self.vec_available;
+        let authorization = self.reserved_reference_write.clone();
+        crate::db::retry_memory_locked(
+            "insert_if_absent_validated_reference_mutations",
+            &db_label,
+            || {
+                let _authorization = crate::db::authorize_reserved_reference_write(&authorization)?;
+                insert_if_absent_with_reference_mutations(
+                    &mut self.conn,
+                    entry,
+                    vec_available,
+                    Some(metadata_patch),
+                    mutations,
+                )
+            },
+        )
+    }
+}
+
+fn normalized_append_key(target: ReservedReferenceTarget, value: &Value) -> Option<String> {
+    match target {
+        ReservedReferenceTarget::EvidenceRefsV1 => {
+            let object = value.as_object()?;
+            let reference = normalize_required_bounded(
+                object.get("ref")?.as_str()?.to_string(),
+                "evidence ref",
+                MAX_REFERENCE_BYTES,
+            )
+            .ok()?;
+            normalize_timestamp(
+                object.get("captured_at")?.as_str()?.to_string(),
+                "evidence captured_at",
+            )
+            .ok()?;
+            let target_kind = match object.get("target_kind") {
+                Some(Value::String(kind)) => Some(
+                    normalize_required_lower_bounded(
+                        kind.to_string(),
+                        "evidence target_kind",
+                        MAX_REFERENCE_KIND_BYTES,
+                    )
+                    .ok()?,
+                ),
+                Some(_) => return None,
+                None => None,
+            };
+            serde_json::to_string(&(reference, target_kind)).ok()
+        }
+        ReservedReferenceTarget::SourceRefs => serde_json::to_string(value).ok(),
+    }
+}
+
+fn merge_validated_reference_metadata(
+    tx: &rusqlite::Transaction<'_>,
+    entry_id: &str,
+    metadata_patch: &Map<String, Value>,
+    metadata_removals: &[&str],
+    mutations: &[ValidatedReferenceMutation],
+) -> Result<Value, MemoryError> {
+    let existing_metadata = read_existing_metadata(tx, entry_id)?;
+    let mut merged = existing_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in metadata_patch {
+        if key != "evidence_refs_v1" && key != "source_refs" {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    for key in metadata_removals {
+        if RESERVED_REFERENCE_KEYS.contains(key) {
+            return Err(MemoryError::InvalidArg(format!(
+                "trusted metadata removal cannot delete reserved reference key '{key}'"
+            )));
+        }
+        merged.remove(*key);
+    }
+    for mutation in mutations {
+        match &mutation.operation {
+            ReservedReferenceOperation::Append { target, value } => {
+                let key = target.metadata_key();
+                let refs = match merged.get(key) {
+                    Some(Value::Array(values)) => values.clone(),
+                    Some(_) => {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "cannot append validated reference to malformed existing metadata.{key}"
+                        )))
+                    }
+                    None => Vec::new(),
+                };
+                let append_key = normalized_append_key(*target, value).ok_or_else(|| {
+                    MemoryError::InvalidArg("invalid normalized reference append".into())
+                })?;
+                if !refs.iter().any(|existing| {
+                    normalized_append_key(*target, existing).as_deref() == Some(append_key.as_str())
+                }) {
+                    let mut refs = refs;
+                    refs.push(value.clone());
+                    merged.insert(key.to_string(), Value::Array(refs));
+                }
+            }
+            ReservedReferenceOperation::EnsureEmptyEvidenceRefsV1 => {
+                merged
+                    .entry("evidence_refs_v1".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+            }
+            ReservedReferenceOperation::TombstoneLegacySourceRefs => {
+                merged.insert("source_refs".to_string(), Value::Null);
+            }
+        }
+    }
+    Ok(Value::Object(merged))
+}
+
+fn upsert_with_validated_reference_mutations(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
+    idless_identity: Option<&str>,
+    metadata_patch: &Map<String, Value>,
+    metadata_removals: &[&str],
+    mutations: &[ValidatedReferenceMutation],
+) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+        &tx,
+        entry,
+        vec_available,
+        idless_identity,
+        metadata_patch,
+        metadata_removals,
+        mutations,
+    )?;
+    tx.commit()?;
+    Ok(result)
+}
+
+pub(crate) fn upsert_with_validated_reference_mutations_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+    metadata_patch: &Map<String, Value>,
+    mutations: &[ValidatedReferenceMutation],
+) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+    upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+        tx,
+        entry,
+        vec_available,
+        idless_identity,
+        metadata_patch,
+        &[],
+        mutations,
+    )
+}
+
+fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+    metadata_patch: &Map<String, Value>,
+    metadata_removals: &[&str],
+    mutations: &[ValidatedReferenceMutation],
+) -> Result<(IdlessUpsertResult, Value), MemoryError> {
+    let mut merged_entry = entry.clone();
+    merged_entry.metadata = merge_validated_reference_metadata(
+        tx,
+        &entry.id,
+        metadata_patch,
+        metadata_removals,
+        mutations,
+    )?;
+    let result = upsert_prepared_within_tx(tx, &merged_entry, vec_available, idless_identity)?;
+    Ok((result, merged_entry.metadata))
+}
+
+#[cfg(test)]
+mod reserved_reference_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn entry(id: &str, metadata: Value) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: format!("/audit/reserved-reference/{id}"),
+            summary: "reserved reference boundary".to_string(),
+            text: format!("reserved reference boundary fixture {id}"),
+            importance: 0.7,
+            timestamp: "2026-07-25T00:00:00Z".to_string(),
+            valid_from: "2026-07-25T00:00:00Z".to_string(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    fn open_store() -> (tempfile::TempDir, crate::MemoryStore) {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let store = crate::MemoryStore::open(&path.to_string_lossy()).expect("open memory store");
+        (dir, store)
+    }
+
+    fn append(reference: &str, captured_at: &str) -> ValidatedReferenceMutation {
+        ValidatedReferenceMutation::evidence(reference.to_string(), captured_at.to_string(), None)
+            .expect("typed append")
+    }
+
+    fn refs(entry: &MemoryEntry) -> Vec<&str> {
+        entry.metadata["evidence_refs_v1"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|value| value["ref"].as_str().expect("typed ref"))
+            .collect()
+    }
+
+    #[test]
+    fn ordinary_store_upsert_strips_hostile_reserved_metadata_on_create() {
+        let (_dir, mut store) = open_store();
+        let hostile = entry(
+            "hostile-create",
+            json!({
+                "kept": true,
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": [{ "target_ref": "#998" }]
+            }),
+        );
+        store.upsert(&hostile).expect("ordinary create");
+
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["kept"], json!(true));
+        assert!(stored.metadata.get("evidence_refs_v1").is_none());
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn ordinary_store_upsert_cannot_replace_trusted_evidence_on_update() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("hostile-update", json!({}));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .expect("trusted seed");
+        let hostile = entry(
+            "hostile-update",
+            json!({
+                "kept": true,
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": ["#998"]
+            }),
+        );
+        store.upsert(&hostile).expect("ordinary hostile update");
+
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100"]);
+        assert_eq!(stored.metadata["kept"], json!(true));
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn stale_ordinary_store_upsert_cannot_erase_later_trusted_append() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let mut stale_store = crate::MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let mut trusted_store = crate::MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let clean = entry("stale-writer", json!({ "owner": "ordinary" }));
+        trusted_store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .expect("trusted seed");
+        let mut stale = stale_store.get(&clean.id).unwrap().unwrap();
+        stale.metadata["stale_patch"] = json!(true);
+        trusted_store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#101", "2026-07-25T00:01:00Z")],
+            )
+            .expect("trusted concurrent append");
+
+        stale_store.upsert(&stale).expect("stale ordinary update");
+        let stored = stale_store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100", "#101"]);
+        assert_eq!(stored.metadata["stale_patch"], json!(true));
+    }
+
+    #[test]
+    fn ordinary_store_upsert_preserves_existing_legacy_source_refs() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("legacy-preserve", json!({ "before": true }));
+        store.upsert(&clean).unwrap();
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+                params![
+                    json!({
+                        "before": true,
+                        "source_refs": [{ "target_ref": "#100" }]
+                    })
+                    .to_string(),
+                    clean.id
+                ],
+            )
+            .unwrap();
+        drop(_authorization);
+        let update = entry("legacy-preserve", json!({ "after": true }));
+        store.upsert(&update).unwrap();
+
+        let stored = store.get(&update.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["after"], json!(true));
+        assert_eq!(
+            stored.metadata["source_refs"][0]["target_ref"],
+            json!("#100")
+        );
+    }
+
+    #[test]
+    fn trusted_append_normalizes_before_dedupe_and_validates_timestamp() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("normalized-append", json!({}));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[
+                    append("#100", "2026-07-25T00:00:00Z"),
+                    append(" #100 ", "2026-07-25T08:00:00+08:00"),
+                ],
+            )
+            .expect("trusted normalized append");
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100"]);
+        assert!(ValidatedReferenceMutation::evidence(
+            "#101".to_string(),
+            "not-a-timestamp".to_string(),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn evidence_dedupe_preserves_target_kind_first_timestamp_and_order() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("typed-evidence-identity", json!({}));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[ValidatedReferenceMutation::evidence(
+                    " #100 ".to_string(),
+                    "2026-07-25T08:00:00+08:00".to_string(),
+                    Some(" ISSUE ".to_string()),
+                )
+                .unwrap()],
+            )
+            .expect("seed typed evidence");
+
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[
+                    ValidatedReferenceMutation::evidence(
+                        "#100".to_string(),
+                        "2026-07-25T00:00:00Z".to_string(),
+                        Some("issue".to_string()),
+                    )
+                    .unwrap(),
+                    ValidatedReferenceMutation::evidence(
+                        "#100".to_string(),
+                        "2026-07-25T00:00:00Z".to_string(),
+                        Some("pr".to_string()),
+                    )
+                    .unwrap(),
+                    ValidatedReferenceMutation::evidence(
+                        "#100".to_string(),
+                        "2026-07-26T00:00:00Z".to_string(),
+                        Some("issue".to_string()),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .expect("append semantically distinct evidence");
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(
+            stored.metadata["evidence_refs_v1"],
+            json!([
+                {
+                    "ref": "#100",
+                    "captured_at": "2026-07-25T00:00:00.000Z",
+                    "target_kind": "issue"
+                },
+                {
+                    "ref": "#100",
+                    "captured_at": "2026-07-25T00:00:00.000Z",
+                    "target_kind": "pr"
+                }
+            ]),
+            "ref+kind duplicates keep the first timestamp while kind distinctions survive"
+        );
+    }
+
+    #[test]
+    fn trusted_metadata_removals_cannot_delete_reserved_references() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("metadata-removal-reference-boundary", json!({}));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .expect("seed trusted evidence");
+
+        for key in RESERVED_REFERENCE_KEYS {
+            let error = store
+                .upsert_with_validated_reference_mutations_and_metadata_removals(
+                    &clean,
+                    None,
+                    &Map::new(),
+                    &[key],
+                    &[],
+                )
+                .expect_err("metadata removal must not erase reserved references");
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot delete reserved reference key"),
+                "unexpected {key} removal refusal: {error}"
+            );
+        }
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100"]);
+    }
+
+    #[test]
+    fn precedent_source_append_normalizes_before_dedupe() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("precedent-source-normalized", json!({}));
+        let source = |target_ref: &str, updated_at: &str| {
+            ValidatedReferenceMutation::precedent_source(
+                " SUPPORTS ".to_string(),
+                " COMMENT ".to_string(),
+                target_ref.to_string(),
+                Some(" 42 ".to_string()),
+                Some(updated_at.to_string()),
+                Some(" hash-42 ".to_string()),
+                None,
+                Some(" lines 1-2 ".to_string()),
+            )
+            .expect("precedent source mutation")
+        };
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[
+                    source(" #100 ", "2026-07-25T08:00:00+08:00"),
+                    source("#100", "2026-07-25T00:00:00Z"),
+                ],
+            )
+            .expect("normalized precedent source append");
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        let refs = stored.metadata["source_refs"].as_array().unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0]["relation"], json!("supports"));
+        assert_eq!(refs[0]["target_kind"], json!("comment"));
+        assert_eq!(refs[0]["target_ref"], json!("#100"));
+        assert_eq!(refs[0]["updated_at"], json!("2026-07-25T00:00:00.000Z"));
+    }
+
+    #[test]
+    fn validated_reference_mutations_reject_oversized_and_unknown_fields() {
+        assert!(ValidatedReferenceMutation::evidence(
+            "r".repeat(MAX_REFERENCE_BYTES + 1),
+            "2026-07-25T00:00:00Z".to_string(),
+            Some("issue".to_string()),
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::evidence(
+            "#100".to_string(),
+            "2026-07-25T00:00:00Z".to_string(),
+            Some("invented_kind".to_string()),
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::evidence(
+            "#100".to_string(),
+            "t".repeat(MAX_REFERENCE_TIMESTAMP_BYTES + 1),
+            None,
+        )
+        .is_err());
+
+        let precedent = |relation: &str,
+                         target_kind: &str,
+                         target_ref: String,
+                         comment_id: Option<String>,
+                         updated_at: Option<String>,
+                         body_hash: Option<String>,
+                         commit_sha: Option<String>,
+                         section_or_span: Option<String>| {
+            ValidatedReferenceMutation::precedent_source(
+                relation.to_string(),
+                target_kind.to_string(),
+                target_ref,
+                comment_id,
+                updated_at,
+                body_hash,
+                commit_sha,
+                section_or_span,
+            )
+        };
+        assert!(precedent(
+            "invented_relation",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            None,
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "invented_kind",
+            "#100".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "r".repeat(MAX_REFERENCE_BYTES + 1),
+            Some("42".to_string()),
+            None,
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("c".repeat(MAX_REFERENCE_ID_BYTES + 1)),
+            None,
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            Some("not-a-timestamp".to_string()),
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            None,
+            Some("h".repeat(MAX_REFERENCE_HASH_BYTES + 1)),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            None,
+            Some("hash".to_string()),
+            None,
+            Some("s".repeat(MAX_REFERENCE_SECTION_BYTES + 1)),
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            None,
+            None,
+            Some("hash".to_string()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "comment",
+            "#100".to_string(),
+            Some("42".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+        assert!(precedent(
+            "supports",
+            "commit",
+            "deadbeef".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+
+        assert!(ValidatedReferenceMutation::capture_source(
+            "invented_capture_kind".to_string(),
+            "capture-id".to_string(),
+            None,
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::capture_source(
+            "k".repeat(MAX_REFERENCE_KIND_BYTES + 1),
+            "capture-id".to_string(),
+            None,
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::capture_source(
+            "turn".to_string(),
+            "i".repeat(MAX_REFERENCE_ID_BYTES + 1),
+            None,
+        )
+        .is_err());
+        assert!(ValidatedReferenceMutation::capture_source(
+            "turn".to_string(),
+            "capture-id".to_string(),
+            Some("r".repeat(MAX_REFERENCE_ID_BYTES + 1)),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn insert_if_absent_strips_hostile_reserved_metadata() {
+        let (_dir, mut store) = open_store();
+        let hostile = entry(
+            "insert-hostile",
+            json!({
+                "kept": true,
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": ["#998"]
+            }),
+        );
+        assert_eq!(
+            store.insert_if_absent(&hostile).unwrap(),
+            InsertMemoryResult::Inserted
+        );
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["kept"], json!(true));
+        assert!(stored.metadata.get("evidence_refs_v1").is_none());
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn idless_upsert_strips_hostile_reserved_metadata() {
+        let (_dir, mut store) = open_store();
+        let hostile = entry(
+            "idless-hostile",
+            json!({
+                "kept": true,
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": ["#998"]
+            }),
+        );
+        assert_eq!(
+            store.upsert_idless(&hostile, "hostile-identity").unwrap(),
+            IdlessUpsertResult::Saved
+        );
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["kept"], json!(true));
+        assert!(stored.metadata.get("evidence_refs_v1").is_none());
+        assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn raw_db_upsert_is_not_an_authorized_channel() {
+        let (_dir, mut store) = open_store();
+        let hostile = entry(
+            "raw-hostile",
+            json!({
+                "evidence_refs_v1": [{
+                    "ref": "#999",
+                    "captured_at": "2026-07-25T00:00:00Z"
+                }],
+                "source_refs": ["#998"]
+            }),
+        );
+        let vec_available = store.vec_available;
+        let result = super::upsert(store.connection_mut(), &hostile, vec_available);
+        assert!(
+            result.is_err(),
+            "raw DB upsert bypassed the scoped MemoryStore write channel"
+        );
+        assert!(store.get(&hostile.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn raw_connections_cannot_erase_or_forge_reserved_reference_metadata() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let mut store = crate::MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let clean = entry("raw-guard", json!({ "kept": true }));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .unwrap();
+
+        let erase = store.connection().execute(
+            "UPDATE memories SET metadata = '{}' WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(erase.is_err(), "raw store connection erased reserved refs");
+        let ordinary_patch = store.connection().execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.ordinary_patch', 1)
+             WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(
+            ordinary_patch.is_err(),
+            "raw store connection mutated the protected metadata column"
+        );
+
+        let raw = crate::db::open_raw(&path).unwrap();
+        let raw_ordinary_patch = raw.execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.raw_ordinary_patch', 1)
+             WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(
+            raw_ordinary_patch.is_err(),
+            "open_raw mutated the protected metadata column"
+        );
+        let forge = raw.execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.evidence_refs_v1', json('[{\"ref\":\"#999\"}]'))
+             WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(forge.is_err(), "open_raw forged reserved refs");
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&stored), vec!["#100"]);
+        assert!(stored.metadata.get("ordinary_patch").is_none());
+        assert!(stored.metadata.get("raw_ordinary_patch").is_none());
+    }
+
+    #[test]
+    fn raw_connection_cannot_disable_reserved_reference_guards() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("memory.db");
+        let mut store = crate::MemoryStore::open(&path.to_string_lossy()).unwrap();
+        let clean = entry("raw-guard-ddl", json!({ "kept": true }));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .unwrap();
+
+        let drop_guard = store
+            .connection_mut()
+            .execute_batch("DROP TRIGGER memories_reserved_refs_update_guard");
+        let overwrite_after_drop = store.connection().execute(
+            "UPDATE memories SET metadata = '{}' WHERE id = ?1",
+            params![clean.id],
+        );
+        let after_drop = store.get(&clean.id).unwrap().unwrap();
+        assert!(
+            drop_guard.is_err(),
+            "raw handle dropped the guard and bypassed it: overwrite={overwrite_after_drop:?}, refs={:?}",
+            refs(&after_drop)
+        );
+        assert!(
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER memory_search_generation_after_update")
+                .is_err(),
+            "raw store handle dropped the canonical search-generation trigger"
+        );
+        assert!(
+            overwrite_after_drop.is_err(),
+            "raw overwrite succeeded after rejected DROP"
+        );
+        assert_eq!(refs(&after_drop), vec!["#100"]);
+
+        let replacement = store.connection().execute_batch(
+            "CREATE TEMP TRIGGER memories_reserved_refs_update_guard
+             BEFORE UPDATE OF metadata ON main.memories
+             BEGIN SELECT 1; END;",
+        );
+        assert!(
+            replacement.is_err(),
+            "raw handle created a replacement guard trigger"
+        );
+
+        store
+            .connection()
+            .create_scalar_function(
+                "tachi_reserved_reference_write_enabled",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| Ok(1_i64),
+            )
+            .expect("hostile function replacement demonstrates independent authorizer guard");
+        let spoofed_overwrite = store.connection().execute(
+            "UPDATE memories SET metadata = '{}' WHERE id = ?1",
+            params![clean.id],
+        );
+        assert!(
+            spoofed_overwrite.is_err(),
+            "spoofed authorization function enabled raw metadata overwrite"
+        );
+
+        assert!(
+            store
+                .connection()
+                .execute_batch("ATTACH DATABASE ':memory:' AS bypass")
+                .is_err(),
+            "raw handle attached an unguarded schema"
+        );
+        assert!(
+            store
+                .connection()
+                .execute_batch("PRAGMA writable_schema = ON")
+                .is_err(),
+            "raw handle enabled writable_schema"
+        );
+
+        let migration = crate::db::authorize_schema_migration(&store.reserved_reference_write)
+            .expect("authorize private schema fixture");
+        store
+            .connection()
+            .execute_batch(
+                "CREATE TABLE private_schema_probe(value INTEGER NOT NULL);
+                 CREATE INDEX private_schema_probe_index ON private_schema_probe(value);
+                 CREATE VIEW private_schema_probe_view AS
+                     SELECT value FROM private_schema_probe;",
+            )
+            .expect("private migration scope may install schema objects");
+        drop(migration);
+
+        for (label, sql) in [
+            (
+                "create table",
+                "CREATE TABLE raw_guard_probe(value INTEGER NOT NULL)",
+            ),
+            (
+                "create index",
+                "CREATE INDEX raw_guard_probe_index ON private_schema_probe(value)",
+            ),
+            (
+                "create view",
+                "CREATE VIEW raw_guard_probe_view AS SELECT value FROM private_schema_probe",
+            ),
+            (
+                "alter table",
+                "ALTER TABLE private_schema_probe ADD COLUMN injected INTEGER",
+            ),
+            ("drop table", "DROP TABLE private_schema_probe"),
+            ("drop index", "DROP INDEX private_schema_probe_index"),
+            ("drop view", "DROP VIEW private_schema_probe_view"),
+        ] {
+            assert!(
+                store.connection().execute_batch(sql).is_err(),
+                "public store handle allowed {label}"
+            );
+        }
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET text = 'ordinary update' WHERE id = ?1",
+                params![clean.id],
+            )
+            .expect("ordinary non-protected memory column remains writable");
+
+        let raw = crate::db::open_raw(&path).unwrap();
+        for (label, sql) in [
+            (
+                "create table",
+                "CREATE TABLE open_raw_probe(value INTEGER NOT NULL)",
+            ),
+            (
+                "create index",
+                "CREATE INDEX open_raw_probe_index ON private_schema_probe(value)",
+            ),
+            (
+                "create view",
+                "CREATE VIEW open_raw_probe_view AS SELECT value FROM private_schema_probe",
+            ),
+            (
+                "alter table",
+                "ALTER TABLE private_schema_probe ADD COLUMN open_raw_injected INTEGER",
+            ),
+            ("drop table", "DROP TABLE private_schema_probe"),
+            ("drop index", "DROP INDEX private_schema_probe_index"),
+            ("drop view", "DROP VIEW private_schema_probe_view"),
+        ] {
+            assert!(raw.execute_batch(sql).is_err(), "open_raw allowed {label}");
+        }
+        raw.execute(
+            "UPDATE memories SET text = 'open_raw ordinary update' WHERE id = ?1",
+            params![clean.id],
+        )
+        .expect("open_raw ordinary DML remains available");
+        assert!(
+            raw.execute_batch("ANALYZE").is_err(),
+            "open_raw gained planner-maintenance schema authority"
+        );
+        assert!(
+            raw.execute_batch("DROP TRIGGER memories_reserved_refs_update_guard")
+                .is_err(),
+            "open_raw dropped the canonical guard"
+        );
+        assert!(
+            raw.execute_batch("DROP TRIGGER memory_search_generation_after_update")
+                .is_err(),
+            "open_raw dropped the canonical search-generation trigger"
+        );
+        assert!(
+            raw.execute(
+                "UPDATE memories SET metadata = '{}' WHERE id = ?1",
+                params![clean.id],
+            )
+            .is_err(),
+            "open_raw overwrote protected metadata"
+        );
+
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(stored.text, "open_raw ordinary update");
+        assert_eq!(refs(&stored), vec!["#100"]);
+    }
+
+    #[test]
+    fn raw_triggers_cannot_launder_typed_write_authority() {
+        for (label, create_trigger) in [
+            (
+                "main",
+                "CREATE TRIGGER malicious_memory_update
+                 AFTER UPDATE ON memories
+                 BEGIN
+                   UPDATE memories
+                   SET path = '/wiki/trigger-forged',
+                       metadata = json_set(metadata, '$.source_refs', json('[\"#trigger\"]'))
+                   WHERE id = NEW.id;
+                 END;",
+            ),
+            (
+                "temp-case-variant",
+                "CREATE TEMP TRIGGER MaLiCiOuS_MeMoRy_UpDaTe
+                 AFTER UPDATE ON main.memories
+                 BEGIN
+                   UPDATE memories
+                   SET source = 'wiki',
+                       metadata = json_set(metadata, '$.source_refs', json('[\"#temp-trigger\"]'))
+                   WHERE id = NEW.id;
+                 END;",
+            ),
+        ] {
+            let (_dir, mut store) = open_store();
+            let seed = entry(&format!("trigger-{label}"), json!({ "kept": true }));
+            store.upsert(&seed).expect("seed ordinary row");
+            let baseline = store.get(&seed.id).unwrap().unwrap();
+
+            let create = store.connection().execute_batch(create_trigger);
+            let mut typed_update = baseline.clone();
+            typed_update.text.push_str(" typed update");
+            store
+                .upsert(&typed_update)
+                .expect("legitimate typed update");
+            let stored = store.get(&seed.id).unwrap().unwrap();
+
+            assert!(
+                create.is_err(),
+                "raw {label} trigger inherited typed authority: path={}, source={}, metadata={}",
+                stored.path,
+                stored.source,
+                stored.metadata
+            );
+            assert_eq!(stored.path, baseline.path);
+            assert_eq!(stored.source, baseline.source);
+            assert!(stored.metadata.get("source_refs").is_none());
+        }
+    }
+
+    #[test]
+    fn raw_trigger_drop_is_denied_for_arbitrary_main_and_temp_triggers() {
+        let (dir, store) = open_store();
+        let path = dir.path().join("memory.db");
+        let offline = rusqlite::Connection::open(&path).expect("open offline trigger fixture");
+        offline
+            .execute_batch(
+                "CREATE TRIGGER MixedCaseAuxTrigger
+                 AFTER INSERT ON access_history BEGIN SELECT 1; END;",
+            )
+            .expect("plant persistent trigger after protected open");
+        drop(offline);
+
+        assert!(
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER mixedcaseauxtrigger")
+                .is_err(),
+            "raw handle dropped an arbitrary persistent trigger"
+        );
+        assert!(
+            store
+                .connection()
+                .execute_batch("CREATE TABLE raw_drop_probe(value INTEGER NOT NULL)")
+                .is_err(),
+            "raw handle created an auxiliary table"
+        );
+
+        let temp = rusqlite::Connection::open_in_memory().expect("open temp trigger fixture");
+        temp.execute_batch(
+            "CREATE TABLE auxiliary(value INTEGER);
+             CREATE TEMP TRIGGER TempAuxTrigger
+             AFTER INSERT ON auxiliary BEGIN SELECT 1; END;",
+        )
+        .expect("seed temp trigger before protection");
+        crate::db::install_reserved_reference_authorizer(&temp, None)
+            .expect("install connection authorizer");
+        assert!(
+            temp.execute_batch("DROP TRIGGER temp.TempAuxTrigger")
+                .is_err(),
+            "protected raw handle dropped an arbitrary temp trigger"
+        );
+    }
+
+    #[test]
+    fn raw_auxiliary_trigger_cannot_chain_into_typed_search_write() {
+        let (_dir, mut store) = open_store();
+        let seed = entry("trigger-access-history", json!({ "kept": true }));
+        store.upsert(&seed).expect("seed searchable row");
+
+        let create = store.connection().execute_batch(
+            "CREATE TRIGGER malicious_access_history_insert
+             AFTER INSERT ON access_history
+             BEGIN
+               UPDATE memories
+               SET category = 'wiki', path = '/wiki/aux-trigger-forged'
+               WHERE id = NEW.memory_id;
+             END;",
+        );
+        let results = store
+            .search(
+                "reserved reference boundary fixture trigger access history",
+                None,
+            )
+            .expect("legitimate typed search");
+        assert!(
+            results.iter().any(|result| result.entry.id == seed.id),
+            "fixture must exercise access recording"
+        );
+        let stored = store.get(&seed.id).unwrap().unwrap();
+
+        assert!(
+            create.is_err(),
+            "raw auxiliary trigger inherited typed search authority: path={}, category={}",
+            stored.path,
+            stored.category
+        );
+        assert_eq!(stored.path, seed.path);
+        assert_eq!(stored.category, seed.category);
+    }
+
+    #[test]
+    fn schema_migration_scope_allows_only_canonical_trigger_ddl() {
+        let (_dir, store) = open_store();
+        let typed = crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+            .expect("authorize typed DML");
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TRIGGER typed_dml_ddl_bypass
+                     AFTER UPDATE ON memories BEGIN SELECT 1; END;"
+                )
+                .is_err(),
+            "typed DML scope authorized trigger DDL"
+        );
+        drop(typed);
+
+        let migration = crate::db::authorize_schema_migration(&store.reserved_reference_write)
+            .expect("authorize schema migration");
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TRIGGER migration_ddl_bypass
+                     AFTER UPDATE ON memories BEGIN SELECT 1; END;"
+                )
+                .is_err(),
+            "schema migration scope authorized an unknown trigger"
+        );
+        store
+            .connection()
+            .execute_batch("DROP TRIGGER memory_search_generation_after_update")
+            .expect("schema migration may remove a canonical search-generation trigger");
+        crate::db::search_generation::ensure_search_generation_schema(store.connection())
+            .expect("schema migration may restore canonical search-generation triggers");
+        crate::db::install_reserved_reference_guard(store.connection())
+            .expect("schema migration may reinstall exact canonical guards");
+        drop(migration);
+        crate::db::validate_persistent_trigger_inventory(store.connection(), true)
+            .expect("canonical guard inventory remains exact");
+        crate::db::search_generation(store.connection())
+            .expect("canonical search-generation inventory remains usable");
+    }
+
+    #[test]
+    fn private_authorization_scopes_reset_after_database_errors() {
+        let (_dir, store) = open_store();
+
+        let typed_error = (|| -> Result<(), crate::error::MemoryError> {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)?;
+            store.connection().execute_batch(
+                "CREATE TRIGGER typed_scope_error
+                     AFTER UPDATE ON memories BEGIN SELECT 1; END;",
+            )?;
+            Ok(())
+        })();
+        assert!(
+            typed_error.is_err(),
+            "typed DML scope must not permit trigger DDL"
+        );
+        let typed_retry =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("typed DML scope must release after an error");
+        drop(typed_retry);
+
+        let migration_error = (|| -> Result<(), crate::error::MemoryError> {
+            let _authorization =
+                crate::db::authorize_schema_migration(&store.reserved_reference_write)?;
+            store
+                .connection()
+                .execute_batch("CREATE TABLE memories(id TEXT PRIMARY KEY);")?;
+            Ok(())
+        })();
+        assert!(
+            migration_error.is_err(),
+            "fixture must make schema migration fail"
+        );
+        let migration_retry =
+            crate::db::authorize_schema_migration(&store.reserved_reference_write)
+                .expect("schema migration scope must release after an error");
+        drop(migration_retry);
+
+        let planner_error = (|| -> Result<(), crate::error::MemoryError> {
+            let _authorization =
+                crate::db::authorize_planner_maintenance(&store.reserved_reference_write)?;
+            store
+                .connection()
+                .execute_batch("CREATE TABLE planner_scope_error(value INTEGER);")?;
+            Ok(())
+        })();
+        assert!(
+            planner_error.is_err(),
+            "planner maintenance scope must not permit arbitrary table DDL"
+        );
+        let planner_retry =
+            crate::db::authorize_planner_maintenance(&store.reserved_reference_write)
+                .expect("planner maintenance scope must release after an error");
+        drop(planner_retry);
+
+        assert!(
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TRIGGER authorization_leak
+                     AFTER UPDATE ON memories BEGIN SELECT 1; END;"
+                )
+                .is_err(),
+            "a failed private scope leaked trigger DDL authority"
+        );
+    }
+
+    #[test]
+    fn revision_checked_full_metadata_update_preserves_reserved_references() {
+        let (_dir, mut store) = open_store();
+        let clean = entry("revision-metadata-guard", json!({ "before": true }));
+        store
+            .upsert_with_validated_reference_mutations(
+                &clean,
+                None,
+                &Map::new(),
+                &[append("#100", "2026-07-25T00:00:00Z")],
+            )
+            .unwrap();
+        let stored = store.get(&clean.id).unwrap().unwrap();
+        assert!(store
+            .update_with_revision(
+                &stored.id,
+                "updated content",
+                "updated summary",
+                &stored.source,
+                &json!({ "after": true }),
+                None,
+                stored.revision,
+            )
+            .unwrap());
+
+        let updated = store.get(&clean.id).unwrap().unwrap();
+        assert_eq!(refs(&updated), vec!["#100"]);
+        assert_eq!(updated.metadata["after"], json!(true));
+        assert!(updated.metadata.get("before").is_none());
+    }
+}
+
+/// Insert `entry` only when its id is absent. The existence decision and all
+/// main/FTS/vector writes share the same transaction, so an `Existing` result
+/// never mutates any representation of the winning row.
+pub(crate) fn insert_if_absent(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+) -> Result<InsertMemoryResult, MemoryError> {
+    insert_if_absent_with_reference_mutations(conn, entry, vec_available, None, &[])
+}
+
+fn insert_if_absent_with_reference_mutations(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    metadata_patch: Option<&Map<String, Value>>,
+    mutations: &[ValidatedReferenceMutation],
 ) -> Result<InsertMemoryResult, MemoryError> {
     if entry.id.trim().is_empty() || entry.id.starts_with("anchor:") {
         return Err(MemoryError::InvalidArg(
@@ -393,13 +2142,18 @@ pub fn insert_if_absent(
         .map(normalize_utc_iso)
         .transpose()?;
     let write_time_utc = now_utc_iso();
-    let mut metadata = entry.metadata.clone();
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut metadata = match metadata_patch {
+        Some(metadata_patch) => {
+            merge_validated_reference_metadata(&tx, &entry.id, metadata_patch, &[], mutations)?
+        }
+        None => strip_untrusted_reserved_metadata(&entry.metadata),
+    };
     let path = crate::types::apply_location_relocation(&path, &entry.location, &mut metadata);
     let metadata_json = serde_json::to_string(&metadata)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let e_json = canonical_entities_json(entry)?;
 
-    let tx = conn.transaction()?;
     let rows_changed = tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance, timestamp, valid_from, valid_until,
@@ -468,7 +2222,7 @@ pub fn insert_if_absent(
 
 /// Insert an id-less entry once. A unique modern identity chooses one winner
 /// without rewriting legacy rows that predate the constraint.
-pub fn upsert_idless(
+pub(crate) fn upsert_idless(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
@@ -511,7 +2265,7 @@ fn upsert_with_idless_identity(
     // can run the full upsert (main row + FTS + vectors + idless semantics)
     // inside a caller-owned `BEGIN IMMEDIATE` transaction alongside
     // archive/supersede and the proposal-state CAS.
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let result = upsert_within_tx(&tx, entry, vec_available, idless_identity)?;
     tx.commit()?;
     Ok(result)
@@ -526,6 +2280,17 @@ fn upsert_with_idless_identity(
 /// vectors, idless semantics) is byte-for-byte identical because both paths
 /// execute this same body; only the commit site differs.
 pub(crate) fn upsert_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+) -> Result<IdlessUpsertResult, MemoryError> {
+    let mut sanitized = entry.clone();
+    sanitized.metadata = merge_ordinary_reserved_metadata(tx, &entry.id, &entry.metadata)?;
+    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity)
+}
+
+fn upsert_prepared_within_tx(
     tx: &rusqlite::Transaction<'_>,
     entry: &MemoryEntry,
     vec_available: bool,
@@ -944,6 +2709,52 @@ mod idless_upsert_tests {
         assert_eq!(revision, 1);
         assert_eq!(text, winner);
         assert_eq!(fts_text, winner);
+    }
+
+    #[test]
+    fn insert_if_absent_makes_new_row_available_to_symbolic_trigram_lookup() {
+        let mut store = crate::MemoryStore::open_in_memory().unwrap();
+        let symbolic_fts_exists: bool = store
+            .connection()
+            .query_row(
+                "SELECT EXISTS (\
+                     SELECT 1 FROM sqlite_master \
+                     WHERE type = 'table' AND name = 'memories_symbolic_fts'\
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            symbolic_fts_exists,
+            "this regression must exercise the symbolic trigram index, not its table-scan fallback"
+        );
+        let mut item = entry("insert-only-symbolic");
+        item.text = "insertonlysymbolicneedle".to_string();
+
+        assert_eq!(
+            store.insert_if_absent(&item).unwrap(),
+            InsertMemoryResult::Inserted
+        );
+
+        let hits = search_symbolic_candidates(
+            store.connection(),
+            "insertonlysymbolicneedle",
+            10,
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            hits.iter().any(|entry| entry.id == item.id),
+            "an inserted row must be discoverable through the symbolic trigram path; got {:?}",
+            hits.iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

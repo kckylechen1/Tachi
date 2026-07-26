@@ -3,7 +3,7 @@ use rusqlite::Connection;
 
 #[test]
 fn open_without_label_also_backs_up_before_migration() {
-    // CP1 regression guard: MemoryStore::open goes through the
+    // CP1 regression guard: the unlabelled MemoryStore open path goes through the
     // path_validation=false branch of open_with_label_inner. Before the
     // fix that branch called init_schema directly, skipping backup for
     // every CLI / open_cli_store path. Now both branches route through
@@ -11,24 +11,78 @@ fn open_without_label_also_backs_up_before_migration() {
     // the branches are ever split again.
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("cp1.db");
+    seed_pre_v23_fixture(&db_path);
 
     {
         let conn = Connection::open(&db_path).expect("open");
-        conn.execute_batch("CREATE TABLE legacy(x)")
-            .expect("create");
+        assert_eq!(
+            crate::db::migrations::read_schema_version(&conn).expect("read v22 stamp"),
+            crate::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "fixture must be a genuine pre-v23 database"
+        );
+        crate::db::validate_persistent_trigger_inventory(&conn, false)
+            .expect("pre-v23 fixture has no unexpected trigger definitions");
     }
-    std::fs::write(migration_marker_path(&db_path), "0.0.0:0").expect("stale marker");
 
-    let _store = crate::MemoryStore::open(db_path.to_str().expect("path")).expect("open");
+    // MemoryStore::open itself correctly denies a stamped-v22 migration. Keep
+    // the unlabelled path while passing the explicit production migration
+    // authority required by the pre-open gate.
+    let context = crate::db::DbOpenContext::open_existing_allow("test:cp1-unlabelled-backup");
+    let store = crate::MemoryStore::open_with_context(db_path.to_str().expect("path"), &context)
+        .expect("authorized unlabelled open must migrate v22");
 
-    let backup_exists = std::fs::read_dir(tmp.path())
+    let backup_path = std::fs::read_dir(tmp.path())
         .expect("read dir")
         .filter_map(|e| e.ok())
-        .any(|e| e.file_name().to_string_lossy().contains("migration-bak"));
-    assert!(
-        backup_exists,
-        "MemoryStore::open (path_validation=false) must create a backup before migrating"
+        .map(|e| e.path())
+        .find(|path| path.to_string_lossy().contains("migration-bak"))
+        .expect("unlabelled authorized migration must back up before v23");
+    let backup = Connection::open(&backup_path).expect("open pre-migration backup");
+    assert_eq!(
+        crate::db::migrations::read_schema_version(&backup).expect("read backup version"),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+        "backup must preserve the pre-v23 stamp"
     );
+    crate::db::validate_persistent_trigger_inventory(&backup, false)
+        .expect("backup must preserve the authentic pre-v23 trigger inventory");
+
+    assert_eq!(
+        crate::db::migrations::read_schema_version(store.connection())
+            .expect("read migrated version"),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+        "authorized unlabelled migration must reach the current schema version"
+    );
+    crate::db::validate_persistent_trigger_inventory(store.connection(), true)
+        .expect("migrated database must have the complete current trigger inventory");
+}
+
+fn seed_pre_v23_fixture(db_path: &Path) {
+    // v23 added only these guard triggers and its migration sentinel. Removing
+    // exactly that atomic migration result produces a legitimate v22 database;
+    // a stamped-current database with the guards missing would instead be a
+    // damaged v23 file that the pre-open inventory validation must refuse.
+    let path = db_path.to_str().expect("path");
+    drop(
+        crate::MemoryStore::open_with_context(path, &crate::db::DbOpenContext::create_fresh())
+            .expect("provision current fixture"),
+    );
+
+    let conn = Connection::open(db_path).expect("open v22 fixture");
+    conn.execute_batch(
+        "DROP TRIGGER memories_reserved_refs_insert_guard;
+         DROP TRIGGER memories_reserved_refs_update_guard;
+         DELETE FROM hard_state
+          WHERE namespace = 'migrations'
+            AND key = 'v23_reserved_reference_guards';
+         PRAGMA user_version = 22;",
+    )
+    .expect("remove only v23 migration effects");
+
+    // A matching marker must not suppress backup for an authorized version
+    // migration. This makes the test discriminate the version-migration path
+    // from the ordinary fingerprint-mismatch backup path.
+    let fingerprint = migration_schema_fingerprint(&conn).expect("fingerprint v22 fixture");
+    std::fs::write(migration_marker_path(db_path), fingerprint).expect("write matching marker");
 }
 
 #[test]

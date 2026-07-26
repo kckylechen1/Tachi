@@ -127,6 +127,14 @@ impl From<memcore::MemoryError> for RepairError {
     }
 }
 
+/// Opens a repair connection without initializing or migrating the DB while
+/// registering the default-deny function required by persistent v23 guards.
+pub(crate) fn open_repair_connection(path: impl AsRef<Path>) -> Result<Connection, RepairError> {
+    let conn = Connection::open(path)?;
+    memcore::db::ensure_reserved_reference_write_guard(&conn)?;
+    Ok(conn)
+}
+
 /// Per-DB context handed to each rule.
 pub struct DbContext {
     pub label: String,
@@ -137,7 +145,10 @@ pub struct DbContext {
 impl DbContext {
     pub fn open(entry: &DbEntry) -> Result<Self, RepairError> {
         let path = PathBuf::from(&entry.path);
-        let conn = Connection::open(&path)?;
+        crate::path_utils::manifest_db_leaf_exists(entry).map_err(|error| {
+            RepairError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        })?;
+        let conn = open_repair_connection(&path)?;
         // Match the rest of the codebase: prefer WAL & shorter busy timeout
         // for repair sessions running alongside a possibly-live daemon.
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
@@ -255,7 +266,7 @@ async fn run_repair_sweep(
         manifest_path
     };
     let manifest = Manifest::load_or_empty(&manifest_path);
-    let entries = inventory::select_dbs(&manifest, db_filter.as_deref());
+    let entries = inventory::select_dbs(&manifest, db_filter.as_deref())?;
 
     let mut active_rules = resolve_rules(&rule_filter);
     // R5 (integrity check) is a safety gate: always run it first regardless
@@ -441,7 +452,7 @@ async fn run_fts_cli(
         Manifest::default_path(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
     };
     let manifest = Manifest::load_or_empty(&manifest_path);
-    let entries = inventory::select_dbs(&manifest, Some(db));
+    let entries = inventory::select_dbs(&manifest, Some(db))?;
     if entries.is_empty() {
         return Err(format!("no DB matched '{db}'").into());
     }

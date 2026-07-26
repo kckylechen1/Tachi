@@ -37,6 +37,8 @@ impl MemoryStore {
         path: &str,
         generated_at: &str,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         self.conn.execute(
             r#"UPDATE memories
                SET metadata = json_set(
@@ -58,6 +60,8 @@ impl MemoryStore {
         ids: &[String],
         processed_at: &str,
     ) -> Result<(), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         for id in ids {
             self.conn.execute(
                 r#"UPDATE memories

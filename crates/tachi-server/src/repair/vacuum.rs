@@ -22,12 +22,13 @@ pub async fn run_vacuum_cli(
         Manifest::default_path(&dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
     };
     let manifest = Manifest::load_or_empty(&manifest_path);
-    let entry = match resolve_one(&manifest, db) {
+    let entry = match resolve_one(&manifest, db)? {
         Some(e) => e,
         None => {
             return Err(format!("--db '{db}' did not resolve to exactly one manifest DB").into())
         }
     };
+    crate::path_utils::manifest_db_leaf_exists(&entry)?;
     let path = std::path::PathBuf::from(&entry.path);
 
     if !apply {
@@ -195,5 +196,72 @@ mod tests {
         let result = run_vacuum_cli(&db_arg, false, &app_home, false).await;
 
         assert!(result.is_ok(), "dry-run must not touch locks: {result:?}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn vacuum_refuses_manifest_project_symlink_without_following_foreign_db() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, app_home, foreign_db) = fresh_fixture();
+        let project_link = app_home.join("linked-project.db");
+        std::os::unix::fs::symlink(&foreign_db, &project_link).expect("project symlink");
+        let mut manifest = Manifest::load(&app_home.join("manifest.json")).unwrap();
+        manifest.dbs[0].path = project_link.to_string_lossy().into_owned();
+        manifest.dbs[0].scope_hint = "project:linked".into();
+        manifest.save(&app_home.join("manifest.json")).unwrap();
+        let foreign_metadata = std::fs::symlink_metadata(&foreign_db).unwrap();
+        let foreign_identity = (foreign_metadata.dev(), foreign_metadata.ino());
+        let foreign_before = std::fs::read(&foreign_db).unwrap();
+        let link_metadata = std::fs::symlink_metadata(&project_link).unwrap();
+        let link_identity = (link_metadata.dev(), link_metadata.ino());
+
+        let error = run_vacuum_cli("project:linked", false, &app_home, false)
+            .await
+            .expect_err("manifest project symlink must refuse vacuum");
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "unexpected refusal: {error}"
+        );
+        let link_after = std::fs::symlink_metadata(&project_link).unwrap();
+        assert_eq!((link_after.dev(), link_after.ino()), link_identity);
+        assert_eq!(std::fs::read_link(&project_link).unwrap(), foreign_db);
+        let foreign_after = std::fs::symlink_metadata(&foreign_db).unwrap();
+        assert_eq!((foreign_after.dev(), foreign_after.ino()), foreign_identity);
+        assert_eq!(std::fs::read(&foreign_db).unwrap(), foreign_before);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn vacuum_refuses_dangling_manifest_project_symlink() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (dir, app_home, _db_path) = fresh_fixture();
+        let missing_target = dir.path().join("missing-external.db");
+        let project_link = app_home.join("dangling-project.db");
+        std::os::unix::fs::symlink(&missing_target, &project_link)
+            .expect("dangling project symlink");
+        let mut manifest = Manifest::load(&app_home.join("manifest.json")).unwrap();
+        manifest.dbs[0].path = project_link.to_string_lossy().into_owned();
+        manifest.dbs[0].scope_hint = "project:dangling".into();
+        manifest.save(&app_home.join("manifest.json")).unwrap();
+        let link_metadata = std::fs::symlink_metadata(&project_link).unwrap();
+        let link_identity = (link_metadata.dev(), link_metadata.ino());
+
+        let error = run_vacuum_cli("project:dangling", false, &app_home, false)
+            .await
+            .expect_err("dangling manifest project symlink must refuse vacuum");
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "unexpected refusal: {error}"
+        );
+        let link_after = std::fs::symlink_metadata(&project_link).unwrap();
+        assert_eq!((link_after.dev(), link_after.ino()), link_identity);
+        assert_eq!(std::fs::read_link(&project_link).unwrap(), missing_target);
+        assert!(std::fs::symlink_metadata(&missing_target).is_err());
     }
 }

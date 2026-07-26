@@ -102,7 +102,7 @@ fn inventory_accepts_explicit_absolute_tachi_db_outside_manifest() {
     drop(conn);
 
     let manifest = crate::manifest::Manifest::empty();
-    let entries = select_dbs(&manifest, Some(path.to_str().unwrap()));
+    let entries = select_dbs(&manifest, Some(path.to_str().unwrap())).expect("select explicit DB");
 
     assert_eq!(entries.len(), 1);
     assert_eq!(
@@ -114,6 +114,68 @@ fn inventory_accepts_explicit_absolute_tachi_db_outside_manifest() {
     );
     assert_eq!(entries[0].schema_kind, "tachi");
     assert_eq!(entries[0].last_classification, "explicit_path");
+}
+
+#[test]
+fn inventory_skips_genuinely_absent_project_db() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing_db = dir.path().join("missing-project.db");
+    let mut manifest = crate::manifest::Manifest::empty();
+    manifest.dbs.push(manifest_db_entry(
+        &missing_db,
+        crate::manifest::DbRole::Project,
+    ));
+
+    let entries = select_dbs(&manifest, None).expect("inspect missing project DB");
+
+    assert!(entries.is_empty());
+    assert!(std::fs::symlink_metadata(missing_db).is_err());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn dangling_manifest_project_symlink_refuses_bulk_and_fts_selection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app_home = dir.path().join("home");
+    std::fs::create_dir_all(&app_home).expect("app home");
+    let missing_target = dir.path().join("missing-external.db");
+    let project_link = app_home.join("project.db");
+    std::os::unix::fs::symlink(&missing_target, &project_link).expect("dangling project symlink");
+    let link_identity = repair_file_identity(&project_link);
+    let mut manifest = crate::manifest::Manifest::empty();
+    manifest.dbs.push(manifest_db_entry(
+        &project_link,
+        crate::manifest::DbRole::Project,
+    ));
+    manifest.save(&app_home.join("manifest.json")).unwrap();
+
+    let bulk_error = super::super::run_repair_sweep(
+        None,
+        vec!["R1".to_string()],
+        false,
+        false,
+        true,
+        None,
+        &app_home,
+    )
+    .await
+    .expect_err("bulk repair must refuse dangling manifest project symlink");
+    let fts_error = super::super::run_fts_cli("project:test", false, &app_home, true, false)
+        .await
+        .expect_err("FTS selection must refuse dangling manifest project symlink");
+
+    for error in [bulk_error.to_string(), fts_error.to_string()] {
+        assert!(
+            error.contains("canonical repo DB path") && error.contains("must not be a symlink"),
+            "unexpected refusal: {error}"
+        );
+    }
+    assert_eq!(repair_file_identity(&project_link), link_identity);
+    assert_eq!(std::fs::read_link(&project_link).unwrap(), missing_target);
+    assert!(
+        std::fs::symlink_metadata(&missing_target).is_err(),
+        "repair selection must not create or mutate the dangling target"
+    );
 }
 
 /// Reproduces the `project:quant` failure mode: the parent virtual table

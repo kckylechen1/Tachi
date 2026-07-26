@@ -21,7 +21,7 @@ use crate::manifest::Manifest;
 
 use super::{
     inventory::{label_for, resolve_one, select_dbs},
-    DbContext, Finding, RepairError, RepairExit, RepairRule, RuleReport,
+    open_repair_connection, DbContext, Finding, RepairError, RepairExit, RepairRule, RuleReport,
 };
 
 mod legacy;

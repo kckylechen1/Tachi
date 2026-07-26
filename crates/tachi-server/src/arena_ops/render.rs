@@ -2,7 +2,7 @@ use crate::TachiArenaParams;
 use serde_json::Value;
 
 use super::lane::harness_lane;
-use super::state::{mission_dir, read_arena_artifact, ArenaArtifactRead};
+use super::state::{read_mission_result, ArenaArtifactRead};
 
 pub(super) fn render_arena_md(arena_id: &str, title: &str, objective: &str) -> String {
     format!(
@@ -78,10 +78,7 @@ fn list_lines(items: &[String]) -> String {
 }
 
 fn mission_result_preview(arena_id: &str, mission_id: &str) -> String {
-    let Ok(dir) = mission_dir(arena_id, mission_id) else {
-        return String::new();
-    };
-    let raw = match read_arena_artifact(&dir.join("result.md"), "arena mission result preview") {
+    let raw = match read_mission_result(arena_id, mission_id) {
         ArenaArtifactRead::Present(raw) => raw,
         ArenaArtifactRead::Missing => String::new(),
         ArenaArtifactRead::Error(_) => return "result unreadable".to_string(),

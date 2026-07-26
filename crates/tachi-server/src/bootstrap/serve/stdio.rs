@@ -48,13 +48,14 @@ pub(super) async fn ensure_stdio_proxy_daemon(
 
 pub(super) fn proxy_can_preserve_project_context(
     info: &crate::cli_client::DaemonInfo,
+    app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
     client_project: Option<&str>,
 ) -> bool {
     if crate::cli_client::daemon_matches_requested_dbs(info, global_db_path, project_db_path) {
         if let (Some(project_db_path), Some(_)) = (project_db_path, client_project) {
-            return valid_proxy_project_binding(project_db_path, client_project);
+            return valid_proxy_project_binding(app_home, project_db_path, client_project);
         }
         return true;
     }
@@ -63,15 +64,23 @@ pub(super) fn proxy_can_preserve_project_context(
     }
     match project_db_path {
         None => false,
-        Some(project_db_path) => valid_proxy_project_binding(project_db_path, client_project),
+        Some(project_db_path) => {
+            valid_proxy_project_binding(app_home, project_db_path, client_project)
+        }
     }
 }
 
-fn valid_proxy_project_binding(project_db_path: &Path, client_project: Option<&str>) -> bool {
+fn valid_proxy_project_binding(
+    app_home: &Path,
+    project_db_path: &Path,
+    client_project: Option<&str>,
+) -> bool {
     let Some(project) = client_project else {
         return false;
     };
-    let Ok(bound_path) = crate::MemoryServer::resolve_named_project_db_path(project) else {
+    let Ok(bound_path) =
+        crate::MemoryServer::resolve_named_project_db_path_in_home(project, app_home)
+    else {
         return false;
     };
     paths_match(project_db_path, &bound_path)
@@ -261,6 +270,7 @@ async fn compatible_daemon(
     if crate::cli_client::daemon_version_matches(&info) {
         if proxy_can_preserve_project_context(
             &info,
+            app_home,
             global_db_path,
             project_db_path,
             client_project,
@@ -439,6 +449,7 @@ impl StdioProxyServer {
         .await?;
         if !proxy_can_preserve_project_context(
             &fresh,
+            &self.app_home,
             &self.global_db_path,
             self.project_db_path.as_deref(),
             self.client_project.as_deref(),

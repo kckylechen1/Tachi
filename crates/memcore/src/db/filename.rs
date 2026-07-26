@@ -1068,18 +1068,55 @@ mod tests {
         // directly (not through the seam — the seam never fires for a
         // non-canonical target, by design).
         {
-            let store = crate::MemoryStore::open(legacy_path.to_str().expect("utf8 path"))
+            let mut store = crate::MemoryStore::open(legacy_path.to_str().expect("utf8 path"))
                 .expect("create legacy-named db");
             let now = chrono::Utc::now().to_rfc3339();
-            store
-                .connection()
-                .execute(
-                    "INSERT INTO memories
-                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
-                     VALUES (?1, '/facts/rename-on-open', 'marker', 'rename-on-open marker row', 0.5, ?2, 'fact', 'test', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
-                    rusqlite::params!["rename-on-open-marker", now],
-                )
-                .expect("insert marker row into legacy-named db");
+            let marker_entry = crate::MemoryEntry {
+                id: "rename-on-open-marker".to_string(),
+                path: "/facts/rename-on-open".to_string(),
+                summary: "marker".to_string(),
+                text: "rename-on-open marker row".to_string(),
+                importance: 0.5,
+                timestamp: now.clone(),
+                valid_from: now,
+                valid_until: None,
+                category: "fact".to_string(),
+                topic: "test".to_string(),
+                keywords: vec![],
+                persons: vec![],
+                entities: vec![],
+                location: String::new(),
+                source: "manual".to_string(),
+                scope: "project".to_string(),
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                vector: None,
+                retention_policy: Some("durable".to_string()),
+                domain: None,
+                metadata: serde_json::json!({}),
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
+            };
+            assert_eq!(
+                store
+                    .insert_if_absent(&marker_entry)
+                    .expect("insert durable marker through MemoryStore"),
+                crate::db::InsertMemoryResult::Inserted,
+                "the legacy fixture must create one durable marker, not coalesce or replace one"
+            );
+            let marker_before_migration = store
+                .get(&marker_entry.id)
+                .expect("read durable marker before migration")
+                .expect("durable marker must exist before migration");
+            assert_eq!(marker_before_migration.summary, marker_entry.summary);
+            assert_eq!(
+                marker_before_migration.retention_policy.as_deref(),
+                Some("durable"),
+                "test precondition: marker must be durable before migration"
+            );
         }
         assert!(
             legacy_path.is_file(),
@@ -1105,15 +1142,12 @@ mod tests {
             "the old name must be left behind as a compat symlink"
         );
 
-        let marker: String = migrated_store
-            .connection()
-            .query_row(
-                "SELECT summary FROM memories WHERE id = ?1",
-                rusqlite::params!["rename-on-open-marker"],
-                |row| row.get(0),
-            )
-            .expect("marker row must survive the rename");
-        assert_eq!(marker, "marker");
+        let marker = migrated_store
+            .get("rename-on-open-marker")
+            .expect("read marker through canonical store")
+            .expect("marker must survive the rename");
+        assert_eq!(marker.summary, "marker");
+        assert_eq!(marker.retention_policy.as_deref(), Some("durable"));
 
         // A second open of the canonical path must be a plain, uneventful
         // open — the seam's own `db_path.exists()` early-return — not a
@@ -1121,14 +1155,11 @@ mod tests {
         drop(migrated_store);
         let reopened = crate::MemoryStore::open(canonical_path.to_str().expect("utf8 path"))
             .expect("reopen canonical path");
-        let marker_again: String = reopened
-            .connection()
-            .query_row(
-                "SELECT summary FROM memories WHERE id = ?1",
-                rusqlite::params!["rename-on-open-marker"],
-                |row| row.get(0),
-            )
-            .expect("marker row must still be there on reopen");
-        assert_eq!(marker_again, "marker");
+        let marker_again = reopened
+            .get("rename-on-open-marker")
+            .expect("read marker through reopened canonical store")
+            .expect("marker must still be there on reopen");
+        assert_eq!(marker_again.summary, "marker");
+        assert_eq!(marker_again.retention_policy.as_deref(), Some("durable"));
     }
 }

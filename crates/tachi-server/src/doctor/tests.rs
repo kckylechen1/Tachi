@@ -12,7 +12,7 @@ fn with_env_lock<F: FnOnce()>(f: F) {
 use crate::test_support::EnvRestore;
 
 fn make_healthy_db(path: &Path) {
-    let conn = memcore::db::open_raw(path).unwrap();
+    let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(
             "CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, archived INT DEFAULT 0, domain TEXT);
              INSERT INTO memories (id, text) VALUES ('a','hello');
@@ -24,7 +24,7 @@ fn make_healthy_db(path: &Path) {
 }
 
 fn make_legacy_db(path: &Path) {
-    let conn = memcore::db::open_raw(path).unwrap();
+    let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(
         "CREATE TABLE chunks (id TEXT PRIMARY KEY, text TEXT);
              INSERT INTO chunks VALUES ('c1','legacy');",
@@ -67,7 +67,7 @@ fn classify_healthy() {
 // ── #1041 S4: doctor cross-domain suspect tripwire ──────────────────────────
 
 fn make_engineering_store_with_trading_leak(path: &Path) {
-    let conn = memcore::db::open_raw(path).unwrap();
+    let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(
         "CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, archived INT DEFAULT 0, domain TEXT);
          INSERT INTO memories (id, text, domain) VALUES ('eng-1', 'refactored the save handler', 'engineering');

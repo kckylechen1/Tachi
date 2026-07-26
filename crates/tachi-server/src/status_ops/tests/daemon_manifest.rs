@@ -2,44 +2,39 @@ use super::*;
 
 #[test]
 fn orphan_classification_matches_scheduler_routing() {
-    let _guard = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let saved = std::env::var_os("TACHI_HOME");
-    std::env::set_var("TACHI_HOME", "/tmp/status-tachi-home");
+    let tachi_home = Path::new("/tmp/status-tachi-home");
     let global = PathBuf::from("/tmp/status/global/memory.db");
     let project = PathBuf::from("/tmp/status/project/memory.db");
     let named = PathBuf::from("/tmp/status-tachi-home/projects/sigil/memory.db");
     let agent = PathBuf::from("/tmp/status-tachi-home/agents/main/memory.db");
-    assert!(!is_orphan_entry(
+    assert!(!is_orphan_entry_in_home(
         &entry(DbRole::Global, "global"),
         &global,
         &global,
-        Some(&project)
+        Some(&project),
+        tachi_home,
     ));
-    assert!(!is_orphan_entry(
+    assert!(!is_orphan_entry_in_home(
         &entry(DbRole::Project, "project"),
         &project,
         &global,
-        Some(&project)
+        Some(&project),
+        tachi_home,
     ));
-    assert!(!is_orphan_entry(
+    assert!(!is_orphan_entry_in_home(
         &entry(DbRole::Project, "project:sigil"),
         &named,
         &global,
-        Some(&project)
+        Some(&project),
+        tachi_home,
     ));
-    assert!(!is_orphan_entry(
+    assert!(!is_orphan_entry_in_home(
         &entry(DbRole::Agent, "openclaw-agent:main"),
         &agent,
         &global,
-        Some(&project)
+        Some(&project),
+        tachi_home,
     ));
-    if let Some(v) = saved {
-        std::env::set_var("TACHI_HOME", v);
-    } else {
-        std::env::remove_var("TACHI_HOME");
-    }
 }
 
 #[test]

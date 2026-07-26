@@ -407,11 +407,12 @@ fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlit
     })
 }
 
-pub(crate) fn is_orphan_entry(
+pub(crate) fn is_orphan_entry_in_home(
     entry: &crate::manifest::DbEntry,
     db_path: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
+    tachi_home: &Path,
 ) -> bool {
     if paths_equal(db_path, global_db_path) {
         return false;
@@ -421,7 +422,7 @@ pub(crate) fn is_orphan_entry(
             return false;
         }
     }
-    if crate::path_utils::named_project_for_db_path(db_path).is_some() {
+    if crate::path_utils::named_project_for_db_path_in_home(db_path, tachi_home).is_some() {
         return false;
     }
     !(entry.allow_write

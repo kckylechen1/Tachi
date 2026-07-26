@@ -114,7 +114,19 @@ pub(crate) async fn run_foundry(
                     continue;
                 }
                 let p = PathBuf::from(&entry.path);
-                if !p.exists() {
+                let leaf_exists = match crate::path_utils::manifest_db_leaf_exists(entry) {
+                    Ok(exists) => exists,
+                    Err(error) => {
+                        entries.push(json!({
+                            "db": entry.path,
+                            "label": entry.scope_hint,
+                            "config": null,
+                            "error": error,
+                        }));
+                        continue;
+                    }
+                };
+                if !leaf_exists {
                     entries.push(json!({
                         "db": entry.path,
                         "label": entry.scope_hint,

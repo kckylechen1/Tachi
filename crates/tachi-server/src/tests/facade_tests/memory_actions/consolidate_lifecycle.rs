@@ -2434,7 +2434,8 @@ async fn merge_into_for_project_refuses_conflicting_immutable_supersession_witho
 
 /// The claim itself is not enough: if a later source archive fails, the
 /// transaction must unwind the newly claimed edge as well as any survivor
-/// mutation.  The trigger is a real SQLite downstream-write failure seam.
+/// mutation. A partial unique index is a real SQLite downstream-write failure
+/// seam that does not require privileged trigger DDL.
 #[tokio::test]
 async fn merge_into_for_project_rolls_back_claim_when_archive_fails() {
     let server = make_server();
@@ -2449,22 +2450,45 @@ async fn merge_into_for_project_rolls_back_claim_when_archive_fails() {
         .with_global_store(|store| {
             store.insert_if_absent(&source).map_err(|e| e.to_string())?;
             store.insert_if_absent(&target).map_err(|e| e.to_string())?;
-            store
-                .connection()
-                .execute_batch(
-                    r#"
-                    CREATE TRIGGER inject_lifecycle_archive_failure
-                    BEFORE UPDATE OF archived ON memories
-                    WHEN OLD.id = 'wrapper-rollback-source'
-                    BEGIN
-                        SELECT RAISE(ABORT, 'injected lifecycle archive failure');
-                    END;
-                    "#,
-                )
-                .map_err(|e| e.to_string())?;
             Ok(())
         })
-        .expect("seed merge rollback fixture and archive-failure trigger");
+        .expect("seed merge rollback fixture");
+    let global_db: String = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("resolve global DB path");
+    let offline = rusqlite::Connection::open(global_db).expect("open archive failure fixture");
+    offline
+        .create_scalar_function(
+            "tachi_reserved_reference_write_enabled",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok(0_i64),
+        )
+        .expect("register reserved-reference guard fixture");
+    offline
+        .execute_batch(
+            r#"
+            INSERT INTO memories
+                (id, path, summary, text, archived, created_at, updated_at, timestamp)
+            VALUES
+                ('archive-failure-blocker', '/test/archive-failure-blocker',
+                 'archive failure blocker', 'archive failure blocker', 1,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+            CREATE UNIQUE INDEX "injected lifecycle archive failure"
+                ON memories ((1)) WHERE archived = 1;
+            "#,
+        )
+        .expect("install archive-failure constraint");
+    drop(offline);
 
     let target_before = server
         .with_global_store_read(|store| {

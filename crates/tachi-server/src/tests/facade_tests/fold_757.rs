@@ -80,8 +80,11 @@ async fn gc_action_matches_memory_gc_handler() {
 }
 
 #[tokio::test]
+// `make_server_with_temp_home` deliberately keeps the process-wide HOME
+// override serialized across both awaited doctor scans.
+#[allow(clippy::await_holding_lock)]
 async fn doctor_scan_action_matches_tachi_doctor_scan_handler() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
     let via_facade =
         crate::facade_memory_ops::handle_tachi_memory(&server, fold_params("doctor_scan"))
             .await

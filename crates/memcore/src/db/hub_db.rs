@@ -88,6 +88,16 @@ pub fn hub_list(
     cap_type: Option<&str>,
     enabled_only: bool,
 ) -> Result<Vec<HubCapability>, MemoryError> {
+    hub_list_limited(conn, cap_type, enabled_only, usize::MAX)
+}
+
+/// List hub capabilities with the row ceiling applied by SQLite.
+pub fn hub_list_limited(
+    conn: &Connection,
+    cap_type: Option<&str>,
+    enabled_only: bool,
+    limit: usize,
+) -> Result<Vec<HubCapability>, MemoryError> {
     let mut sql = String::from(
         "SELECT id, type, name, version, description, definition, enabled,
                 review_status, health_status, last_error, last_success_at, last_failure_at,
@@ -104,7 +114,8 @@ pub fn hub_list(
     if enabled_only {
         sql.push_str(" AND enabled = 1");
     }
-    sql.push_str(" ORDER BY name ASC");
+    sql.push_str(" ORDER BY name ASC LIMIT ?");
+    param_values.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
 
     let mut stmt = conn.prepare(&sql)?;
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -122,6 +133,16 @@ pub fn hub_search(
     conn: &Connection,
     query: &str,
     cap_type: Option<&str>,
+) -> Result<Vec<HubCapability>, MemoryError> {
+    hub_search_limited(conn, query, cap_type, usize::MAX)
+}
+
+/// Search hub capabilities with the row ceiling applied by SQLite.
+pub fn hub_search_limited(
+    conn: &Connection,
+    query: &str,
+    cap_type: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<HubCapability>, MemoryError> {
     let terms = query
         .split_whitespace()
@@ -166,7 +187,8 @@ pub fn hub_search(
         sql.push_str(" AND type = ?");
         param_values.push(Box::new(t.to_string()));
     }
-    sql.push_str(" ORDER BY uses DESC, name ASC");
+    sql.push_str(" ORDER BY uses DESC, name ASC LIMIT ?");
+    param_values.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
 
     let mut stmt = conn.prepare(&sql)?;
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -366,5 +388,57 @@ fn hub_cap_from_row(row: &rusqlite::Row) -> HubCapability {
         last_used: row.get(19).unwrap_or(None),
         created_at: row.get(20).unwrap_or_default(),
         updated_at: row.get(21).unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capability(index: usize) -> HubCapability {
+        HubCapability {
+            id: format!("skill:limited-{index}"),
+            cap_type: "skill".to_string(),
+            name: format!("Limited capability {index}"),
+            version: 1,
+            description: "limited capability fixture".to_string(),
+            definition: "{}".to_string(),
+            enabled: true,
+            review_status: "approved".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "direct".to_string(),
+            uses: index as u64,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn hub_list_and_search_apply_limits_inside_sql() {
+        crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
+        let conn = Connection::open_in_memory().expect("open hub test database");
+        crate::db::init_schema(&conn).expect("initialize hub test schema");
+        for index in 0..3 {
+            hub_upsert(&conn, &capability(index)).expect("seed hub capability");
+        }
+
+        assert_eq!(hub_list(&conn, None, true).unwrap().len(), 3);
+        assert_eq!(hub_list_limited(&conn, None, true, 2).unwrap().len(), 2);
+        assert!(hub_list_limited(&conn, None, true, 0).unwrap().is_empty());
+        assert_eq!(
+            hub_search_limited(&conn, "limited capability", None, 1)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

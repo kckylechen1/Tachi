@@ -34,6 +34,10 @@ mod review_digest;
 mod router;
 #[cfg(test)]
 pub(crate) use router::worktree_holder_gate;
+#[cfg(test)]
+pub(crate) use transport::{
+    github_command_runner_call_count, reset_github_command_runner_call_count,
+};
 mod safe_merge;
 mod ship;
 mod transport;

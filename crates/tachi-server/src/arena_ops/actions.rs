@@ -7,10 +7,10 @@ use super::lane::{harness_lane, tracked_worker_prompt};
 use super::render::{render_arena_md, render_prompt_md, render_summary_md};
 use super::state::{
     active_state, arena_dir, arena_root, compact_mission_status, dispatch_response_summary,
-    mission_dir, mission_statuses, new_arena_id, new_mission_id, nonempty_file,
-    read_arena_artifact, read_json_file, read_linked_dispatch_result,
-    refresh_linked_dispatch_fields, update_mission_status, validate_arena_id, validate_mission_id,
-    ArenaArtifactRead,
+    mission_dir, mission_file_nonempty, mission_statuses, new_arena_id, new_mission_id,
+    read_json_file, read_linked_dispatch_result, read_mission_plan, read_mission_result,
+    read_required_mission_status, refresh_linked_dispatch_fields, update_mission_status,
+    validate_arena_id, validate_mission_id, ArenaArtifactRead,
 };
 
 mod board;
@@ -29,6 +29,9 @@ pub(crate) async fn handle_tachi_arena(
     _server: &MemoryServer,
     params: TachiArenaParams,
 ) -> Result<String, String> {
+    // Arena mutates mission state after inspecting worker-controlled documents.
+    // Refuse before dispatch when the descriptor-bound read primitive is absent.
+    crate::dispatch_ops::ensure_descriptor_reads_supported()?;
     match params.action.to_ascii_lowercase().as_str() {
         "open" => handle_open(params),
         "spawn" => handle_spawn(_server, params).await,

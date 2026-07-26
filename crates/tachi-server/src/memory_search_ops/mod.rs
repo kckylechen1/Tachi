@@ -27,12 +27,17 @@ pub(crate) use rerank::{
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;
+pub(crate) use save_memory::handle_save_memory_with_references;
 pub(crate) use save_memory::save_eval_memory;
+pub(crate) use save_memory::{
+    handle_save_memory_with_authorized_reference_mutations,
+    save_eval_memory_with_authorized_reference_mutations,
+};
 pub(crate) use search_helpers::client_project_precedence;
 pub(crate) use search_helpers::explicit_workspace_project;
 pub(crate) use search_helpers::list_available_named_projects;
 pub(crate) use search_helpers::named_project_db_exists;
-pub(crate) use search_helpers::named_project_from_db_path;
+pub(crate) use search_helpers::named_project_from_db_path_in_home;
 pub(crate) use search_helpers::normalize_json_relevance;
 pub(crate) use search_helpers::resolve_effective_named_project;
 pub(crate) use search_helpers::resolve_workspace_named_project;
@@ -43,4 +48,8 @@ pub(crate) use search_memory::invalidate_recall_cache_after_write;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;
 pub(crate) use search_memory::search_memory_rows_with_recall_config;
+#[cfg(test)]
+pub(crate) use search_memory::{
+    RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
+};
 pub(crate) use text_scrub::{contains_secret_like, scrub_secrets, scrub_think_tags};

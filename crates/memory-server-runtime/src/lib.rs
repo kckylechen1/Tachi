@@ -2,6 +2,8 @@ use memcore::MemoryStore;
 use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-support")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
@@ -671,6 +673,24 @@ pub struct DbRuntime {
     pub schema_migration: MigrationAuthority,
 }
 
+/// A request-owned read-only store.
+///
+/// Unlike a [`ReadStorePool`] checkout, this contains no mutex or `RwLock`
+/// guard. Callers may retain it across async boundaries, but it is intentionally
+/// single-owner and exposes the store only through synchronous closures.
+pub struct RequestScopedReadStore {
+    store: MemoryStore,
+}
+
+impl RequestScopedReadStore {
+    pub fn with_store<T>(
+        &mut self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        f(&mut self.store)
+    }
+}
+
 impl DbRuntime {
     /// Enable isolated observation of future global read/write contention.
     ///
@@ -805,6 +825,40 @@ impl DbRuntime {
         f(&mut store)
     }
 
+    /// Open one read-only store for a request that targets a currently
+    /// unattached path. The returned session owns no runtime lock or pool
+    /// checkout, so retaining it across an async await cannot block writers.
+    ///
+    /// A cached attached path deliberately returns `None`: its established
+    /// read-pool routing and LRU touch behavior remain unchanged. The direct
+    /// branch only validates an existing DB and opens it read-only; it never
+    /// initializes, migrates, or attaches the path.
+    pub fn open_unattached_path_store_read_session_with_label(
+        &self,
+        db_path: &Path,
+        label: &str,
+    ) -> Result<Option<RequestScopedReadStore>, String> {
+        let key = project_db_read_cache_key(db_path)?;
+        let attached = self
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .map(|entry| entry.touch())
+            .is_some();
+        if attached {
+            return Ok(None);
+        }
+
+        // This gate protects the open itself just as the existing unattached
+        // read closure does. It is dropped before the request session escapes.
+        let store = {
+            let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
+            open_read_store(&key, label)?
+        };
+        Ok(Some(RequestScopedReadStore { store }))
+    }
+
     fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
         let key = project_db_cache_key(db_path)?;
         if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
@@ -817,11 +871,9 @@ impl DbRuntime {
             return Ok(state);
         }
 
-        let state = ProjectDbState::open(
-            key.clone(),
-            configured_memory_read_pool_size(),
-            &self.schema_migration,
-        )?;
+        let migration = self.named_project_write_migration_authority(&key);
+        let state =
+            ProjectDbState::open(key.clone(), configured_memory_read_pool_size(), &migration)?;
         let mut guard = self
             .attached_project_dbs
             .write()
@@ -832,6 +884,28 @@ impl DbRuntime {
             .or_insert_with(|| AttachedProjectEntry::new(state))
             .state
             .clone())
+    }
+
+    /// Dynamic named-project attachment is a write boundary. Permit exactly
+    /// the v22-to-v23 guard migration when the process otherwise carries
+    /// `Deny`; no other historical or future schema transition gains ambient
+    /// authority. The resulting state is cached, so this authority is used at
+    /// most once per attached library and never escapes as a raw connection.
+    fn named_project_write_migration_authority(&self, db_path: &Path) -> MigrationAuthority {
+        if !matches!(self.schema_migration, MigrationAuthority::Deny) {
+            return self.schema_migration.clone();
+        }
+        if memcore::db::migrations::EXPECTED_SCHEMA_VERSION == 23
+            && matches!(
+                memcore::db::migrations::read_schema_version_at_path(db_path),
+                Ok(22)
+            )
+        {
+            return MigrationAuthority::Allow {
+                approved_by: "runtime:named-project-write:v23-evidence-guards".to_string(),
+            };
+        }
+        MigrationAuthority::Deny
     }
 
     /// Read-then-touch a cached entry's last-used timestamp and clone its
@@ -1137,7 +1211,7 @@ impl DbRuntime {
 }
 
 fn project_db_cache_key(db_path: &Path) -> Result<PathBuf, String> {
-    if db_path.exists() {
+    if project_db_leaf_exists_without_symlink(db_path)? {
         return std::fs::canonicalize(db_path)
             .map_err(|e| format!("canonicalize project db {}: {e}", db_path.display()));
     }
@@ -1155,11 +1229,26 @@ fn project_db_cache_key(db_path: &Path) -> Result<PathBuf, String> {
 }
 
 fn project_db_read_cache_key(db_path: &Path) -> Result<PathBuf, String> {
-    if !db_path.exists() {
+    if !project_db_leaf_exists_without_symlink(db_path)? {
         return Err(format!("project db does not exist: {}", db_path.display()));
     }
     std::fs::canonicalize(db_path)
         .map_err(|e| format!("canonicalize project db {}: {e}", db_path.display()))
+}
+
+fn project_db_leaf_exists_without_symlink(db_path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(db_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "project DB path {} must not be a symlink",
+            db_path.display()
+        )),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "inspect project DB path {}: {error}",
+            db_path.display()
+        )),
+    }
 }
 
 /// Default requests-per-minute limit per session (0 = unlimited)
@@ -1257,14 +1346,15 @@ fn next_recency_tick() -> u64 {
 impl ProjectDbState {
     /// Open a project DB with an explicit #1119 [`MigrationAuthority`]. A
     /// project DB is always opened with [`OpenIntent::OpenExisting`] — it is
-    /// operational data, never a fresh-provisioning target here — so the only
-    /// degree of freedom is whether this process may migrate an older-schema
-    /// project DB forward (`Allow`) or must refuse (`Deny`, fail-closed).
+    /// operational data, never a fresh-provisioning target here. Authority is
+    /// normally the deploy-time value; dynamic named-project write attachment
+    /// may instead pass the exact v22-to-v23 guard-migration authority above.
     pub fn open(
         db_path: PathBuf,
         read_pool_size: usize,
         migration: &MigrationAuthority,
     ) -> Result<Self, String> {
+        project_db_leaf_exists_without_symlink(&db_path)?;
         let db_str = db_path.to_str().ok_or_else(|| {
             format!(
                 "Project DB path contains invalid UTF-8: {}",
@@ -1389,6 +1479,88 @@ fn write_or_recover<'a, T>(
     }
 }
 
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+struct ReadStoreOpenObserver {
+    db_path: PathBuf,
+    count: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "test-support")]
+/// Test instrumentation for physical direct read-store opens at one canonical
+/// DB path. Pool construction does not use this path; the observer therefore
+/// counts precisely the one-off opens used by unattached path reads.
+#[doc(hidden)]
+pub struct ReadStoreOpenObservation {
+    observer: ReadStoreOpenObserver,
+}
+
+#[cfg(feature = "test-support")]
+impl ReadStoreOpenObservation {
+    pub fn count(&self) -> usize {
+        self.observer.count.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for ReadStoreOpenObservation {
+    fn drop(&mut self) {
+        let mut guard = lock_or_recover(read_store_open_observer(), "read_store_open_observer");
+        if guard
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&active.count, &self.observer.count))
+        {
+            *guard = None;
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+/// Install one path-filtered observer for a targeted test. The observation is
+/// process-global because direct unattached opens do not carry `DbRuntime`
+/// state; callers must serialize tests that observe the same process.
+#[doc(hidden)]
+pub fn observe_read_store_opens_for_test(
+    db_path: &Path,
+) -> Result<ReadStoreOpenObservation, String> {
+    let db_path = std::fs::canonicalize(db_path).map_err(|error| {
+        format!(
+            "canonicalize observed read store {}: {error}",
+            db_path.display()
+        )
+    })?;
+    let observer = ReadStoreOpenObserver {
+        db_path,
+        count: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut guard = lock_or_recover(read_store_open_observer(), "read_store_open_observer");
+    if guard.is_some() {
+        return Err("a read-store open observation is already active".to_string());
+    }
+    *guard = Some(observer.clone());
+    Ok(ReadStoreOpenObservation { observer })
+}
+
+#[cfg(feature = "test-support")]
+fn read_store_open_observer() -> &'static StdMutex<Option<ReadStoreOpenObserver>> {
+    static OBSERVER: OnceLock<StdMutex<Option<ReadStoreOpenObserver>>> = OnceLock::new();
+    OBSERVER.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(feature = "test-support")]
+fn record_read_store_open(db_path: &Path) {
+    let observer = lock_or_recover(read_store_open_observer(), "read_store_open_observer").clone();
+    if observer
+        .as_ref()
+        .is_some_and(|observer| observer.db_path == db_path)
+    {
+        observer
+            .expect("observer checked above")
+            .count
+            .fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
     let db_str = db_path.to_str().ok_or_else(|| {
         format!(
@@ -1397,7 +1569,11 @@ fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
             db_path.display()
         )
     })?;
-    MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))
+    let store =
+        MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))?;
+    #[cfg(feature = "test-support")]
+    record_read_store_open(db_path);
+    Ok(store)
 }
 
 fn zero_key(key: &mut [u8; 32]) {
@@ -1445,6 +1621,114 @@ mod tests {
             project_attach_init_gate: Arc::new(StdMutex::new(())),
             schema_migration: MigrationAuthority::Deny,
         }
+    }
+
+    #[cfg(unix)]
+    fn test_file_identity(path: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path).expect("path metadata");
+        (metadata.dev(), metadata.ino())
+    }
+
+    #[cfg(unix)]
+    fn assert_project_symlink_refused_for_runtime_read_and_write(kind: &str) {
+        let temp = unique_temp_dir(&format!("project-symlink-{kind}"));
+        let global_db = temp.join("global.db");
+        drop(
+            MemoryStore::open_with_label(global_db.to_str().expect("global path"), "global")
+                .expect("seed global DB"),
+        );
+        let runtime = test_runtime(global_db);
+        let project_link = temp.join("project.db");
+        let external_db = temp.join("external.db");
+        let external_before = if kind == "wrong" {
+            drop(
+                MemoryStore::open_with_label(
+                    external_db.to_str().expect("external path"),
+                    "foreign",
+                )
+                .expect("seed foreign DB"),
+            );
+            Some((
+                test_file_identity(&external_db),
+                std::fs::read(&external_db).expect("foreign bytes"),
+            ))
+        } else {
+            None
+        };
+        let target = if kind == "loop" {
+            project_link.clone()
+        } else {
+            external_db.clone()
+        };
+        std::os::unix::fs::symlink(&target, &project_link).expect("project symlink");
+        let link_identity = test_file_identity(&project_link);
+
+        let read_result = runtime.with_path_store_read(&project_link, |_store| Ok(()));
+        let write_result = runtime.with_path_store(&project_link, |_store| Ok(()));
+
+        for (operation, result) in [("read", read_result), ("write", write_result)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(()) => panic!("project {kind} symlink must refuse runtime {operation}"),
+            };
+            assert!(
+                error.contains("project DB path") && error.contains("must not be a symlink"),
+                "expected project leaf refusal for {operation}, got: {error}"
+            );
+        }
+        assert_eq!(test_file_identity(&project_link), link_identity);
+        assert_eq!(std::fs::read_link(&project_link).unwrap(), target);
+        if let Some((identity, bytes)) = external_before {
+            assert_eq!(test_file_identity(&external_db), identity);
+            assert_eq!(std::fs::read(&external_db).unwrap(), bytes);
+        } else if kind == "dangling" {
+            assert!(std::fs::symlink_metadata(&external_db).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_wrong_target_symlink_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("wrong");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_dangling_symlink_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("dangling");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_symlink_loop_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("loop");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_global_symlink_remains_supported() {
+        let temp = unique_temp_dir("global-symlink");
+        let external_db = temp.join("external-global.db");
+        drop(
+            MemoryStore::open_with_label(
+                external_db.to_str().expect("external global path"),
+                "global",
+            )
+            .expect("seed external global DB"),
+        );
+        let global_link = temp.join("global.db");
+        std::os::unix::fs::symlink(&external_db, &global_link).expect("global symlink");
+
+        let runtime = test_runtime(global_link);
+
+        runtime
+            .with_global_store_read(|_store| Ok(()))
+            .expect("global symlink read remains supported");
+        runtime
+            .with_global_store(|_store| Ok(()))
+            .expect("global symlink write remains supported");
     }
 
     #[test]

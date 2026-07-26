@@ -19,6 +19,7 @@ use crate::error::MemoryError;
 pub struct RecallCacheHit {
     pub rows_json: String,
     pub reranked: bool,
+    pub generation_fingerprint: String,
 }
 
 /// Aggregate diagnostics for the recall cache (surfaced in status output).
@@ -43,18 +44,19 @@ pub fn recall_cache_get(
 ) -> Result<Option<RecallCacheHit>, MemoryError> {
     let row = conn
         .query_row(
-            "SELECT rows_json, reranked, updated_at FROM recall_cache WHERE cache_id = ?1",
+            "SELECT rows_json, reranked, updated_at, generation_fingerprint FROM recall_cache WHERE cache_id = ?1",
             params![cache_id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, i64>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             },
         )
         .optional()?;
-    let Some((rows_json, reranked, updated_at)) = row else {
+    let Some((rows_json, reranked, updated_at, generation_fingerprint)) = row else {
         return Ok(None);
     };
     if ttl_secs > 0 {
@@ -69,14 +71,17 @@ pub fn recall_cache_get(
     Ok(Some(RecallCacheHit {
         rows_json,
         reranked: reranked != 0,
+        generation_fingerprint,
     }))
 }
 
 /// Insert or refresh a cache entry. `created_at` is preserved across updates so
 /// age-based diagnostics reflect first-seen, while the TTL uses `updated_at`.
+#[allow(clippy::too_many_arguments)]
 pub fn recall_cache_put(
     conn: &Connection,
     cache_id: &str,
+    generation_fingerprint: &str,
     query: &str,
     rows_json: &str,
     result_count: i64,
@@ -85,16 +90,18 @@ pub fn recall_cache_put(
 ) -> Result<(), MemoryError> {
     conn.execute(
         "INSERT INTO recall_cache
-            (cache_id, query, rows_json, result_count, reranked, hit_count, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)
+            (cache_id, generation_fingerprint, query, rows_json, result_count, reranked, hit_count, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?7)
          ON CONFLICT(cache_id) DO UPDATE SET
-            query        = excluded.query,
-            rows_json    = excluded.rows_json,
-            result_count = excluded.result_count,
-            reranked     = excluded.reranked,
-            updated_at   = excluded.updated_at",
+            generation_fingerprint = excluded.generation_fingerprint,
+            query                  = excluded.query,
+            rows_json              = excluded.rows_json,
+            result_count           = excluded.result_count,
+            reranked               = excluded.reranked,
+            updated_at             = excluded.updated_at",
         params![
             cache_id,
+            generation_fingerprint,
             query,
             rows_json,
             result_count,
@@ -188,6 +195,7 @@ mod tests {
         recall_cache_put(
             c,
             "rc:1",
+            "generation-1",
             "q",
             "[{\"id\":\"a\"}]",
             1,
@@ -200,6 +208,7 @@ mod tests {
         let hit = hit.unwrap();
         assert_eq!(hit.rows_json, "[{\"id\":\"a\"}]");
         assert!(!hit.reranked);
+        assert_eq!(hit.generation_fingerprint, "generation-1");
     }
 
     #[test]
@@ -207,7 +216,17 @@ mod tests {
         let s = store();
         let c = &s.conn;
         let written = Utc::now() - chrono::Duration::seconds(3600);
-        recall_cache_put(c, "rc:2", "q", "[]", 0, false, &written.to_rfc3339()).unwrap();
+        recall_cache_put(
+            c,
+            "rc:2",
+            "generation-2",
+            "q",
+            "[]",
+            0,
+            false,
+            &written.to_rfc3339(),
+        )
+        .unwrap();
         // ttl 900s, written 3600s ago → stale → miss
         assert!(recall_cache_get(c, "rc:2", 900, Utc::now())
             .unwrap()
@@ -232,9 +251,29 @@ mod tests {
         let s = store();
         let c = &s.conn;
         let t0 = Utc::now() - chrono::Duration::seconds(10);
-        recall_cache_put(c, "rc:3", "q1", "[1]", 1, false, &t0.to_rfc3339()).unwrap();
+        recall_cache_put(
+            c,
+            "rc:3",
+            "generation-3a",
+            "q1",
+            "[1]",
+            1,
+            false,
+            &t0.to_rfc3339(),
+        )
+        .unwrap();
         let t1 = Utc::now();
-        recall_cache_put(c, "rc:3", "q2", "[1,2]", 2, true, &t1.to_rfc3339()).unwrap();
+        recall_cache_put(
+            c,
+            "rc:3",
+            "generation-3b",
+            "q2",
+            "[1,2]",
+            2,
+            true,
+            &t1.to_rfc3339(),
+        )
+        .unwrap();
         let created: String = c
             .query_row(
                 "SELECT created_at FROM recall_cache WHERE cache_id='rc:3'",
@@ -252,6 +291,7 @@ mod tests {
             .unwrap();
         assert_eq!(hit.rows_json, "[1,2]");
         assert!(hit.reranked, "reranked flag updated on upsert");
+        assert_eq!(hit.generation_fingerprint, "generation-3b");
     }
 
     #[test]
@@ -259,7 +299,17 @@ mod tests {
         let s = store();
         let c = &s.conn;
         let now = Utc::now();
-        recall_cache_put(c, "rc:4", "q", "[1]", 1, false, &now.to_rfc3339()).unwrap();
+        recall_cache_put(
+            c,
+            "rc:4",
+            "generation-4",
+            "q",
+            "[1]",
+            1,
+            false,
+            &now.to_rfc3339(),
+        )
+        .unwrap();
         recall_cache_record_hit(c, "rc:4", &now.to_rfc3339()).unwrap();
         let stats = recall_cache_stats(c).unwrap();
         assert_eq!(stats.entries, 1);
@@ -277,9 +327,29 @@ mod tests {
         let now = Utc::now();
         // A fresh row (well within any TTL) and a stale one — invalidate_all
         // must not TTL-gate; both must be gone afterward.
-        recall_cache_put(c, "rc:fresh", "q", "[1]", 1, false, &now.to_rfc3339()).unwrap();
+        recall_cache_put(
+            c,
+            "rc:fresh",
+            "generation-fresh",
+            "q",
+            "[1]",
+            1,
+            false,
+            &now.to_rfc3339(),
+        )
+        .unwrap();
         let old = now - chrono::Duration::seconds(10_000);
-        recall_cache_put(c, "rc:stale", "q", "[2]", 1, false, &old.to_rfc3339()).unwrap();
+        recall_cache_put(
+            c,
+            "rc:stale",
+            "generation-stale",
+            "q",
+            "[2]",
+            1,
+            false,
+            &old.to_rfc3339(),
+        )
+        .unwrap();
         assert_eq!(recall_cache_stats(c).unwrap().entries, 2);
 
         let removed = recall_cache_invalidate_all(c).unwrap();

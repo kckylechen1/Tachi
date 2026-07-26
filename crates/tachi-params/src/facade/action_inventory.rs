@@ -88,6 +88,10 @@ pub const TACHI_EVENT_ACTIONS: &[&str] = &[
 /// and #1098's `action_effect` completeness test.
 pub const TACHI_WIKI_ACTIONS: &[&str] = &["search", "browse", "read", "write"];
 
+/// `tachi_component` facade actions. The schema inventory is independent from
+/// the server's replay-effect map so the live-router ratchet detects drift.
+pub(super) const TACHI_COMPONENT_ACTIONS: &[&str] = &["list", "show", "check", "plan"];
+
 /// `tachi_skill` facade actions. Single source for `facade::tachi_skill_action_schema`
 /// and #1098's `action_effect` completeness test.
 pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run", "bundle", "loadout", "from_pattern"];

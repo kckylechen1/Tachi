@@ -92,6 +92,117 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
     );
 }
 
+/// A successful replay must resume missing completion derives without
+/// duplicating the canonical outcome, continuity events, or the flow marker.
+/// The GitHub runner is deliberately reset here: completion reconciliation is
+/// local-only and must never replay delivery commands.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn repeated_task_complete_reuses_outcome_and_completion_events() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let flow_id = "flow_20260726T000001Z-completion-replay";
+    let dispatch_id = "20260726T000001Z-completion-replay";
+    seed_dispatch_run(&server, dispatch_id);
+    crate::task_lifecycle::mark_task_dispatch(
+        flow_id,
+        dispatch_id,
+        json!({"agent": "codex", "profile": "codex_builder", "task": "reconcile completion"}),
+    )
+    .expect("mark dispatch");
+
+    let mut params = task_params("complete");
+    params.format = Some("full".to_string());
+    params.task = Some("Reconcile a previously interrupted completion".to_string());
+    params.agent = Some("codex".to_string());
+    params.outcome = Some("success".to_string());
+    params.task_id = None;
+    params.task_type = Some("fix_request".to_string());
+    params.profile = Some("codex_builder".to_string());
+    params.dispatch_id = Some(dispatch_id.to_string());
+    params.flow_id = Some(flow_id.to_string());
+    params.scope = Some("global".to_string());
+    params.evidence_refs = vec!["crates/tachi-server/src/complete_ops/handler.rs".to_string()];
+    params.subagents = vec![crate::tool_params::TachiSubagentEvalParams {
+        role: "reviewer".to_string(),
+        agent: "codex-reviewer".to_string(),
+        ..Default::default()
+    }];
+
+    crate::gh_ops::reset_github_command_runner_call_count();
+    let first_raw = server
+        .tachi_task(rmcp::handler::server::wrapper::Parameters(params.clone()))
+        .await
+        .expect("first task completion");
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let second_raw = server
+        .tachi_task(rmcp::handler::server::wrapper::Parameters(params))
+        .await
+        .expect("replayed task completion");
+    let first: Value = serde_json::from_str(&first_raw).expect("first completion JSON");
+    let second: Value = serde_json::from_str(&second_raw).expect("second completion JSON");
+    assert_ne!(
+        first["task_id"], second["task_id"],
+        "the fixture must cross the wall-clock fallback task-id boundary"
+    );
+    assert_eq!(
+        second["pipeline"]["continuity_events"]["status"],
+        json!("saved"),
+        "an idempotent canonical replay must not surface an event collision: {second:#}"
+    );
+
+    let outcome_rows: i64 = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                    [dispatch_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("count canonical completion outcomes");
+    assert_eq!(
+        outcome_rows, 1,
+        "a replay must reconcile one canonical outcome row"
+    );
+
+    for event_type in ["task.outcome", "subagent.evaluated"] {
+        let events = server
+            .with_global_store_read(|store| {
+                store
+                    .list_tachi_events(&memcore::TachiEventQuery {
+                        event_type: Some(event_type.to_string()),
+                        limit: 10,
+                        ..memcore::TachiEventQuery::default()
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .expect("list replayed completion events");
+        assert_eq!(
+            events.len(),
+            1,
+            "replaying the same completion must retain exactly one {event_type} event"
+        );
+    }
+
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("flow events");
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.contains("\"event\":\"dispatch_completed\""))
+            .count(),
+        1,
+        "replaying a completion must not append another flow completion marker: {events}"
+    );
+    assert_eq!(
+        crate::gh_ops::github_command_runner_call_count(),
+        0,
+        "completion replay must not invoke the GitHub command runner"
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {

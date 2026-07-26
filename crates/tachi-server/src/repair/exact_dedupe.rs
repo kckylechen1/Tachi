@@ -22,8 +22,9 @@ fn target_and_daemon_scope(
         )
         .into());
     }
-    let entry = super::inventory::resolve_one(&manifest, db)
+    let entry = super::inventory::resolve_one(&manifest, db)?
         .ok_or_else(|| format!("--db '{db}' did not resolve to exactly one manifest DB"))?;
+    crate::path_utils::manifest_db_leaf_exists(&entry)?;
     let target = std::fs::canonicalize(entry.path)?;
     let authorized = manifest
         .dbs
@@ -243,21 +244,44 @@ mod tests {
     #[cfg(unix)]
     use crate::db_ownership::set_ownership_inject_for_test;
     use crate::manifest::DbEntry;
-    use rusqlite::params;
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let app_home = dir.path().join(".tachi");
         std::fs::create_dir_all(&app_home).unwrap();
         let db_path = dir.path().join(memcore::MEMORY_DB_FILENAME);
-        let store = MemoryStore::open(&db_path.to_string_lossy()).unwrap();
+        let mut store = MemoryStore::open(&db_path.to_string_lossy()).unwrap();
         for id in ["winner", "loser"] {
             store
-                .connection()
-                .execute(
-                    "INSERT INTO memories(id,path,text,timestamp,created_at,updated_at,retention_policy) VALUES(?1,'/same','duplicate','2026-01-01','2026-01-01','2026-01-01',?2)",
-                    params![id, (id == "winner").then_some("permanent")],
-                )
+                .insert_if_absent(&memcore::MemoryEntry {
+                    id: id.into(),
+                    path: "/same".into(),
+                    summary: String::new(),
+                    text: "duplicate".into(),
+                    importance: 0.7,
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    valid_from: String::new(),
+                    valid_until: None,
+                    category: "fact".into(),
+                    topic: String::new(),
+                    keywords: Vec::new(),
+                    persons: Vec::new(),
+                    entities: Vec::new(),
+                    location: String::new(),
+                    source: "test".into(),
+                    scope: "general".into(),
+                    archived: false,
+                    access_count: 0,
+                    last_access: None,
+                    revision: 1,
+                    vector: None,
+                    retention_policy: (id == "winner").then_some("permanent".into()),
+                    domain: None,
+                    metadata: serde_json::json!({}),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".into(),
+                })
                 .unwrap();
         }
         let identity = std::fs::canonicalize(&db_path)
@@ -267,6 +291,10 @@ mod tests {
         let dedupe_plan = store
             .plan_exact_dedupe(identity.clone(), None, None)
             .unwrap();
+        assert_eq!(
+            dedupe_plan.planned_losers, 1,
+            "fixture must seed one intentional exact duplicate"
+        );
         let plan_path = dir.path().join("plan.json");
         std::fs::write(&plan_path, serde_json::to_vec_pretty(&dedupe_plan).unwrap()).unwrap();
         let mut manifest = Manifest::empty();
@@ -311,6 +339,75 @@ mod tests {
             "unexpected refusal: {error}"
         );
         assert_eq!(std::fs::read(db_path).unwrap(), before);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn plan_refuses_manifest_project_symlink_without_following_foreign_db() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, app_home, foreign_db, _plan_path, _receipt_path) = fixture();
+        let project_link = app_home.join("project-link.db");
+        std::os::unix::fs::symlink(&foreign_db, &project_link).expect("project symlink");
+        let mut manifest = Manifest::load(&app_home.join("manifest.json")).unwrap();
+        manifest.dbs[0].path = project_link.to_string_lossy().into_owned();
+        manifest.dbs[0].scope_hint = "project:linked".into();
+        manifest.save(&app_home.join("manifest.json")).unwrap();
+        let foreign_metadata = std::fs::symlink_metadata(&foreign_db).unwrap();
+        let foreign_identity = (foreign_metadata.dev(), foreign_metadata.ino());
+        let foreign_before = std::fs::read(&foreign_db).unwrap();
+        let link_metadata = std::fs::symlink_metadata(&project_link).unwrap();
+        let link_identity = (link_metadata.dev(), link_metadata.ino());
+        let output = app_home.join("plan-output.json");
+
+        let error = plan("project:linked", &output, None, None, &app_home)
+            .expect_err("manifest project symlink must refuse exact-dedupe");
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "unexpected refusal: {error}"
+        );
+        assert!(!output.exists());
+        let link_after = std::fs::symlink_metadata(&project_link).unwrap();
+        assert_eq!((link_after.dev(), link_after.ino()), link_identity);
+        assert_eq!(std::fs::read_link(&project_link).unwrap(), foreign_db);
+        let foreign_after = std::fs::symlink_metadata(&foreign_db).unwrap();
+        assert_eq!((foreign_after.dev(), foreign_after.ino()), foreign_identity);
+        assert_eq!(std::fs::read(&foreign_db).unwrap(), foreign_before);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn plan_refuses_dangling_manifest_project_symlink() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (dir, app_home, _db_path, _plan_path, _receipt_path) = fixture();
+        let missing_target = dir.path().join("missing-external.db");
+        let project_link = app_home.join("dangling-project.db");
+        std::os::unix::fs::symlink(&missing_target, &project_link)
+            .expect("dangling project symlink");
+        let mut manifest = Manifest::load(&app_home.join("manifest.json")).unwrap();
+        manifest.dbs[0].path = project_link.to_string_lossy().into_owned();
+        manifest.dbs[0].scope_hint = "project:dangling".into();
+        manifest.save(&app_home.join("manifest.json")).unwrap();
+        let link_metadata = std::fs::symlink_metadata(&project_link).unwrap();
+        let link_identity = (link_metadata.dev(), link_metadata.ino());
+        let output = app_home.join("plan-output.json");
+
+        let error = plan("project:dangling", &output, None, None, &app_home)
+            .expect_err("dangling manifest project symlink must refuse exact-dedupe");
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "unexpected refusal: {error}"
+        );
+        assert!(!output.exists());
+        let link_after = std::fs::symlink_metadata(&project_link).unwrap();
+        assert_eq!((link_after.dev(), link_after.ino()), link_identity);
+        assert_eq!(std::fs::read_link(&project_link).unwrap(), missing_target);
+        assert!(std::fs::symlink_metadata(&missing_target).is_err());
     }
 
     #[test]

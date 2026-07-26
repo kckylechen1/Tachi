@@ -1,97 +1,109 @@
 #!/usr/bin/env bash
-# Amp orb setup — runs once on a fresh orb (see ampcode.com/manual/orbs).
-# Provisions the toolchain the cloud build/test/review seat needs for this repo.
-# Keep it fast and idempotent: a warm orb should be close to a no-op.
+# Amp orb readiness check for the cloud build/test/review seat.
 #
-# WHY THIS FILE EXISTS. Without it the orb is a bare machine. A review seat
-# dispatched here on 2026-07-25 found `command -v cargo` → exit 1, could not
-# compile or test anything, and silently fell back to reading the diff and
-# reasoning about it — then produced a verdict that reads like verification.
-# That is worse than failing: a "reviewed" record where nothing was ever built.
-# The whole point of the cloud seat is evidence from outside the agent, so the
-# toolchain is not optional garnish here, it is the deliverable.
-#
-# What CI actually runs (.github/workflows/ci.yml) and therefore what a seat
-# must be able to reproduce:
-#   cargo clippy --workspace --all-targets --locked -- -D warnings
-#   cargo fmt --all --check
-#   cargo nextest run --workspace --locked --profile ci
-#   python3 scripts/check_release_versions.py
+# This hook intentionally provisions nothing. A mutable bootstrap cannot prove
+# what toolchain ran a mission, and a seat that lacks a required tool must fail
+# before it can produce a review-shaped but unverified result. The orb image
+# must provide these command-line tools before this hook is invoked.
 set -euo pipefail
 
-export PATH="${HOME}/.cargo/bin:${HOME}/.local/bin:${PATH}"
+export PATH="${PATH}:${CARGO_HOME:-${HOME}/.cargo}/bin"
+export RUSTUP_AUTO_INSTALL=0
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${REPO_ROOT}"
-
-# ---------------------------------------------------------------------------
-# Rust (stable) + the two components CI gates on
-# ---------------------------------------------------------------------------
-# Check ~/.cargo/bin directly as well: on a fresh non-login shell cargo can be
-# installed but not yet on PATH.
-if ! command -v rustup >/dev/null 2>&1 && [ ! -x "${HOME}/.cargo/bin/rustup" ]; then
-  echo "setup: no rustup; installing the stable toolchain"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal
+readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3 node npm)
+readonly REQUIRED_RUST_COMPONENTS=(clippy rustfmt)
+readonly REQUIRED_CARGO_AUDIT_VERSION="0.22.2"
+setup_source="${BASH_SOURCE[0]}"
+setup_parent="${setup_source%/*}"
+if [[ "${setup_parent}" == "${setup_source}" ]]; then
+  setup_parent=.
 fi
-# shellcheck disable=SC1091
-[ -f "${HOME}/.cargo/env" ] && . "${HOME}/.cargo/env"
-export PATH="${HOME}/.cargo/bin:${PATH}"
+readonly SETUP_DIR="$(cd -- "${setup_parent}" && pwd -P)"
+readonly REPO_ROOT="$(cd -- "${SETUP_DIR}/.." && pwd -P)"
+readonly RUST_TOOLCHAIN_FILE="${REPO_ROOT}/rust-toolchain.toml"
 
-command -v rustup >/dev/null 2>&1 || {
-  echo "setup: FAILED — rustup still unavailable after install" >&2; exit 1; }
+toolchain_channels=()
+toolchain_channel_pattern='^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)"[[:space:]]*$'
+while IFS= read -r line; do
+  if [[ "${line}" =~ ${toolchain_channel_pattern} ]]; then
+    toolchain_channels+=("${BASH_REMATCH[1]}")
+  fi
+done <"${RUST_TOOLCHAIN_FILE}"
 
-rustup toolchain install stable --profile minimal --no-self-update >/dev/null 2>&1 || true
-rustup default stable >/dev/null 2>&1 || true
-# clippy and rustfmt are separate components under --profile minimal, and both
-# are CI gates — a seat without them cannot reproduce the repo's own checks.
-rustup component add clippy rustfmt >/dev/null 2>&1 || true
+if ((${#toolchain_channels[@]} != 1)); then
+  printf 'setup: FAILED -- rust-toolchain.toml must declare exactly one exact semver channel\n' >&2
+  exit 1
+fi
+readonly REQUIRED_RUST_VERSION="${toolchain_channels[0]}"
 
-# ---------------------------------------------------------------------------
-# cargo-nextest — CI runs the suite through it, not through `cargo test`
-# ---------------------------------------------------------------------------
-if ! command -v cargo-nextest >/dev/null 2>&1; then
-  echo "setup: installing cargo-nextest"
-  # Prebuilt tarball first: `cargo install` compiles it from source and costs
-  # minutes on every cold orb.
-  if ! curl -sSfL --proto '=https' --tlsv1.2 \
-        https://get.nexte.st/latest/linux \
-      | tar zxf - -C "${HOME}/.cargo/bin" 2>/dev/null; then
-    echo "setup: nextest tarball unavailable, falling back to cargo install" >&2
-    cargo install cargo-nextest --locked
+missing=()
+
+for tool in "${REQUIRED_TOOLS[@]}"; do
+  if ! command -v "${tool}" >/dev/null 2>&1 || ! "${tool}" --version >/dev/null 2>&1; then
+    missing+=("${tool}")
+  fi
+done
+
+if command -v node >/dev/null 2>&1 && node_version="$(node --version 2>/dev/null)"; then
+  node_major="${node_version#v}"
+  node_major="${node_major%%.*}"
+  if [[ ! "${node_major}" =~ ^[0-9]+$ ]] || ((node_major < 20)); then
+    missing+=("node>=20(found:${node_version:-unknown})")
   fi
 fi
 
-# ---------------------------------------------------------------------------
-# python3 — scripts/check_release_versions.py is part of the CI gate
-# ---------------------------------------------------------------------------
-command -v python3 >/dev/null 2>&1 || {
-  echo "setup: WARNING — no python3; scripts/check_release_versions.py cannot run" >&2; }
+if command -v cargo-audit >/dev/null 2>&1; then
+  cargo_audit_version="$(cargo-audit --version 2>/dev/null || true)"
+  read -r cargo_audit_name cargo_audit_actual _ <<<"${cargo_audit_version}"
+  if [[ "${cargo_audit_name:-}" != cargo-audit || "${cargo_audit_actual:-}" != "${REQUIRED_CARGO_AUDIT_VERSION}" ]]; then
+    missing+=("cargo-audit=${cargo_audit_actual:-unknown}(required:${REQUIRED_CARGO_AUDIT_VERSION})")
+  fi
+fi
 
-# ---------------------------------------------------------------------------
-# Warm the dependency graph so the first real command is not also the first
-# download. `--locked` matches CI and fails loudly if Cargo.lock is stale.
-# ---------------------------------------------------------------------------
-cargo fetch --locked
+if command -v rustc >/dev/null 2>&1; then
+  rustc_version="$(cd -- "${REPO_ROOT}" && rustc --version 2>/dev/null || true)"
+  read -r rustc_name rustc_actual _ <<<"${rustc_version}"
+  if [[ "${rustc_name:-}" != rustc || "${rustc_actual:-}" != "${REQUIRED_RUST_VERSION}" ]]; then
+    missing+=("rustc=${rustc_actual:-unknown}(required:${REQUIRED_RUST_VERSION})")
+  fi
+fi
 
-# ---------------------------------------------------------------------------
-# Fail loudly here rather than mid-mission. A seat that discovers a missing
-# toolchain halfway through will improvise around it; that is exactly the
-# failure this file was written to stop.
-# ---------------------------------------------------------------------------
-missing=""
-for tool in cargo rustc cargo-nextest; do
-  command -v "$tool" >/dev/null 2>&1 || missing="${missing} ${tool}"
-done
-for comp in clippy rustfmt; do
-  rustup component list --installed 2>/dev/null | grep -q "^${comp}" || missing="${missing} ${comp}"
-done
-if [ -n "${missing}" ]; then
-  echo "setup: FAILED — missing after provisioning:${missing}" >&2
-  echo "setup: refusing to report ready; a seat here could not reproduce CI." >&2
+if command -v cargo >/dev/null 2>&1; then
+  cargo_version="$(cd -- "${REPO_ROOT}" && cargo --version 2>/dev/null || true)"
+  read -r cargo_name cargo_actual _ <<<"${cargo_version}"
+  if [[ "${cargo_name:-}" != cargo || "${cargo_actual:-}" != "${REQUIRED_RUST_VERSION}" ]]; then
+    missing+=("cargo=${cargo_actual:-unknown}(required:${REQUIRED_RUST_VERSION})")
+  fi
+
+  for component in "${REQUIRED_RUST_COMPONENTS[@]}"; do
+    case "${component}" in
+      clippy) cargo_subcommand="clippy" ;;
+      rustfmt) cargo_subcommand="fmt" ;;
+      *)
+        missing+=("unknown-rust-component:${component}")
+        continue
+        ;;
+    esac
+
+    if ! (cd -- "${REPO_ROOT}" && cargo "${cargo_subcommand}" --version >/dev/null 2>&1); then
+      missing+=("${component}@rust-${REQUIRED_RUST_VERSION}")
+    fi
+  done
+fi
+
+if ((${#missing[@]})); then
+  printf 'setup: FAILED -- missing or unusable preinstalled CI tools: %s\n' "${missing[*]}" >&2
+  printf 'setup: refusing readiness; provision the orb image, then rerun this check.\n' >&2
   exit 1
 fi
 
-echo "setup: $(rustc --version), $(cargo --version)"
-echo "setup: $(cargo nextest --version 2>/dev/null || echo 'cargo-nextest present')"
-echo "setup: ready — clippy / fmt / nextest / cargo fetch all available"
+printf 'setup: ready -- required command-line tools are usable\n'
+for tool in "${REQUIRED_TOOLS[@]}"; do
+  "${tool}" --version
+done
+for component in "${REQUIRED_RUST_COMPONENTS[@]}"; do
+  case "${component}" in
+    clippy) (cd -- "${REPO_ROOT}" && cargo clippy --version) ;;
+    rustfmt) (cd -- "${REPO_ROOT}" && cargo fmt --version) ;;
+  esac
+done

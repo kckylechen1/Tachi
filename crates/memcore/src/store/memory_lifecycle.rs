@@ -907,6 +907,7 @@ fn apply_lifecycle_proposal_once(
     store: &mut MemoryStore,
     proposal_id: &str,
 ) -> Result<LifecycleApplyResult, MemoryError> {
+    let _authorization = db::authorize_reserved_reference_write(&store.reserved_reference_write)?;
     let tx = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1997,7 +1998,9 @@ mod tests {
 
     #[test]
     fn apply_rolls_back_memory_when_proposal_stamp_aborts() {
-        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let dir = tempfile::tempdir().expect("lifecycle rollback temp dir");
+        let path = dir.path().join("memory.db");
+        let mut store = MemoryStore::open(&path.to_string_lossy()).expect("open test store");
         let source = MemoryEntry {
             id: "rollback-source".into(),
             path: "/scratch/rollback".into(),
@@ -2045,8 +2048,8 @@ mod tests {
             .expect("load approved proposal")
             .expect("approved proposal exists");
 
-        store
-            .conn
+        let offline = rusqlite::Connection::open(&path).expect("open offline trigger fixture");
+        offline
             .execute_batch(
                 "CREATE TRIGGER abort_lifecycle_proposal_stamp
                  BEFORE UPDATE ON hard_state
@@ -2054,6 +2057,7 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'abort lifecycle proposal stamp'); END;",
             )
             .expect("install abort trigger");
+        drop(offline);
         let err = apply_lifecycle_proposal(&mut store, &proposal_id)
             .expect_err("proposal stamp trigger must abort the transaction");
         assert!(err.to_string().contains("abort lifecycle proposal stamp"));

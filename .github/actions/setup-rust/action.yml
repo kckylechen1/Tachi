@@ -1,11 +1,7 @@
 name: Setup Rust
-description: Install a Rust toolchain with rustup on the runner
+description: Install the repository-pinned Rust toolchain with rustup
 
 inputs:
-  toolchain:
-    description: Rust toolchain channel or version
-    required: false
-    default: stable
   targets:
     description: Optional comma or whitespace separated rustup targets to install
     required: false
@@ -17,7 +13,6 @@ runs:
     - name: Install Rust toolchain
       shell: pwsh
       env:
-        INPUT_TOOLCHAIN: ${{ inputs.toolchain }}
         INPUT_TARGETS: ${{ inputs.targets }}
       run: |
         $ErrorActionPreference = "Stop"
@@ -29,17 +24,21 @@ runs:
           throw "rustup is required on the runner but was not found."
         }
 
-        rustup set profile default
-        rustup toolchain install $env:INPUT_TOOLCHAIN --no-self-update
-        rustup default $env:INPUT_TOOLCHAIN
-        rustup component add clippy rustfmt
+        $toolchainFile = Join-Path $env:GITHUB_WORKSPACE "rust-toolchain.toml"
+        $toolchainMatches = @(Select-String -Path $toolchainFile -Pattern '^\s*channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$')
+        if ($toolchainMatches.Count -ne 1) {
+          throw "rust-toolchain.toml must contain exactly one exact semver channel."
+        }
+        $toolchain = $toolchainMatches[0].Matches[0].Groups[1].Value
+
+        rustup toolchain install $toolchain --profile minimal --component clippy --component rustfmt --no-self-update
 
         if ($env:INPUT_TARGETS) {
           $targets = $env:INPUT_TARGETS -split '[,\s]+' | Where-Object { $_ }
           foreach ($target in $targets) {
-            rustup target add --toolchain $env:INPUT_TOOLCHAIN $target
+            rustup target add --toolchain $toolchain $target
           }
         }
 
-        rustc --version
-        cargo --version
+        rustup run $toolchain rustc --version
+        rustup run $toolchain cargo --version
