@@ -471,6 +471,21 @@ pub(crate) fn handle_route_policy_apply(
                     ),
                 }
                 .map_err(|e| format!("CAS profile/card overlay: {e}"))?;
+                // Unreachable while this apply runs inside the IMMEDIATE
+                // transaction opened above: no other writer can land between the
+                // overlay read and this CAS. Kept deliberately, as the guard that
+                // still holds if that coarse lock is ever narrowed.
+                //
+                // It has no test, and that is a considered gap rather than an
+                // oversight: reaching it requires injecting a competing write
+                // INSIDE this transaction, whose only vector is trigger DDL, and
+                // `install_reserved_reference_authorizer` denies every trigger
+                // except one exact ingest-fence shape (memcore/src/db/open.rs).
+                // Three tests that tried it died on `not authorized` before
+                // reaching this line. The reachable half of the contract — a
+                // refused apply mutating neither row — is covered by
+                // `loadout_v3_apply_refuses_live_overlay_drift_without_mutation`.
+                // Do not re-add a DDL-injected test here; it cannot run.
                 if !overlay_cas_ok {
                     return Err(format!(
                         "stale_overlay_version: profile/card overlay {} changed before loadout_evolution proposal {proposal_id} could apply; reload, regenerate, and re-review",
