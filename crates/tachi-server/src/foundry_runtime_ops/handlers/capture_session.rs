@@ -6,13 +6,13 @@ use super::super::maintenance::enqueue_capture_maintenance_jobs;
 use super::super::recall::parse_session_capture_response;
 use super::bracket::{extract_bracket_self_evolution_notes, matches_agent_tag};
 use super::target::resolve_capture_target;
-use crate::DbScope;
 use crate::server_state::MemoryServer;
 use crate::tool_params::CaptureSessionParams;
+use crate::DbScope;
 use chrono::{Duration, Utc};
 use memcore::MemoryEntry;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// #1301 provisional capture policy. The named constant is deliberately kept
 /// beside the classifier so archive policy never grows a second flat age.
@@ -1644,8 +1644,8 @@ fn bracket_capture_is_suppressed(
 #[cfg(test)]
 mod affinity_tests {
     use super::resolve_capture_write_target;
-    use crate::DbScope;
     use crate::server_state::MemoryServer;
+    use crate::DbScope;
     use memcore::MemoryEntry;
     use serde_json::json;
 
@@ -1971,10 +1971,10 @@ mod affinity_tests {
 #[cfg(test)]
 mod handler_tests {
     use super::{
-        CAPTURE_EPHEMERAL_TTL_DAYS, CAPTURE_MANIFEST_COMPLETED_RETENTION_POLICY,
-        CAPTURE_MANIFEST_NAMESPACE, CAPTURE_MANIFEST_STAGING_POLICY,
-        CAPTURE_RETENTION_POLICY_VERSION, build_capture_replay_key,
-        extract_bracket_self_evolution_notes, handle_capture_session, set_capture_failpoint,
+        build_capture_replay_key, extract_bracket_self_evolution_notes, handle_capture_session,
+        set_capture_failpoint, CAPTURE_EPHEMERAL_TTL_DAYS,
+        CAPTURE_MANIFEST_COMPLETED_RETENTION_POLICY, CAPTURE_MANIFEST_NAMESPACE,
+        CAPTURE_MANIFEST_STAGING_POLICY, CAPTURE_RETENTION_POLICY_VERSION,
     };
     use crate::server_state::MemoryServer;
     use crate::tool_params::{CaptureSessionParams, Message};
@@ -1989,7 +1989,7 @@ mod handler_tests {
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
         tokio::task::JoinHandle<()>,
     ) {
-        use axum::{Json, Router, routing::post};
+        use axum::{routing::post, Json, Router};
 
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let handler_calls = calls.clone();
@@ -2665,21 +2665,18 @@ mod handler_tests {
                 assert_eq!(manifest["completed"], true);
                 assert_eq!(manifest["artifacts"][0]["entry"], serde_json::Value::Null);
                 let receipt = &manifest["destination_receipts"][0];
-                assert!(
-                    receipt["memory_ids"]
-                        .as_array()
-                        .expect("receipt memory ids")
-                        .iter()
-                        .any(|memory_id| memory_id == id)
-                );
+                assert!(receipt["memory_ids"]
+                    .as_array()
+                    .expect("receipt memory ids")
+                    .iter()
+                    .any(|memory_id| memory_id == id));
                 for job_id in receipt["maintenance_job_ids"]
                     .as_array()
                     .expect("receipt job ids")
                 {
-                    assert!(
-                        jobs.iter()
-                            .any(|(found, _)| Some(found.as_str()) == job_id.as_str())
-                    );
+                    assert!(jobs
+                        .iter()
+                        .any(|(found, _)| Some(found.as_str()) == job_id.as_str()));
                 }
                 assert!(events.iter().any(|event| {
                     Some(event.id.as_str()) == receipt["session_event_id"].as_str()
@@ -2945,7 +2942,7 @@ mod handler_tests {
             .unwrap_or_else(|e| e.into_inner());
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async move {
-            use axum::{Json, Router, routing::post};
+            use axum::{routing::post, Json, Router};
 
             // Responds to every /v1/embeddings call with exactly ONE
             // embedding, regardless of how many inputs were requested — the

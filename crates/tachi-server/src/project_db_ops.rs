@@ -1663,10 +1663,8 @@ mod resolve_or_register_workspace_root_tests {
                     .expect("register");
             }
 
-            let manifest = crate::manifest::Manifest::load(
-                &root.join("manifest.json"),
-            )
-            .expect("manifest");
+            let manifest =
+                crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
             let mut scopes = manifest
                 .dbs
                 .iter()

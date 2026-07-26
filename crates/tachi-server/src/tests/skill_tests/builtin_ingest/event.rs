@@ -2,16 +2,16 @@ use super::*;
 use crate::server_state::MemoryServer;
 use crate::tool_params::{IngestEventParams, Message};
 use axum::{
-    Json, Router,
     response::{IntoResponse, Response},
     routing::post,
+    Json, Router,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::Value;
 use std::sync::Arc;
 use tachi_llm::{
-    LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
     llm::{ChatLaneConfig, ProviderRuntimeConfig},
+    LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
 };
 
 const FACT_RESPONSE: &str = r#"[{"text":"The ingest durability test records one stable fact after reopening the database.","topic":"ingest durability","keywords":["ingest","durability"],"entities":["Tachi"],"scope":"general","importance":0.8}]"#;

@@ -1,7 +1,7 @@
-use super::{DailyStageReport, ManifestDbTarget, TruthMaintenanceRoute, load_manifest_targets};
+use super::{load_manifest_targets, DailyStageReport, ManifestDbTarget, TruthMaintenanceRoute};
 use crate::server_state::{DbScope, MemoryServer};
 use memcore::MemoryStore;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 struct TruthMaintenanceScope {
     runnable: Vec<ManifestDbTarget>,

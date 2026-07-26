@@ -166,7 +166,10 @@ fn tachi_home_detects_workspace_data_tachi_layout() {
 fn named_project_from_path_accepts_canonical_layout() {
     let home = Path::new("/tmp/tachi-test-home");
     let path = home.join("projects/sigil/memory.db");
-    assert_eq!(named_project_from_path_in_home(&path, home).as_deref(), Some("sigil"));
+    assert_eq!(
+        named_project_from_path_in_home(&path, home).as_deref(),
+        Some("sigil")
+    );
 }
 
 #[test]
@@ -684,8 +687,8 @@ fn plan_c_genuinely_absent_project_resolves_to_fresh_gen4_path() {
         std::fs::create_dir(&repo).expect("repo");
 
         let gen4 = plan_c_dir_name_from_root(&repo).expect("gen-4 identity");
-        let resolved = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
-            .expect("fresh registration path");
+        let resolved =
+            plan_c_alias_db_for_root_in_home(&repo, &tachi_home).expect("fresh registration path");
         assert_eq!(resolved, plan_c_global_db_path(&gen4));
         assert!(matches!(
             inspect_plan_c_alias_in_home(&repo.join(".tachi/tachi-memory.db"), &repo, &tachi_home),

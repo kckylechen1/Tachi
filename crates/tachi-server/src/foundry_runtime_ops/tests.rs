@@ -1,8 +1,8 @@
+use super::capture::persist_capture_entry;
 use super::handlers::{
     build_bracket_self_evolution_id, classify_bracket_self_evolution,
     extract_bracket_self_evolution_notes, matches_agent_tag, resolve_capture_target,
 };
-use super::capture::persist_capture_entry;
 use super::maintenance::memory_claim_signature;
 use super::recall::{parse_compact_context_response, parse_session_capture_response};
 use super::{FOUNDRY_DISTILL_SOURCE, FOUNDRY_RELATED_LIMIT};

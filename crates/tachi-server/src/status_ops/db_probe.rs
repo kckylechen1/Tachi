@@ -4,16 +4,16 @@
 //! Extracted from `status_ops::mod` (no behavior change).
 
 use super::{
-    EXPECTED_EMBEDDING_DIM, EnrichmentFailureSummary, LatestFailedJob, LatestFoundryJob,
-    NamespaceHealth, RelationCount, STUCK_THRESHOLD_SECS, latest_failed_job, latest_foundry_job,
-    latest_foundry_job_with_statuses, paths_equal,
+    latest_failed_job, latest_foundry_job, latest_foundry_job_with_statuses, paths_equal,
+    EnrichmentFailureSummary, LatestFailedJob, LatestFoundryJob, NamespaceHealth, RelationCount,
+    EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
 };
 use crate::manifest::DbRole;
 use chrono::{DateTime, Utc};
 pub(crate) use memcore::RECALL_CACHE_SQL_WHERE as RECALL_CACHE_WHERE;
 use memcore::{
-    ContinuityMetrics, JobStatusHistogram, MemoryStore, VectorBackfillScope, job_status_histogram,
-    vector_backfill::vector_backfill_eligible_where,
+    job_status_histogram, vector_backfill::vector_backfill_eligible_where, ContinuityMetrics,
+    JobStatusHistogram, MemoryStore, VectorBackfillScope,
 };
 use rusqlite::OptionalExtension;
 use serde_json::json;

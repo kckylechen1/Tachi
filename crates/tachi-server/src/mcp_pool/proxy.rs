@@ -1,6 +1,6 @@
 use super::{CircuitProbeDecision, CircuitState};
 use crate::server_state::MemoryServer;
-use crate::shared_defs::{DeadLetter, push_dead_letter_with_limits};
+use crate::shared_defs::{push_dead_letter_with_limits, DeadLetter};
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use serde_json::json;
@@ -696,11 +696,9 @@ mod auto_ingest_response_tests {
             .expect("structured auto-ingest persistence warning");
         assert_eq!(warnings.len(), 1, "exactly one persistence warning");
         assert_eq!(warnings[0]["code"], "auto_ingest_not_persisted");
-        assert!(
-            warnings[0]["reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("injected auto-ingest stage failure"))
-        );
+        assert!(warnings[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("injected auto-ingest stage failure")));
         let status: serde_json::Value = serde_json::from_str(
             &crate::pipeline_ops::handle_get_pipeline_status(&server)
                 .await

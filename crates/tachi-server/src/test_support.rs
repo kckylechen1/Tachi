@@ -268,7 +268,7 @@ pub(crate) fn spawn_opencode_probe_server() -> (String, std::thread::JoinHandle<
 
 #[cfg(test)]
 mod tests {
-    use super::{CwdRestore, EnvRestore, non_skipped_fixture_base, with_tachi_home};
+    use super::{non_skipped_fixture_base, with_tachi_home, CwdRestore, EnvRestore};
     use std::path::Path;
 
     /// #1096 leaf-2a round-2 (codex C5): pins the panic-safety claim in

@@ -31,13 +31,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::time::{Instant, MissedTickBehavior, interval};
+use tokio::time::{interval, Instant, MissedTickBehavior};
 
-use memcore::{MemoryStore, PersistedFoundryJob, load_pending_foundry_jobs};
+use memcore::{load_pending_foundry_jobs, MemoryStore, PersistedFoundryJob};
 
-use crate::DbScope;
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
 use crate::manifest::{DbRole, Manifest};
+use crate::DbScope;
 
 mod routing;
 mod scheduler;
@@ -46,8 +46,8 @@ mod worker;
 
 use routing::{classify_route_in_home, manifest_label_for, path_hash};
 pub use scheduler::FoundryScheduler;
-pub use types::{MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL, WorkerMetrics};
 use types::{Route, WorkerHandle};
+pub use types::{WorkerMetrics, MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
 use worker::run_db_worker;
 
 #[cfg(test)]

@@ -11,12 +11,12 @@ mod tests;
 pub(crate) use alias::validate_project_db_relpath;
 pub(crate) use alias::{
     canonical_db_leaf_exists_without_symlink, plan_c_alias_db_for_root_in_home,
-    plan_c_dir_name_from_root,
-    plan_c_existing_alias_db_for_root_in_home, plan_c_existing_named_alias_db_in_home,
-    plan_c_global_db_path, plan_c_global_db_path_existing, plan_c_global_db_path_existing_in_home,
-    plan_c_global_db_path_in_home, plan_c_legacy_dir_name_from_root,
-    plan_c_previous_dir_name_from_root, plan_c_previous_raw_dir_name_from_root,
-    plan_c_project_root_from_local_db, resolve_project_db_path,
+    plan_c_dir_name_from_root, plan_c_existing_alias_db_for_root_in_home,
+    plan_c_existing_named_alias_db_in_home, plan_c_global_db_path, plan_c_global_db_path_existing,
+    plan_c_global_db_path_existing_in_home, plan_c_global_db_path_in_home,
+    plan_c_legacy_dir_name_from_root, plan_c_previous_dir_name_from_root,
+    plan_c_previous_raw_dir_name_from_root, plan_c_project_root_from_local_db,
+    resolve_project_db_path,
 };
 
 /// Return whether a persisted project identity is safe to address without
@@ -67,12 +67,13 @@ pub(crate) use named::{
 };
 pub(crate) use symlink::{
     ensure_plan_c_symlink, ensure_plan_c_symlink_in_home, inspect_plan_c_alias_for_local_db,
-    inspect_plan_c_alias_for_local_db_in_home,
-    inspect_plan_c_alias_in_home,
+    inspect_plan_c_alias_for_local_db_in_home, inspect_plan_c_alias_in_home,
 };
 #[cfg(all(test, unix))]
 pub(crate) use symlink::{install_plan_c_symlink_hook_for_test, PlanCSymlinkHookGuard};
-pub(crate) use types::{PlanCAliasInspection, PlanCAliasIntegrity, PlanCLinkOutcome, PlanCSplitBrain};
+pub(crate) use types::{
+    PlanCAliasInspection, PlanCAliasIntegrity, PlanCLinkOutcome, PlanCSplitBrain,
+};
 
 /// Return the process-cached root of the current Git worktree, when available.
 pub(crate) fn cached_git_root() -> Option<&'static std::path::PathBuf> {

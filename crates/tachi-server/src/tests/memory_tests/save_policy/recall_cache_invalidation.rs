@@ -17,14 +17,14 @@ use super::*;
 use crate::facade_memory_ops::consolidate_ops::merge_into_for_project;
 use crate::memory_ops::{handle_archive_memory, handle_delete_memory, handle_memory_gc};
 use crate::memory_search_ops::{
-    RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride, handle_save_memory,
-    handle_search_memory, handle_search_memory_with_access,
+    handle_save_memory, handle_search_memory, handle_search_memory_with_access,
+    RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
 };
 use crate::test_support::EnvRestore;
 use crate::tool_params::{ArchiveMemoryParams, DeleteMemoryParams};
 use serde_json::Value;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 enum MockEmbeddingOutcome {
@@ -522,11 +522,9 @@ async fn exact_duplicate_save_does_not_bust_the_recall_cache() {
         .await
         .expect("first save");
     let first_json: Value = serde_json::from_str(&first).expect("first json");
-    assert!(
-        first_json["status"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("saved"))
-    );
+    assert!(first_json["status"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("saved")));
 
     // Warm a recall-cache row directly (bypassing an actual search call, so
     // this test only depends on the cache table, not on unrelated ranking
@@ -1228,12 +1226,10 @@ async fn mutation_after_cache_lookup_is_observed_by_generation_validation() {
         .as_str()
         .expect("first id")
         .to_string();
-    assert!(
-        search_rows(&reader, &needle)
-            .await
-            .iter()
-            .any(|row| row["id"] == first_id)
-    );
+    assert!(search_rows(&reader, &needle)
+        .await
+        .iter()
+        .any(|row| row["id"] == first_id));
 
     let mut second = writer
         .with_global_store_read(|store| {

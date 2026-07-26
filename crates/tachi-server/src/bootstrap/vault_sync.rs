@@ -640,18 +640,14 @@ mod tests {
 
         let target = open_cli_store_read_only(&target_db).expect("target store");
         assert!(target.vault_get_config().expect("target config").is_some());
-        assert!(
-            target
-                .vault_get_entry("VOYAGE_API_KEY_1")
-                .expect("target entry")
-                .is_some()
-        );
-        assert!(
-            target
-                .vault_get_rotation("VOYAGE_API_KEY")
-                .expect("target rotation")
-                .is_some()
-        );
+        assert!(target
+            .vault_get_entry("VOYAGE_API_KEY_1")
+            .expect("target entry")
+            .is_some());
+        assert!(target
+            .vault_get_rotation("VOYAGE_API_KEY")
+            .expect("target rotation")
+            .is_some());
 
         let _ = std::fs::remove_file(source_db);
         let _ = std::fs::remove_file(target_db);

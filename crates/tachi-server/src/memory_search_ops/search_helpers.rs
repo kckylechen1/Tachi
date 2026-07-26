@@ -1,7 +1,7 @@
 use crate::DbScope;
 use memcore::MemoryEntry;
-use serde_json::{Value, json};
-use std::collections::{HashMap, hash_map::Entry};
+use serde_json::{json, Value};
+use std::collections::{hash_map::Entry, HashMap};
 
 pub(crate) fn normalize_search_relevance(results: &mut [(memcore::SearchResult, DbScope)]) {
     let max_score = results

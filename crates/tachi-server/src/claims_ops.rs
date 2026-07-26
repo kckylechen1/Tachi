@@ -16,7 +16,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use icu_properties::{CodePointMapData, props::GeneralCategory};
+use icu_properties::{props::GeneralCategory, CodePointMapData};
 use memcore::{
     AgentIdentity, ClaimSelector, NewSessionClaim, NewWorkClaim, ReleaseOutcome, SessionClaim,
     UnverifiedAdmissionState, WorkClaimHandoffRequest, WorkClaimMode,
