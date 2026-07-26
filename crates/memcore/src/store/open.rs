@@ -693,6 +693,7 @@ mod exact_dedupe_open_tests {
             archived: false,
             access_count: 0,
             last_access: None,
+            last_use_at: None,
             revision: 1,
             metadata: serde_json::json!({}),
             vector: None,

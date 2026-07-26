@@ -27,6 +27,7 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
                     archived: false,
                     access_count: 0,
                     last_access: None,
+                    last_use_at: None,
                     revision: 1,
                     metadata: json!({}),
                     vector: None,

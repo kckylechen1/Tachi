@@ -32,6 +32,7 @@ fn board_entry(id: &str, state: &str, timestamp: String) -> memcore::MemoryEntry
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         vector: None,
         metadata: json!({

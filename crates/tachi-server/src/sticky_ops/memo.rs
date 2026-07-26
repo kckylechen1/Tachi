@@ -102,6 +102,7 @@ pub(super) fn sticky_to_memory_entry(server: &MemoryServer, memo: &StickyMemo) -
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         vector: None,
         metadata,

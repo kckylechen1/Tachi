@@ -461,6 +461,63 @@ fn migration_adds_lifecycle_columns_when_rebuilding_legacy_table() {
     assert_eq!(tier, "raw");
 }
 
+/// tachi#1446. `last_use_at` has to survive two hazards that a plain
+/// `ensure_column` does not cover on its own, and both of them are silent:
+///
+/// 1. `migrate_enum_constraints` DROPs and re-CREATEs `memories` from a literal
+///    column list in `rebuild_memories_with_check_constraints`, and it runs
+///    *after* the `ensure_column` block in `init_schema_inner`. A column added
+///    only by `ensure_column` would be created and then destroyed inside one
+///    `init_schema` call, leaving `MEMORY_SELECT_COLUMNS` naming a column that
+///    does not exist.
+/// 2. That rebuild fires on **fresh** databases too, not just legacy ones —
+///    `BASE_SCHEMA_SQL` creates `memories` without the CHECK constraints, so
+///    the shape probe misses on first open.
+///
+/// Asserted on the legacy path (which starts without the column) and on the
+/// fresh path (which starts with it), because the two reach the rebuild through
+/// different branches of the guarded expression.
+#[test]
+fn last_use_at_survives_the_check_constraint_rebuild_on_both_paths() {
+    let legacy = open_with_legacy_row("manual", "fact", "general", None, "/notes/x", "{}");
+    assert!(
+        !has_column(&legacy, "memories", "last_use_at").unwrap(),
+        "fixture must start without the column, else this proves nothing"
+    );
+    // `let _` not `.unwrap()`: the auto-extension may already be enabled if a
+    // sibling test in this process got there first, and this test has nothing
+    // to say about that.
+    let _ = crate::db::enable_simple_auto_extension();
+    init_schema(&legacy).unwrap();
+    assert!(
+        has_column(&legacy, "memories", "last_use_at").unwrap(),
+        "legacy DB must end up with last_use_at after init_schema"
+    );
+    let value: Option<String> = legacy
+        .query_row("SELECT last_use_at FROM memories WHERE id='row1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        value, None,
+        "nothing in tachi#1446 commit 1 writes this column; a back-filled value would mean the \
+         rebuild invented one"
+    );
+
+    let (fresh, _tmp) = sigil_1289_fresh_full_path();
+    assert!(
+        has_column(&fresh, "memories", "last_use_at").unwrap(),
+        "fresh DB must carry last_use_at after the full init path"
+    );
+
+    let init_only = sigil_1289_init_schema_only();
+    assert!(
+        has_column(&init_only, "memories", "last_use_at").unwrap(),
+        "the init_schema-only path must carry it too — this is the path a sentinel-migration-only \
+         column would miss"
+    );
+}
+
 #[test]
 fn migration_is_idempotent() {
     let conn = open_with_legacy_row("manual", "fact", "general", None, "/notes/x", "{}");

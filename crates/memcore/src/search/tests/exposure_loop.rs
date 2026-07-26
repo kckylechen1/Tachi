@@ -1,4 +1,5 @@
-//! Exposure-loop magnitude harness — tachi#1446 commit 0 (**measurement only**).
+//! Exposure-loop magnitude harness — tachi#1446 commit 0 (measurement) plus
+//! commit 1's RED/GREEN regression pair.
 //!
 //! # What this is
 //! `hybrid_search` bumps an access record for **every row it returns**
@@ -9,11 +10,17 @@
 //! formulas. This module converts those hand-derivations into corpus
 //! measurements, so priority is fixed by evidence rather than arithmetic.
 //!
-//! **Nothing here fixes the loop.** No production behavior changes; every
-//! production symbol this file touches was already reachable from a test build.
-//! The three `measure_*` tests are green-today instruments. The fourth test,
+//! **Nothing in commit 0 fixed the loop.** The three `measure_*` tests are
+//! green-today instruments. The fourth test,
 //! [`exposure_alone_must_not_change_rank`], is the regression gate for the fix
-//! and is **RED today on purpose** (`#[ignore]`d, see its own doc).
+//! and is **RED on purpose** at default config (`#[ignore]`d, see its own doc).
+//!
+//! Commit 1 added the fifth test,
+//! [`use_provenance_recency_keeps_exposure_out_of_rank`] — the same scenario
+//! with `RecallConfig::use_provenance_recency` on, which is **GREEN**. The
+//! RED/GREEN pair is the proof: the defect is real at shipped config, and that
+//! one switch is what removes it. The default is unchanged, so the fourth test
+//! stays red and stays ignored until the knob flips.
 //!
 //! # The three levers (verified at `e75478ed9`)
 //!
@@ -125,8 +132,12 @@
 //!
 //! # How to run (Oz)
 //!     cargo nextest run -p memcore measure_l1 measure_l2 measure_l3
+//!     cargo nextest run -p memcore use_provenance_recency_keeps_exposure_out_of_rank  # EXPECTED GREEN
 //!     cargo nextest run -p memcore exposure_alone_must_not_change_rank \
 //!         --run-ignored only          # EXPECTED RED — see that test's doc
+//!
+//! Note the second and third commands must be run separately: an unfiltered
+//! `--run-ignored only` name filter matches both tests by prefix.
 
 use super::*;
 
@@ -370,6 +381,43 @@ fn search_options(profile: Profile, top_k: usize, record_access: bool) -> Search
         weights: profile.weights(),
         recall_config: Some(RecallConfig::default()),
         ..Default::default()
+    }
+}
+
+/// The same options [`search_options`] builds, with a caller-supplied
+/// `RecallConfig` substituted. Built *from* `search_options` rather than beside
+/// it so the two arms of the RED/GREEN pair below cannot drift apart in any
+/// field except the one under test.
+fn search_options_with_recall_config(
+    profile: Profile,
+    top_k: usize,
+    record_access: bool,
+    recall_config: RecallConfig,
+) -> SearchOptions {
+    SearchOptions {
+        recall_config: Some(recall_config),
+        ..search_options(profile, top_k, record_access)
+    }
+}
+
+/// `RecallConfig::default()` with tachi#1446's lever-1 knob on.
+///
+/// Trap 1 again, in its sharpest form: `TACHI_RECALL_USE_PROVENANCE_RECENCY`
+/// cannot reach this crate's tests at all (`RecallConfig::load` short-circuits
+/// to `Self::default()` under `cfg!(test)`, `recall_config.rs:92`), so a
+/// version of this fixture that exported the env var would run the *default*
+/// profile twice and report the fix green while measuring nothing. The knob is
+/// therefore injected as a value through `SearchOptions.recall_config`
+/// (`search.rs:83`), the same channel the profiles use.
+fn use_provenance_recency_config() -> RecallConfig {
+    assert!(
+        !RecallConfig::default().use_provenance_recency,
+        "the knob must be OFF by default — if it were not, this test and its RED sibling would \
+         be running the same configuration and the pair would prove nothing"
+    );
+    RecallConfig {
+        use_provenance_recency: true,
+        ..RecallConfig::default()
     }
 }
 
@@ -1115,4 +1163,90 @@ fn exposure_alone_must_not_change_rank() {
         table(&first),
         table(&second)
     );
+}
+
+/// **GREEN — the other half of the pair, tachi#1446 commit 1.**
+///
+/// Byte-for-byte the same scenario as [`exposure_alone_must_not_change_rank`]
+/// above: same corpus, same query, same two `record_access`-on calls, same
+/// profile, same `top_k`. The *only* difference is
+/// `RecallConfig::use_provenance_recency`. That test is RED at default config
+/// and this one is green with the knob on, so the pair is the proof: the defect
+/// is real, and this specific switch is what removes it. Neither test alone
+/// says that — a lone green could be green because the fixture is weak.
+///
+/// The mechanism is a read swap, not a write. `default_decay_score_with_config`
+/// takes the age reference from `last_use_at` instead of `last_access`, and
+/// nothing in this commit writes `last_use_at`, so every row falls through to
+/// its content `timestamp` on both calls — which is exactly the state an
+/// unexposed row is in. The final assertion pins that: if the column were
+/// silently being written, this test would still be green for the wrong reason.
+///
+/// **What this does NOT claim.** `access_count` is still bumped by exposure and
+/// still multiplies the decay formula's frequency term (`scorer.rs:151`), and
+/// `access_history` rows still raise the ACT-R base-level activation floor
+/// (`scorer.rs:236-244`) for exposed rows. Both remain live after this commit —
+/// they are the out-of-scope levers in #1446's blast-radius map. Scores
+/// therefore *do* move between the two calls here; the frozen claim is that the
+/// ordering does not, and that the decay channel keeps a range instead of
+/// collapsing onto one value.
+#[test]
+fn use_provenance_recency_keeps_exposure_out_of_rank() {
+    let conn = seeded_connection();
+    let config = use_provenance_recency_config();
+
+    let first = hybrid_search(
+        &conn,
+        QUERY,
+        &search_options_with_recall_config(Profile::Default, EXPOSED_TOP_K, true, config.clone()),
+    )
+    .expect("first hybrid_search");
+    let second = hybrid_search(
+        &conn,
+        QUERY,
+        &search_options_with_recall_config(Profile::Default, EXPOSED_TOP_K, true, config),
+    )
+    .expect("second hybrid_search");
+
+    let first_order: Vec<&str> = first.iter().map(|r| r.entry.id.as_str()).collect();
+    let second_order: Vec<&str> = second.iter().map(|r| r.entry.id.as_str()).collect();
+
+    assert_eq!(
+        first_order,
+        second_order,
+        "with use_provenance_recency ON, exposure must not be able to reach the ranking at \
+         all — the decay channel's age reference is a column the search path never \
+         writes.\nfirst:\n{}\nsecond:\n{}",
+        table(&first),
+        table(&second)
+    );
+
+    // The defect measured in commit 0 is not inflation, it is *range collapse*:
+    // after one exposure every returned row landed on the same decay value, so
+    // a channel carrying 20% of the default profile's weight stopped telling
+    // candidates apart. Ordering alone would not catch a regression that
+    // re-collapsed the range while happening to preserve this corpus's order,
+    // so assert the range directly.
+    let decays: Vec<f64> = second.iter().map(|r| r.score.decay).collect();
+    let spread = decays.iter().cloned().fold(f64::MIN, f64::max)
+        - decays.iter().cloned().fold(f64::MAX, f64::min);
+    assert!(
+        spread > 0.1,
+        "the decay channel collapsed to a near-constant on the second call (spread {spread}) — \
+         the fresh and stale ends of the returned set are eight raw half-lives apart, so a live \
+         recency signal cannot put them within 0.1 of each other:\n{}",
+        table(&second)
+    );
+
+    // Falsifier for the green above: it must come from the read swap, not from
+    // some other path having quietly started writing the new column.
+    for r in second.iter().chain(first.iter()) {
+        assert!(
+            r.entry.last_use_at.is_none(),
+            "{} carries last_use_at={:?}; nothing in tachi#1446 commit 1 writes that column, so \
+             a non-NULL value here means this test is passing for a reason it does not state",
+            r.entry.id,
+            r.entry.last_use_at
+        );
+    }
 }

@@ -71,8 +71,18 @@ fn simple_query_input(query: &str) -> String {
     out
 }
 
-pub(crate) const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
-pub(crate) const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.last_access,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
+/// 27 columns. `row_to_entry` reads them by name, but
+/// `memory_crud::read::get_many_with_vectors` appends `v.embedding` after this
+/// list and reads it **by ordinal** — see [`MEMORY_EMBEDDING_COLUMN_INDEX`].
+pub(crate) const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,last_use_at,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
+pub(crate) const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.last_access,m.last_use_at,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
+
+/// Ordinal of `v.embedding` when it is selected immediately after
+/// [`MEMORY_SELECT_COLUMNS_QUALIFIED`]: the count of columns in that list.
+/// Named so the coupling is visible from the constant it depends on — before
+/// tachi#1446 this was a bare `26` literal at the read site, three files away
+/// from the string it counts.
+pub(crate) const MEMORY_EMBEDDING_COLUMN_INDEX: usize = 27;
 
 static FTS_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1004,6 +1014,7 @@ mod reserved_reference_tests {
             archived: false,
             access_count: 0,
             last_access: None,
+            last_use_at: None,
             revision: 1,
             metadata,
             vector: None,
@@ -2562,6 +2573,7 @@ mod idless_upsert_tests {
             archived: false,
             access_count: 0,
             last_access: None,
+            last_use_at: None,
             revision: 1,
             metadata: serde_json::json!({}),
             vector: None,
@@ -3099,5 +3111,35 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(simple_query_input(input), expected, "input={input:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod select_column_ordinal_tests {
+    use super::{
+        MEMORY_EMBEDDING_COLUMN_INDEX, MEMORY_SELECT_COLUMNS, MEMORY_SELECT_COLUMNS_QUALIFIED,
+    };
+
+    /// tachi#1446 regression guard. `get_many_with_vectors` (`read.rs`) selects
+    /// `{MEMORY_SELECT_COLUMNS_QUALIFIED}, v.embedding` and reads the blob by
+    /// ordinal, so that ordinal *is* the qualified list's column count and
+    /// nothing else. Adding `last_use_at` shifted it; before this test the only
+    /// thing pinning the two together was a bare integer literal in another
+    /// file. No column in either list contains a comma, so splitting on `,` is
+    /// an exact count.
+    #[test]
+    fn embedding_ordinal_equals_the_selected_column_count() {
+        let plain = MEMORY_SELECT_COLUMNS.split(',').count();
+        let qualified = MEMORY_SELECT_COLUMNS_QUALIFIED.split(',').count();
+        assert_eq!(
+            plain, qualified,
+            "the qualified and unqualified select lists must stay the same shape"
+        );
+        assert_eq!(
+            qualified, MEMORY_EMBEDDING_COLUMN_INDEX,
+            "v.embedding is selected immediately after MEMORY_SELECT_COLUMNS_QUALIFIED, so its \
+             ordinal is that list's column count; update MEMORY_EMBEDDING_COLUMN_INDEX when the \
+             list changes"
+        );
     }
 }

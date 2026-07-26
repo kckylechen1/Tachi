@@ -178,6 +178,7 @@ pub(super) fn merge_capture_entries(
         archived: false,
         access_count: existing.access_count,
         last_access: existing.last_access.clone(),
+        last_use_at: existing.last_use_at.clone(),
         revision: existing.revision + 1,
         metadata,
         vector: None,
