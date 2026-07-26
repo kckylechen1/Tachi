@@ -129,6 +129,50 @@ pub fn recall_config_v3_identity_payload(
     Value::Object(map.into_iter().collect())
 }
 
+/// Content-addressed schema for profile/card loadout changes. The immutable
+/// apply payload is deliberately separate from descriptive proposal fields so
+/// a reviewer approves exactly what `apply_proposals` can mutate.
+pub const LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION: u64 = 3;
+pub const LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION: &str = "2026-07-loadout-evolution-v3";
+pub const LOADOUT_EVOLUTION_PROPOSAL_KIND: &str = "loadout_evolution";
+pub const LOADOUT_EVOLUTION_PROPOSAL_TARGET: &str = "profile_card_overlay";
+
+/// Extract the complete payload consumed by the loadout apply operation. This
+/// is also the display-copy shape checked by the server before review/apply;
+/// do not add a field read by apply without binding it here.
+pub fn loadout_evolution_v3_apply_payload(proposal: &Value) -> Value {
+    json!({
+        "profile": proposal.get("profile").cloned().unwrap_or(Value::Null),
+        "operation": proposal.get("operation").cloned().unwrap_or(Value::Null),
+        "skill_id": proposal.get("skill_id").cloned().unwrap_or(Value::Null),
+        "trait_id": proposal.get("trait_id").cloned().unwrap_or(Value::Null),
+        "evidence_id": proposal.get("evidence_id").cloned().unwrap_or(Value::Null),
+        "weakness_id": proposal.get("weakness_id").cloned().unwrap_or(Value::Null),
+        "proposed_patch": proposal.get("proposed_patch").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// Canonical identity payload for a loadout-evolution proposal. The identity
+/// binds every value apply can consume, the exact reviewer evidence, the
+/// policy version, and the profile-card overlay target.
+pub fn loadout_evolution_v3_identity_payload(
+    apply_payload: &Value,
+    evidence_review: &Value,
+    policy_version: &str,
+    target: &str,
+) -> Value {
+    let mut map: BTreeMap<String, Value> = BTreeMap::new();
+    map.insert("kind".to_string(), json!(LOADOUT_EVOLUTION_PROPOSAL_KIND));
+    map.insert("policy_version".to_string(), json!(policy_version));
+    map.insert("target".to_string(), json!(target));
+    map.insert("apply_payload".to_string(), canonical_json(apply_payload));
+    map.insert(
+        "evidence_review".to_string(),
+        canonical_json(evidence_review),
+    );
+    Value::Object(map.into_iter().collect())
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadoutEvalEntry {
     pub path: String,
@@ -603,7 +647,32 @@ where
         }
     }
 
-    Ok(out)
+    Ok(out
+        .into_iter()
+        .map(mint_loadout_evolution_v3_identity)
+        .collect())
+}
+
+fn mint_loadout_evolution_v3_identity(mut proposal: Value) -> Value {
+    let legacy_proposal_id = proposal
+        .get("proposal_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let apply_payload = loadout_evolution_v3_apply_payload(&proposal);
+    let evidence_review = proposal.get("evidence").cloned().unwrap_or(json!({}));
+    let identity_payload = loadout_evolution_v3_identity_payload(
+        &apply_payload,
+        &evidence_review,
+        LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION,
+        LOADOUT_EVOLUTION_PROPOSAL_TARGET,
+    );
+    proposal["legacy_proposal_id"] = json!(legacy_proposal_id);
+    proposal["schema_version"] = json!(LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION);
+    proposal["policy_version"] = json!(LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION);
+    proposal["target"] = json!(LOADOUT_EVOLUTION_PROPOSAL_TARGET);
+    proposal["identity_payload"] = identity_payload;
+    proposal
 }
 
 fn build_evidence_contract_evolution_proposals(
