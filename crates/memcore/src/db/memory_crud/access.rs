@@ -742,8 +742,9 @@ mod get_access_times_tests {
             "the use read must see the recorded use event"
         );
         assert!(
-            uses.get("shown").is_none(),
-            "a row that was only ever displayed has no use history"
+            !uses.contains_key("shown"),
+            "a row that was only ever displayed has no use history — the use read must omit \
+             the id entirely, not return an empty vector for it"
         );
 
         let last_use_at: Option<String> = conn
