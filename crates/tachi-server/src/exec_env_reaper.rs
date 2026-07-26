@@ -393,21 +393,61 @@ impl HolderCheck {
 /// Injectable holder probe — the real one shells out to `lsof`; tests pass a
 /// closure so the decision logic is exercised without depending on the host's
 /// process table.
-pub(crate) type HolderProbe = dyn Fn(&Path) -> HolderCheck;
+pub(crate) type HolderProbe = dyn Fn(&Path, Option<HolderExclusion>) -> HolderCheck;
+
+/// The one holder the reaper itself creates while pinning a candidate's inode.
+/// Both fields must match before an `lsof` row is ignored; excluding the whole
+/// process would hide unrelated descriptors and weaken the holder fence.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HolderExclusion {
+    pid: u32,
+    fd: i32,
+}
 
 /// Real probe: `lsof +D <dir>` (recursive — a live `cargo` holds files deep
 /// inside the target, not just at its root).
-pub(crate) fn lsof_holder_probe(path: &Path) -> HolderCheck {
+pub(crate) fn lsof_holder_probe(
+    path: &Path,
+    ignored_holder: Option<HolderExclusion>,
+) -> HolderCheck {
     match Command::new("lsof").arg("+D").arg(path).output() {
-        Ok(out) => interpret_lsof(
-            out.status.code(),
-            &String::from_utf8_lossy(&out.stdout),
-            &String::from_utf8_lossy(&out.stderr),
-        ),
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let filtered = ignored_holder
+                .map(|ignored| without_ignored_holder(&stdout, ignored))
+                .unwrap_or_else(|| stdout.into_owned());
+            interpret_lsof(
+                out.status.code(),
+                &filtered,
+                &String::from_utf8_lossy(&out.stderr),
+            )
+        }
         // No lsof on this host ⇒ we cannot prove "unheld" ⇒ nothing is
         // reclaimed. Loud, not silent.
         Err(err) => HolderCheck::Unknown(format!("cannot run lsof: {err}")),
     }
+}
+
+fn without_ignored_holder(stdout: &str, ignored: HolderExclusion) -> String {
+    stdout
+        .lines()
+        .filter(|line| {
+            let mut fields = line.split_whitespace();
+            let _command = fields.next();
+            let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
+            let _user = fields.next();
+            let fd = fields.next().and_then(|value| {
+                let digits = value
+                    .as_bytes()
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count();
+                value[..digits].parse::<i32>().ok()
+            });
+            pid != Some(ignored.pid) || fd != Some(ignored.fd)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Pure interpreter for an `lsof +D` run — the part worth testing.
@@ -996,6 +1036,15 @@ pub(crate) struct FileIdentity {
 }
 
 impl FileIdentity {
+    #[cfg(unix)]
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }
+    }
+
     /// `symlink_metadata`, not `metadata`: the identity is of the entry AT this
     /// path, not of whatever a symlink there might point through. A candidate is
     /// only ever a directory (the scan uses `symlink_metadata` to enqueue it and
@@ -1003,12 +1052,8 @@ impl FileIdentity {
     /// symlink here would already be a lie about what was judged.
     #[cfg(unix)]
     fn of(path: &Path) -> Option<Self> {
-        use std::os::unix::fs::MetadataExt;
         let meta = std::fs::symlink_metadata(path).ok()?;
-        Some(Self {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        })
+        Some(Self::from_metadata(&meta))
     }
 
     /// No portable `(dev, ino)` off Unix, and this module's holder probes (`ps`,
@@ -1017,6 +1062,61 @@ impl FileIdentity {
     /// deleter may not act on: fail closed, exactly like [`HolderCheck::Unknown`].
     #[cfg(not(unix))]
     fn of(_path: &Path) -> Option<Self> {
+        None
+    }
+}
+
+/// An open handle to the directory judged by the scan. Holding the handle keeps
+/// its inode allocated until the candidate has either been refused or deleted,
+/// so a remove-and-recreate race cannot make a replacement look identical by
+/// receiving the judged directory's just-freed inode number.
+#[derive(Debug)]
+struct PinnedDirectory {
+    handle: std::fs::File,
+    identity: FileIdentity,
+}
+
+impl PinnedDirectory {
+    #[cfg(unix)]
+    fn open(path: &Path) -> Option<Self> {
+        let handle = std::fs::File::open(path).ok()?;
+        let identity = FileIdentity::from_metadata(&handle.metadata().ok()?);
+        let path_meta = std::fs::symlink_metadata(path).ok()?;
+        if !path_meta.is_dir() || FileIdentity::from_metadata(&path_meta) != identity {
+            return None;
+        }
+        Some(Self { handle, identity })
+    }
+
+    #[cfg(unix)]
+    fn current_identity(&self) -> Option<FileIdentity> {
+        self.handle
+            .metadata()
+            .ok()
+            .map(|meta| FileIdentity::from_metadata(&meta))
+    }
+
+    #[cfg(unix)]
+    fn holder_exclusion(&self) -> Option<HolderExclusion> {
+        use std::os::fd::AsRawFd;
+        Some(HolderExclusion {
+            pid: std::process::id(),
+            fd: self.handle.as_raw_fd(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn open(_path: &Path) -> Option<Self> {
+        None
+    }
+
+    #[cfg(not(unix))]
+    fn current_identity(&self) -> Option<FileIdentity> {
+        None
+    }
+
+    #[cfg(not(unix))]
+    fn holder_exclusion(&self) -> Option<HolderExclusion> {
         None
     }
 }
@@ -1051,7 +1151,7 @@ impl Staleness {
 /// A directory that *looks like* a reclaimable build artifact. Being a
 /// candidate says nothing about whether it may be deleted — that is
 /// [`decide_reap`].
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct OrphanCandidate {
     /// The path as the scan walked it — the caller's spelling, symlinked scan
     /// root and all.
@@ -1087,6 +1187,10 @@ pub(crate) struct OrphanCandidate {
     /// [`decide_reap`] treats that exactly like an unprobed holder check:
     /// unprovable ⇒ never reclaimed.
     pub(crate) file_identity: Option<FileIdentity>,
+    /// Open handle for the judged directory. Unlike `(dev, ino)` alone, this
+    /// prevents the inode from being recycled onto a replacement while the
+    /// delete decision is in flight.
+    identity_pin: Option<PinnedDirectory>,
     pub(crate) kind: ResourceKind,
     pub(crate) staleness: Staleness,
     /// Measured *only* for candidates that survived every cheap gate — a
@@ -1570,6 +1674,7 @@ pub(crate) fn scan_orphan_candidates(
             match walk_disposition(&dir, depth, protection, DEFAULT_MAX_DEPTH) {
                 WalkDisposition::Candidate(kind) => {
                     out.record(&dir, UnitOutcome::Candidate, String::new());
+                    let identity_pin = PinnedDirectory::open(&dir);
                     out.candidates.push(OrphanCandidate {
                         staleness: staleness(&dir, now, cutoff),
                         // Pin the spelling the verdict is about to be rendered against —
@@ -1578,7 +1683,8 @@ pub(crate) fn scan_orphan_candidates(
                         // …and the REAL identity beside it (BUG 2, closed): captured
                         // now, at judgement, and re-checked immediately before the
                         // delete (`delete_resource_bytes`).
-                        file_identity: FileIdentity::of(&dir),
+                        file_identity: identity_pin.as_ref().map(|pin| pin.identity),
+                        identity_pin,
                         path: dir,
                         kind,
                         bytes: None,
@@ -2134,7 +2240,13 @@ fn run_orphan_reap_uncertified(
             // byte walk and an `lsof +D` (which walks the tree again).
             Ok(_) => {
                 candidate.bytes = Some(dir_size(&candidate.path));
-                candidate.holders = Some(probe(&candidate.path));
+                candidate.holders = Some(probe(
+                    &candidate.path,
+                    candidate
+                        .identity_pin
+                        .as_ref()
+                        .and_then(PinnedDirectory::holder_exclusion),
+                ));
                 decide_reap(
                     &candidate,
                     opts.max_age_days,
@@ -2438,6 +2550,7 @@ fn reclaim_candidate(
                 protection,
                 &candidate.identity,
                 candidate.file_identity,
+                candidate.identity_pin.as_ref(),
             )
         })
         .map_err(|err| {
@@ -2553,6 +2666,7 @@ fn delete_resource_bytes(
     protection: &Protection,
     pinned: &Path,
     pinned_identity: Option<FileIdentity>,
+    identity_pin: Option<&PinnedDirectory>,
 ) -> Result<i64, MemoryError> {
     let path = Path::new(&resource.path);
 
@@ -2630,13 +2744,17 @@ fn delete_resource_bytes(
     // `Reclaim` decision without one (BUG 2's fail-closed half), so `None` here means
     // this deleter was invoked outside that gate, and an identity we were never given
     // is not one we may act on.
+    let handle_identity = identity_pin.and_then(PinnedDirectory::current_identity);
     let current_identity = FileIdentity::of(path);
-    if pinned_identity.is_none() || current_identity != pinned_identity {
+    if pinned_identity.is_none()
+        || handle_identity != pinned_identity
+        || current_identity != pinned_identity
+    {
         return Err(MemoryError::InvalidArg(format!(
             "identity unresolved: refusing to reclaim {}: its (dev, ino) identity does not match \
-             the one the verdict was rendered against (captured {pinned_identity:?}, now \
-             {current_identity:?}) — the object at this path was replaced between judgement and \
-             delete",
+             the pinned directory handle or the one the verdict was rendered against (captured \
+             {pinned_identity:?}, handle {handle_identity:?}, now {current_identity:?}) — the object \
+             at this path was replaced between judgement and delete",
             resource.path
         )));
     }
@@ -2644,7 +2762,10 @@ fn delete_resource_bytes(
     // `reclaiming`, but the bytes are still there. A process that grabbed the
     // directory since the scan aborts the delete (row → `reclaim_failed`,
     // retryable) rather than losing a live build's cache.
-    match probe(path) {
+    match probe(
+        path,
+        identity_pin.and_then(PinnedDirectory::holder_exclusion),
+    ) {
         HolderCheck::None => {}
         other => {
             return Err(MemoryError::InvalidArg(format!(
@@ -2992,11 +3113,11 @@ mod tests {
     }
 
     fn unheld_probe() -> Box<HolderProbe> {
-        Box::new(|_path: &Path| HolderCheck::None)
+        Box::new(|_path: &Path, _ignored_holder| HolderCheck::None)
     }
 
     fn held_probe() -> Box<HolderProbe> {
-        Box::new(|_path: &Path| HolderCheck::Held(vec!["cargo 4242".to_string()]))
+        Box::new(|_path: &Path, _ignored_holder| HolderCheck::Held(vec!["cargo 4242".to_string()]))
     }
 
     /// `now` shifted far past every fixture's mtime, so the fixtures read as
@@ -3033,6 +3154,7 @@ mod tests {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
             file_identity: Some(fixture_identity()),
+            identity_pin: None,
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Stale { age_days: 30 },
             bytes: Some(2048),
@@ -3365,6 +3487,23 @@ mod tests {
     }
 
     #[test]
+    fn lsof_excludes_only_the_reapers_exact_pin() {
+        let stdout = "COMMAND   PID USER   FD   TYPE DEVICE  SIZE/OFF NODE NAME\n\
+                      tachi    123 user    7r   DIR   1,16       320  123 /tmp/x-target\n\
+                      tachi    123 user    8r   REG   1,16      2048  124 /tmp/x-target/live\n\
+                      cargo    456 user    7r   REG   1,16      2048  125 /tmp/x-target/other\n";
+        let filtered = without_ignored_holder(stdout, HolderExclusion { pid: 123, fd: 7 });
+
+        assert!(!filtered.contains("123 user    7r"));
+        assert!(filtered.contains("123 user    8r"));
+        assert!(filtered.contains("456 user    7r"));
+        assert_eq!(
+            interpret_lsof(Some(1), &filtered, ""),
+            HolderCheck::Held(vec!["tachi 123".to_string(), "cargo 456".to_string()])
+        );
+    }
+
+    #[test]
     fn lsof_clean_empty_run_means_unheld() {
         assert_eq!(interpret_lsof(Some(1), "", ""), HolderCheck::None);
         assert_eq!(interpret_lsof(Some(0), "", ""), HolderCheck::None);
@@ -3436,7 +3575,7 @@ mod tests {
         let root = unique_temp_dir("tachi-reaper-unknown-holder");
         let dead = make_target_dir(&root, "would-be-dead-target");
         let mut store = open_store(&root);
-        let unknown_probe = |_path: &Path| {
+        let unknown_probe = |_path: &Path, _ignored_holder| {
             HolderCheck::Unknown("cannot run lsof: No such file or directory".to_string())
         };
 
@@ -3482,7 +3621,7 @@ mod tests {
         let target = make_target_dir(&root, "live-target");
         let _handle = std::fs::File::open(target.join("debug/artifact.rlib")).unwrap();
 
-        let check = lsof_holder_probe(&target);
+        let check = lsof_holder_probe(&target, None);
         assert_ne!(
             check,
             HolderCheck::None,
@@ -3491,6 +3630,7 @@ mod tests {
         let candidate = OrphanCandidate {
             identity: std::fs::canonicalize(&target).unwrap(),
             file_identity: FileIdentity::of(&target),
+            identity_pin: PinnedDirectory::open(&target),
             path: target.clone(),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Stale { age_days: 30 },
@@ -3575,7 +3715,7 @@ mod tests {
         // it after the reap has run.
         let probes = std::rc::Rc::new(std::cell::Cell::new(0usize));
         let counter = std::rc::Rc::clone(&probes);
-        let counting_probe = move |_path: &Path| {
+        let counting_probe = move |_path: &Path, _ignored_holder| {
             counter.set(counter.get() + 1);
             HolderCheck::None
         };
@@ -3686,6 +3826,7 @@ mod tests {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
             file_identity: Some(fixture_identity()),
+            identity_pin: None,
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Fresh { age_days: 2 },
             bytes: None,
@@ -3706,6 +3847,7 @@ mod tests {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
             file_identity: Some(fixture_identity()),
+            identity_pin: None,
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Unprovable("cannot read /tmp/x-target/deps".to_string()),
             bytes: None,
@@ -4035,7 +4177,7 @@ mod tests {
         let mut store = open_store(&root);
 
         let calls = std::cell::Cell::new(0usize);
-        let probe = move |_path: &Path| {
+        let probe = move |_path: &Path, _ignored_holder| {
             let n = calls.get();
             calls.set(n + 1);
             if n == 0 {
@@ -4095,6 +4237,7 @@ mod tests {
             // set, re-asserted at the line that deletes.
             &std::fs::canonicalize(&shared).unwrap(),
             FileIdentity::of(&shared),
+            PinnedDirectory::open(&shared).as_ref(),
         )
         .expect_err("a protected path must never be deleted");
         assert!(
@@ -4137,7 +4280,7 @@ mod tests {
         let claimed = std::rc::Rc::new(std::cell::Cell::new(false));
         let claiming_probe = {
             let claimed = std::rc::Rc::clone(&claimed);
-            move |_path: &Path| {
+            move |_path: &Path, _ignored_holder| {
                 claimed.set(true);
                 // …and it holds nothing open right now: the fd-only recheck is blind to it.
                 HolderCheck::None
@@ -4316,7 +4459,7 @@ mod tests {
         // below for exactly which fence that lands the refusal on.
         let link_for_probe = link.clone();
         let decoy_for_probe = decoy_root.clone();
-        let retargeting_probe = move |_path: &Path| {
+        let retargeting_probe = move |_path: &Path, _ignored_holder| {
             std::fs::remove_file(&link_for_probe).unwrap();
             std::os::unix::fs::symlink(&decoy_for_probe, &link_for_probe).unwrap();
             HolderCheck::None
@@ -4401,7 +4544,7 @@ mod tests {
         // during the eligibility check — either invocation's identity recheck
         // would catch it (see the assertion below).
         let target_for_probe = target.clone();
-        let swapping_probe = move |_path: &Path| {
+        let swapping_probe = move |_path: &Path, _ignored_holder| {
             std::fs::remove_dir_all(&target_for_probe).unwrap();
             std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
             std::fs::write(
@@ -4497,7 +4640,7 @@ mod tests {
         // directory and passes — leaving only the second recheck to catch this.
         let calls = Arc::new(AtomicUsize::new(0));
         let target_for_probe = target.clone();
-        let swap_on_second_call = move |_path: &Path| {
+        let swap_on_second_call = move |_path: &Path, _ignored_holder| {
             let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
             if call == 2 {
                 std::fs::remove_dir_all(&target_for_probe).unwrap();
@@ -4749,7 +4892,7 @@ mod tests {
         let mut store = open_store(&root);
 
         let calls = std::cell::Cell::new(0usize);
-        let probe = move |_path: &Path| {
+        let probe = move |_path: &Path, _ignored_holder| {
             let n = calls.get();
             calls.set(n + 1);
             if n == 0 {
@@ -4854,7 +4997,7 @@ mod tests {
         let mut store2 = open_store(&root2);
 
         let target_for_probe = target.clone();
-        let swapping_probe = move |_path: &Path| {
+        let swapping_probe = move |_path: &Path, _ignored_holder| {
             std::fs::remove_dir_all(&target_for_probe).unwrap();
             std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
             std::fs::write(
@@ -5240,7 +5383,7 @@ mod tests {
         let arrived = Arc::new(AtomicUsize::new(0));
         let rendezvous = {
             let arrived = Arc::clone(&arrived);
-            move |_path: &Path| {
+            move |_path: &Path, _ignored_holder| {
                 arrived.fetch_add(1, Ordering::SeqCst);
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while arrived.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
@@ -5451,7 +5594,7 @@ mod tests {
                 let target = make_target_dir(&root, "kt-swapped-target");
                 let mut store = open_store(&root);
                 let target_for_probe = target.clone();
-                let swapping_probe = move |_path: &Path| {
+                let swapping_probe = move |_path: &Path, _ignored_holder| {
                     std::fs::remove_dir_all(&target_for_probe).unwrap();
                     std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
                     std::fs::write(

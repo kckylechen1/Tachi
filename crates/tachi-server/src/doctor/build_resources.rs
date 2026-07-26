@@ -317,7 +317,7 @@ fn scan_orphan_build_resources_with_roots(
                 )
         })
         .filter_map(|candidate| {
-            let holder = match crate::exec_env_reaper::lsof_holder_probe(&candidate.path) {
+            let holder = match crate::exec_env_reaper::lsof_holder_probe(&candidate.path, None) {
                 crate::exec_env_reaper::HolderCheck::None => HolderState::Unheld,
                 crate::exec_env_reaper::HolderCheck::Held(_) => HolderState::Held,
                 crate::exec_env_reaper::HolderCheck::Unknown(_) => HolderState::Unknown,
