@@ -1,7 +1,8 @@
 use crate::server_state::MemoryServer;
 use crate::tool_params::*;
 use chrono::Utc;
-use memcore::{HubCapability, MemoryEntry, MemoryStore};
+use memcore::{HubCapability, MemoryEntry, MemoryStore, MigrationAuthority};
+use rusqlite::params;
 use serde_json::json;
 
 fn ensure_test_env() {
@@ -420,16 +421,104 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
     {
         let mut store = MemoryStore::open(wiki_db.to_str().expect("utf8 wiki db"))
             .expect("open wiki project db");
-        for entry in entries {
-            store.upsert(&entry).expect("seed wiki project entry");
+        for entry in &entries {
+            store.upsert(entry).expect("seed wiki project entry");
         }
     }
+    seed_pre_v23_wiki_reference_metadata(&wiki_db, &entries);
     let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
     std::fs::create_dir_all(global_db.parent().expect("global db parent"))
         .expect("create global db dir");
     copy_template_db(&global_db);
-    let server = MemoryServer::new(global_db, None).expect("failed to create test server");
+    let server = MemoryServer::new_with_migration_authority(
+        global_db,
+        None,
+        MigrationAuthority::Allow {
+            approved_by: "test:wiki-legacy-v22-fixture".to_string(),
+        },
+    )
+    .expect("failed to create test server");
+    server
+        .with_named_project_store("wiki", |store| {
+            let schema_version: i64 = store
+                .connection()
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            if schema_version != i64::from(memcore::db::migrations::EXPECTED_SCHEMA_VERSION) {
+                return Err(format!(
+                    "legacy wiki fixture must reopen at schema v{}; found v{schema_version}",
+                    memcore::db::migrations::EXPECTED_SCHEMA_VERSION
+                ));
+            }
+            let guard_count: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema
+                     WHERE type = 'trigger'
+                       AND name IN (
+                           'memories_reserved_refs_insert_guard',
+                           'memories_reserved_refs_update_guard'
+                       )",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if guard_count != 2 {
+                return Err(format!(
+                    "legacy wiki fixture must restore both v23 reference guards; found {guard_count}"
+                ));
+            }
+            Ok(())
+        })
+        .expect("authorized named wiki open must restore v23 guards");
     (server, temp_home)
+}
+
+/// Seed only the pre-v23 state that an ordinary v23 upsert cannot express.
+///
+/// The base rows still travel through `MemoryStore::upsert`, preserving the
+/// normal write boundary. The offline mutation first turns the disposable DB
+/// into a genuine v22 snapshot, then restores only fixture-supplied reserved
+/// reference metadata. The server above must migrate the snapshot back to
+/// canonical v23 before any wiki operation can use it.
+fn seed_pre_v23_wiki_reference_metadata(wiki_db: &std::path::Path, entries: &[MemoryEntry]) {
+    let connection = rusqlite::Connection::open(wiki_db).expect("open offline wiki v22 fixture");
+    connection
+        .execute(
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+            params!["migrations", "v23_reserved_reference_guards"],
+        )
+        .expect("remove v23 guard migration sentinel from legacy fixture");
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
+             DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
+             PRAGMA user_version = 22;",
+        )
+        .expect("downgrade disposable wiki fixture to v22 guards");
+    let schema_version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("read legacy wiki fixture schema version");
+    assert_eq!(
+        schema_version, 22,
+        "fixture must be pre-v23 before metadata seed"
+    );
+
+    for entry in entries.iter().filter(|entry| {
+        entry.metadata.get("source_refs").is_some()
+            || entry.metadata.get("evidence_refs_v1").is_some()
+    }) {
+        let updated = connection
+            .execute(
+                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+                params![entry.metadata.to_string(), entry.id],
+            )
+            .expect("restore legacy wiki reserved metadata");
+        assert_eq!(
+            updated, 1,
+            "legacy fixture row must exist before metadata restore"
+        );
+    }
 }
 
 pub(crate) fn make_entry(id: &str) -> MemoryEntry {
