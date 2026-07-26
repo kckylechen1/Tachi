@@ -47,6 +47,10 @@ const _: () = assert!(
 
 #[cfg(feature = "admin")]
 pub mod agent_profile;
+// #1297 leaf 1. Portable-kernel, not admin-gated: it has no network, no `gh`,
+// no `Connection`, and a downstream consumer pinning this crate wants a
+// complete memcore. Schema delta: zero — assertions ride `tachi_events`.
+pub mod current_truth;
 pub mod db;
 pub mod embed_config;
 pub mod error;
@@ -72,6 +76,15 @@ pub mod vector_backfill;
 pub use agent_profile::{
     AgentProfileIdentity, AgentProfilePack, AgentProfileRule, AgentProfileSource,
     RenderedAgentProfile, AGENT_PROFILE_PACK_SCHEMA_VERSION,
+};
+pub use current_truth::{
+    build_truth_assertion_event, classify_assertion, decode_truth_assertion, derive_action_queue,
+    reduce_current_truth, truth_assertion_event_id, ActionItemV1, ActionKindV1, AssertionRefV1,
+    AssertionRelationV1, CandidateReasonV1, CandidateRecordV1, CurrentTruthDiagnosticsV1,
+    CurrentTruthError, CurrentTruthFold, CurrentTruthProjectionV1, CurrentTruthStatsV1,
+    IssuerClass, PredicateTruthV1, RejectedAssertionV1, SubjectTruthV1, TruthAssertionInputV1,
+    TruthAssertionV1, TruthEventEnvelopeV1, TruthIssuerV1, TruthPredicate, TruthStateV1,
+    TruthValue, TRUTH_ASSERTION_DOMAIN, TRUTH_ASSERTION_EVENT_TYPE,
 };
 #[cfg(feature = "admin")]
 pub use db::dispatch_adjudications::{
