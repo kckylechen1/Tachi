@@ -19,7 +19,7 @@
 //! | `size`, `mode`, `nlink` | truncation, chmod, hardlink games |
 //! | `ino` | rewrite-via-rename (new inode, same bytes) |
 //! | `mtime` | ordinary writes |
-//! | `ctime` | **mutate-then-restore**: content and mtime can both be restored by an unprivileged worker (`write` + `utimes`), but `ctime` cannot be set by anyone — restoring the bytes still leaves a ctime bump |
+//! | `ctime` | **mutate-then-restore**: content and mtime can both be restored by an unprivileged worker (`write` + `utimes`), but POSIX exposes no call that *sets* `ctime` — `utimensat` bumps it — so restoring the bytes still leaves a ctime bump |
 //!
 //! `atime` is deliberately NOT recorded: reads legitimately bump it (and
 //! `relatime`/`noatime` mounts make it non-deterministic), so it is noise, not
@@ -47,13 +47,39 @@
 //! [`WorkspaceManifest::seal_with_clock_barrier`]). Any inode change after that
 //! point is stamped by a monotone clock at or past the barrier, hence strictly
 //! past the recorded `ctime`, and the existing comparison becomes sound. `ctime`
-//! is the barrier's target because POSIX bumps it on *every* inode change and no
-//! unprivileged process can set it.
+//! is the barrier's target because POSIX bumps it on *every* inode change and
+//! provides no call that sets it (the closest, `utimensat`, bumps it too).
 //!
 //! If the barrier cannot be observed, capture **fails** — it never degrades to a
 //! best-effort sleep, and a pre-image that carries no dominating barrier is
 //! refused at gate time ([`WorkspaceManifest::verify_clock_barriers`]) rather
 //! than passed. "I could not resolve this window" is not "nothing happened".
+//!
+//! ### The barrier has exactly two preconditions, and both are REFUSALS
+//!
+//! A barrier is an argument of the form "I observed this filesystem's clock pass
+//! X, therefore anything it stamps later is > X". That argument needs the clock
+//! it measured to be (a) the same clock that will stamp the entries, and (b) a
+//! clock that actually advances on an inode change. Neither is universal, so
+//! both are checked and both fail closed:
+//!
+//! * **A ctime witness must exist on this platform.** `ctime` is a POSIX
+//!   concept. On a platform where `std` exposes no change-time equivalent, there
+//!   is nothing for the barrier to observe *and* nothing for `compare_entry` to
+//!   convict with — substituting creation time (which does not move when a
+//!   file's contents change) would let the barrier "observe" an advance that can
+//!   never happen, i.e. manufacture a proof, which is strictly worse than the
+//!   bug this module exists to fix. So [`CtimeWitness`] is recorded in the image
+//!   and anything but [`CtimeWitness::PosixCtime`] is refused, at seal time and
+//!   again at gate time.
+//! * **One walk root must be one filesystem.** The barrier is measured with a
+//!   probe beside the root, on the root's device. An entry *under* that root but
+//!   on a different device (a mount inside the workspace) is stamped by a
+//!   different clock, which the probe never observed. The walk records any such
+//!   entry in [`WorkspaceManifest::foreign_device_paths`] and the image is
+//!   refused. A per-device barrier is not merely unimplemented, it is not
+//!   constructible: a probe must live *outside* every walk root, and a
+//!   filesystem mounted *inside* the walk root has no location outside it.
 //!
 //! ## The walk roots are PINNED by the parent, never re-derived from the tree
 //!
@@ -127,6 +153,58 @@ impl std::fmt::Display for FsTime {
     }
 }
 
+/// What the `ctime_*` fields of an image actually hold.
+///
+/// Recorded in the image rather than inferred at read time, so the refusal below
+/// is a property of the **data** and can be exercised by a test on any platform
+/// — the same reason [`WorkspaceManifest::clock_barriers`] is re-verified at
+/// gate time instead of trusted.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CtimeWitness {
+    /// POSIX inode change time: bumped by the kernel on *every* inode change,
+    /// with no call that sets it directly. The only value this gate accepts.
+    PosixCtime,
+    /// This platform exposes no change-time equivalent through `std`, so the
+    /// `ctime_*` fields hold a constant placeholder that cannot testify to
+    /// anything.
+    ///
+    /// `#[default]` on purpose: an image that does not say which witness it used
+    /// (an older binary, a truncated write) reads as the pessimistic value and
+    /// is refused, rather than defaulting into the guarantee it never had.
+    #[default]
+    None,
+}
+
+impl CtimeWitness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CtimeWitness::PosixCtime => "posix_ctime",
+            CtimeWitness::None => "none",
+        }
+    }
+}
+
+/// The ctime witness available on the platform this binary was built for.
+#[cfg(unix)]
+pub fn ctime_witness_kind() -> CtimeWitness {
+    CtimeWitness::PosixCtime
+}
+
+/// No change-time equivalent is reachable through `std` here.
+///
+/// `Metadata::created()` is deliberately NOT offered as a substitute: creation
+/// time does not advance when a file's contents change, so a barrier "proven"
+/// against it would be proven against a value that can never move — a
+/// manufactured proof, and a worse failure than the missing barrier this module
+/// was written to add.
+#[cfg(not(unix))]
+pub fn ctime_witness_kind() -> CtimeWitness {
+    CtimeWitness::None
+}
+
 /// Filesystem entry class as seen through `symlink_metadata` (symlinks are
 /// never followed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,17 +238,21 @@ pub struct EntryFingerprint {
     pub nlink: u64,
     pub mtime_sec: i64,
     pub mtime_nsec: i64,
-    /// Inode change time — unforgeable by an unprivileged worker, so this is
-    /// the field that catches mutate-then-restore. It only *proves* anything
-    /// once the capture is sealed with a clock barrier that strictly exceeds it
+    /// Inode change time — the field that catches mutate-then-restore, because
+    /// POSIX has no call that sets it (`utimensat`, which restores mtime, bumps
+    /// ctime).
+    ///
+    /// Meaningful ONLY when the image records
+    /// [`CtimeWitness::PosixCtime`], and it only *proves* anything once the
+    /// capture is sealed with a clock barrier that strictly exceeds it
     /// ([`WorkspaceManifest::clock_barriers`]); without that, a write inside the
     /// capture's own clock tick carries the same stamp and is invisible.
     pub ctime_sec: i64,
     pub ctime_nsec: i64,
     /// `None` for a non-file, and also for a file under an unhashed root (see
     /// [`WorkspaceManifest::unhashed_roots`]) — there, detection falls back to
-    /// size/inode/mtime/**ctime**, which an unprivileged worker cannot restore
-    /// and which the capture-time clock barrier makes resolvable.
+    /// size/inode/mtime/**ctime**, which the capture-time clock barrier makes
+    /// resolvable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,6 +302,27 @@ pub struct WorkspaceManifest {
     /// silently passing (the #1440 fail-open through a second door).
     #[serde(default)]
     pub clock_barriers: BTreeMap<String, FsTime>,
+    /// What the `ctime_*` fields in this image actually are (see
+    /// [`CtimeWitness`]). `#[serde(default)]` is [`CtimeWitness::None`], the
+    /// pessimistic value: an image that does not say is refused.
+    #[serde(default)]
+    pub ctime_witness: CtimeWitness,
+    /// Manifest keys the walk found on a **different filesystem than their walk
+    /// root** — plus, on a platform where device ids cannot be read at all, one
+    /// entry naming the root itself.
+    ///
+    /// A barrier is measured with a probe on the root's device. It says nothing
+    /// about a second filesystem's clock, so an image with any entry here cannot
+    /// use its timestamps as evidence and is refused at seal time and at gate
+    /// time. Empty in the ordinary case (one workspace, one filesystem).
+    ///
+    /// Note for whoever hits this in the field: a pre-4.17 / `xino=off`
+    /// overlayfs can report the *underlying* layer's `st_dev` for a file that
+    /// has not been copied up, which would land entries here on a tree that is
+    /// really one mount. That is a loud refusal naming the paths, not a silent
+    /// pass — the direction this gate is required to fail in.
+    #[serde(default)]
+    pub foreign_device_paths: Vec<String>,
 }
 
 impl WorkspaceManifest {
@@ -280,6 +383,12 @@ impl WorkspaceManifest {
     /// cannot be observed. A pre-image whose window cannot be resolved cannot
     /// convict, so the dispatch must not start under it.
     pub fn seal_with_clock_barrier(&mut self) -> Result<(), String> {
+        // Before spending a single probe write: a barrier is only an argument if
+        // the clock it measures is the clock that stamps the entries, and if
+        // that clock advances on an inode change at all. Establishing one
+        // without these would produce a barrier that *looks* like every other
+        // barrier and proves nothing.
+        self.verify_timestamp_preconditions()?;
         let maxes = self.max_ctime_by_root();
         let roots = self.walk_roots();
         let root_paths: Vec<PathBuf> = roots.iter().map(|(_, path)| path.clone()).collect();
@@ -299,6 +408,43 @@ impl WorkspaceManifest {
         self.verify_clock_barriers()
     }
 
+    /// The two things that must hold before ANY timestamp in this image can be
+    /// used as evidence, barrier or not: a real ctime witness, and one
+    /// filesystem per walk root.
+    ///
+    /// Checked against both images at gate time — the post-image's timestamps
+    /// are half of every comparison, so a post-image with no ctime witness makes
+    /// the comparison unsound even against a perfectly sealed pre-image.
+    pub fn verify_timestamp_preconditions(&self) -> Result<(), String> {
+        if self.ctime_witness != CtimeWitness::PosixCtime {
+            return Err(format!(
+                "this image records ctime witness {:?}, not {:?}: the platform it was captured on \
+                 exposes no inode change time, so the ctime fields hold a placeholder that does \
+                 not advance when a file changes. A clock barrier measured against such a field \
+                 would prove an advance that cannot happen, and mutate-then-restore would be \
+                 invisible to the comparison. This gate refuses to run there rather than certify \
+                 a tree it cannot inspect",
+                self.ctime_witness.as_str(),
+                CtimeWitness::PosixCtime.as_str(),
+            ));
+        }
+        if !self.foreign_device_paths.is_empty() {
+            return Err(format!(
+                "this walk root spans more than one filesystem: {} entry/entries are not on their \
+                 walk root's device. The clock barrier is observed with a probe on the ROOT's \
+                 device, so it never measured the clock that stamps these, and applying it to \
+                 them would be exactly the cross-filesystem claim the probe placement check \
+                 already refuses. A per-device barrier is not constructible here — the probe must \
+                 live outside every walk root, and a filesystem mounted inside the root has no \
+                 location outside it — so a multi-device walk root is refused rather than \
+                 certified on another filesystem's evidence: {}",
+                self.foreign_device_paths.len(),
+                self.foreign_device_paths.join(", "),
+            ));
+        }
+        Ok(())
+    }
+
     /// Does this pre-image carry a barrier that dominates every `ctime` it
     /// recorded? `Err` names the first entry it cannot vouch for.
     ///
@@ -307,6 +453,7 @@ impl WorkspaceManifest {
     /// older binary, a partial write, or a future refactor that forgets to seal
     /// is caught instead of quietly passing.
     pub fn verify_clock_barriers(&self) -> Result<(), String> {
+        self.verify_timestamp_preconditions()?;
         for (key, entry) in &self.entries {
             let label = root_label_of_key(key);
             let ctime = FsTime::new(entry.ctime_sec, entry.ctime_nsec);
@@ -365,6 +512,18 @@ pub fn establish_clock_barrier(
     must_exceed: FsTime,
     walk_roots: &[PathBuf],
 ) -> Result<FsTime, String> {
+    // A public entry point, so it repeats the platform refusal instead of
+    // relying on its one caller having done it: what this function returns is a
+    // `FsTime` that a caller will treat as proof, and on a platform with no
+    // change-time witness there is nothing here that could be proof.
+    if ctime_witness_kind() != CtimeWitness::PosixCtime {
+        return Err(format!(
+            "no inode change time is available on this platform, so there is no field for a clock \
+             barrier at {} to be observed in. Substituting creation time would prove an advance \
+             that cannot occur (creation time does not move when contents change); refusing",
+            root.display()
+        ));
+    }
     let probe_dir = root.parent().ok_or_else(|| {
         format!(
             "walk root {} has no parent directory to hold the clock probe; the parent must be \
@@ -521,6 +680,11 @@ pub fn capture(spec: &CaptureSpec) -> Result<WorkspaceManifest, String> {
         // needs one. Leaving it empty here is what makes an unsealed image fail
         // closed at gate time.
         clock_barriers: BTreeMap::new(),
+        // Stamped from the build target, not inferred by a reader: it is what
+        // makes the platform refusal a property of the data (and therefore
+        // testable) rather than a `cfg` a test can never reach.
+        ctime_witness: ctime_witness_kind(),
+        foreign_device_paths: Vec::new(),
     };
 
     walk_root(
@@ -587,8 +751,27 @@ fn walk_root(
     // The root entry itself is fingerprinted (keyed by the bare label) — an
     // xattr or a chmod applied to the workspace directory is a change to the
     // workspace, and a walk that only covered the children would miss it.
+    //
+    // The root's device is captured here and every entry below is checked
+    // against it. This is the walk-level half of the same rule the clock probe
+    // enforces at the root level: one barrier is one filesystem's clock, so an
+    // entry on a second filesystem is an entry the barrier never covered.
+    // `device_id` is read off metadata the walk already stat'ed — no extra
+    // syscall.
+    let mut root_dev: Option<u64> = None;
     match std::fs::symlink_metadata(root) {
         Ok(meta) => {
+            root_dev = device_id(&meta);
+            if root_dev.is_none() {
+                // Not "assume one device": on a platform that cannot report a
+                // device id, `Some(a) == Some(b)` degenerates to `None == None`
+                // and every cross-device entry would silently compare equal.
+                // Record the root itself so the image is refused.
+                manifest.foreign_device_paths.push(format!(
+                    "{label} (device ids are unavailable on this platform, so a walk root that \
+                     spans two filesystems cannot be ruled out)"
+                ));
+            }
             let fingerprint = fingerprint_entry(root, &meta, true, manifest);
             manifest.entries.insert(label.to_string(), fingerprint);
         }
@@ -636,6 +819,19 @@ fn walk_root(
                     continue;
                 }
             };
+            // Only when the root's own device is known — otherwise the marker
+            // pushed above already covers the whole root, and repeating it per
+            // entry would bury it under one line per file.
+            if root_dev.is_some() {
+                let entry_dev = device_id(&meta);
+                if !shares_barrier_device(root_dev, entry_dev) {
+                    manifest.foreign_device_paths.push(format!(
+                        "{key} (device {}; walk root {label} is device {})",
+                        entry_dev.map_or_else(|| "unreadable".to_string(), |d| d.to_string()),
+                        root_dev.map_or_else(|| "unreadable".to_string(), |d| d.to_string()),
+                    ));
+                }
+            }
             let fingerprint = fingerprint_entry(&path, &meta, hash_content, manifest);
             if fingerprint.kind == EntryKind::Dir {
                 let is_unhashed_root = hash_content
@@ -652,6 +848,22 @@ fn walk_root(
             }
             manifest.entries.insert(key, fingerprint);
         }
+    }
+}
+
+/// Can an entry on `entry_dev` be vouched for by a barrier measured on the walk
+/// root's `root_dev`?
+///
+/// The `_ => false` arm is the load-bearing one. Comparing the two `Option<u64>`
+/// values directly would make `None == None` **true**, so on any platform that
+/// reports no device id at all, every entry would silently qualify as "same
+/// filesystem as the root" — a barrier applied to entries it never measured,
+/// which is the exact fail-open shape this module is here to remove. Unknown is
+/// not a match.
+pub fn shares_barrier_device(root_dev: Option<u64>, entry_dev: Option<u64>) -> bool {
+    match (root_dev, entry_dev) {
+        (Some(root), Some(entry)) => root == entry,
+        _ => false,
     }
 }
 
@@ -795,9 +1007,23 @@ fn unix_nlink(_meta: &std::fs::Metadata) -> u64 {
 fn unix_mtime(meta: &std::fs::Metadata) -> (i64, i64) {
     file_time_pair(meta.modified().ok())
 }
+/// There is no inode change time here, and this says so with a CONSTANT.
+///
+/// It used to return `meta.created()`. That is not a change time: creation time
+/// does not advance when a file's contents change, so `establish_clock_barrier`
+/// could observe a probe's creation time "advance" past a walk's creation times
+/// and report a barrier — a proof manufactured out of a field that can never
+/// move, which is worse than the missing barrier the barrier was added to
+/// supply.
+///
+/// A constant is the fail-closed choice twice over: [`ctime_witness_kind`]
+/// refuses this platform outright (the loud path), and if that refusal is ever
+/// deleted, `observed > must_exceed` can never hold against a constant, so the
+/// barrier spin times out and still refuses. There is no arrangement of this
+/// file in which a non-unix platform passes.
 #[cfg(not(unix))]
-fn unix_ctime(meta: &std::fs::Metadata) -> (i64, i64) {
-    file_time_pair(meta.created().ok())
+fn unix_ctime(_meta: &std::fs::Metadata) -> (i64, i64) {
+    (0, 0)
 }
 #[cfg(not(unix))]
 fn device_id(_meta: &std::fs::Metadata) -> Option<u64> {

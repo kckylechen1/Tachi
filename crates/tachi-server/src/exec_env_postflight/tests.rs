@@ -19,10 +19,11 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::liveness::DescendantLiveness;
-use super::manifest::{DeltaKind, FsTime};
+use super::manifest::{CtimeWitness, DeltaKind, FsTime};
 use super::{
-    apply_verdict, naming, rejection_log_message, BlockReason, FileQuarantineSink, GateOutcome,
-    GateVerdict, PostflightGate, QuarantineSink, RejectReason, WriteContract,
+    apply_verdict, manifest, naming, rejection_log_message, BlockReason, ClockBarrierEvidence,
+    FileQuarantineSink, GateOutcome, GateVerdict, PostflightGate, QuarantineSink, RejectReason,
+    WriteContract,
 };
 
 // ─── fakes ──────────────────────────────────────────────────────────────────
@@ -374,8 +375,9 @@ fn surface_8_mutate_then_restore_is_caught_by_ctime_alone() {
     // worker edits a file, puts the ORIGINAL BYTES BACK, and restores atime and
     // mtime to the nanosecond with utimensat(). Content hash, size, mode, inode
     // AND mtime all match the pre-image afterwards — every field a well-behaved
-    // tool would look at says "unchanged". Only ctime, which no unprivileged
-    // process can set, still testifies.
+    // tool would look at says "unchanged". Only ctime still testifies, because
+    // POSIX has no call that sets it and the one that restores mtime
+    // (utimensat) bumps it.
     let fx = Fixture::new();
     let target = fx.ws().join("src/tracked.rs");
     let original = fs::read(&target).expect("original bytes");
@@ -673,7 +675,7 @@ fn unhashed_build_dirs_are_still_detected_and_are_named_on_the_receipt() {
     );
 
     // A same-size overwrite: no size facet, no content hash to compare — only the
-    // timestamps testify, and ctime cannot be put back by an unprivileged worker.
+    // timestamps testify, and the sealed barrier is what makes them able to.
     fs::write(fx.ws().join("target/debug/artifact.bin"), b"bbbbbbbb").expect("tamper");
 
     let outcome = gate.run(&Reaped).expect("gate run");
@@ -1138,6 +1140,228 @@ fn the_clock_probe_is_written_outside_every_walk_root() {
         matches!(outcome.verdict, GateVerdict::Clean { .. }),
         "sealing the pre-image must not show up as a change: {:?}",
         outcome.verdict
+    );
+}
+
+// ─── the barrier's two preconditions (#1440 review) ─────────────────────────
+//
+// A barrier is the argument "I watched this filesystem's clock pass X, so
+// anything it stamps later is > X". That argument needs the clock it measured to
+// be the clock that stamps the entries, and needs that clock to move when an
+// inode changes. Neither is universal. Both are recorded IN THE IMAGE — which is
+// what makes them testable here rather than only on the platform that lacks
+// them: the tests below put the gate in the state each precondition failure
+// produces and assert it refuses, exactly as the barrier-absent test above does.
+
+#[test]
+fn a_sealed_preimage_names_the_ctime_witness_it_actually_used() {
+    // The positive half. On unix the witness is POSIX ctime, and the gate is
+    // willing to run. If this ever records `None` on a platform where the gate
+    // still passes, the refusal below has been disconnected.
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    let pre = gate.capture_preimage().expect("pre-image");
+
+    assert_eq!(
+        pre.ctime_witness,
+        CtimeWitness::PosixCtime,
+        "a unix capture must record the POSIX ctime witness, or its ctime fields prove nothing"
+    );
+    pre.verify_timestamp_preconditions()
+        .expect("a single-filesystem unix capture satisfies both preconditions");
+    assert!(
+        pre.foreign_device_paths.is_empty(),
+        "a single-filesystem workspace must not report foreign devices: {:?}",
+        pre.foreign_device_paths
+    );
+}
+
+#[test]
+fn an_image_with_no_ctime_witness_is_not_a_pass() {
+    // The platform hole this review caught: `#[cfg(not(unix))] unix_ctime` used
+    // to return `created()`, which does NOT advance when a file's contents
+    // change — so the barrier spin could "observe" an advance in a field that
+    // can never move and MANUFACTURE a proof. That is worse than the original
+    // fail-open: the original lost a signal, this one invents one.
+    //
+    // The refusal is data-driven precisely so it can be exercised from a unix
+    // test: this is byte-for-byte the pre-image such a platform produces.
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+
+    rewrite_preimage(&fx.preimage_path(), |obj| {
+        obj.insert(
+            "ctime_witness".to_string(),
+            serde_json::Value::String("none".to_string()),
+        );
+    });
+
+    let outcome = gate.run(&Reaped).expect("gate run");
+    let GateVerdict::Rejected { reason, deltas, .. } = &outcome.verdict else {
+        panic!(
+            "an image whose ctime field cannot advance proves nothing about mutate-then-restore; \
+             passing it as clean manufactures a proof: {:?}",
+            outcome.verdict
+        );
+    };
+    assert_eq!(*reason, RejectReason::UnusableImage);
+    assert!(
+        deltas.iter().any(|d| d.detail.contains("ctime witness")),
+        "the receipt must name the missing witness: {deltas:#?}"
+    );
+    assert!(!outcome.artifacts_released());
+}
+
+#[test]
+fn an_absent_ctime_witness_field_reads_as_none_not_as_a_guarantee() {
+    // An older binary wrote no `ctime_witness` at all. `#[serde(default)]` must
+    // land on the pessimistic value — a field that is missing must not default
+    // into the guarantee the image never carried.
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+
+    rewrite_preimage(&fx.preimage_path(), |obj| {
+        obj.remove("ctime_witness");
+    });
+
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert!(
+        matches!(
+            outcome.verdict,
+            GateVerdict::Rejected {
+                reason: RejectReason::UnusableImage,
+                ..
+            }
+        ),
+        "a missing ctime_witness must fail closed, not default to posix_ctime: {:?}",
+        outcome.verdict
+    );
+}
+
+#[test]
+fn a_walk_root_spanning_two_filesystems_is_not_a_pass() {
+    // The barrier is measured with a probe on the ROOT's device. An entry under
+    // the root but on another mount is stamped by a clock the probe never
+    // watched — the same cross-filesystem claim `establish_clock_barrier`
+    // already refuses when the PROBE lands on the wrong device, left open one
+    // level down until now.
+    //
+    // Creating a real second mount inside a temp dir needs privileges no test
+    // has, so this drives the refusal from the recorded state rather than from a
+    // live mount; `shares_barrier_device` below covers the decision that
+    // populates it.
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+
+    rewrite_preimage(&fx.preimage_path(), |obj| {
+        obj.insert(
+            "foreign_device_paths".to_string(),
+            serde_json::json!(["workspace/src (device 42; walk root workspace is device 7)"]),
+        );
+    });
+
+    let outcome = gate.run(&Reaped).expect("gate run");
+    let GateVerdict::Rejected { reason, deltas, .. } = &outcome.verdict else {
+        panic!(
+            "a barrier proven on one filesystem must not certify entries on another: {:?}",
+            outcome.verdict
+        );
+    };
+    assert_eq!(*reason, RejectReason::UnusableImage);
+    assert!(
+        deltas
+            .iter()
+            .any(|d| d.detail.contains("more than one filesystem")),
+        "the receipt must say the walk root spans filesystems: {deltas:#?}"
+    );
+    assert!(!outcome.artifacts_released());
+}
+
+#[test]
+fn an_unknown_device_is_not_treated_as_the_same_device() {
+    // The one-line fail-open this guards: `root_dev == entry_dev` on two
+    // `Option<u64>`s makes `None == None` TRUE, so a platform that reports no
+    // device id at all would have every entry qualify as "same filesystem as the
+    // root" and inherit a barrier that never measured it. Unknown is not a
+    // match, in either direction.
+    assert!(manifest::shares_barrier_device(Some(7), Some(7)));
+    assert!(!manifest::shares_barrier_device(Some(7), Some(42)));
+    assert!(!manifest::shares_barrier_device(Some(7), None));
+    assert!(!manifest::shares_barrier_device(None, Some(7)));
+    assert!(
+        !manifest::shares_barrier_device(None, None),
+        "two unknown device ids are not evidence of one filesystem; treating them as equal is the \
+         fail-open"
+    );
+}
+
+#[test]
+fn the_receipt_states_what_was_established_not_what_is_generally_true() {
+    // The prose half. A clean run may report the barrier it verified; a run that
+    // verified nothing must NOT read like one that did. The old caveat asserted
+    // "ctime cannot be restored by an unprivileged worker" and "the pre-image is
+    // sealed with an observed capture-time clock barrier" on every run, from a
+    // struct that did not know either — the confident-claim shape this issue
+    // exists to stop.
+    let fx = Fixture::new();
+    let gate = fx
+        .gate(WriteContract::DetectAndReject)
+        .with_build_artifacts_unhashed();
+    fs::create_dir_all(fx.ws().join("target")).expect("target");
+    fs::write(fx.ws().join("target/artifact.bin"), b"aaaa").expect("artifact");
+    gate.capture_preimage().expect("pre-image");
+
+    let clean = gate.run(&Reaped).expect("gate run");
+    assert!(matches!(clean.verdict, GateVerdict::Clean { .. }));
+    let ClockBarrierEvidence::Verified(roots) = &clean.clock_barrier else {
+        panic!(
+            "a run that passed the barrier check must report what it verified: {:?}",
+            clean.clock_barrier
+        );
+    };
+    assert!(
+        roots.contains_key("workspace"),
+        "the evidence must name the roots it covers: {roots:?}"
+    );
+    let caveat = clean
+        .unhashed_caveat()
+        .expect("unhashed paths carry a caveat");
+    assert!(
+        caveat.contains("This run verified"),
+        "the caveat must report a measurement, not a general property: {caveat}"
+    );
+    assert!(
+        !caveat.contains("cannot be restored by an unprivileged worker"),
+        "the caveat re-committed the unconditional guarantee it was rewritten to drop: {caveat}"
+    );
+    assert_eq!(clean.receipt()["clock_barrier"]["status"], "verified");
+
+    // …and the same surface on a run that established nothing: no pre-image at
+    // all, so the barrier was never reached.
+    let fresh = Fixture::new();
+    let ungated = fresh
+        .gate(WriteContract::DetectAndReject)
+        .with_build_artifacts_unhashed();
+    let outcome = ungated.run(&Reaped).expect("gate run");
+    assert_eq!(
+        outcome.clock_barrier,
+        ClockBarrierEvidence::NotEstablished,
+        "a run that never read a pre-image cannot claim a verified barrier"
+    );
+    assert!(
+        outcome
+            .clock_barrier
+            .describe()
+            .contains("did NOT establish"),
+        "an unestablished barrier must say so: {}",
+        outcome.clock_barrier.describe()
+    );
+    assert_eq!(
+        outcome.receipt()["clock_barrier"]["status"],
+        "not_established"
     );
 }
 
