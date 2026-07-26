@@ -2,7 +2,10 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
-use crate::types::GcConfig;
+use crate::types::{AuthorityLevel, EffectScope, GcConfig, TachiEventRecord};
+
+use super::common::now_utc_iso;
+use super::event_ledger::insert_tachi_event;
 
 // ─── GC (Garbage Collection) ──────────────────────────────────────────────────
 
@@ -113,6 +116,82 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
 
 // ─── AUTO-ARCHIVE STALE MEMORIES ──────────────────────────────────────────────
 
+/// `event_type` of the receipt [`archive_stale_memories`] writes to
+/// `tachi_events`. Named rather than inlined because both the writer and every
+/// reader that wants to ask "has GC ever archived anything, and what" must
+/// agree on the exact string — tachi#1463.
+pub const GC_MEMORY_ARCHIVED_EVENT_TYPE: &str = "memory.gc_archived";
+
+/// How many archived memory ids a single receipt records verbatim.
+///
+/// `tachi_events` is append-only and, unlike every table [`gc_tables`] prunes,
+/// nothing reaps it — so an uncapped id list turns one first-run sweep over a
+/// large corpus into a permanent multi-megabyte row. The cap only ever elides
+/// *ids*: `archived_count` is the true count for every pass whether or not the
+/// sample was truncated, and a truncated pass says so in `memory_ids_truncated`
+/// rather than presenting a short list as if it were complete.
+const GC_ARCHIVED_ID_SAMPLE_CAP: usize = 500;
+
+/// One auto-archive predicate, paired with the receipt vocabulary describing it.
+///
+/// The descriptive fields sit in the same literal as the statement they
+/// describe so a receipt cannot drift into claiming a threshold the SQL does
+/// not apply; a separately maintained list of pass names would eventually
+/// diverge with nothing to catch it.
+struct ArchivalPass {
+    /// Stable identifier for this predicate, recorded in the receipt.
+    name: &'static str,
+    /// Column supplying this predicate's staleness reference.
+    recency_column: &'static str,
+    /// Rows qualify strictly below this importance.
+    importance_below: f64,
+    /// Which `retention_policy` values this predicate claims.
+    retention_scope: &'static str,
+    /// `UPDATE … RETURNING id`; `?1` is `stale_days`, `?2` the archival time.
+    sql: String,
+}
+
+/// Result of running one [`ArchivalPass`].
+struct ArchivalOutcome {
+    count: usize,
+    ids: Vec<String>,
+    truncated: bool,
+}
+
+/// Run a single archival pass and capture the ids it actually archived.
+///
+/// The `query_map` iterator is drained to exhaustion rather than run through
+/// `execute`: with a `RETURNING` clause the modified rows are the statement's
+/// output, so stepping it to completion is what both applies the whole update
+/// and yields every id. `execute` is the wrong verb for a returning statement.
+///
+/// The loop counts every returned row but stops *storing* ids at
+/// [`GC_ARCHIVED_ID_SAMPLE_CAP`], so a truncated sample never costs the caller
+/// an accurate count.
+fn run_archival_pass(
+    conn: &Connection,
+    pass: &ArchivalPass,
+    stale_days: u32,
+    now: &str,
+) -> Result<ArchivalOutcome, MemoryError> {
+    let mut stmt = conn.prepare(&pass.sql)?;
+    let mut count = 0usize;
+    let mut ids: Vec<String> = Vec::new();
+    let rows = stmt.query_map(params![stale_days, now], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        let id = row?;
+        count += 1;
+        if ids.len() < GC_ARCHIVED_ID_SAMPLE_CAP {
+            ids.push(id);
+        }
+    }
+    Ok(ArchivalOutcome {
+        count,
+        truncated: count > ids.len(),
+        ids,
+    })
+}
+
 /// Archive low-importance memories that haven't been accessed in `stale_days`.
 /// Respects `retention_policy`:
 ///   - permanent / pinned → never auto-archived (GC-exempt)
@@ -120,63 +199,193 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
 ///   - durable (or NULL) → standard thresholds (importance < 0.5 / < 0.3)
 ///
 /// Returns the number of memories archived.
+///
+/// # Receipt (tachi#1463)
+///
+/// Archiving a row removes it from default search, so this is a scheduled,
+/// unattended mutation of what recall can return. Every sweep that archives at
+/// least one row therefore writes a `memory.gc_archived` event to
+/// `tachi_events` naming the threshold, the predicate that fired, and the rows
+/// it moved. Before this existed the function returned a bare count into an
+/// `eprintln!`, and establishing that GC had never archived anything took
+/// forensic signature analysis of the corpus instead of a lookup.
+///
+/// Three deliberate choices here, each of which could reasonably have gone the
+/// other way:
+///
+/// - **`tachi_events`, not `audit_log`.** `audit_log` is shaped for MCP proxy
+///   tool calls (`timestamp, server_id, tool_name, args_hash, success,
+///   duration_ms, error_kind`) with no free-form column to hold "which rows,
+///   which predicate, which threshold" — and [`gc_tables`] prunes it, so GC
+///   would reap its own receipts.
+/// - **memcore writes to its own ledger.** Every other `insert_tachi_event`
+///   caller lives in `tachi-server`; memcore has owned the DDL and the insert
+///   function without ever using them. This is its first self-write. The
+///   alternative — returning the ids and emitting from the `tachi-server`
+///   scheduler — leaves the receipt optional at the layer that can forget it,
+///   which is precisely how the gap arose. The crate that owns both the
+///   mutation and the ledger emits the record for its own mutation.
+/// - **Emit only when rows moved.** Nothing prunes `tachi_events`; a no-op
+///   marker every six hours would add rows forever to record non-events. "GC
+///   ran at all" is a scheduler-liveness question, not an archival receipt.
+///
+/// The sweep is also now a single transaction. It has to be, for the receipt to
+/// mean anything: four autocommit statements could half-apply and leave a
+/// receipt describing an archival that partially rolled back.
 pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64, MemoryError> {
+    // `unchecked_transaction` takes `&Connection`, which keeps this function's
+    // signature — and `MemoryStore::archive_stale_memories`'s `&self` — intact.
+    // It rolls back on drop, so any `?` below abandons the whole sweep.
+    let tx = conn.unchecked_transaction()?;
+    let now = now_utc_iso();
+
     // Skip permanent and pinned memories entirely
     let exempt_clause =
         "AND (retention_policy IS NULL OR retention_policy NOT IN ('permanent', 'pinned'))";
 
-    // Durable (NULL or 'durable'): standard thresholds
-    let affected_durable_1 = conn.execute(
-        &format!(
-            "UPDATE memories SET archived = 1
-             WHERE archived = 0
-               AND last_access IS NOT NULL
-               AND unixepoch(last_access) < unixepoch('now', '-' || ?1 || ' days')
-               AND importance < 0.5
-               AND (retention_policy IS NULL OR retention_policy = 'durable')
-               {exempt_clause}"
-        ),
-        params![stale_days],
-    )?;
+    // `revision = revision + 1` is not bookkeeping, it is the point.
+    // `restore_archived_if_revision` (memory_crud.rs) un-archives under
+    // `WHERE id = ?2 AND archived = 1 AND revision = ?3`. If GC archived
+    // without moving `revision`, a caller holding the pre-GC revision would
+    // succeed at un-archiving a row it never learned had been archived — the
+    // CAS guard silently blind to the one mutation no caller can observe. A CAS
+    // failure after a GC sweep is the guard working. `updated_at` moves with it
+    // because every sibling archival path sets both (`archive_memory`,
+    // `archive_memory_if_revision`, `restore_archived_if_revision`, and the
+    // lifecycle-proposal path in `store/memory_lifecycle.rs`); GC was the sole
+    // outlier, and a row mutated at a time its `updated_at` does not mention is
+    // a column that lies. Checked before doing this: `updated_at` is not a
+    // ranking input — it is absent from `MEMORY_SELECT_COLUMNS`, absent from
+    // `MemoryEntry`, and the scorer's recency reference is `last_use_at` /
+    // `last_access` falling back to `timestamp` — so a bumped `updated_at`
+    // cannot make a later-restored row look spuriously fresh in search.
+    //
+    // The `WHERE` clauses below are unchanged: this commit records what the
+    // predicates did, it does not touch what they select (tachi#1458 owns
+    // whether GC should reap by display or by use).
+    let passes = [
+        // Durable (NULL or 'durable'): standard thresholds
+        ArchivalPass {
+            name: "durable_stale_by_last_access",
+            recency_column: "last_access",
+            importance_below: 0.5,
+            retention_scope: "durable_or_unset",
+            sql: format!(
+                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
+                 WHERE archived = 0
+                   AND last_access IS NOT NULL
+                   AND unixepoch(last_access) < unixepoch('now', '-' || ?1 || ' days')
+                   AND importance < 0.5
+                   AND (retention_policy IS NULL OR retention_policy = 'durable')
+                   {exempt_clause}
+                 RETURNING id"
+            ),
+        },
+        ArchivalPass {
+            name: "durable_never_accessed_by_timestamp",
+            recency_column: "timestamp",
+            importance_below: 0.3,
+            retention_scope: "durable_or_unset",
+            sql: format!(
+                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
+                 WHERE archived = 0
+                   AND last_access IS NULL
+                   AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
+                   AND importance < 0.3
+                   AND (retention_policy IS NULL OR retention_policy = 'durable')
+                   {exempt_clause}
+                 RETURNING id"
+            ),
+        },
+        // Ephemeral: more aggressive thresholds (importance < 0.7 / < 0.5)
+        ArchivalPass {
+            name: "ephemeral_stale_by_last_access",
+            recency_column: "last_access",
+            importance_below: 0.7,
+            retention_scope: "ephemeral",
+            sql: "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
+                  WHERE archived = 0
+                    AND last_access IS NOT NULL
+                    AND unixepoch(last_access) < unixepoch('now', '-' || ?1 || ' days')
+                    AND importance < 0.7
+                    AND retention_policy = 'ephemeral'
+                  RETURNING id"
+                .to_string(),
+        },
+        ArchivalPass {
+            name: "ephemeral_never_accessed_by_timestamp",
+            recency_column: "timestamp",
+            importance_below: 0.5,
+            retention_scope: "ephemeral",
+            sql: "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
+                  WHERE archived = 0
+                    AND last_access IS NULL
+                    AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
+                    AND importance < 0.5
+                    AND retention_policy = 'ephemeral'
+                  RETURNING id"
+                .to_string(),
+        },
+    ];
 
-    let affected_durable_2 = conn.execute(
-        &format!(
-            "UPDATE memories SET archived = 1
-             WHERE archived = 0
-               AND last_access IS NULL
-               AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
-               AND importance < 0.3
-               AND (retention_policy IS NULL OR retention_policy = 'durable')
-               {exempt_clause}"
-        ),
-        params![stale_days],
-    )?;
+    let mut total: usize = 0;
+    let mut pass_receipts: Vec<serde_json::Value> = Vec::with_capacity(passes.len());
+    for pass in &passes {
+        let outcome = run_archival_pass(&tx, pass, stale_days, &now)?;
+        total += outcome.count;
+        pass_receipts.push(serde_json::json!({
+            "predicate": pass.name,
+            "recency_column": pass.recency_column,
+            "importance_below": pass.importance_below,
+            "retention_scope": pass.retention_scope,
+            "archived_count": outcome.count,
+            "memory_ids": outcome.ids,
+            "memory_ids_truncated": outcome.truncated,
+        }));
+    }
 
-    // Ephemeral: more aggressive thresholds (importance < 0.7 / < 0.5)
-    let affected_ephemeral_1 = conn.execute(
-        "UPDATE memories SET archived = 1
-         WHERE archived = 0
-           AND last_access IS NOT NULL
-           AND unixepoch(last_access) < unixepoch('now', '-' || ?1 || ' days')
-           AND importance < 0.7
-           AND retention_policy = 'ephemeral'",
-        params![stale_days],
-    )?;
+    if total > 0 {
+        let event = TachiEventRecord {
+            id: format!("gc-archive-{}", uuid::Uuid::new_v4()),
+            source_repo: "tachi".to_string(),
+            adapter: "memcore_gc".to_string(),
+            // No project/domain/session context reaches this layer. The receipt
+            // is written to the same database whose rows it archived, so global
+            // and per-project sweeps are already told apart by which
+            // `tachi_events` table holds the row; inventing a label here would
+            // be guessing. `event_type` carries the discriminator, and it is
+            // indexed.
+            project: String::new(),
+            domain: String::new(),
+            session_id: String::new(),
+            actor: "memcore_gc".to_string(),
+            event_type: GC_MEMORY_ARCHIVED_EVENT_TYPE.to_string(),
+            // The rows were archived by the time this is written: a completed
+            // state change, not a proposal — same authority as
+            // `emit_memory_saved_event`.
+            authority: AuthorityLevel::RawFact,
+            // `Recall` is the whole reason this receipt exists: archiving drops
+            // rows out of default search.
+            effects: vec![EffectScope::MemoryWrite, EffectScope::Recall],
+            projection_hints: Vec::new(),
+            payload: serde_json::json!({
+                "stale_days": stale_days,
+                "archived_total": total,
+                "archived_at": now,
+                "id_sample_cap": GC_ARCHIVED_ID_SAMPLE_CAP,
+                "passes": pass_receipts,
+            }),
+            provenance: serde_json::json!({
+                "source": "memcore::db::stats_gc::archive_stale_memories",
+                "note": "scheduled unattended archival; rows listed here were removed from default search and had their revision bumped",
+            }),
+            created_at: now.clone(),
+        };
+        insert_tachi_event(&tx, &event)?;
+    }
 
-    let affected_ephemeral_2 = conn.execute(
-        "UPDATE memories SET archived = 1
-         WHERE archived = 0
-           AND last_access IS NULL
-           AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
-           AND importance < 0.5
-           AND retention_policy = 'ephemeral'",
-        params![stale_days],
-    )?;
-
-    Ok(
-        (affected_durable_1 + affected_durable_2 + affected_ephemeral_1 + affected_ephemeral_2)
-            as u64,
-    )
+    tx.commit()?;
+    Ok(total as u64)
 }
 
 // ─── STATS ────────────────────────────────────────────────────────────────────

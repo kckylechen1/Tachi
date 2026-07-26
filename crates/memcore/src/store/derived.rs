@@ -100,9 +100,24 @@ impl MemoryStore {
     }
 
     /// Archive low-importance memories not accessed in `stale_days`.
+    ///
+    /// Writes a `memory.gc_archived` receipt to `tachi_events` naming the rows
+    /// and thresholds whenever the sweep archives anything — see
+    /// [`db::archive_stale_memories`] (tachi#1463).
+    ///
+    /// Retried on `SQLITE_BUSY` like [`Self::gc_tables`]: tachi#1463 made the
+    /// sweep a single transaction so its receipt cannot describe a partially
+    /// applied archival, which means it now holds the write lock across all
+    /// four passes instead of releasing it between four autocommit statements.
+    /// Retrying is safe because that transaction rolls back whole, and a replay
+    /// re-selects from scratch — rows archived by a committed attempt no longer
+    /// match `archived = 0`.
     pub fn archive_stale_memories(&self, stale_days: u32) -> Result<u64, MemoryError> {
-        let _authorization =
-            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        db::archive_stale_memories(&self.conn, stale_days)
+        let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
+        db::retry_memory_locked("archive_stale_memories", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
+            db::archive_stale_memories(&self.conn, stale_days)
+        })
     }
 }
