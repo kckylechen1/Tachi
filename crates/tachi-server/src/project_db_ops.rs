@@ -182,6 +182,21 @@ impl MemoryServer {
     }
 }
 
+/// Register a just-created repo-local `<git_root>/.tachi/tachi-memory.db` in the
+/// manifest so [`MemoryServer::resolve_named_project_db_path`] can find it by
+/// name independent of the (Unix-only, best-effort) Plan C symlink — see
+/// `server_methods/db.rs::resolve_named_project_db_path`'s doc comment: the
+/// manifest-recorded repo-local path is the addressing scheme's PRIMARY
+/// resolution path, the symlink is a legacy/secondary fallback.
+///
+/// Mirrors the single-entry registration shape
+/// `bootstrap/tidy/migration.rs::update_manifest_after_migration` writes for
+/// its own callers; unlike that helper this never removes or rewrites any
+/// entry but the one it is registering, and refuses to silently fabricate a
+/// fresh empty manifest over a manifest file that exists but fails to parse
+/// (an unreadable/corrupt manifest is an error here, not "no entries yet" —
+/// overwriting it via `load_or_empty` would silently drop every other
+/// registered project's entry).
 pub(crate) fn register_repo_local_manifest_entry_in_home(
     db_path: &std::path::Path,
     project_name: &str,

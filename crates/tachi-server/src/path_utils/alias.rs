@@ -144,6 +144,8 @@ pub(crate) fn plan_c_legacy_dir_name_from_root(project_root: &Path) -> Option<St
 /// dir when the hashed one does not yet exist. Used when creating/resolving the
 /// alias so repos that predate the hash suffix keep addressing their old data.
 ///
+/// Returns an error when the root cannot produce a stable identity or when
+/// compatibility aliases disagree about the physical DB.
 pub(crate) fn plan_c_alias_db_for_root_in_home(
     project_root: &Path,
     tachi_home: &Path,
@@ -161,6 +163,8 @@ pub(crate) fn plan_c_alias_db_for_root_in_home(
     Ok(plan_c_global_db_path_in_home(tachi_home, &current))
 }
 
+/// Like [`plan_c_alias_db_for_root_in_home`] but only returns a path when an
+/// alias DB (hashed or legacy) actually exists on disk. Used by reverse lookups.
 pub(crate) fn plan_c_existing_alias_db_for_root_in_home(
     project_root: &Path,
     tachi_home: &Path,
