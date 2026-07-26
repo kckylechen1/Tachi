@@ -158,6 +158,35 @@ pub(crate) fn enforce_session_project(
     transport_label: &str,
     role: EnforcementRole,
 ) -> Result<(), rmcp::ErrorData> {
+    enforce_session_project_impl(None, tool_name, arguments, project, transport_label, role)
+}
+
+pub(crate) fn enforce_server_session_project(
+    server: &crate::MemoryServer,
+    tool_name: &str,
+    arguments: &mut Option<JsonObject>,
+    project: &str,
+    transport_label: &str,
+    role: EnforcementRole,
+) -> Result<(), rmcp::ErrorData> {
+    enforce_session_project_impl(
+        Some(server),
+        tool_name,
+        arguments,
+        project,
+        transport_label,
+        role,
+    )
+}
+
+fn enforce_session_project_impl(
+    server: Option<&crate::MemoryServer>,
+    tool_name: &str,
+    arguments: &mut Option<JsonObject>,
+    project: &str,
+    transport_label: &str,
+    role: EnforcementRole,
+) -> Result<(), rmcp::ErrorData> {
     let args = arguments.get_or_insert_with(serde_json::Map::new);
     if let Some(explicit_project) = args.get("project") {
         let Some(requested_alias) = explicit_project.as_str().map(str::to_string) else {
@@ -173,9 +202,12 @@ pub(crate) fn enforce_session_project(
         // value the wire already had for this key. See [`EnforcementRole`]
         // for why this is safe regardless of which hop is calling.
         stamp_project_explicit_marker(args, true);
-        let requested_identity =
-            crate::MemoryServer::resolve_named_project_db_identity(&requested_alias);
-        let bound_identity = crate::MemoryServer::resolve_named_project_db_identity(project);
+        let resolve_identity = |name: &str| match server {
+            Some(server) => server.resolve_server_named_project_db_identity(name),
+            None => crate::MemoryServer::resolve_named_project_db_identity(name),
+        };
+        let requested_identity = resolve_identity(&requested_alias);
+        let bound_identity = resolve_identity(project);
 
         match (requested_identity, bound_identity) {
             (Ok(requested_db), Ok(bound_db)) if requested_db == bound_db => {

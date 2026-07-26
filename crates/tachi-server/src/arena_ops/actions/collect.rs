@@ -23,10 +23,10 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
         let dir = mission_dir(arena_id, &mission_id)?;
         let result_path = dir.join("result.md");
         let plan_path = dir.join("plan.md");
-        let mut status_before = read_json_file(&dir.join("status.json"))?;
+        let mut status_before = read_required_mission_status(arena_id, &mission_id)?;
         refresh_linked_dispatch_fields(&mut status_before);
         let mut artifact_read_errors = Vec::new();
-        let mut result = match read_arena_artifact(&result_path, "arena mission result") {
+        let mut result = match read_mission_result(arena_id, &mission_id) {
             ArenaArtifactRead::Present(raw) => raw,
             ArenaArtifactRead::Missing => String::new(),
             ArenaArtifactRead::Error(err) => {
@@ -46,25 +46,42 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
         if result.trim().is_empty() && artifact_read_errors.is_empty() {
             if let Some(dispatch_id) = status_before.get("dispatch_id").and_then(Value::as_str) {
                 let run_dir_hint = status_before.get("run_dir").and_then(Value::as_str);
-                if let Some(dispatch_result) =
-                    read_linked_dispatch_result(dispatch_id, run_dir_hint)
-                {
-                    crate::utils::write_owner_only_file_atomic(
-                        &result_path,
-                        dispatch_result.as_bytes(),
-                    )
-                    .map_err(|e| format!("write linked dispatch result.md: {e}"))?;
-                    result = dispatch_result;
-                    result_source = "linked_dispatch_result";
+                match read_linked_dispatch_result(dispatch_id, run_dir_hint) {
+                    Ok(Some(dispatch_result)) => {
+                        crate::utils::write_owner_only_file_atomic(
+                            &result_path,
+                            dispatch_result.as_bytes(),
+                        )
+                        .map_err(|e| format!("write linked dispatch result.md: {e}"))?;
+                        result = dispatch_result;
+                        result_source = "linked_dispatch_result";
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        artifact_read_errors.push(error);
+                        result_source = "result_read_error";
+                    }
                 }
             }
         }
-        match read_arena_artifact(&plan_path, "arena mission plan") {
+        match read_mission_plan(arena_id, &mission_id) {
             ArenaArtifactRead::Present(_) | ArenaArtifactRead::Missing => {}
             ArenaArtifactRead::Error(err) => artifact_read_errors.push(err),
         }
-        let result_written = nonempty_file(&result_path);
-        let plan_written = nonempty_file(&plan_path);
+        let result_written = match mission_file_nonempty(arena_id, &mission_id, "result.md") {
+            Ok(written) => written,
+            Err(error) => {
+                artifact_read_errors.push(error);
+                false
+            }
+        };
+        let plan_written = match mission_file_nonempty(arena_id, &mission_id, "plan.md") {
+            Ok(written) => written,
+            Err(error) => {
+                artifact_read_errors.push(error);
+                false
+            }
+        };
         let artifact_read_error = artifact_read_errors.first().cloned();
         let state = if !artifact_read_errors.is_empty() {
             "artifact_read_error"
@@ -87,7 +104,7 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
                     json!(artifact_read_errors.clone())
                 },
                 "completion_draft": if state == "collected" {
-                    completion_draft_for_mission(&status_before, &result_path)
+                    completion_draft_for_mission(&status_before, &result_path, &result)
                 } else {
                     Value::Null
                 },

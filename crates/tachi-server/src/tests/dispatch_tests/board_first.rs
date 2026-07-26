@@ -2,41 +2,15 @@
 //! pollers until the V2 plan stage (up to 180s LLM call) completes, and a
 //! plan-stage failure must not leave an orphaned kanban row.
 //!
-//! tachi#1288 (Fix C, CLI-era fixture cleanup): the doc paragraph these tests
-//! originally shipped with claimed the plan stage was driven against a fake
-//! `claude` binary via a `CLAUDE_BIN` env override, "so no network call /
-//! real Claude Code CLI is required." That was true when the V2 plan stage
-//! went through `ClaudePool::call` (which shelled out to the binary at
-//! `CLAUDE_BIN`). #1274 (ClaudePool decommission step 2/3) deleted that
-//! branch entirely: `dispatch_v2::call_plan_llm` now calls
-//! `llm.call_reasoning_llm_provider_only(...)` directly, which never reads
-//! `CLAUDE_BIN` — see `dispatch_v2.rs`'s own
-//! `call_plan_llm_never_reaches_cli_binary_resolver` negative-control test,
-//! which exists specifically to keep that invariant honest.
-//!
-//! Concretely, that leaves this file's tests in two different states:
-//!   * `plan_stage_failure_closes_both_status_and_kanban_row` still gets a
-//!     genuine plan-stage failure (now from the real reasoning-LLM call
-//!     erroring in an unconfigured test environment, not from the fake
-//!     script's `exit 1`) and still verifies the property it's named for
-//!     (status.json + kanban row both close terminal).
-//!   * `successful_dispatch_seeds_status_and_kanban_before_plan_completes`
-//!     and `plan_review_pending_response_projects_input_required_kanban_state`
-//!     need `call_plan_llm` to actually SUCCEED, which now requires a real,
-//!     configured reasoning-lane LLM provider (network egress + credentials)
-//!     — the elaborate `write_fake_claude_binary` / sentinel-release dance
-//!     below no longer influences either test's outcome at all, since
-//!     nothing in the production code path ever executes that file. Both are
-//!     `#[ignore]` by default pending a usable `REASONING_FALLBACK_API_KEY`
-//!     or non-placeholder `SILICONFLOW_API_KEY` (see
-//!     `require_usable_reasoning_lane_key`); run with `--run-ignored` /
-//!     `--ignored`. A forced ignored run without keys panics loud (never
-//!     silent-green). Rewriting them against a real mock provider seam —
-//!     none exists in `tachi-llm` today — remains the tachi#1288 follow-up.
+//! #1274 moved V2 planning to provider-only HTTP. These tests install a local
+//! OpenAI-compatible reasoning provider so success and failure are independent
+//! of ambient credentials, provider health, and network access. The ordering
+//! test's provider handler waits on a test-controlled sentinel before replying,
+//! preserving the pre-plan observation barrier.
 //!
 //! Each test isolates `TACHI_HOME` to a fresh temp dir and holds
-//! `global_test_lock()` because `CLAUDE_BIN` / `DISPATCH_V2_ENABLED` /
-//! `TACHI_HOME` are process-global env vars.
+//! `global_test_lock()` because `DISPATCH_V2_ENABLED` / `TACHI_HOME` are
+//! process-global env vars.
 
 use super::super::make_server;
 use super::{
@@ -44,109 +18,133 @@ use super::{
     DISPATCH_TEST_WAIT_INTERVAL,
 };
 use crate::test_support::EnvRestore;
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
 use serde_json::{json, Value};
+use tachi_llm::{
+    llm::{ChatLaneConfig, ProviderRuntimeConfig},
+    LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
+};
 
-/// Placeholder injected by `tests/mod.rs::ensure_test_env` — not a usable key.
-const TEST_SILICONFLOW_PLACEHOLDER: &str = "test-siliconflow-key";
+const MOCK_PLAN: &str = "## Goal\nboard-first test.\n\n## Steps\n1. inspect\n\n## Files\n- src/lib.rs\n\n## Validation\n- cargo test\n";
 
-/// Usable reasoning-lane key = non-empty `REASONING_FALLBACK_API_KEY`, or
-/// non-empty `SILICONFLOW_API_KEY` that is not the test placeholder.
-///
-/// Missing → loud SKIP + panic so `--ignored` without keys is red, never green.
-fn require_usable_reasoning_lane_key() {
-    let fallback = std::env::var("REASONING_FALLBACK_API_KEY").unwrap_or_default();
-    let silicon = std::env::var("SILICONFLOW_API_KEY").unwrap_or_default();
-    let fallback_ok = !fallback.trim().is_empty();
-    let silicon_ok =
-        !silicon.trim().is_empty() && silicon.trim() != TEST_SILICONFLOW_PLACEHOLDER;
-    if fallback_ok || silicon_ok {
-        return;
-    }
-    let mut missing = Vec::new();
-    if fallback.trim().is_empty() {
-        missing.push("REASONING_FALLBACK_API_KEY (empty/unset)");
-    }
-    if silicon.trim().is_empty() {
-        missing.push("SILICONFLOW_API_KEY (empty/unset)");
-    } else if silicon.trim() == TEST_SILICONFLOW_PLACEHOLDER {
-        missing.push("SILICONFLOW_API_KEY (test placeholder, not usable)");
-    }
-    eprintln!(
-        "SKIP: needs usable REASONING_FALLBACK_API_KEY or SILICONFLOW_API_KEY \
-         (not test placeholder); missing/unusable: {}",
-        missing.join(", ")
-    );
-    panic!(
-        "precondition failed: usable reasoning-lane API key required \
-         (REASONING_FALLBACK_API_KEY or non-placeholder SILICONFLOW_API_KEY); \
-         missing/unusable: {}",
-        missing.join(", ")
-    );
+#[derive(Clone)]
+enum MockProviderMode {
+    Success,
+    SuccessAfter(std::path::PathBuf),
+    Failure,
 }
 
-/// Write a fake `claude` CLI at `path` that either succeeds with a
-/// minimal-but-valid plan envelope, or exits non-zero.
-///
-/// tachi#1288 (Fix C): this described forcing `ClaudePool::call` into its
-/// `Err` branch until #1274 deleted that branch. Nothing in the current
-/// `dispatch_v2::call_plan_llm` reads `CLAUDE_BIN` or executes this file
-/// anymore (see the module doc above) — this fixture is now dead machinery
-/// for every caller below. Left in place (rather than deleted) because the
-/// two callers that use `FakeClaudeMode::Success` are a tracked LANE-OUTAGE
-/// red pair, not something this bounded fix rewrites; ripping the fixture
-/// out from underneath already-red tests without being able to re-run them
-/// here would risk hiding whether they still fail for the same documented
-/// reason.
-///
-/// #971 review-fix (F4): `Success` no longer takes a fixed wall-clock sleep.
-/// A fixed sleep is a CI flake trap — under load, polling can be delayed
-/// past the sleep window, so the pre-plan assertions can race a plan stage
-/// that already completed. Instead the fake binary spin-waits on a sentinel
-/// file (`release_path`) that the test creates only AFTER its pre-plan
-/// assertions have passed, making the pre-plan observation window
-/// test-controlled rather than timing-dependent. `poll_timeout_secs` is a
-/// generous backstop so a test bug (never creating the sentinel) fails fast
-/// instead of hanging forever.
-///
-/// #971 review-fix (F4, second pass): `release_path` is derived from the
-/// test's isolated `TACHI_HOME`, which itself derives from the process
-/// `TMPDIR` — a directory this test does not control the naming of. The
-/// generated `RELEASE=...` assignment must therefore be a single-quoted
-/// shell literal (with embedded `'` escaped as `'\''`): double quotes stop
-/// spaces but still expand `$()`/backticks under a hostile `TMPDIR`.
-fn write_fake_claude_binary(path: &std::path::Path, mode: FakeClaudeMode) {
-    use std::io::Write;
-    let script = match mode {
-        FakeClaudeMode::Success {
-            release_path,
-            poll_timeout_secs,
-        } => format!(
-            "#!/usr/bin/env bash\nset -e\nRELEASE='{release}'\nDEADLINE=$(( $(date +%s) + {timeout} ))\nwhile [ ! -f \"$RELEASE\" ]; do\n  if [ \"$(date +%s)\" -ge \"$DEADLINE\" ]; then\n    echo 'fake claude: timed out waiting for release sentinel' 1>&2\n    exit 1\n  fi\n  sleep 0.02\ndone\ncat <<'JSON'\n{{\"result\":\"## Goal\\nboard-first test.\\n\\n## Steps\\n1. inspect\\n\\n## Files\\n- src/lib.rs\\n\\n## Validation\\n- cargo test\\n\"}}\nJSON\n",
-            release = release_path.display().to_string().replace('\'', "'\\''"),
-            timeout = poll_timeout_secs,
-        ),
-        FakeClaudeMode::Fail => "#!/usr/bin/env bash\necho 'synthetic plan failure' 1>&2\nexit 1\n"
-            .to_string(),
-    };
-    let mut f = std::fs::File::create(path).expect("create fake claude binary");
-    f.write_all(script.as_bytes())
-        .expect("write fake claude binary");
-    drop(f);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap();
+struct MockProvider {
+    llm: LlmClient,
+    server_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for MockProvider {
+    fn drop(&mut self) {
+        self.server_task.abort();
     }
 }
 
-enum FakeClaudeMode {
-    Success {
-        release_path: std::path::PathBuf,
-        poll_timeout_secs: u64,
-    },
-    Fail,
+impl MockProvider {
+    async fn start(mode: MockProviderMode) -> Self {
+        let app = Router::new()
+            .route("/chat/completions", post(mock_chat_completions))
+            .with_state(mode);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock reasoning provider");
+        let port = listener
+            .local_addr()
+            .expect("mock reasoning provider address")
+            .port();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock reasoning provider");
+        });
+
+        let unused_lane = || ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        };
+        let config = ProviderRuntimeConfig {
+            extract: unused_lane(),
+            summary: unused_lane(),
+            reasoning: ChatLaneConfig {
+                base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+                model: "mock-board-first-reasoning".to_string(),
+                api_key_envs: vec!["BOARD_FIRST_REASONING_API_KEY"],
+            },
+            distill: unused_lane(),
+            rerank: RerankConfig {
+                provider: RerankProviderKind::Voyage,
+                local_endpoint: None,
+            },
+        };
+        let llm = LlmClient::new_with_config(config, None).expect("initialize mock LLM client");
+        llm.set_provider_secret_pool(
+            "BOARD_FIRST_REASONING_API_KEY",
+            vec![ProviderSecret {
+                key_id: "board-first-test-key".to_string(),
+                value: "test-key".to_string(),
+            }],
+        );
+
+        Self { llm, server_task }
+    }
+}
+
+async fn mock_chat_completions(State(mode): State<MockProviderMode>) -> Response {
+    match mode {
+        MockProviderMode::Failure => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "synthetic plan failure"}})),
+        )
+            .into_response(),
+        MockProviderMode::Success => mock_plan_response(),
+        MockProviderMode::SuccessAfter(release_path) => {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !release_path.is_file() {
+                if tokio::time::Instant::now() >= deadline {
+                    return (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        Json(
+                            json!({"error": {"message": "timed out waiting for release sentinel"}}),
+                        ),
+                    )
+                        .into_response();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            mock_plan_response()
+        }
+    }
+}
+
+fn mock_plan_response() -> Response {
+    Json(json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": MOCK_PLAN
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2
+        },
+        "model": "mock-board-first-reasoning"
+    }))
+    .into_response()
 }
 
 /// Wait until exactly one subdirectory exists under `run_root` and return
@@ -189,8 +187,8 @@ fn read_status_json(run_dir: &std::path::Path) -> Option<Value> {
 }
 
 /// A run directory is created before its receipt is atomically published.
-/// Wait for the receipt itself, while the fake plan stage remains blocked on
-/// its sentinel, so this test observes the required ordering rather than a
+/// Wait for the receipt itself, while the mock provider remains blocked on its
+/// sentinel, so this test observes the required ordering rather than a
 /// directory-creation race.
 async fn wait_for_status_json(run_dir: &std::path::Path) -> Value {
     for _ in 0..DISPATCH_TEST_WAIT_ATTEMPTS {
@@ -216,16 +214,13 @@ async fn plan_stage_failure_closes_both_status_and_kanban_row() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let fake_claude = temp_home.path().join("claude-fail");
-    write_fake_claude_binary(&fake_claude, FakeClaudeMode::Fail);
-
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
-    let _claude_bin = EnvRestore::set_path("CLAUDE_BIN", &fake_claude);
-    let _skip_perms = EnvRestore::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
     let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let mock_provider = MockProvider::start(MockProviderMode::Failure).await;
 
     let run_root = temp_home.path().join("runs");
-    let server = make_server();
+    let mut server = make_server();
+    server.replace_llm(mock_provider.llm.clone());
 
     let mut params = dispatch_params(Some("claude"), "plan stage failure should close kanban");
     params.stage = Some("auto".to_string());
@@ -262,43 +257,29 @@ async fn plan_stage_failure_closes_both_status_and_kanban_row() {
 
 /// (5b) A successful V2 dispatch must have BOTH status.json AND the kanban
 /// row present with pre-plan content (dispatch accepted, no plan yet)
-/// BEFORE the (slow, faked) plan stage completes — proving BOARD-FIRST /
+/// BEFORE the blocked mock-provider plan stage completes — proving BOARD-FIRST /
 /// RECEIPT-FIRST ordering is observable, not just eventually-true.
-///
-/// tachi#1288 (Fix C): "faked" above is aspirational, not actual — see the
-/// module doc's CLI-era-fixture note. This test needs `call_plan_llm` to
-/// really succeed, so it is ignored by default without a usable reasoning key.
-#[ignore = "needs usable REASONING_FALLBACK_API_KEY or SILICONFLOW_API_KEY (not test placeholder); run with --run-ignored / --ignored --nocapture"]
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
-    require_usable_reasoning_lane_key();
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let fake_claude = temp_home.path().join("claude-slow-success");
-    // #971 review-fix (F4): the fake binary blocks on this sentinel file
-    // instead of a fixed wall-clock sleep — the test releases it only after
-    // the pre-plan assertions below have already passed, so the pre-plan
-    // observation window is deterministic, not a race against a timer.
+    // #971 review-fix (F4): the HTTP handler blocks on this sentinel file.
+    // The test releases it only after the pre-plan assertions below have
+    // passed, so the observation window is deterministic.
     let release_path = temp_home.path().join("release-plan-stage");
-    write_fake_claude_binary(
-        &fake_claude,
-        FakeClaudeMode::Success {
-            release_path: release_path.clone(),
-            poll_timeout_secs: 60,
-        },
-    );
 
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
-    let _claude_bin = EnvRestore::set_path("CLAUDE_BIN", &fake_claude);
-    let _skip_perms = EnvRestore::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
     let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let mock_provider =
+        MockProvider::start(MockProviderMode::SuccessAfter(release_path.clone())).await;
 
     let run_root = temp_home.path().join("runs");
-    let server = make_server();
+    let mut server = make_server();
+    server.replace_llm(mock_provider.llm.clone());
     let server_for_task = (*server).clone();
 
     let mut params = dispatch_params(Some("custom"), "board-first ordering smoke");
@@ -312,8 +293,8 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
     });
 
     // Run dir + status.json must appear almost immediately (receipt-first) —
-    // the fake plan-stage binary is blocked on `release_path`, which this
-    // test has not created yet, so it cannot have completed.
+    // the mock provider is blocked on `release_path`, which this test has not
+    // created yet, so the plan stage cannot have completed.
     let run_dir = wait_for_single_run_dir(&run_root).await;
     let dispatch_id = run_dir
         .file_name()
@@ -356,9 +337,8 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
     );
 
     // #971 review-fix (F4): all pre-plan assertions above have now passed —
-    // release the fake plan-stage binary so it can complete. This is the
-    // deterministic barrier replacing the old fixed 2s sleep: the plan
-    // stage cannot resolve before this point, by construction, not by luck.
+    // release the mock HTTP handler so it can return the plan. The plan stage
+    // cannot resolve before this point, by construction, not by luck.
     std::fs::write(&release_path, b"go").expect("write release sentinel");
 
     // Now let the dispatch actually finish and sanity-check the final state.
@@ -383,41 +363,21 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
 /// reapable by `gc_expired_kanban_cards` instead of pinned forever — this
 /// test only asserts the vocabulary is consistent; GC aging itself is
 /// covered at the `kanban::gc` unit level, not re-driven end-to-end here.
-///
-/// tachi#1288 (Fix C): same live-key precondition as
-/// `successful_dispatch_seeds_status_and_kanban_before_plan_completes` —
-/// ignored by default; see the module doc.
-#[ignore = "needs usable REASONING_FALLBACK_API_KEY or SILICONFLOW_API_KEY (not test placeholder); run with --run-ignored / --ignored --nocapture"]
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn plan_review_pending_response_projects_input_required_kanban_state() {
-    require_usable_reasoning_lane_key();
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let fake_claude = temp_home.path().join("claude-pending-review");
-    let release_path = temp_home.path().join("release-plan-stage");
-    write_fake_claude_binary(
-        &fake_claude,
-        FakeClaudeMode::Success {
-            release_path: release_path.clone(),
-            poll_timeout_secs: 60,
-        },
-    );
-    // Nothing blocks on the sentinel pre-plan in this test — release it
-    // immediately so the plan stage can complete and hand back the
-    // pending-review early response.
-    std::fs::write(&release_path, b"go").expect("write release sentinel");
-
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
-    let _claude_bin = EnvRestore::set_path("CLAUDE_BIN", &fake_claude);
-    let _skip_perms = EnvRestore::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
     let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "true");
+    let mock_provider = MockProvider::start(MockProviderMode::Success).await;
 
     let run_root = temp_home.path().join("runs");
-    let server = make_server();
+    let mut server = make_server();
+    server.replace_llm(mock_provider.llm.clone());
 
     let mut params = dispatch_params(Some("claude"), "plan review pending state projection");
     params.stage = Some("auto".to_string());

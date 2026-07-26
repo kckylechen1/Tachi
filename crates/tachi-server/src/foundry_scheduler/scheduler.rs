@@ -154,17 +154,26 @@ fn manifest_worker_targets(
             return BTreeMap::new();
         }
     };
+    let tachi_home = manifest_path.parent().unwrap_or_else(|| Path::new("."));
 
     let mut by_path: BTreeMap<PathBuf, (String, Route)> = BTreeMap::new();
     for entry in &manifest.dbs {
         let path = PathBuf::from(&entry.path);
         // Only schedule against actual SQLite files. Manifest may carry
         // stale paths; skip silently rather than spawning doomed workers.
-        if !path.exists() {
-            continue;
+        match crate::path_utils::manifest_db_leaf_exists(entry) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                eprintln!(
+                    "[foundry-scheduler] refusing manifest DB {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
         }
         let label = manifest_label_for(&path, &entry.scope_hint);
-        let route = classify_route(entry, &path, own_global, own_project);
+        let route = classify_route_in_home(entry, &path, own_global, own_project, tachi_home);
         by_path.insert(path, (label, route));
     }
     by_path

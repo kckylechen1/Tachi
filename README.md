@@ -290,7 +290,7 @@ The graph engine creates and traverses causal, temporal, and entity relationship
 Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"personal"`). `save_memory` and `search_memory` can filter by domain. There is no separate domain registry — domains are ad-hoc tags on memory rows, not a configured resource.
 
 ### 5. Encrypted Vault
-Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. See [`docs/INSTALL.md`](docs/INSTALL.md).
+Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. `tachi vault exec --require NAME -- <cmd>` runs a child process with Vault-delivered credentials (Vault only fills env names the caller did not already set); by default it refuses to spawn a credential-less child if the Vault is unavailable, and `--allow-unauthenticated` opts back into running with the inherited environment. See [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### 6. Tachi Hub & Skill Packs
 Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `tachi_skill(action="discover"|"run"|"bundle")` is the canonical skill facade; standalone `run_skill`, `prepare_capability_bundle`, and skill-focused `hub_discover` calls remain compatibility routes for older clients.
@@ -381,7 +381,7 @@ still reuse a compatible daemon unless stdio proxying is also disabled.
 
 ## Model Stack
 
-Phase 2 simplified the lane model. Background skill and foundry calls now go through the **Claude CLI pool first**, falling back to the raw API lane on error. For most deployments you only need:
+Phase 2 simplified the background lanes. Extraction, summary, and daily distillation go through configured OpenAI-compatible API lanes; a distinct configured provider fallback is tried before loud `LANE_OUTAGE` recording when a chain is exhausted. `FOUNDRY_DISTILL_BACKEND=claude_cli` remains a legacy selector but still calls the API distill lane, not a Claude subprocess. Ordinary reasoning/chat is separate: it tries Claude CLI first, then the configured API fallback; provider-only callers intentionally omit CLI. For most deployments you only need:
 
 | Purpose | Required | Default |
 |---------|----------|---------|
@@ -449,6 +449,8 @@ cargo build --release
 
 # Run all tests (nextest is what CI runs: per-test timeouts, see .config/nextest.toml)
 cargo nextest run --workspace   # cargo install cargo-nextest; plain `cargo test --all` also works
+# Two tests need the gitignored docs/superpowers/ corpus (see #1378). Default runs
+# skip them via #[ignore]; on a provisioned box: cargo nextest run --run-ignored all …
 
 # Run the MCP server from source with the standard profile
 cargo run -p tachi-server -- --profile standard

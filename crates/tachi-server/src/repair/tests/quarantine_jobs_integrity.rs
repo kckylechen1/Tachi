@@ -33,6 +33,105 @@ fn r3_quarantine_sweep_reports_count() {
 }
 
 #[test]
+fn quarantine_purge_uses_default_deny_v23_connection() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+
+    let dir = TempDir::new().unwrap();
+    let (db_path, conn) = fresh_db(&dir, "purge-guard.db");
+    let schema_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        schema_version,
+        i64::from(memcore::db::migrations::EXPECTED_SCHEMA_VERSION),
+        "fixture must retain the current canonical schema"
+    );
+    let metadata = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/scratch/purge-guard",
+            "expected_db": db_path.display().to_string(),
+            "actual_db": db_path.display().to_string(),
+            "detected_at": "2020-01-01T00:00:00Z",
+        }
+    });
+    insert_memory(
+        &conn,
+        "purge-guarded",
+        "/_quarantine/cross-db/scratch/purge-guard",
+        "purge guard row",
+        &metadata.to_string(),
+        None,
+        None,
+    );
+    insert_memory(
+        &conn,
+        "protected-row",
+        "/scratch/protected",
+        "protected row",
+        "{}",
+        None,
+        None,
+    );
+    conn.execute_batch(
+        "CREATE TRIGGER quarantine_purge_requires_default_deny_guard
+         BEFORE DELETE ON memories
+         WHEN tachi_reserved_reference_write_enabled() != 0
+         BEGIN
+             SELECT RAISE(ABORT, 'quarantine purge requires default-deny guard');
+         END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: db_path.display().to_string(),
+            role: DbRole::Project,
+            owner: "test".into(),
+            schema_kind: "tachi".into(),
+            vec_enabled: false,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "tachi".into(),
+            scope_hint: "project:purge-guard".into(),
+            notes: String::new(),
+        }],
+    };
+
+    crate::repair::quarantine::cmd_purge(&manifest, 1, true, true)
+        .expect("v23 guarded purge should delete the quarantined row");
+
+    let conn = crate::repair::open_repair_connection(&db_path)
+        .expect("common repair connection should reopen the current DB");
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = 'purge-guarded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0, "guarded purge must commit its DELETE");
+    let error = conn
+        .execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.source_refs', json('[\"untyped\"]'))
+             WHERE id = 'protected-row'",
+            [],
+        )
+        .expect_err("common repair connection must not grant protected metadata writes");
+    assert!(
+        error
+            .to_string()
+            .contains("reserved memory reference metadata requires typed mutation"),
+        "unexpected protected-write result: {error}"
+    );
+}
+
+#[test]
 fn r4_jobs_purge_dead_letter() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "jobs.db");

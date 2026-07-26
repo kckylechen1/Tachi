@@ -28,6 +28,16 @@ impl MemoryStore {
         db::hub_list(&self.conn, cap_type, enabled_only)
     }
 
+    /// List hub capabilities with a database-enforced row ceiling.
+    pub fn hub_list_limited(
+        &self,
+        cap_type: Option<&str>,
+        enabled_only: bool,
+        limit: usize,
+    ) -> Result<Vec<HubCapability>, MemoryError> {
+        db::hub_list_limited(&self.conn, cap_type, enabled_only, limit)
+    }
+
     /// Search hub capabilities by name/description.
     pub fn hub_search(
         &self,
@@ -35,6 +45,16 @@ impl MemoryStore {
         cap_type: Option<&str>,
     ) -> Result<Vec<HubCapability>, MemoryError> {
         db::hub_search(&self.conn, query, cap_type)
+    }
+
+    /// Search hub capabilities with a database-enforced row ceiling.
+    pub fn hub_search_limited(
+        &self,
+        query: &str,
+        cap_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<HubCapability>, MemoryError> {
+        db::hub_search_limited(&self.conn, query, cap_type, limit)
     }
 
     /// Enable or disable a hub capability.

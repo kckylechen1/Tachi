@@ -2,6 +2,151 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn vault_exec_cli_parses_require_and_trailing_command() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "exec",
+        "--keychain",
+        "--consumer",
+        "clanker",
+        "--require",
+        "ZHIPUAI_API_KEY,XAI_API_KEY",
+        "--",
+        "opencode",
+        "run",
+        "--auto",
+    ])
+    .expect("vault exec invocation should parse");
+
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Vault {
+            action: VaultAction::Exec {
+                keychain: true,
+                consumer: Some(consumer),
+                require,
+                allow_unauthenticated: false,
+                command,
+                ..
+            }
+        }) if consumer == "clanker"
+            && require == ["ZHIPUAI_API_KEY", "XAI_API_KEY"]
+            && command == ["opencode", "run", "--auto"]
+    ));
+    assert!(Cli::try_parse_from(["tachi", "vault", "exec", "--keychain"]).is_err());
+}
+
+// #1413 concern 4: --allow-unauthenticated is an explicit opt-in to the
+// inherited-environment fail-open path. Default is false (asserted above); the
+// flag must parse to true and stay compatible with --require.
+#[test]
+fn vault_exec_cli_parses_allow_unauthenticated_opt_in() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "exec",
+        "--keychain",
+        "--allow-unauthenticated",
+        "--",
+        "opencode",
+        "run",
+    ])
+    .expect("--allow-unauthenticated should parse");
+
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Vault {
+            action: VaultAction::Exec {
+                allow_unauthenticated: true,
+                command,
+                ..
+            }
+        }) if command == ["opencode", "run"]
+    ));
+}
+
+#[test]
+fn exact_dedupe_cli_is_nested_under_repair_dedupe() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "dedupe",
+        "exact",
+        "--db",
+        "project:test",
+        "--output",
+        "plan.json",
+        "--limit",
+        "1",
+        "--path-prefix",
+        "/wiki",
+    ])
+    .expect("nested exact-dedupe plan should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Dedupe {
+                action: DedupeAction::Exact { db, output, limit: Some(1), path_prefix: Some(prefix) }
+            }), ..
+        }) if db == "project:test" && output == std::path::Path::new("plan.json") && prefix == "/wiki"
+    ));
+    assert!(
+        Cli::try_parse_from(["tachi", "repair", "exact", "--db", "x", "--output", "p"]).is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["tachi", "repair", "apply", "--db", "x", "--plan", "p", "--yes"])
+            .is_err()
+    );
+
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "dedupe",
+        "apply",
+        "--db",
+        "project:test",
+        "--plan",
+        "plan.json",
+        "--yes",
+        "--receipt-out",
+        "receipt.json",
+    ])
+    .expect("nested exact-dedupe apply should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Dedupe {
+                action: DedupeAction::Apply { db, plan, yes: true, receipt_out }
+            }), ..
+        }) if db == "project:test"
+            && plan == std::path::Path::new("plan.json")
+            && receipt_out == std::path::Path::new("receipt.json")
+    ));
+
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "dedupe",
+        "restore",
+        "--db",
+        "project:test",
+        "--receipt",
+        "receipt.json",
+        "--yes",
+    ])
+    .expect("nested exact-dedupe restore should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Dedupe {
+                action: DedupeAction::Restore { db, receipt, yes: true }
+            }), ..
+        }) if db == "project:test" && receipt == std::path::Path::new("receipt.json")
+    ));
+}
+
+#[test]
 fn capture_archive_commands_parse_and_mutations_require_confirm() {
     let plan = Cli::try_parse_from([
         "tachi",
@@ -311,6 +456,36 @@ fn skill_surface_cli_parses_sync_plan() {
 }
 
 #[test]
+fn injection_surface_cli_parses_doctor() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "injection-surface",
+        "doctor",
+        "--registry",
+        "/tmp/fleet.json",
+        "--home",
+        "/tmp/fixture-home",
+        "--json",
+    ])
+    .expect("injection-surface doctor should parse");
+    match parsed.command.expect("command") {
+        Commands::InjectionSurface {
+            action:
+                InjectionSurfaceAction::Doctor {
+                    registry,
+                    home,
+                    json,
+                },
+        } => {
+            assert_eq!(registry, std::path::PathBuf::from("/tmp/fleet.json"));
+            assert_eq!(home, Some(std::path::PathBuf::from("/tmp/fixture-home")));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
 fn backfill_vectors_accepts_named_project() {
     let parsed = Cli::try_parse_from([
         "tachi",
@@ -336,16 +511,36 @@ fn backfill_vectors_accepts_named_project() {
 }
 
 #[test]
-fn backfill_vectors_rejects_db_and_project_together() {
-    let parsed = Cli::try_parse_from([
-        "tachi",
-        "backfill-vectors",
-        "--db",
-        "/tmp/memory.db",
-        "--project",
-        "sigil",
-    ]);
-    assert!(parsed.is_err());
+fn backfill_vectors_all_projects_is_exclusive_and_cache_is_opt_in() {
+    let parsed = Cli::try_parse_from(["tachi", "backfill-vectors", "--all-projects", "--dry-run"])
+        .expect("all-projects dry run should parse");
+    match parsed.command.expect("command") {
+        Commands::BackfillVectors {
+            db,
+            project,
+            all_projects,
+            dry_run,
+            include_cache,
+            ..
+        } => {
+            assert!(db.is_none());
+            assert!(project.is_none());
+            assert!(all_projects);
+            assert!(dry_run);
+            assert!(!include_cache, "recall-cache rows must be explicit opt-in");
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    for conflicting_args in [
+        vec!["--db", "/tmp/memory.db", "--all-projects"],
+        vec!["--project", "sigil", "--all-projects"],
+        vec!["--db", "/tmp/memory.db", "--project", "sigil"],
+    ] {
+        let mut args = vec!["tachi", "backfill-vectors"];
+        args.extend(conflicting_args);
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]
@@ -547,4 +742,38 @@ fn vault_sync_help_names_offline_guessing_risk() {
         "{import_help}"
     );
     assert!(import_help.contains("--allow-unsigned"), "{import_help}");
+}
+
+#[test]
+fn help_reports_api_only_distill_and_canonical_db_paths() {
+    let mut root_cmd = Cli::command();
+    let root_help = root_cmd.render_long_help().to_string();
+    assert!(
+        root_help.contains("Run batch memory distill through the configured API lane"),
+        "{root_help}"
+    );
+    assert!(
+        root_help.contains("never launches Claude CLI"),
+        "{root_help}"
+    );
+    assert!(
+        !root_help.contains("Claude CLI when configured"),
+        "{root_help}"
+    );
+    assert!(root_help.contains(".tachi/tachi-memory.db"), "{root_help}");
+
+    let mut backfill_cmd = Cli::command();
+    let backfill_help = backfill_cmd
+        .find_subcommand_mut("backfill-vectors")
+        .expect("backfill-vectors command")
+        .render_long_help()
+        .to_string();
+    assert!(
+        backfill_help.contains("~/.tachi/projects/<name>/tachi-memory.db"),
+        "{backfill_help}"
+    );
+    assert!(
+        !backfill_help.contains("~/.tachi/projects/<name>/memory.db"),
+        "{backfill_help}"
+    );
 }

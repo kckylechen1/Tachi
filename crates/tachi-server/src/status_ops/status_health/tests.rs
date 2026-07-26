@@ -92,7 +92,7 @@ fn deprecated_configured_key_reports_canonical_cleanup_hint() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
-    let _reasoning = EnvRestore::set("REASONING_API_KEY", "legacy-secret");
+    let _minimax = EnvRestore::set("MINIMAX_API_KEY", "legacy-secret");
 
     let rows = collect_api_key_status_from_sources(
         HashSet::new(),
@@ -102,24 +102,25 @@ fn deprecated_configured_key_reports_canonical_cleanup_hint() {
         &HashMap::new(),
         &HashMap::new(),
     );
-    let reasoning = api_key_row(&rows, "REASONING_API_KEY");
+    let minimax = api_key_row(&rows, "MINIMAX_API_KEY");
 
-    assert!(reasoning.deprecated);
-    assert_eq!(reasoning.canonical_name, "DEEPSEEK_API_KEY");
-    assert_eq!(reasoning.status, "configured");
-    assert!(reasoning
+    assert!(minimax.deprecated);
+    assert_eq!(minimax.canonical_name, "DEEPSEEK_API_KEY");
+    assert_eq!(minimax.status, "configured");
+    assert!(minimax
         .cleanup_hint
         .as_deref()
         .is_some_and(|hint| hint.contains("migrate this secret to DEEPSEEK_API_KEY")));
 }
 
 #[test]
-fn deprecated_unset_key_has_no_cleanup_hint() {
+fn live_lane_keys_are_not_deprecated_or_remove_migrate_targets() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
-    let _reasoning = EnvRestore::remove("REASONING_API_KEY");
+    let _reasoning = EnvRestore::set("REASONING_API_KEY", "reasoning-secret");
+    let _distill = EnvRestore::set("DISTILL_API_KEY", "distill-secret");
 
     let rows = collect_api_key_status_from_sources(
         HashSet::new(),
@@ -129,11 +130,63 @@ fn deprecated_unset_key_has_no_cleanup_hint() {
         &HashMap::new(),
         &HashMap::new(),
     );
-    let reasoning = api_key_row(&rows, "REASONING_API_KEY");
 
-    assert!(reasoning.deprecated);
-    assert_eq!(reasoning.status, "deprecated-unset");
-    assert!(reasoning.cleanup_hint.is_none());
+    for key in ["REASONING_API_KEY", "DISTILL_API_KEY"] {
+        let row = api_key_row(&rows, key);
+        assert!(
+            !row.deprecated,
+            "live resolver input {key} is not deprecated"
+        );
+        assert_eq!(row.canonical_name, key);
+        assert_eq!(row.status, "configured");
+        let hint = row.cleanup_hint.as_deref().unwrap_or_default();
+        for forbidden in ["deprecated", "migrate", "remove"] {
+            assert!(
+                !hint.contains(forbidden),
+                "live resolver input {key} must not emit {forbidden:?} guidance: {hint}"
+            );
+        }
+    }
+
+    let reasoning = api_key_row(&rows, "REASONING_API_KEY");
+    assert!(reasoning
+        .cleanup_hint
+        .as_deref()
+        .is_some_and(|hint| hint.contains("accepted aliases/fallbacks")));
+}
+
+#[test]
+fn unset_live_lane_keys_are_missing_not_deprecated() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let _reasoning = EnvRestore::remove("REASONING_API_KEY");
+    let _distill = EnvRestore::remove("DISTILL_API_KEY");
+    let _zai = EnvRestore::remove("ZAI_API_KEY");
+    let _bigmodel = EnvRestore::remove("BIGMODEL_API_KEY");
+
+    let rows = collect_api_key_status_from_sources(
+        HashSet::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+
+    for key in ["REASONING_API_KEY", "DISTILL_API_KEY"] {
+        let row = api_key_row(&rows, key);
+        assert!(
+            !row.deprecated,
+            "live resolver input {key} is not deprecated"
+        );
+        assert_eq!(row.status, "missing");
+        let hint = row.cleanup_hint.as_deref().unwrap_or_default();
+        assert!(!hint.contains("deprecated"));
+        assert!(!hint.contains("migrate"));
+        assert!(!hint.contains("remove"));
+    }
 }
 
 #[test]
@@ -432,4 +485,84 @@ fn model_lanes_reports_configured_local_rerank_provider() {
         json!("local")
     );
     assert!(lanes["rerank"]["model"].is_null());
+}
+
+#[test]
+fn model_lanes_distinguish_api_only_distill_from_cli_first_reasoning() {
+    let lanes = model_lanes_json();
+
+    assert_eq!(
+        lanes["distill"]["provider"],
+        json!(
+            "openai-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector (no Claude subprocess)"
+        )
+    );
+    assert_eq!(
+        lanes["reasoning"]["provider"],
+        json!("claude-cli-first, openai-compatible fallback")
+    );
+}
+
+#[test]
+fn xai_and_zai_are_recognized_provider_env_names() {
+    // #1355: the grok/xai opencode lane provider uses `{env:XAI_API_KEY}`
+    // substitution in opencode.json so vault "收权" can never blank it (no
+    // literal on disk). That only works end-to-end if this name is in the
+    // provider-key filter that gates which unlocked-vault secrets get
+    // injected into the lane subprocess env
+    // (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
+    let names = provider_api_key_env_names();
+    assert!(
+        names.contains("XAI_API_KEY"),
+        "XAI_API_KEY must be a recognized provider env name so an unlocked-vault \
+         xAI secret materializes into the grok lane child env"
+    );
+    // Alternate ecosystem name is admitted too (whichever the owner stored).
+    assert!(
+        names.contains("GROK_API_KEY"),
+        "GROK_API_KEY alias must be admitted by the provider-key filter"
+    );
+    // Zhipu/BigModel family already covered before #1355.
+    assert!(names.contains("ZAI_API_KEY"));
+    assert!(names.contains("BIGMODEL_API_KEY"));
+}
+
+#[test]
+fn zhipuai_is_a_recognized_provider_env_name() {
+    // #1355(b): the opencode `zhipuai-coding-plan` GLM lane provider uses
+    // `{env:ZHIPUAI_API_KEY}` substitution in opencode.json. `ZAI_API_KEY`
+    // (asserted above) does NOT cover this — the vault stores a distinct
+    // `ZHIPUAI_API_KEY` secret (verified by SHA match against the working
+    // opencode literal at `zhipuai-coding-plan.options.apiKey`) holding a
+    // different value than `ZAI_API_KEY`. Without `ZHIPUAI_API_KEY` in the
+    // provider-key filter, the GLM lane subprocess never receives its
+    // vault secret and `{env:ZHIPUAI_API_KEY}` resolves to nothing.
+    let names = provider_api_key_env_names();
+    assert!(
+        names.contains("ZHIPUAI_API_KEY"),
+        "ZHIPUAI_API_KEY must be a recognized provider env name so an unlocked-vault \
+         zhipuai secret materializes into the opencode GLM lane child env"
+    );
+}
+
+#[test]
+fn kimi_is_a_recognized_provider_env_name() {
+    // #1355 follow-up: the `kimi-for-coding`/K3 opencode lane provider uses
+    // `{env:KIMI_API_KEY}` substitution (or direct env read) so vault
+    // "收权" can never blank it (no literal on disk). That only works
+    // end-to-end if this name is in the provider-key filter that gates
+    // which unlocked-vault secrets get injected into the lane subprocess
+    // env (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
+    let names = provider_api_key_env_names();
+    assert!(
+        names.contains("KIMI_API_KEY"),
+        "KIMI_API_KEY must be a recognized provider env name so an unlocked-vault \
+         Kimi secret materializes into the kimi-for-coding lane child env"
+    );
+    // Alternate ecosystem name is admitted too (whichever the owner stored;
+    // Moonshot AI is Kimi's vendor).
+    assert!(
+        names.contains("MOONSHOT_API_KEY"),
+        "MOONSHOT_API_KEY alias must be admitted by the provider-key filter"
+    );
 }

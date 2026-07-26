@@ -59,7 +59,7 @@ fn upsert_idempotent() {
     e.text = "updated text".into();
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "updated", 5, false, false, None, None).unwrap();
+    let results = search_fts(&conn, "updated", 5, false, false, None, None, None).unwrap();
     assert!(results.contains_key("dup"));
 }
 
@@ -280,17 +280,24 @@ fn auth_failed_enrichment_retry_claim_respects_backoff_and_attempt_cap() {
         "retry should honor next_retry_at backoff"
     );
 
-    store
-        .connection()
-        .execute(
-            "UPDATE memories
-             SET metadata = json_set(metadata,
-                 '$.enrichment.retry.attempts', ?1,
-                 '$.enrichment.retry.next_retry_at', '1970-01-01T00:00:00.000Z')
-             WHERE id = 'auth-claim'",
-            rusqlite::params![ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS],
-        )
-        .unwrap();
+    {
+        // The capped-attempt fixture needs a state no production API creates;
+        // keep raw fixture SQL explicitly authorized and tightly scoped.
+        let _fixture_sql =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize capped retry fixture SQL");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories
+                 SET metadata = json_set(metadata,
+                     '$.enrichment.retry.attempts', ?1,
+                     '$.enrichment.retry.next_retry_at', '1970-01-01T00:00:00.000Z')
+                 WHERE id = 'auth-claim'",
+                rusqlite::params![ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS],
+            )
+            .unwrap();
+    }
     let capped = store
         .claim_auth_failed_enrichment_retries(10)
         .expect("claim capped retry");

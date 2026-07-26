@@ -176,7 +176,7 @@ fn sticky_persists_and_reads_back() {
 // CAS implementation.
 #[test]
 fn try_claim_sticky_is_cas_not_naive_upsert() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-cas-contract-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -216,8 +216,10 @@ fn try_claim_sticky_is_cas_not_naive_upsert() {
 // illusion.
 #[test]
 fn concurrent_claim_smoke_single_winner_under_load() {
-    let db_path =
-        std::env::temp_dir().join(format!("sticky-claim-race-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-claim-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let db_path_str = db_path.to_string_lossy().to_string();
 
     // Seed the DB once so schema exists before concurrent opens.
@@ -314,8 +316,10 @@ fn concurrent_claim_smoke_single_winner_under_load() {
 /// the actual cleanup off this field).
 #[test]
 fn claim_write_carries_a_ninety_day_hard_state_ttl() {
-    let db_path =
-        std::env::temp_dir().join(format!("sticky-claim-ttl-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-claim-ttl-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let server = test_server(db_path.clone());
 
     server
@@ -349,7 +353,7 @@ fn claim_write_carries_a_ninety_day_hard_state_ttl() {
 
 #[test]
 fn is_claimed_reflects_successful_claim() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-claimed-check-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -378,8 +382,10 @@ fn is_claimed_reflects_successful_claim() {
 // the same renderer `handle_memory_briefing` calls in production).
 #[tokio::test]
 async fn sticky_leave_scrubs_secrets_in_storage_and_briefing_render() {
-    let db_path =
-        std::env::temp_dir().join(format!("sticky-cp4-scrub-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-cp4-scrub-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let server = test_server(db_path.clone());
 
     let raw_secret_text =
@@ -482,7 +488,7 @@ async fn sticky_leave_scrubs_secrets_in_storage_and_briefing_render() {
 //       `delivered` before attempting the (best-effort) mark write.
 #[test]
 fn mark_claimed_error_branch_is_reachable_and_does_not_affect_cas_outcome() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-cp3-mark-failure-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -539,7 +545,7 @@ fn mark_claimed_error_branch_is_reachable_and_does_not_affect_cas_outcome() {
 // recovery-escape claim the doc makes is true in code, not aspirational.
 #[test]
 fn cp3_row_stuck_unread_after_cas_win_is_still_recoverable_via_include_read() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-cp3-recovery-escape-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -600,7 +606,7 @@ fn cp3_row_stuck_unread_after_cas_win_is_still_recoverable_via_include_read() {
 
 #[tokio::test]
 async fn briefing_claims_sticky_exactly_once_then_absent() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-briefing-once-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -634,8 +640,10 @@ async fn briefing_claims_sticky_exactly_once_then_absent() {
 
 #[tokio::test]
 async fn addressed_sticky_invisible_to_leader_and_other_seats() {
-    let db_path =
-        std::env::temp_dir().join(format!("sticky-addressing-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-addressing-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let server = test_server(db_path.clone());
 
     server
@@ -674,7 +682,7 @@ async fn addressed_sticky_invisible_to_leader_and_other_seats() {
 
 #[tokio::test]
 async fn expired_sticky_hidden_from_unread_but_visible_in_archive() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-ttl-archive-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -765,7 +773,7 @@ fn with_tachi_agent_seat_env<F: FnOnce()>(value: Option<&str>, f: F) {
 #[test]
 fn cp2_caller_with_explicit_agent_id_consumes_only_its_own_addressed_stickies() {
     with_tachi_agent_seat_env(Some("some-other-seat-must-be-ignored"), || {
-        let db_path = std::env::temp_dir().join(format!(
+        let db_path = crate::utils::test_fixture_path(format!(
             "sticky-cp2-explicit-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
@@ -806,7 +814,7 @@ fn cp2_caller_with_explicit_agent_id_consumes_only_its_own_addressed_stickies() 
 #[test]
 fn cp2_param_less_caller_with_tachi_agent_seat_env_does_not_consume_broadcast() {
     with_tachi_agent_seat_env(Some("wizard"), || {
-        let db_path = std::env::temp_dir().join(format!(
+        let db_path = crate::utils::test_fixture_path(format!(
             "sticky-cp2-env-fallback-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
@@ -856,7 +864,7 @@ fn cp2_param_less_caller_with_tachi_agent_seat_env_does_not_consume_broadcast() 
 #[test]
 fn cp2_identity_less_caller_resolves_to_leader() {
     with_tachi_agent_seat_env(None, || {
-        let db_path = std::env::temp_dir().join(format!(
+        let db_path = crate::utils::test_fixture_path(format!(
             "sticky-cp2-identity-less-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
@@ -898,7 +906,7 @@ fn cp2_tachi_profile_env_alone_no_longer_resolves_a_seat() {
     std::env::set_var("TACHI_PROFILE", "standard");
     std::env::remove_var("TACHI_AGENT_SEAT");
 
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-cp2-profile-not-seat-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -969,7 +977,7 @@ async fn cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_strin
     std::env::set_var("TACHI_PROFILE", "standard");
     std::env::remove_var("TACHI_AGENT_SEAT");
 
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-cp2-round3-leave-no-seat-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -1031,7 +1039,7 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
     std::env::set_var("TACHI_PROFILE", "codex_55_review");
     std::env::set_var("TACHI_AGENT_SEAT", "worker-a");
 
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-cp2-round3-leave-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -1085,7 +1093,7 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
 // state this test deliberately leaves in place).
 #[tokio::test]
 async fn sticky_leave_accepts_explicit_agent_id_for_one_shot_channels() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-leave-explicit-agent-id-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -1145,8 +1153,10 @@ async fn sticky_leave_accepts_explicit_agent_id_for_one_shot_channels() {
 // paths use).
 #[tokio::test]
 async fn sticky_leave_clamps_ttl_days_to_thirty_day_ceiling() {
-    let db_path =
-        std::env::temp_dir().join(format!("sticky-ttl-clamp-{}.sqlite", uuid::Uuid::new_v4()));
+    let db_path = crate::utils::test_fixture_path(format!(
+        "sticky-ttl-clamp-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
     let server = test_server(db_path.clone());
 
     let result = handle_sticky_leave(
@@ -1227,7 +1237,7 @@ fn raw_secret_test_memo(id: &str, to: Option<&str>) -> StickyMemo {
 
 #[tokio::test]
 async fn cp4_round3_briefing_json_route_masks_hand_inserted_raw_secret_row() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-cp4-round3-briefing-json-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -1269,7 +1279,7 @@ async fn cp4_round3_briefing_json_route_masks_hand_inserted_raw_secret_row() {
 
 #[test]
 fn cp4_round3_sticky_check_json_route_masks_hand_inserted_raw_secret_row() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-cp4-round3-check-json-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -1340,7 +1350,7 @@ fn cp4_round3_sticky_check_json_route_masks_hand_inserted_raw_secret_row() {
 // both fed by the same `pending.rs` choke point) shows for it.
 #[tokio::test]
 async fn explicit_agent_id_row_is_caller_asserted_and_renders_with_self_reported_suffix() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-identity-assurance-caller-asserted-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -1411,7 +1421,7 @@ async fn explicit_agent_id_row_is_caller_asserted_and_renders_with_self_reported
 
 #[tokio::test]
 async fn no_explicit_agent_id_row_is_session_and_renders_without_suffix() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "sticky-identity-assurance-session-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

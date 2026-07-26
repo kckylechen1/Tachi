@@ -17,9 +17,11 @@ mod golden_corpus;
 mod graph;
 mod noise;
 mod ops_audit_corpus;
+mod p3_probe;
 mod phase_receipts;
 mod raw_vector_floor;
 mod supersession;
+mod surface;
 mod symbolic;
 
 fn setup() -> Connection {

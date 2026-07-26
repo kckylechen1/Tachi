@@ -1,4 +1,30 @@
 use super::*;
+use crate::MemoryServer;
+
+fn source_params() -> IngestSourceParams {
+    IngestSourceParams {
+        content: "alpha durability chunk beta durability chunk gamma".to_string(),
+        source_url: Some("https://example.com/durable-source".to_string()),
+        source: Some("durable-source".to_string()),
+        path_prefix: Some("/wiki/general/durable-source".to_string()),
+        auto_chunk: true,
+        auto_summarize: false,
+        auto_link: false,
+        importance: 0.7,
+        scope: "global".to_string(),
+        project: None,
+        domain: Some("general".to_string()),
+        chunk_size_chars: 18,
+        chunk_overlap_chars: 0,
+        metadata: None,
+    }
+}
+
+fn source_server_at(path: std::path::PathBuf) -> MemoryServer {
+    let bootstrap = make_server();
+    drop(bootstrap);
+    MemoryServer::new(path, None).expect("open durable source ingest database")
+}
 
 #[tokio::test]
 async fn ingest_source_chunks_content_and_builds_graph_edges() {
@@ -122,4 +148,164 @@ async fn ingest_source_empty_content_records_skip_audit() {
     assert!(audits.iter().any(|entry| {
         entry["tool_name"] == "ingest_source" && entry["error_kind"] == "empty_source_content"
     }));
+}
+
+#[tokio::test]
+async fn abandoned_source_claim_reopens_with_stable_ordered_ids_exactly_once() {
+    let temp = tempfile::tempdir().expect("temp source ingest database");
+    let db_path = temp.path().join("memory.db");
+    let params = source_params();
+    let path_prefix = params.path_prefix.clone().expect("path prefix");
+    let source_label = params.source.as_deref().expect("source label");
+    let event_hash = crate::utils::stable_hash(&format!(
+        "{}:{}:{}",
+        source_label,
+        path_prefix,
+        params.content.trim()
+    ));
+
+    let server = source_server_at(db_path.clone());
+    server
+        .with_global_store(|store| {
+            store
+                .try_claim_event(&event_hash, &path_prefix, "ingest_source")
+                .map_err(|error| format!("seed abandoned source claim: {error}"))?;
+            store
+                .connection()
+                .execute(
+                    "UPDATE processed_events \
+                     SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes') \
+                     WHERE event_hash = ?1 AND worker = 'ingest_source'",
+                    [&event_hash],
+                )
+                .map_err(|error| format!("age source claim with database time: {error}"))?;
+            Ok(())
+        })
+        .expect("seed abandoned source claim");
+    drop(server);
+
+    let reopened = source_server_at(db_path);
+    let completed = crate::pipeline_ops::handle_ingest_source(&reopened, params.clone())
+        .await
+        .expect("abandoned source claim must retry after reopen");
+    let response: Value = serde_json::from_str(&completed).expect("completed source response");
+    assert_eq!(response["status"], "completed");
+
+    let chunks = crate::pipeline_ops::helpers::chunk_text(
+        params.content.trim(),
+        params.chunk_size_chars,
+        params.chunk_overlap_chars,
+    );
+    let expected_ids = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            format!(
+                "ingest-source:{event_hash}:{index}:{}",
+                crate::utils::stable_hash(chunk)
+            )
+        })
+        .collect::<Vec<_>>();
+    let ids: Vec<String> =
+        serde_json::from_value(response["ids"].clone()).expect("ordered source ids");
+    assert_eq!(ids, expected_ids, "response ids must follow chunk order");
+
+    let replay = crate::pipeline_ops::handle_ingest_source(&reopened, params)
+        .await
+        .expect("completed source replay");
+    let replay: Value = serde_json::from_str(&replay).expect("replay response");
+    assert_eq!(replay["status"], "skipped");
+
+    let persisted = reopened
+        .with_global_store_read(|store| {
+            store
+                .list_by_path(&path_prefix, 20, false)
+                .map_err(|error| format!("list source chunks: {error}"))
+        })
+        .expect("read source chunks");
+    assert_eq!(persisted.len(), expected_ids.len());
+    for expected_id in expected_ids {
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|entry| entry.id == expected_id)
+                .count(),
+            1,
+            "each logical source chunk must exist exactly once"
+        );
+    }
+}
+
+#[tokio::test]
+async fn source_success_audit_failure_is_loud_retryable_and_idempotent() {
+    let temp = tempfile::tempdir().expect("temp source audit failure database");
+    let server = source_server_at(temp.path().join("memory.db"));
+    let mut params = source_params();
+    params.auto_chunk = false;
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| {
+            connection.execute_batch(
+                    "CREATE TRIGGER fail_ingest_success_audit \
+                     BEFORE INSERT ON audit_log \
+                     WHEN NEW.server_id = 'ingest' AND NEW.tool_name = 'ingest_source' AND NEW.success = 1 \
+                     BEGIN SELECT RAISE(FAIL, 'injected ingest audit failure'); END;",
+            )
+        },
+    )
+    .expect("inject audit_log_insert failure");
+
+    let error = crate::pipeline_ops::handle_ingest_source(&server, params.clone())
+        .await
+        .expect_err("success audit failure must reach the source caller");
+    assert!(
+        error.contains("audit"),
+        "audit failure must be explicit: {error}"
+    );
+
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| connection.execute_batch("DROP TRIGGER fail_ingest_success_audit"),
+    )
+    .expect("restore audit writes");
+
+    let completed = crate::pipeline_ops::handle_ingest_source(&server, params.clone())
+        .await
+        .expect("audit failure must release the claim for retry");
+    let response: Value = serde_json::from_str(&completed).expect("retry response");
+    assert_eq!(response["status"], "completed");
+
+    let (facts, success_audits, failure_audits) = server
+        .with_global_store_read(|store| {
+            let facts = store
+                .list_by_path(
+                    params.path_prefix.as_deref().expect("path prefix"),
+                    10,
+                    false,
+                )
+                .map_err(|error| format!("list retried source facts: {error}"))?;
+            let success: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log \
+                     WHERE server_id = 'ingest' AND tool_name = 'ingest_source' AND success = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("count source success audits: {error}"))?;
+            let failure: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log \
+                     WHERE server_id = 'ingest' AND tool_name = 'ingest_source' AND success = 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("count source failure audits: {error}"))?;
+            Ok((facts, success, failure))
+        })
+        .expect("read source retry state");
+    assert_eq!(facts.len(), 1, "retry must not duplicate the source fact");
+    assert_eq!(success_audits, 1);
+    assert_eq!(failure_audits, 1);
 }

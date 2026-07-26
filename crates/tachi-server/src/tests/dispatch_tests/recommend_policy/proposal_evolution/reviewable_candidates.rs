@@ -91,10 +91,46 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         proposal["proposed_patch"]["add_signature_skills"][0],
         json!("skill:planning-ux-review")
     );
+    assert_eq!(proposal["schema_version"], json!(3));
+    assert_eq!(
+        proposal["policy_version"],
+        json!("2026-07-loadout-evolution-v3")
+    );
+    assert_eq!(proposal["target"], json!("profile_card_overlay"));
+    assert_eq!(
+        proposal["identity_payload"]["kind"],
+        json!("loadout_evolution")
+    );
+    assert_eq!(
+        proposal["identity_payload"]["apply_payload"]["profile"],
+        proposal["profile"]
+    );
+    assert_eq!(
+        proposal["identity_payload"]["apply_payload"]["skill_id"],
+        proposal["skill_id"]
+    );
+    assert_eq!(
+        proposal["identity_payload"]["apply_payload"]["proposed_patch"],
+        proposal["proposed_patch"]
+    );
+    assert_eq!(
+        proposal["identity_payload"]["evidence_review"],
+        proposal["evidence"]
+    );
+    assert!(
+        proposal["content_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.len() == 64),
+        "minted loadout proposal must expose its SHA-256 content digest: {proposal:?}"
+    );
     let proposal_id = proposal["proposal_id"]
         .as_str()
         .expect("proposal id")
         .to_string();
+    assert!(
+        proposal_id.starts_with("loadout_evolution:v3:"),
+        "loadout proposal id must be content-addressed: {proposal_id}"
+    );
     let passive_proposal = proposals["proposals"]
         .as_array()
         .and_then(|items| {
@@ -192,6 +228,13 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         json!("applied_profile_card_overlay")
     );
 
+    let overlay_before_second_apply = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read overlay before second apply");
     let mut second_apply = task_params("apply_proposals");
     second_apply.proposal_id = Some(proposal_id.clone());
     second_apply.confirm = true;
@@ -200,6 +243,17 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .await
         .expect_err("applied proposal should require a fresh approved proposal");
     assert!(err.contains("must be approved before apply"), "{err}");
+    let overlay_after_second_apply = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read overlay after second apply");
+    assert_eq!(
+        overlay_before_second_apply, overlay_after_second_apply,
+        "a refused second apply must not mutate the already projected overlay"
+    );
 
     let mut passive_review = task_params("review_proposal");
     passive_review.proposal_id = Some(passive_proposal_id.clone());
@@ -428,5 +482,413 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .as_array()
             .expect("agent projected evidence")
             .contains(&json!("acceptance_criteria"))
+    );
+}
+
+/// Discrimination: the shipped `review_proposal` / `apply_proposals` facade
+/// must bind the exact loadout payload a human approved. On the pre-#1431
+/// implementation, changing only the top-level skill id after approval was
+/// accepted and projected into the durable overlay.
+#[tokio::test]
+async fn loadout_apply_refuses_tampered_payload_without_overlay_mutation() {
+    let server = make_server();
+    for idx in 0..10 {
+        let agent = if idx < 5 { "claude" } else { "claude-alt" };
+        server
+            .tachi_complete(Parameters(TachiCompleteParams {
+                task_id: Some(format!("loadout-tamper-plan-{idx}")),
+                task: "Plan a dispatch loadout evolution slice".to_string(),
+                agent: agent.to_string(),
+                outcome: "success".to_string(),
+                task_type: Some("plan_request".to_string()),
+                profile: Some("claude_plan".to_string()),
+                risk: Some("medium".to_string()),
+                duration_ms: Some(20_000),
+                skills_used: vec!["skill:planning-ux-review".to_string()],
+                cost_tokens: Some(1200),
+                cost_usd: Some(0.03),
+                quality_score: Some(0.92),
+                notes: Some("Seed loadout payload-tamper fixture.".to_string()),
+                trajectory: None,
+                diff: None,
+                worktree: None,
+                subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
+                dispatch_id: None,
+                flow_id: Some("flow-loadout-tamper".to_string()),
+                issue_ref: Some("kckylechen1/tachi#1431".to_string()),
+                pr_ref: None,
+                evidence_refs: vec![
+                    "docs/engineering/architecture/dispatch-policy-learning-spec.md".to_string(),
+                ],
+                tests_run: vec!["cargo test -p tachi-server dispatch".to_string()],
+                diff_present: Some(false),
+                scope: Some("project".to_string()),
+                project: None,
+                format: None,
+                signatures: Vec::new(),
+                rulings: Vec::new(),
+                adjudication: None,
+                eval_run_ids: Vec::new(),
+            }))
+            .await
+            .expect("seed loadout eval row");
+    }
+
+    let mut proposal_params = task_params("proposals");
+    proposal_params.limit = Some(50);
+    let raw = server
+        .tachi_task(Parameters(proposal_params))
+        .await
+        .expect("proposals should succeed");
+    let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
+    let proposal_id = proposals["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|proposal| {
+                proposal["kind"] == json!("loadout_evolution")
+                    && proposal["operation"] == json!("promote_observed_skill_to_signature")
+            })
+        })
+        .and_then(|proposal| proposal["proposal_id"].as_str())
+        .expect("minted loadout proposal id")
+        .to_string();
+
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    server
+        .tachi_task(Parameters(review))
+        .await
+        .expect("approve loadout proposal");
+
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("loadout proposal row");
+            let mut value: serde_json::Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["skill_id"] = json!("skill:attacker-controlled");
+            store
+                .set_state(
+                    tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize tampered proposal"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("tamper only the display payload after approval");
+
+    let before_proposal = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read proposal before refused apply");
+    let before_overlay = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read overlay before refused apply");
+
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("a payload changed after approval must refuse");
+    assert!(
+        err.contains("display_copy_drift"),
+        "expected display_copy_drift refusal, got: {err}"
+    );
+
+    let after_proposal = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read proposal after refused apply");
+    let after_overlay = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read overlay after refused apply");
+    assert_eq!(
+        before_proposal, after_proposal,
+        "a refused apply must not mutate the proposal row"
+    );
+    assert_eq!(
+        before_overlay, after_overlay,
+        "a refused apply must leave overlay bytes and state version unchanged"
+    );
+}
+
+#[tokio::test]
+async fn legacy_loadout_rows_stay_listable_but_refuse_review_and_apply() {
+    let server = make_server();
+    let pending_id = "loadout_evolution:legacy:pending";
+    let approved_id = "loadout_evolution:legacy:approved";
+    server
+        .with_global_store(|store| {
+            for (proposal_id, status) in [(pending_id, "pending"), (approved_id, "approved")] {
+                store
+                    .set_state(
+                        tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+                        proposal_id,
+                        &json!({
+                            "proposal_id": proposal_id,
+                            "kind": "loadout_evolution",
+                            "status": status,
+                            "profile": "claude_plan",
+                            "operation": "promote_observed_skill_to_signature",
+                            "skill_id": "skill:legacy-loadout",
+                            "proposed_patch": { "add_signature_skills": ["skill:legacy-loadout"] },
+                            "evidence": { "source": "legacy-fixture" },
+                        })
+                        .to_string(),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok::<_, String>(())
+        })
+        .expect("seed legacy loadout rows");
+
+    let mut list = task_params("proposals");
+    list.limit = Some(50);
+    let listed_raw = server
+        .tachi_task(Parameters(list))
+        .await
+        .expect("legacy rows remain listable");
+    let listed: serde_json::Value = serde_json::from_str(&listed_raw).expect("proposal list JSON");
+    for proposal_id in [pending_id, approved_id] {
+        let row = listed["proposals"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item["proposal_id"] == json!(proposal_id))
+            })
+            .expect("legacy loadout row remains listable");
+        assert_eq!(row["legacy_unbound_proposal"], json!(true), "{row:?}");
+    }
+
+    let review_before = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, pending_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read legacy review row");
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(pending_id.to_string());
+    review.review_status = Some("approved".to_string());
+    let review_err = server
+        .tachi_task(Parameters(review))
+        .await
+        .expect_err("legacy loadout row must not be reviewable");
+    assert!(
+        review_err.contains("legacy_unbound_proposal"),
+        "expected loud legacy refusal, got: {review_err}"
+    );
+    let review_after = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, pending_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read legacy review row after refusal");
+    assert_eq!(
+        review_before, review_after,
+        "a refused legacy review must not mutate its row"
+    );
+
+    let apply_before = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, approved_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read legacy apply row");
+    let overlay_before = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read overlay before legacy apply");
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(approved_id.to_string());
+    apply.confirm = true;
+    let apply_err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("legacy loadout row must not be applicable");
+    assert!(
+        apply_err.contains("legacy_unbound_proposal"),
+        "expected loud legacy refusal, got: {apply_err}"
+    );
+    let apply_after = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, approved_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read legacy apply row after refusal");
+    let overlay_after = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read overlay after legacy apply");
+    assert_eq!(
+        apply_before, apply_after,
+        "a refused legacy apply must not mutate its proposal row"
+    );
+    assert_eq!(
+        overlay_before, overlay_after,
+        "a refused legacy apply must leave overlay bytes and state version unchanged"
+    );
+}
+
+#[tokio::test]
+async fn loadout_review_refuses_evidence_drift_without_partial_mutation() {
+    let server = make_server();
+    for idx in 0..10 {
+        let agent = if idx < 5 { "claude" } else { "claude-alt" };
+        server
+            .tachi_complete(Parameters(TachiCompleteParams {
+                task_id: Some(format!("loadout-evidence-drift-plan-{idx}")),
+                task: "Plan a dispatch loadout evolution slice".to_string(),
+                agent: agent.to_string(),
+                outcome: "success".to_string(),
+                task_type: Some("plan_request".to_string()),
+                profile: Some("claude_plan".to_string()),
+                risk: Some("medium".to_string()),
+                duration_ms: Some(20_000),
+                skills_used: vec!["skill:planning-ux-review".to_string()],
+                cost_tokens: Some(1200),
+                cost_usd: Some(0.03),
+                quality_score: Some(0.92),
+                notes: Some("Seed loadout evidence-drift fixture.".to_string()),
+                trajectory: None,
+                diff: None,
+                worktree: None,
+                subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
+                dispatch_id: None,
+                flow_id: Some("flow-loadout-evidence-drift".to_string()),
+                issue_ref: Some("kckylechen1/tachi#1431".to_string()),
+                pr_ref: None,
+                evidence_refs: vec![
+                    "docs/engineering/architecture/dispatch-policy-learning-spec.md".to_string(),
+                ],
+                tests_run: vec!["cargo test -p tachi-server dispatch".to_string()],
+                diff_present: Some(false),
+                scope: Some("project".to_string()),
+                project: None,
+                format: None,
+                signatures: Vec::new(),
+                rulings: Vec::new(),
+                adjudication: None,
+                eval_run_ids: Vec::new(),
+            }))
+            .await
+            .expect("seed loadout eval row");
+    }
+
+    let mut proposal_params = task_params("proposals");
+    proposal_params.limit = Some(50);
+    let raw = server
+        .tachi_task(Parameters(proposal_params))
+        .await
+        .expect("proposals should succeed");
+    let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
+    let proposal_id = proposals["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|proposal| {
+                proposal["kind"] == json!("loadout_evolution")
+                    && proposal["operation"] == json!("promote_observed_skill_to_signature")
+            })
+        })
+        .and_then(|proposal| proposal["proposal_id"].as_str())
+        .expect("minted loadout proposal id")
+        .to_string();
+
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                .map_err(|e| e.to_string())?
+                .expect("loadout proposal row");
+            let mut value: serde_json::Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["evidence"]["source"] = json!("attacker-controlled-evidence");
+            store
+                .set_state(
+                    tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize tampered proposal"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("tamper only reviewer-visible evidence before review");
+
+    let before_proposal = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read proposal before refused review");
+    let before_overlay = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read overlay before refused review");
+
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = server
+        .tachi_task(Parameters(review))
+        .await
+        .expect_err("evidence drift before review must refuse");
+    assert!(
+        err.contains("display_copy_drift"),
+        "expected display_copy_drift refusal, got: {err}"
+    );
+
+    let after_proposal = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("read proposal after refused review");
+    let after_overlay = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read overlay after refused review");
+    assert_eq!(
+        before_proposal, after_proposal,
+        "a refused review must not mutate the proposal row"
+    );
+    assert_eq!(
+        before_overlay, after_overlay,
+        "a refused review must leave overlay bytes and state version unchanged"
     );
 }

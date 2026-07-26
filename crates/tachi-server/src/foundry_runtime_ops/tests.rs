@@ -1,3 +1,4 @@
+use super::capture::persist_capture_entry;
 use super::handlers::{
     build_bracket_self_evolution_id, classify_bracket_self_evolution,
     extract_bracket_self_evolution_notes, matches_agent_tag, resolve_capture_target,

@@ -1,5 +1,14 @@
-use super::cache::{recall_cache_key, recall_cache_read_enabled, recall_cache_ttl_secs};
-use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
+use super::cache::{
+    prepare_request_scoped_named_project_reads, recall_cache_epoch,
+    recall_cache_generation_fingerprint_with_named_project_reads, recall_cache_key,
+    recall_cache_read_enabled, recall_cache_ttl_secs, recall_cache_write_through,
+};
+#[cfg(test)]
+use super::cache::{run_recall_cache_race_hook, RecallCacheRacePoint};
+use super::rows::{
+    auto_query_embedding_would_run_with_named_project_reads, query_with_context_symbols,
+    search_memory_rows_with_named_project_reads,
+};
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
@@ -47,51 +56,143 @@ pub(crate) async fn handle_search_memory_with_access(
     // hybrid-search (+ optional rerank) round trip. Gated behind
     // TACHI_ENABLE_RECALL_CACHE. We never key on a caller-supplied embedding
     // (the key is the query text) or cache trivial queries. The cache lives in
-    // the global DB so cross-DB merged results have a single home. A cache hit
-    // intentionally does not bump per-memory access_count (skipping the search
-    // is the whole point); hit_count on the cache row carries the telemetry.
+    // the global DB so cross-DB merged results have a single home. Searches
+    // that record access are ineligible: access_count/history participate in
+    // production ranking, so skipping their writes on a hit would change the
+    // search contract and recording them on a miss would immediately advance
+    // the authoritative generation. Auto-generated embeddings are also
+    // ineligible because provider success versus lexical degradation is not a
+    // caller-bound representation. Explicit finite query vectors remain keyed
+    // by their full contents and are cacheable.
     let sandboxed_search = params
         .agent_role
         .as_deref()
         .is_some_and(|role| !role.trim().is_empty());
-    let cache_key = (recall_cache_read_enabled()
-        && params.query_vec.is_none()
+    let cache_candidate = recall_cache_read_enabled()
         && !sandboxed_search
-        && !memcore::should_skip_query(&params.query))
-    .then(|| recall_cache_key(&params, top_k, project_only));
+        && !record_access
+        && !memcore::should_skip_query(&params.query);
+    // This candidate scope is intentional: reuse still avoids duplicate named
+    // reads when auto embedding later makes the request cache-ineligible.
+    // A session is prepared before the vec-capability probe so every named
+    // read in a cache-capable request shares its one physical read-only open.
+    // Planning failures retain the existing fail-open cache bypass behavior;
+    // the normal search path below still returns its own routing error.
+    let mut named_project_reads = if cache_candidate {
+        match prepare_request_scoped_named_project_reads(server, &params, project_only) {
+            Ok(reads) => Some(reads),
+            Err(error) => {
+                tracing::warn!(
+                    "[recall_cache] bypassing request-scoped named read reuse because target planning failed: {error}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let auto_query_embedding = auto_query_embedding_would_run_with_named_project_reads(
+        server,
+        &params,
+        named_project_reads.as_mut(),
+    );
+    let cache_eligible = cache_candidate && !auto_query_embedding;
+    let cache_key = if cache_eligible {
+        Some(recall_cache_key(
+            &params,
+            top_k,
+            project_only,
+            server.pipeline_enabled,
+        )?)
+    } else {
+        None
+    };
 
+    // tachi#1435 slice 4 / #2059 codex round 2: snapshot the cache epoch
+    // BEFORE touching the store at all (read lookup or the miss-path
+    // fresh-compute below). If a concurrent save/enrichment/contradiction
+    // commits + invalidates anywhere between this snapshot and this search's
+    // own write-through, the epoch compare at the write-through site (below)
+    // will see a mismatch and discard this run's (now possibly stale)
+    // result instead of resurrecting it into the cache. See
+    // `search_memory::cache`'s module doc for the full race + the
+    // cross-process safety boundary this in-memory counter relies on.
+    let epoch_at_read = recall_cache_epoch();
+
+    // Lookup precedes authoritative generation validation. For a hit, each
+    // unique DB is read once and that read is its linearization point: commits
+    // before it force a mismatch; commits after it are ordered after this
+    // search. Misses take a second snapshot after row computation and only
+    // write when both snapshots match, binding the payload to a generation at
+    // which the query result was still current. Multiple physical DBs cannot
+    // share one SQLite snapshot, so this is deliberately per-DB validation,
+    // not a claim of cross-file transactional atomicity.
+    let mut cache_write_context = None;
     if let Some(ref key) = cache_key {
         let ttl = recall_cache_ttl_secs();
-        if let Ok(Some(hit)) = server.with_global_store_read(|store| {
+        let lookup = server.with_global_store_read(|store| {
             store
                 .recall_cache_lookup(key, ttl)
                 .map_err(|e| e.to_string())
-        }) {
-            // If the caller asked for a reranked ordering but the cache only
-            // holds the hybrid one, fall through and do the real work.
-            if !params.enable_rerank || hit.reranked {
-                let server_clone = (*server).clone();
-                let key_clone = key.clone();
-                std::mem::drop(tokio::task::spawn_blocking(move || {
-                    let _ = server_clone.with_global_store(|store| {
-                        store
-                            .recall_cache_record_hit(&key_clone)
-                            .map_err(|e| e.to_string())
-                    });
-                }));
-                return render_search_response(
-                    &params.query,
-                    params.format.as_deref(),
-                    hit.rows_json,
-                );
+        });
+        #[cfg(test)]
+        run_recall_cache_race_hook(RecallCacheRacePoint::AfterLookupBeforeValidation);
+        match lookup {
+            Ok(hit) => match recall_cache_generation_fingerprint_with_named_project_reads(
+                server,
+                &params,
+                project_only,
+                named_project_reads.as_mut(),
+            ) {
+                Ok(current_generation) => {
+                    if let Some(hit) = hit {
+                        // The generation comparison runs after lookup, closing
+                        // the cross-process stale-hit window. Rerank remains an
+                        // additional defensive check for legacy cache rows.
+                        if hit.generation_fingerprint == current_generation
+                            && (!params.enable_rerank || hit.reranked)
+                        {
+                            let server_clone = (*server).clone();
+                            let key_clone = key.clone();
+                            std::mem::drop(tokio::task::spawn_blocking(move || {
+                                let _ = server_clone.with_global_store(|store| {
+                                    store
+                                        .recall_cache_record_hit(&key_clone)
+                                        .map_err(|e| e.to_string())
+                                });
+                            }));
+                            return render_search_response(
+                                &params.query,
+                                params.format.as_deref(),
+                                hit.rows_json,
+                            );
+                        }
+                    }
+                    cache_write_context = Some((key.clone(), current_generation));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "[recall_cache] bypassing cache because authoritative generation validation failed: {error}"
+                    );
+                }
+            },
+            Err(error) => {
+                tracing::warn!("[recall_cache] lookup failed; bypassing cache: {error}");
             }
         }
     }
 
     let mut search_params = params.clone();
     expand_search_params_for_rerank(&mut search_params, top_k);
-    let mut rows =
-        search_memory_rows_with_access(server, search_params, project_only, record_access).await?;
+    let mut rows = search_memory_rows_with_named_project_reads(
+        server,
+        search_params,
+        project_only,
+        record_access,
+        None,
+        named_project_reads.as_mut(),
+    )
+    .await?;
     let (reranked_rows, _rerank_policy) =
         apply_search_rerank_policy(server, &params.query, rows, top_k, params.enable_rerank).await;
     rows = reranked_rows;
@@ -99,24 +200,75 @@ pub(crate) async fn handle_search_memory_with_access(
     let serialized =
         serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))?;
 
+    #[cfg(test)]
+    run_recall_cache_race_hook(RecallCacheRacePoint::AfterQueryBeforeValidation);
+
     // ── Recall-cache write-through ───────────────────────────────────────
     // Cache the rendered rows so the next identical query short-circuits.
     // Skip empty result sets so a transiently-empty answer never masks
     // newly-added memories until the TTL elapses. `reranked` records whether
     // this run actually reranked, so the read side can honor rerank intent.
-    if let Some(key) = cache_key {
+    //
+    // Epoch guard (tachi#1435 slice 4 / #2059 codex round 2, TOCTOU-closed in
+    // round 3 — see `search_memory::cache`'s module doc for the full
+    // mutual-exclusion invariant): `rows` above was computed from a store
+    // snapshot taken sometime after `epoch_at_read` — if a
+    // save/enrichment/contradiction/auto-link committed AND invalidated in
+    // the meantime, writing `rows` now would resurrect exactly the stale
+    // content that invalidation was trying to clear. The recheck MUST run
+    // INSIDE this `with_global_store` closure (not before it) — that closure
+    // holds the same `global_rw_gate` write lock
+    // `invalidate_recall_cache_after_write`'s DELETE+bump holds, so the two
+    // can never interleave; checking outside the lock and only writing
+    // inside it would reopen the exact race this guard exists to close.
+    // Discarding is always safe: the next miss just recomputes fresh.
+    if let Some((key, generation_before_search)) = cache_write_context {
         if !rows.is_empty() {
-            let _ = server.with_global_store(|store| {
-                store
-                    .recall_cache_store(
+            match recall_cache_generation_fingerprint_with_named_project_reads(
+                server,
+                &params,
+                project_only,
+                named_project_reads.as_mut(),
+            ) {
+                Ok(generation_after_search)
+                    if generation_after_search == generation_before_search =>
+                {
+                    let wrote = recall_cache_write_through(
+                        server,
+                        epoch_at_read,
                         &key,
+                        &generation_after_search,
                         &params.query,
                         &serialized,
                         rows.len() as i64,
                         params.enable_rerank,
-                    )
-                    .map_err(|e| e.to_string())
-            });
+                    );
+                    match wrote {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::debug!(
+                                "[recall_cache] discarding stale write-through for {key} — \
+                                 epoch advanced (concurrent invalidation) between read and write"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "[recall_cache] write-through failed for {key}: {error}"
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        "[recall_cache] discarding write-through for {key} because a participating database changed while rows were computed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "[recall_cache] discarding write-through because post-query generation validation failed: {error}"
+                    );
+                }
+            }
         }
     }
     render_search_response(&params.query, params.format.as_deref(), serialized)

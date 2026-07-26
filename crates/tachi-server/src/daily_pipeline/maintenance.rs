@@ -165,14 +165,16 @@ pub(crate) fn resolve_truth_maintenance_route(
     server: &MemoryServer,
     target: &ManifestDbTarget,
 ) -> TruthMaintenanceRoute {
-    resolve_truth_maintenance_route_for_paths(
+    resolve_truth_maintenance_route_for_paths_in_home(
+        &server.tachi_home_dir(),
         &server.global_db_path_buf(),
         server.project_db_path_buf().as_deref(),
         target,
     )
 }
 
-pub(crate) fn resolve_truth_maintenance_route_for_paths(
+pub(crate) fn resolve_truth_maintenance_route_for_paths_in_home(
+    tachi_home: &std::path::Path,
     global_db_path: &std::path::Path,
     project_db_path: Option<&std::path::Path>,
     target: &ManifestDbTarget,
@@ -200,7 +202,9 @@ pub(crate) fn resolve_truth_maintenance_route_for_paths(
         };
     }
 
-    if let Some(project_name) = crate::path_utils::named_project_for_db_path(&target.path) {
+    if let Some(project_name) =
+        crate::path_utils::named_project_for_db_path_in_home(&target.path, tachi_home)
+    {
         return TruthMaintenanceRoute {
             target_db,
             named_project: Some(project_name),

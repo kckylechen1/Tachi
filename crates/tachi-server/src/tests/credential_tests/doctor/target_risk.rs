@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_doctor_reports_missing_secret_existing_target_and_permissions() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-doctor-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -67,7 +67,7 @@ fn credential_doctor_reports_missing_secret_existing_target_and_permissions() {
 
 #[test]
 fn credential_doctor_reports_high_risk_targets() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-doctor-risk-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

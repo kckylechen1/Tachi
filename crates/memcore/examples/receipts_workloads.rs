@@ -988,7 +988,7 @@ fn pad_to_bytes(base: &str, target_bytes: usize, i: usize) -> String {
 /// side effect of any prior `search_symbolic_candidates` call, and every
 /// grid cell makes one before this runs.
 fn symbolic_trigram_plan_sql() -> String {
-    memcore::db::symbolic_trigram_select_sql("m.id")
+    memcore::db::symbolic_trigram_select_sql("m.id", None)
 }
 
 /// `EXPLAIN QUERY PLAN` rows (the `detail` column only) for the production
@@ -1158,16 +1158,33 @@ fn measure_symbolic_cell(
             conn.execute_batch("PRAGMA shrink_memory;")
                 .expect("shrink_memory before fresh symbolic scan");
             let start = Instant::now();
-            let entries =
-                search_symbolic_candidates(conn, query, SYMBOLIC_LIMIT, false, false, None, None)
-                    .expect("fresh symbolic scan");
+            let entries = search_symbolic_candidates(
+                conn,
+                query,
+                SYMBOLIC_LIMIT,
+                false,
+                false,
+                None,
+                None,
+                None,
+            )
+            .expect("fresh symbolic scan");
             let elapsed_us = start.elapsed().as_micros() as u64;
             (1, Some(elapsed_us), None, None, entries)
         }
         CacheState::Warmed => {
             for _ in 0..GRID_WARMUP {
-                search_symbolic_candidates(conn, query, SYMBOLIC_LIMIT, false, false, None, None)
-                    .expect("warmup symbolic scan");
+                search_symbolic_candidates(
+                    conn,
+                    query,
+                    SYMBOLIC_LIMIT,
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("warmup symbolic scan");
             }
             let mut samples: Vec<u64> = Vec::with_capacity(GRID_MEASURED);
             let mut last_entries = Vec::new();
@@ -1179,6 +1196,7 @@ fn measure_symbolic_cell(
                     SYMBOLIC_LIMIT,
                     false,
                     false,
+                    None,
                     None,
                     None,
                 )
@@ -1232,6 +1250,7 @@ mod grid_tests {
             false,
             None,
             None,
+            None,
         )
         .expect("oldest-target symbolic scan");
 
@@ -1267,6 +1286,7 @@ mod grid_tests {
             SYMBOLIC_LIMIT,
             false,
             false,
+            None,
             None,
             None,
         )
@@ -1308,6 +1328,7 @@ mod grid_tests {
             SYMBOLIC_LIMIT,
             false,
             false,
+            None,
             None,
             None,
         )
@@ -1353,6 +1374,7 @@ mod grid_tests {
             false,
             None,
             None,
+            None,
         )
         .expect("recent-hit-200 symbolic scan");
 
@@ -1387,6 +1409,7 @@ mod grid_tests {
             SYMBOLIC_LIMIT,
             false,
             false,
+            None,
             None,
             None,
         )

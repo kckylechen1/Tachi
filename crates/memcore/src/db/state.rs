@@ -133,8 +133,10 @@ pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<boo
 /// UTC at second granularity (plenty for a multi-day TTL) before comparing —
 /// so rendering differences between callers can no longer flip the verdict.
 ///
-/// Three **fail-closed** exclusions, each independently sufficient to retain
+/// Four **fail-closed** exclusions, each independently sufficient to retain
 /// a row (only a row that fails ALL three is a reap candidate):
+/// - `json_valid(value_json)` false — malformed JSON is retained so one
+///   corrupt legacy row cannot abort maintenance for every valid row.
 /// - `json_type(...) != 'text'` — a non-string `expires_at` (JSON `null`,
 ///   `number`, `bool`, array, object) is retained. This is also how a
 ///   *missing* `expires_at` key is excluded: `json_type` on an absent path
@@ -150,7 +152,8 @@ pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<boo
 pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize, MemoryError> {
     let removed = conn.execute(
         "DELETE FROM hard_state
-         WHERE json_type(value_json, '$.expires_at') = 'text'
+         WHERE json_valid(value_json)
+           AND json_type(value_json, '$.expires_at') = 'text'
            AND datetime(json_extract(value_json, '$.expires_at')) IS NOT NULL
            AND datetime(json_extract(value_json, '$.expires_at')) < datetime(?1)",
         params![now_rfc3339],
@@ -173,8 +176,9 @@ const ALLOWED_TERMINAL_STATUS_PATHS: &[&str] = &["$.status", "$.cleanup_status"]
 /// Idempotent TTL backfill for `hard_state` rows written before their
 /// namespace carried an `expires_at` field at all (the seven-namespace
 /// state-lifecycle-hygiene pass this reap function's own header warns every
-/// future `hard_state` writer to check against). Only rows whose JSON has
-/// **no `expires_at` key at all** are touched.
+/// future `hard_state` writer to check against). Only rows with valid JSON
+/// whose document has **no `expires_at` key at all** are touched; malformed
+/// legacy rows remain untouched so they cannot abort the whole backfill.
 ///
 /// `json_extract(value_json, '$.expires_at') IS NULL` would ALSO match a row
 /// that explicitly carries `"expires_at": null` — the #1301 retain-forever
@@ -215,6 +219,7 @@ pub fn backfill_missing_expires_at(
                 "UPDATE hard_state
                  SET value_json = json_set(value_json, '$.expires_at', ?1)
                  WHERE namespace = ?2
+                   AND json_valid(value_json)
                    AND json_type(value_json, '$.expires_at') IS NULL",
                 params![ttl_rfc3339, namespace],
             )?;
@@ -247,6 +252,7 @@ pub fn backfill_missing_expires_at(
                 "UPDATE hard_state
                  SET value_json = json_set(value_json, '$.expires_at', ?1)
                  WHERE namespace = ?2
+                   AND json_valid(value_json)
                    AND json_type(value_json, '$.expires_at') IS NULL
                    AND json_extract(value_json, '{status_path}') IN ({placeholders})"
             );
@@ -515,6 +521,37 @@ mod tests {
     }
 
     #[test]
+    fn reap_expired_state_skips_malformed_json_and_removes_valid_expired_rows() {
+        let conn = open_state_db();
+        set_state(&conn, "capture_manifest", "corrupt", "not valid json")
+            .expect("seed corrupt row");
+        set_state(
+            &conn,
+            "capture_manifest",
+            "expired",
+            r#"{"expires_at":"2020-01-01T00:00:00Z"}"#,
+        )
+        .expect("seed expired row");
+
+        let removed = reap_expired_state(&conn, "2026-01-01T00:00:00Z")
+            .expect("malformed state must not abort reaping valid rows");
+
+        assert_eq!(removed, 1, "the valid expired row must still be reaped");
+        assert!(
+            get_state(&conn, "capture_manifest", "corrupt")
+                .expect("read corrupt row")
+                .is_some(),
+            "malformed JSON must be retained fail-closed"
+        );
+        assert!(
+            get_state(&conn, "capture_manifest", "expired")
+                .expect("read expired row")
+                .is_none(),
+            "valid expired JSON must still make maintenance progress"
+        );
+    }
+
+    #[test]
     fn reap_expired_state_is_a_noop_on_an_empty_table() {
         let conn = open_state_db();
         assert_eq!(
@@ -719,6 +756,35 @@ mod tests {
     }
 
     #[test]
+    fn unconditional_backfill_skips_malformed_json_and_updates_valid_rows() {
+        let conn = open_state_db();
+        set_state(&conn, "build_receipt", "corrupt", "not valid json").expect("seed corrupt row");
+        set_state(&conn, "build_receipt", "valid", r#"{"outcome":"success"}"#)
+            .expect("seed valid row");
+
+        let backfilled =
+            backfill_missing_expires_at(&conn, "build_receipt", "2126-07-20T00:00:00Z", None)
+                .expect("malformed state must not abort an unconditional backfill");
+
+        assert_eq!(backfilled, 1, "the valid row must still be backfilled");
+        assert_eq!(
+            get_state(&conn, "build_receipt", "corrupt")
+                .expect("read corrupt row")
+                .expect("corrupt row exists")
+                .0,
+            "not valid json",
+            "malformed JSON must remain untouched"
+        );
+        let (valid, _) = get_state(&conn, "build_receipt", "valid")
+            .expect("read valid row")
+            .expect("valid row exists");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&valid).unwrap()["expires_at"],
+            "2126-07-20T00:00:00Z"
+        );
+    }
+
+    #[test]
     fn backfill_missing_expires_at_never_clobbers_the_explicit_retain_forever_null() {
         let conn = open_state_db();
         set_state(
@@ -806,6 +872,50 @@ mod tests {
                 "{key}: expected expires_at presence = {expect_ttl}, row = {value}"
             );
         }
+    }
+
+    #[test]
+    fn scoped_backfill_skips_malformed_json_and_updates_matching_valid_rows() {
+        let conn = open_state_db();
+        set_state(
+            &conn,
+            "memory_lifecycle_proposals",
+            "corrupt",
+            "not valid json",
+        )
+        .expect("seed corrupt row");
+        set_state(
+            &conn,
+            "memory_lifecycle_proposals",
+            "applied",
+            r#"{"status":"applied"}"#,
+        )
+        .expect("seed matching terminal row");
+
+        let backfilled = backfill_missing_expires_at(
+            &conn,
+            "memory_lifecycle_proposals",
+            "2126-07-20T00:00:00Z",
+            Some(("$.status", &["applied"])),
+        )
+        .expect("malformed state must not abort a scoped backfill");
+
+        assert_eq!(backfilled, 1, "the matching valid row must be backfilled");
+        assert_eq!(
+            get_state(&conn, "memory_lifecycle_proposals", "corrupt")
+                .expect("read corrupt row")
+                .expect("corrupt row exists")
+                .0,
+            "not valid json",
+            "malformed JSON must remain untouched"
+        );
+        let (applied, _) = get_state(&conn, "memory_lifecycle_proposals", "applied")
+            .expect("read applied row")
+            .expect("applied row exists");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&applied).unwrap()["expires_at"],
+            "2126-07-20T00:00:00Z"
+        );
     }
 
     #[test]

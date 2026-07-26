@@ -99,7 +99,7 @@ SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 ```
 
-Phase 2 之后，后台调用先走 Claude CLI pool，落败方回退 SiliconFlow。寻常部署只需 Voyage + SiliconFlow 二脉即可。
+Phase 2 之后，后台抽取、摘要、每日蒸馏径走所配 OpenAI-compatible API 脉；别有已设 provider 可退，穷尽方明记 `LANE_OUTAGE`。`FOUNDRY_DISTILL_BACKEND=claude_cli` 乃兼容旧名，仍调 API distill lane，非起 Claude 子进程。寻常 reasoning/chat 则先试 Claude CLI，后转所配 API；provider-only 调用不经 CLI。寻常部署只需 Voyage + SiliconFlow 二脉即可。
 
 ---
 

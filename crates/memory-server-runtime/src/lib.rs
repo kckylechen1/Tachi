@@ -2,12 +2,15 @@ use memcore::MemoryStore;
 use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-support")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex as StdMutex, RwLock as StdRwLock};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 const DEFAULT_MEMORY_READ_POOL_SIZE: usize = 4;
 const MAX_MEMORY_READ_POOL_SIZE: usize = 32;
+const DEFAULT_DB_CONTENTION_RECEIPT_CAPACITY: usize = 4096;
 
 /// Logical memory database scope used by server handlers and background jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +70,108 @@ pub fn query_limit(limit: usize) -> usize {
 pub struct ReadPoolCheckoutReceipt {
     pub pool_checkout_wait: Duration,
     pub operation_wall_time: Duration,
+}
+
+/// One opt-in timing sample from a real global [`DbRuntime`] operation.
+///
+/// The labels name the two resources involved in every global operation:
+/// `gate` is always `global_rw_gate`, while `resource` is either the write
+/// `global_store` mutex or the read `global_read_pool`. Timings deliberately
+/// contain no database path, query, memory content, or credential.
+#[derive(Debug, Clone)]
+pub struct DbContentionReceipt {
+    /// Stable instrumentation boundary, currently `db_runtime`.
+    pub phase: &'static str,
+    /// `write` for [`DbRuntime::with_global_store`], `read` for its read twins.
+    pub action: &'static str,
+    /// The primary operation resource: `global_store` or `global_read_pool`.
+    pub resource: &'static str,
+    /// The `global_rw_gate` mode: `exclusive` for writes, `shared` for reads.
+    pub mode: &'static str,
+    /// The shared gate that serialized or admitted the operation.
+    pub gate: &'static str,
+    pub gate_wait: Duration,
+    pub resource_wait: Duration,
+    pub resource_hold: Duration,
+    pub gate_hold: Duration,
+    /// `false` when the closure returned an error or panicked.
+    pub completed: bool,
+}
+
+/// One atomic drain of a [`DbContentionRecorder`].
+///
+/// `dropped_samples` covers only the same interval as `receipts`; draining
+/// resets both together so a harness cannot silently report a complete phase
+/// after collector overflow.
+#[derive(Debug)]
+pub struct DbContentionBatch {
+    pub receipts: Vec<DbContentionReceipt>,
+    pub dropped_samples: u64,
+}
+
+#[derive(Default)]
+struct DbContentionRecorderState {
+    receipts: VecDeque<DbContentionReceipt>,
+    dropped_samples: u64,
+}
+
+/// Shared, opt-in sink for [`DbContentionReceipt`]s.
+///
+/// A runtime allocates this only when a caller asks to observe it. Normal
+/// global reads and writes retain their existing no-timer path.
+pub struct DbContentionRecorder {
+    state: StdMutex<DbContentionRecorderState>,
+    capacity: usize,
+}
+
+impl Default for DbContentionRecorder {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_DB_CONTENTION_RECEIPT_CAPACITY)
+    }
+}
+
+impl DbContentionRecorder {
+    /// Construct a recorder with a fixed maximum number of retained samples.
+    /// Once full, new samples are counted as dropped until the next drain.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            state: StdMutex::new(DbContentionRecorderState {
+                receipts: VecDeque::with_capacity(capacity),
+                dropped_samples: 0,
+            }),
+            capacity,
+        }
+    }
+
+    fn record(&self, receipt: DbContentionReceipt) {
+        let mut state = lock_or_recover(&self.state, "db_contention_receipts");
+        if state.receipts.len() < self.capacity {
+            state.receipts.push_back(receipt);
+        } else {
+            state.dropped_samples = state.dropped_samples.saturating_add(1);
+        }
+    }
+
+    /// Drain every retained sample and the overflow count observed so far.
+    /// The queue and counter reset atomically for phase-isolated collection.
+    pub fn drain(&self) -> DbContentionBatch {
+        let mut state = lock_or_recover(&self.state, "db_contention_receipts");
+        DbContentionBatch {
+            receipts: state.receipts.drain(..).collect(),
+            dropped_samples: std::mem::take(&mut state.dropped_samples),
+        }
+    }
+}
+
+struct ElapsedOnDrop<'a> {
+    started: Instant,
+    elapsed: &'a mut Option<Duration>,
+}
+
+impl Drop for ElapsedOnDrop<'_> {
+    fn drop(&mut self) {
+        *self.elapsed = Some(self.started.elapsed());
+    }
 }
 
 /// Shared state behind every clone of a [`ReadStorePool`]: the fixed slots
@@ -547,6 +652,13 @@ pub struct DbRuntime {
     pub global_store: Arc<StdMutex<MemoryStore>>,
     pub global_read_pool: ReadStorePool,
     pub global_rw_gate: Arc<StdRwLock<()>>,
+    /// Lazily initialized only by an explicit measurement caller (#1255).
+    /// The normal path performs a single `OnceLock::get` and takes no timer.
+    pub global_contention_recorder: Arc<OnceLock<Arc<DbContentionRecorder>>>,
+    /// Test-only causal signal for a writer that has observed the real global
+    /// gate as busy immediately before its measured blocking acquisition.
+    #[cfg(test)]
+    global_write_gate_contended_observers: Arc<StdMutex<Vec<std::sync::mpsc::Sender<()>>>>,
     pub global_db_path: Arc<PathBuf>,
     pub global_vec_available: bool,
     pub project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
@@ -561,7 +673,78 @@ pub struct DbRuntime {
     pub schema_migration: MigrationAuthority,
 }
 
+/// A request-owned read-only store.
+///
+/// Unlike a [`ReadStorePool`] checkout, this contains no mutex or `RwLock`
+/// guard. Callers may retain it across async boundaries, but it is intentionally
+/// single-owner and exposes the store only through synchronous closures.
+pub struct RequestScopedReadStore {
+    store: MemoryStore,
+}
+
+impl RequestScopedReadStore {
+    pub fn with_store<T>(
+        &mut self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        f(&mut self.store)
+    }
+}
+
 impl DbRuntime {
+    /// Enable isolated observation of future global read/write contention.
+    ///
+    /// This does not change lock order, pool size, or admission semantics. The
+    /// returned recorder is shared by every clone of this runtime, including
+    /// per-MCP-session server clones used by the in-process receipt harness.
+    pub fn enable_global_contention_receipts(&self) -> Arc<DbContentionRecorder> {
+        Arc::clone(
+            self.global_contention_recorder
+                .get_or_init(|| Arc::new(DbContentionRecorder::default())),
+        )
+    }
+
+    /// Test-only: notify once when a global writer has observed
+    /// `global_rw_gate` as contended immediately before its measured acquire.
+    /// This is a causal test probe, not a production lock path or policy.
+    #[cfg(test)]
+    fn observe_next_global_write_gate_contention_for_test(&self) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        lock_or_recover(
+            &self.global_write_gate_contended_observers,
+            "global_write_gate_contended_observers",
+        )
+        .push(tx);
+        rx
+    }
+
+    #[cfg(test)]
+    fn notify_global_write_gate_contention_for_test(&self) {
+        if lock_or_recover(
+            &self.global_write_gate_contended_observers,
+            "global_write_gate_contended_observers",
+        )
+        .is_empty()
+        {
+            return;
+        }
+        let contended = matches!(
+            self.global_rw_gate.try_write(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        if !contended {
+            return;
+        }
+        for observer in lock_or_recover(
+            &self.global_write_gate_contended_observers,
+            "global_write_gate_contended_observers",
+        )
+        .drain(..)
+        {
+            let _ = observer.send(());
+        }
+    }
+
     pub fn has_project_db(&self) -> bool {
         self.project_db
             .read()
@@ -642,6 +825,40 @@ impl DbRuntime {
         f(&mut store)
     }
 
+    /// Open one read-only store for a request that targets a currently
+    /// unattached path. The returned session owns no runtime lock or pool
+    /// checkout, so retaining it across an async await cannot block writers.
+    ///
+    /// A cached attached path deliberately returns `None`: its established
+    /// read-pool routing and LRU touch behavior remain unchanged. The direct
+    /// branch only validates an existing DB and opens it read-only; it never
+    /// initializes, migrates, or attaches the path.
+    pub fn open_unattached_path_store_read_session_with_label(
+        &self,
+        db_path: &Path,
+        label: &str,
+    ) -> Result<Option<RequestScopedReadStore>, String> {
+        let key = project_db_read_cache_key(db_path)?;
+        let attached = self
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .map(|entry| entry.touch())
+            .is_some();
+        if attached {
+            return Ok(None);
+        }
+
+        // This gate protects the open itself just as the existing unattached
+        // read closure does. It is dropped before the request session escapes.
+        let store = {
+            let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
+            open_read_store(&key, label)?
+        };
+        Ok(Some(RequestScopedReadStore { store }))
+    }
+
     fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
         let key = project_db_cache_key(db_path)?;
         if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
@@ -654,11 +871,9 @@ impl DbRuntime {
             return Ok(state);
         }
 
-        let state = ProjectDbState::open(
-            key.clone(),
-            configured_memory_read_pool_size(),
-            &self.schema_migration,
-        )?;
+        let migration = self.named_project_write_migration_authority(&key);
+        let state =
+            ProjectDbState::open(key.clone(), configured_memory_read_pool_size(), &migration)?;
         let mut guard = self
             .attached_project_dbs
             .write()
@@ -669,6 +884,28 @@ impl DbRuntime {
             .or_insert_with(|| AttachedProjectEntry::new(state))
             .state
             .clone())
+    }
+
+    /// Dynamic named-project attachment is a write boundary. Permit exactly
+    /// the v22-to-v23 guard migration when the process otherwise carries
+    /// `Deny`; no other historical or future schema transition gains ambient
+    /// authority. The resulting state is cached, so this authority is used at
+    /// most once per attached library and never escapes as a raw connection.
+    fn named_project_write_migration_authority(&self, db_path: &Path) -> MigrationAuthority {
+        if !matches!(self.schema_migration, MigrationAuthority::Deny) {
+            return self.schema_migration.clone();
+        }
+        if memcore::db::migrations::EXPECTED_SCHEMA_VERSION == 23
+            && matches!(
+                memcore::db::migrations::read_schema_version_at_path(db_path),
+                Ok(22)
+            )
+        {
+            return MigrationAuthority::Allow {
+                approved_by: "runtime:named-project-write:v23-evidence-guards".to_string(),
+            };
+        }
+        MigrationAuthority::Deny
     }
 
     /// Read-then-touch a cached entry's last-used timestamp and clone its
@@ -739,17 +976,138 @@ impl DbRuntime {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
-        let mut store = lock_or_recover(&self.global_store, "global_store");
-        f(&mut store)
+        let Some(recorder) = self.global_contention_recorder.get().cloned() else {
+            let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
+            let mut store = lock_or_recover(&self.global_store, "global_store");
+            return f(&mut store);
+        };
+
+        let gate_wait_started = Instant::now();
+        let mut gate_wait = Duration::ZERO;
+        let mut gate_hold_started = None;
+        let mut gate_hold = Duration::ZERO;
+        let mut resource_wait = Duration::ZERO;
+        let mut resource_hold_started = None;
+        let mut resource_hold = Duration::ZERO;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            self.notify_global_write_gate_contention_for_test();
+            let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
+            gate_wait = gate_wait_started.elapsed();
+            gate_hold_started = Some(Instant::now());
+            let resource_wait_started = Instant::now();
+            let mut store = lock_or_recover(&self.global_store, "global_store");
+            resource_wait = resource_wait_started.elapsed();
+            resource_hold_started = Some(Instant::now());
+            let result = f(&mut store);
+            resource_hold = resource_hold_started
+                .expect("resource hold timer set before measured write")
+                .elapsed();
+            drop(store);
+            gate_hold = gate_hold_started
+                .expect("gate hold timer set after measured write admission")
+                .elapsed();
+            drop(_gate);
+            result
+        }));
+        if outcome.is_err() {
+            resource_hold = resource_hold_started.map_or(Duration::ZERO, |start| start.elapsed());
+            gate_hold = gate_hold_started.map_or(Duration::ZERO, |start| start.elapsed());
+        }
+        let completed = matches!(&outcome, Ok(Ok(_)));
+        recorder.record(DbContentionReceipt {
+            phase: "db_runtime",
+            action: "write",
+            resource: "global_store",
+            mode: "exclusive",
+            gate: "global_rw_gate",
+            gate_wait,
+            resource_wait,
+            resource_hold,
+            gate_hold,
+            completed,
+        });
+        match outcome {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn with_global_store_read_instrumented<T>(
+        &self,
+        recorder: Arc<DbContentionRecorder>,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> (Result<T, String>, ReadPoolCheckoutReceipt) {
+        let gate_wait_started = Instant::now();
+        let mut gate_wait = Duration::ZERO;
+        let mut gate_hold_started = None;
+        let mut gate_hold = Duration::ZERO;
+        let mut pool_wait_on_panic = None;
+        let mut resource_hold_on_panic = None;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+            gate_wait = gate_wait_started.elapsed();
+            gate_hold_started = Some(Instant::now());
+            let pool_wait_started = Instant::now();
+            let result = self
+                .global_read_pool
+                .with_store_recording("global_read_pool", |store| {
+                    pool_wait_on_panic = Some(pool_wait_started.elapsed());
+                    let _hold_timer = ElapsedOnDrop {
+                        started: Instant::now(),
+                        elapsed: &mut resource_hold_on_panic,
+                    };
+                    f(store)
+                });
+            gate_hold = gate_hold_started
+                .expect("gate hold timer set after measured read admission")
+                .elapsed();
+            drop(_gate);
+            result
+        }));
+        if outcome.is_err() {
+            gate_hold = gate_hold_started.map_or(Duration::ZERO, |start| start.elapsed());
+        }
+        let (resource_wait, resource_hold, completed) = match &outcome {
+            Ok((result, receipt)) => (
+                receipt.pool_checkout_wait,
+                receipt.operation_wall_time,
+                result.is_ok(),
+            ),
+            Err(_) => (
+                pool_wait_on_panic.unwrap_or(Duration::ZERO),
+                resource_hold_on_panic.unwrap_or(Duration::ZERO),
+                false,
+            ),
+        };
+        recorder.record(DbContentionReceipt {
+            phase: "db_runtime",
+            action: "read",
+            resource: "global_read_pool",
+            mode: "shared",
+            gate: "global_rw_gate",
+            gate_wait,
+            resource_wait,
+            resource_hold,
+            gate_hold,
+            completed,
+        });
+        match outcome {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     pub fn with_global_store_read<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-        self.global_read_pool.with_store("global_read_pool", f)
+        let Some(recorder) = self.global_contention_recorder.get().cloned() else {
+            let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+            return self.global_read_pool.with_store("global_read_pool", f);
+        };
+
+        self.with_global_store_read_instrumented(recorder, f).0
     }
 
     /// Recording twin of [`Self::with_global_store_read`]: identical
@@ -768,10 +1126,15 @@ impl DbRuntime {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<(T, ReadPoolCheckoutReceipt), String> {
-        let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-        let (result, receipt) = self
-            .global_read_pool
-            .with_store_recording("global_read_pool", f);
+        let Some(recorder) = self.global_contention_recorder.get().cloned() else {
+            let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+            let (result, receipt) = self
+                .global_read_pool
+                .with_store_recording("global_read_pool", f);
+            return Ok((result?, receipt));
+        };
+
+        let (result, receipt) = self.with_global_store_read_instrumented(recorder, f);
         Ok((result?, receipt))
     }
 
@@ -848,7 +1211,7 @@ impl DbRuntime {
 }
 
 fn project_db_cache_key(db_path: &Path) -> Result<PathBuf, String> {
-    if db_path.exists() {
+    if project_db_leaf_exists_without_symlink(db_path)? {
         return std::fs::canonicalize(db_path)
             .map_err(|e| format!("canonicalize project db {}: {e}", db_path.display()));
     }
@@ -866,11 +1229,26 @@ fn project_db_cache_key(db_path: &Path) -> Result<PathBuf, String> {
 }
 
 fn project_db_read_cache_key(db_path: &Path) -> Result<PathBuf, String> {
-    if !db_path.exists() {
+    if !project_db_leaf_exists_without_symlink(db_path)? {
         return Err(format!("project db does not exist: {}", db_path.display()));
     }
     std::fs::canonicalize(db_path)
         .map_err(|e| format!("canonicalize project db {}: {e}", db_path.display()))
+}
+
+fn project_db_leaf_exists_without_symlink(db_path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(db_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "project DB path {} must not be a symlink",
+            db_path.display()
+        )),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "inspect project DB path {}: {error}",
+            db_path.display()
+        )),
+    }
 }
 
 /// Default requests-per-minute limit per session (0 = unlimited)
@@ -968,14 +1346,15 @@ fn next_recency_tick() -> u64 {
 impl ProjectDbState {
     /// Open a project DB with an explicit #1119 [`MigrationAuthority`]. A
     /// project DB is always opened with [`OpenIntent::OpenExisting`] — it is
-    /// operational data, never a fresh-provisioning target here — so the only
-    /// degree of freedom is whether this process may migrate an older-schema
-    /// project DB forward (`Allow`) or must refuse (`Deny`, fail-closed).
+    /// operational data, never a fresh-provisioning target here. Authority is
+    /// normally the deploy-time value; dynamic named-project write attachment
+    /// may instead pass the exact v22-to-v23 guard-migration authority above.
     pub fn open(
         db_path: PathBuf,
         read_pool_size: usize,
         migration: &MigrationAuthority,
     ) -> Result<Self, String> {
+        project_db_leaf_exists_without_symlink(&db_path)?;
         let db_str = db_path.to_str().ok_or_else(|| {
             format!(
                 "Project DB path contains invalid UTF-8: {}",
@@ -1100,6 +1479,88 @@ fn write_or_recover<'a, T>(
     }
 }
 
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+struct ReadStoreOpenObserver {
+    db_path: PathBuf,
+    count: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "test-support")]
+/// Test instrumentation for physical direct read-store opens at one canonical
+/// DB path. Pool construction does not use this path; the observer therefore
+/// counts precisely the one-off opens used by unattached path reads.
+#[doc(hidden)]
+pub struct ReadStoreOpenObservation {
+    observer: ReadStoreOpenObserver,
+}
+
+#[cfg(feature = "test-support")]
+impl ReadStoreOpenObservation {
+    pub fn count(&self) -> usize {
+        self.observer.count.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for ReadStoreOpenObservation {
+    fn drop(&mut self) {
+        let mut guard = lock_or_recover(read_store_open_observer(), "read_store_open_observer");
+        if guard
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&active.count, &self.observer.count))
+        {
+            *guard = None;
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+/// Install one path-filtered observer for a targeted test. The observation is
+/// process-global because direct unattached opens do not carry `DbRuntime`
+/// state; callers must serialize tests that observe the same process.
+#[doc(hidden)]
+pub fn observe_read_store_opens_for_test(
+    db_path: &Path,
+) -> Result<ReadStoreOpenObservation, String> {
+    let db_path = std::fs::canonicalize(db_path).map_err(|error| {
+        format!(
+            "canonicalize observed read store {}: {error}",
+            db_path.display()
+        )
+    })?;
+    let observer = ReadStoreOpenObserver {
+        db_path,
+        count: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut guard = lock_or_recover(read_store_open_observer(), "read_store_open_observer");
+    if guard.is_some() {
+        return Err("a read-store open observation is already active".to_string());
+    }
+    *guard = Some(observer.clone());
+    Ok(ReadStoreOpenObservation { observer })
+}
+
+#[cfg(feature = "test-support")]
+fn read_store_open_observer() -> &'static StdMutex<Option<ReadStoreOpenObserver>> {
+    static OBSERVER: OnceLock<StdMutex<Option<ReadStoreOpenObserver>>> = OnceLock::new();
+    OBSERVER.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(feature = "test-support")]
+fn record_read_store_open(db_path: &Path) {
+    let observer = lock_or_recover(read_store_open_observer(), "read_store_open_observer").clone();
+    if observer
+        .as_ref()
+        .is_some_and(|observer| observer.db_path == db_path)
+    {
+        observer
+            .expect("observer checked above")
+            .count
+            .fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
     let db_str = db_path.to_str().ok_or_else(|| {
         format!(
@@ -1108,7 +1569,11 @@ fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
             db_path.display()
         )
     })?;
-    MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))
+    let store =
+        MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))?;
+    #[cfg(feature = "test-support")]
+    record_read_store_open(db_path);
+    Ok(store)
 }
 
 fn zero_key(key: &mut [u8; 32]) {
@@ -1147,6 +1612,8 @@ mod tests {
             global_read_pool: ReadStorePool::open_read_only(global_db_str, 1)
                 .expect("global read pool"),
             global_rw_gate: Arc::new(StdRwLock::new(())),
+            global_contention_recorder: Arc::new(OnceLock::new()),
+            global_write_gate_contended_observers: Arc::new(StdMutex::new(Vec::new())),
             global_db_path: Arc::new(global_db),
             global_vec_available: false,
             project_db: Arc::new(StdRwLock::new(None)),
@@ -1154,6 +1621,114 @@ mod tests {
             project_attach_init_gate: Arc::new(StdMutex::new(())),
             schema_migration: MigrationAuthority::Deny,
         }
+    }
+
+    #[cfg(unix)]
+    fn test_file_identity(path: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path).expect("path metadata");
+        (metadata.dev(), metadata.ino())
+    }
+
+    #[cfg(unix)]
+    fn assert_project_symlink_refused_for_runtime_read_and_write(kind: &str) {
+        let temp = unique_temp_dir(&format!("project-symlink-{kind}"));
+        let global_db = temp.join("global.db");
+        drop(
+            MemoryStore::open_with_label(global_db.to_str().expect("global path"), "global")
+                .expect("seed global DB"),
+        );
+        let runtime = test_runtime(global_db);
+        let project_link = temp.join("project.db");
+        let external_db = temp.join("external.db");
+        let external_before = if kind == "wrong" {
+            drop(
+                MemoryStore::open_with_label(
+                    external_db.to_str().expect("external path"),
+                    "foreign",
+                )
+                .expect("seed foreign DB"),
+            );
+            Some((
+                test_file_identity(&external_db),
+                std::fs::read(&external_db).expect("foreign bytes"),
+            ))
+        } else {
+            None
+        };
+        let target = if kind == "loop" {
+            project_link.clone()
+        } else {
+            external_db.clone()
+        };
+        std::os::unix::fs::symlink(&target, &project_link).expect("project symlink");
+        let link_identity = test_file_identity(&project_link);
+
+        let read_result = runtime.with_path_store_read(&project_link, |_store| Ok(()));
+        let write_result = runtime.with_path_store(&project_link, |_store| Ok(()));
+
+        for (operation, result) in [("read", read_result), ("write", write_result)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(()) => panic!("project {kind} symlink must refuse runtime {operation}"),
+            };
+            assert!(
+                error.contains("project DB path") && error.contains("must not be a symlink"),
+                "expected project leaf refusal for {operation}, got: {error}"
+            );
+        }
+        assert_eq!(test_file_identity(&project_link), link_identity);
+        assert_eq!(std::fs::read_link(&project_link).unwrap(), target);
+        if let Some((identity, bytes)) = external_before {
+            assert_eq!(test_file_identity(&external_db), identity);
+            assert_eq!(std::fs::read(&external_db).unwrap(), bytes);
+        } else if kind == "dangling" {
+            assert!(std::fs::symlink_metadata(&external_db).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_wrong_target_symlink_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("wrong");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_dangling_symlink_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("dangling");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_project_symlink_loop_refuses_read_and_write() {
+        assert_project_symlink_refused_for_runtime_read_and_write("loop");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_global_symlink_remains_supported() {
+        let temp = unique_temp_dir("global-symlink");
+        let external_db = temp.join("external-global.db");
+        drop(
+            MemoryStore::open_with_label(
+                external_db.to_str().expect("external global path"),
+                "global",
+            )
+            .expect("seed external global DB"),
+        );
+        let global_link = temp.join("global.db");
+        std::os::unix::fs::symlink(&external_db, &global_link).expect("global symlink");
+
+        let runtime = test_runtime(global_link);
+
+        runtime
+            .with_global_store_read(|_store| Ok(()))
+            .expect("global symlink read remains supported");
+        runtime
+            .with_global_store(|_store| Ok(()))
+            .expect("global symlink write remains supported");
     }
 
     #[test]
@@ -1480,6 +2055,7 @@ mod tests {
         let global_db = temp.join("global/memory.db");
         std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
         let runtime = Arc::new(test_runtime(global_db));
+        let recorder = runtime.enable_global_contention_receipts();
 
         // Pool size is 1 (test_runtime). Thread A holds the sole slot on a
         // release gate so it deterministically stays checked out until we let
@@ -1556,7 +2132,234 @@ mod tests {
              pool_checkout_wait (B was proven parked); got {waiter_wait:?}"
         );
 
+        let contention = recorder.drain();
+        assert_eq!(contention.dropped_samples, 0);
+        assert!(
+            contention.receipts.iter().any(|receipt| {
+                receipt.phase == "db_runtime"
+                    && receipt.action == "read"
+                    && receipt.resource == "global_read_pool"
+                    && receipt.mode == "shared"
+                    && receipt.gate == "global_rw_gate"
+                    && receipt.resource_wait > Duration::ZERO
+                    && receipt.resource_hold > Duration::ZERO
+                    && receipt.gate_hold >= receipt.resource_hold
+                    && receipt.completed
+            }),
+            "the real pooled reader that was proven parked must emit a complete \
+             global_read_pool timing receipt; receipts={contention:?}"
+        );
+
         waiter.join().expect("waiter thread should join");
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// #1255: a global write must record the actual `global_rw_gate` wait and
+    /// `global_store` hold, rather than inferring contention from an HTTP
+    /// handler delay. Writer A holds the real write gate and store mutex on a
+    /// condition-variable release; writer B first proves that the same real
+    /// gate is busy, then attempts its real DbRuntime write. The assertion is
+    /// on the measured DbRuntime receipt, not on a handler delay or scheduler
+    /// window.
+    ///
+    /// Mutation discriminator: replacing the measured `gate_wait` assignment
+    /// in `with_global_store` with `Duration::ZERO` makes the strict waiter
+    /// assertion below fail while the same writer/reader choreography still
+    /// runs. This is intentionally a real gate test, not the transport
+    /// harness's server-side `hold_ms` overlap aid.
+    #[test]
+    fn global_write_contention_receipt_reports_gate_wait_and_store_hold() {
+        let temp = unique_temp_dir("global-write-contention-receipt");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = Arc::new(test_runtime(global_db));
+        let recorder = runtime.enable_global_contention_receipts();
+
+        let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let (holder_entered_tx, holder_entered_rx) = std::sync::mpsc::channel();
+        let holder_runtime = Arc::clone(&runtime);
+        let holder_release = Arc::clone(&release);
+        let holder = std::thread::spawn(move || {
+            holder_runtime.with_global_store(|_store| {
+                holder_entered_tx
+                    .send(())
+                    .expect("holder should signal after taking global gate/store");
+                let (released, wake) = &*holder_release;
+                let mut released = released.lock().expect("lock release gate");
+                while !*released {
+                    released = wake.wait(released).expect("wait release gate");
+                }
+                Ok(())
+            })
+        });
+        holder_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("holder must own global_rw_gate before waiter starts");
+
+        let contended_rx = runtime.observe_next_global_write_gate_contention_for_test();
+        let (waiter_done_tx, waiter_done_rx) = std::sync::mpsc::channel();
+        let waiter_runtime = Arc::clone(&runtime);
+        let waiter = std::thread::spawn(move || {
+            let _ = waiter_done_tx.send(waiter_runtime.with_global_store(|_store| Ok(())));
+        });
+        contended_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter must observe the real global_rw_gate held before holder releases");
+
+        {
+            let (released, wake) = &*release;
+            *released.lock().expect("lock release gate") = true;
+            wake.notify_all();
+        }
+        holder
+            .join()
+            .expect("holder thread should join")
+            .expect("holder DbRuntime write should succeed");
+        waiter_done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("waiter should finish after holder release")
+            .expect("waiter DbRuntime write should succeed");
+        waiter.join().expect("waiter thread should join");
+
+        let contention = recorder.drain();
+        assert_eq!(contention.dropped_samples, 0);
+        assert_eq!(
+            contention.receipts.len(),
+            2,
+            "only the holder and waiter writes should be observed; receipts={contention:?}"
+        );
+        assert!(
+            contention.receipts.iter().all(|receipt| {
+                receipt.phase == "db_runtime"
+                    && receipt.action == "write"
+                    && receipt.resource == "global_store"
+                    && receipt.mode == "exclusive"
+                    && receipt.gate == "global_rw_gate"
+                    && receipt.gate_hold >= receipt.resource_hold
+                    && receipt.completed
+            }),
+            "all real global writes must retain their complete labelled timing receipt; \
+             receipts={contention:?}"
+        );
+        assert!(
+            contention
+                .receipts
+                .iter()
+                .any(|receipt| receipt.gate_wait > Duration::ZERO),
+            "writer B waited behind the holder's real global_rw_gate but receipt lost that wait; \
+             receipts={contention:?}"
+        );
+        assert!(
+            contention
+                .receipts
+                .iter()
+                .any(|receipt| receipt.resource_hold > Duration::ZERO),
+            "writer A held the real global_store but receipt lost that hold; \
+             receipts={contention:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn measured_global_panics_emit_incomplete_receipts_and_resume_unwind() {
+        let temp = unique_temp_dir("global-contention-panic-receipts");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = test_runtime(global_db);
+        let recorder = runtime.enable_global_contention_receipts();
+
+        let write_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.with_global_store::<()>(|_store| panic!("measured write panic"))
+        }))
+        .expect_err("measured write panic must resume to its caller");
+        assert_eq!(
+            write_panic.downcast_ref::<&str>(),
+            Some(&"measured write panic")
+        );
+        assert!(
+            runtime.global_store.is_poisoned(),
+            "instrumented write panic must retain the original mutex-poisoning behavior"
+        );
+
+        let read_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.with_global_store_read::<()>(|_store| panic!("measured read panic"))
+        }))
+        .expect_err("measured read panic must resume to its caller");
+        assert_eq!(
+            read_panic.downcast_ref::<&str>(),
+            Some(&"measured read panic")
+        );
+        assert!(
+            runtime.global_read_pool.inner.stores[0].is_poisoned(),
+            "instrumented read panic must retain the original pool-slot poisoning behavior"
+        );
+
+        let recording_read_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.with_global_store_read_recording::<()>(|_store| {
+                panic!("measured recording read panic")
+            })
+        }))
+        .expect_err("measured recording read panic must resume to its caller");
+        assert_eq!(
+            recording_read_panic.downcast_ref::<&str>(),
+            Some(&"measured recording read panic")
+        );
+
+        let contention = recorder.drain();
+        assert_eq!(contention.dropped_samples, 0);
+        assert_eq!(contention.receipts.len(), 3);
+        assert!(contention.receipts.iter().all(|receipt| !receipt.completed));
+        assert_eq!(
+            contention
+                .receipts
+                .iter()
+                .filter(|receipt| receipt.resource == "global_store")
+                .count(),
+            1
+        );
+        assert_eq!(
+            contention
+                .receipts
+                .iter()
+                .filter(|receipt| receipt.resource == "global_read_pool")
+                .count(),
+            2
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn contention_recorder_bounds_samples_and_reports_overflow_per_drain() {
+        let temp = unique_temp_dir("global-contention-recorder-capacity");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = test_runtime(global_db);
+        let recorder = Arc::new(DbContentionRecorder::with_capacity(2));
+        assert!(
+            runtime
+                .global_contention_recorder
+                .set(Arc::clone(&recorder))
+                .is_ok(),
+            "test runtime recorder must be unset"
+        );
+
+        for _ in 0..3 {
+            runtime
+                .with_global_store(|_store| Ok(()))
+                .expect("measured write");
+        }
+
+        let overflowed = recorder.drain();
+        assert_eq!(overflowed.receipts.len(), 2);
+        assert_eq!(overflowed.dropped_samples, 1);
+        assert!(overflowed.receipts.iter().all(|receipt| receipt.completed));
+
+        let reset = recorder.drain();
+        assert!(reset.receipts.is_empty());
+        assert_eq!(reset.dropped_samples, 0);
+
         let _ = std::fs::remove_dir_all(temp);
     }
 

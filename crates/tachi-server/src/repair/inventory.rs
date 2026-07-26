@@ -34,37 +34,33 @@ pub fn label_for(entry: &DbEntry) -> String {
 ///
 /// `None` returns ALL writable, on-disk Tachi DBs (skips non-tachi schema
 /// files like openclaw_legacy `.sqlite`).
-pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Vec<DbEntry> {
+pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Result<Vec<DbEntry>, String> {
     let want = filter.map(|s| s.trim().to_string());
     let mut seen = HashSet::new();
+    let mut entries = Vec::new();
 
-    let mut entries: Vec<DbEntry> = manifest
-        .dbs
-        .iter()
-        .filter(|e| {
-            // Skip non-tachi schemas — they don't have memories/foundry tables.
-            if e.schema_kind != "tachi" {
-                return false;
-            }
-            // Skip files that disappeared between manifest GC and now.
-            if !PathBuf::from(&e.path).exists() {
-                return false;
-            }
-            true
-        })
-        .filter(|e| match &want {
-            None => true,
-            Some(w) => matches(e, w),
-        })
-        .filter(|e| {
-            let key = std::fs::canonicalize(&e.path)
-                .unwrap_or_else(|_| PathBuf::from(&e.path))
-                .to_string_lossy()
-                .to_string();
-            seen.insert(key)
-        })
-        .cloned()
-        .collect();
+    for entry in &manifest.dbs {
+        // Skip non-tachi schemas — they don't have memories/foundry tables.
+        if entry.schema_kind != "tachi" {
+            continue;
+        }
+        // Inspect the leaf without following project-role symlinks. A genuine
+        // missing regular path keeps the inventory's documented skip behavior,
+        // while dangling/wrong/loop project symlinks must fail loudly.
+        if !crate::path_utils::manifest_db_leaf_exists(entry)? {
+            continue;
+        }
+        if want.as_ref().is_some_and(|want| !matches(entry, want)) {
+            continue;
+        }
+        let key = std::fs::canonicalize(&entry.path)
+            .unwrap_or_else(|_| PathBuf::from(&entry.path))
+            .to_string_lossy()
+            .to_string();
+        if seen.insert(key) {
+            entries.push(entry.clone());
+        }
+    }
 
     if entries.is_empty() {
         if let Some(w) = want.as_deref() {
@@ -74,7 +70,7 @@ pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Vec<DbEntry> {
         }
     }
 
-    entries
+    Ok(entries)
 }
 
 fn matches(e: &DbEntry, want: &str) -> bool {
@@ -122,12 +118,12 @@ fn explicit_path_entry(want: &str) -> Option<DbEntry> {
 
 /// Resolve a single label/path to one DbEntry. Returns None if no match or
 /// ambiguous.
-pub fn resolve_one(manifest: &Manifest, want: &str) -> Option<DbEntry> {
-    let hits = select_dbs(manifest, Some(want));
+pub fn resolve_one(manifest: &Manifest, want: &str) -> Result<Option<DbEntry>, String> {
+    let hits = select_dbs(manifest, Some(want))?;
     if hits.len() == 1 {
-        hits.into_iter().next()
+        Ok(hits.into_iter().next())
     } else {
-        None
+        Ok(None)
     }
 }
 

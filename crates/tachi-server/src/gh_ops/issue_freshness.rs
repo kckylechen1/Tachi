@@ -2073,7 +2073,7 @@ mod tests {
     /// which needs a REAL `delete_state` I/O failure — not a mocked one — to
     /// prove the honesty wiring end-to-end).
     fn test_server_with_path() -> (MemoryServer, std::path::PathBuf) {
-        let db = std::env::temp_dir().join(format!(
+        let db = crate::utils::test_fixture_path(format!(
             "issue-freshness-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ));

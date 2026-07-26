@@ -3,8 +3,10 @@
 //! `TACHI_EMBED_RAW_TIER` gates raw inclusion only on
 //! [`crate::MemoryStore::entries_missing_vectors`] and
 //! [`crate::db::list_memory_ids_needing_embedding`]. The daemon sweep path
-//! ([`crate::MemoryStore::entries_missing_vectors_filtered`]) always includes
-//! raw, matching pre-#1242 behavior.
+//! uses the shared [`crate::vector_backfill::vector_backfill_eligible_where`]
+//! predicate (anchors out; recall-cache out unless opted in) and does not
+//! apply this raw-tier gate — raw stays eligible there, matching pre-#1242
+//! behavior.
 
 /// Whether raw-tier memories are eligible for gated embedding backfill paths.
 ///

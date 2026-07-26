@@ -10,6 +10,7 @@ use crate::shared_defs::{
 };
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
+use memcore::{AuthorityLevel, EffectScope, TachiEventRecord};
 use rmcp::model::{InitializeRequestParams, InitializeResult, ServerCapabilities, ServerInfo};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
@@ -44,6 +45,82 @@ fn tool_action_denied_result(
     rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(format!(
         "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action for this profile, or call tachi_tools() to inspect the active surface."
     ))])
+}
+
+fn dlq_capture_refusal_reason(tool_name: &str, is_native: bool) -> &'static str {
+    if tool_name.starts_with("dlq_")
+        || tool_name.starts_with("ghost_")
+        || tool_name == "get_pipeline_status"
+    {
+        "excluded_control_or_status_route"
+    } else if is_native {
+        "native_route_not_generic_dlq_replayable"
+    } else {
+        "default_deny_no_explicit_safe_replay_authority"
+    }
+}
+
+fn record_dlq_capture_refused(
+    server: &MemoryServer,
+    tool_name: &str,
+    action: Option<&str>,
+    reason: &str,
+    is_native: bool,
+    error_category: &str,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let event = TachiEventRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        source_repo: "tachi".to_string(),
+        adapter: "server_handler.call_tool".to_string(),
+        project: project.unwrap_or_default().to_string(),
+        domain: "dlq".to_string(),
+        session_id: server.rate_limit_session_id(),
+        actor: "tachi-server".to_string(),
+        event_type: "dlq_capture_refused".to_string(),
+        authority: AuthorityLevel::ReviewSignalOnly,
+        effects: vec![EffectScope::None],
+        projection_hints: Vec::new(),
+        payload: serde_json::json!({
+            "tool_name": tool_name,
+            "action": action,
+            "reason": reason,
+            "is_native": is_native,
+            "error_category": error_category,
+            "dlq_enqueued": false,
+        }),
+        provenance: serde_json::json!({
+            "source": "server_handler.call_tool",
+            "decision": "should_enqueue_dlq_refused",
+        }),
+        created_at: Utc::now().to_rfc3339(),
+    };
+
+    server.with_global_store(|store| {
+        store
+            .insert_tachi_event(&event)
+            .map_err(|error| format!("insert dlq_capture_refused event: {error}"))
+    })
+}
+
+fn attach_dlq_capture_refusal_fallback(
+    error: &mut rmcp::ErrorData,
+    tool_name: &str,
+    action: Option<&str>,
+    reason: &str,
+    persistence_error: &str,
+) {
+    let original_error_data = error.data.take();
+    error.data = Some(serde_json::json!({
+        "original_error_data": original_error_data,
+        "lifecycle_signal": {
+            "event_type": "dlq_capture_refused",
+            "tool_name": tool_name,
+            "action": action,
+            "reason": reason,
+            "persistence_error": persistence_error,
+        }
+    }));
 }
 
 pub(crate) fn split_proxy_tool_name<'a>(
@@ -360,6 +437,11 @@ struct HttpSessionIdentity {
     client: Option<String>,
     agent_identity_id: Option<String>,
     project: Option<String>,
+    /// A caller that sent a malformed project identity must not silently
+    /// become an unbound session. In particular, HTTP permits opaque obs-text
+    /// bytes that `HeaderValue::to_str` cannot decode as UTF-8; collapsing
+    /// that case to `None` would bypass named-project validation entirely.
+    project_error: Option<String>,
     /// #1120 PR1: `X-Tachi-Workspace-Root` / `_meta.tachiWorkspaceRoot`. Only
     /// consulted when `project` is absent — an explicit named-project binding
     /// always wins, matching how a caller-supplied `project=` argument always
@@ -368,15 +450,11 @@ struct HttpSessionIdentity {
     /// Review finding [3] (#1207): set when `X-Tachi-Workspace-Root` /
     /// `_meta.tachiWorkspaceRoot` was PRESENT but unusable — blank/whitespace,
     /// or (header only) not valid UTF-8 text — as opposed to simply absent.
-    /// `workspace_root` collapses "absent" and "malformed" to the same `None`
-    /// (matching the pre-existing `X-Tachi-Project`/profile/client parsing
-    /// this PR's header reuses the shape of); that is fine for a caller that
-    /// never declared a root, but a caller that DID send one and got it
-    /// silently ignored must not fall through to an unbound session — this
-    /// carries the reason so `apply_http_session_identity` can fail closed
-    /// instead. Scoped to `workspace_root` only (this PR's new surface); the
-    /// analogous gap on `X-Tachi-Project`/profile/client is pre-existing
-    /// behavior out of this PR's blast radius.
+    /// `workspace_root` collapses "absent" and "malformed" to the same `None`;
+    /// that is fine for a caller that never declared a root, but a caller that
+    /// DID send one and got it silently ignored must not fall through to an
+    /// unbound session — this carries the reason so
+    /// `apply_http_session_identity` can fail closed instead.
     workspace_root_error: Option<String>,
     /// #1251: the raw `X-Tachi-Dispatch-Depth` header value for the recursive-
     /// dispatch gate. Stored raw (like the other identity fields); a present
@@ -421,6 +499,12 @@ impl MemoryServer {
         context: &RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
         let identity = http_session_identity(request, context);
+        if let Some(err) = identity.project_error.as_deref() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("malformed X-Tachi-Project identity: {err}"),
+                None,
+            ));
+        }
         // Review finding [3] (#1207): a caller-supplied but malformed/blank
         // `X-Tachi-Workspace-Root` (or its `_meta` twin) must fail the whole
         // `initialize` call, not silently disappear into an unbound session
@@ -440,13 +524,15 @@ impl MemoryServer {
             .transpose()?;
         let project = match project_binding_source(&identity) {
             ProjectBindingSource::Named(project) => {
-                Self::resolve_named_project_db_path(project).map_err(|err| {
-                    rmcp::ErrorData::invalid_params(
-                        format!("invalid HTTP direct-connect project binding: {err}"),
-                        None,
-                    )
-                })?;
-                Some(project.to_string())
+                let (canonical_project, _) = self
+                    .resolve_server_named_project_binding(project)
+                    .map_err(|err| {
+                        rmcp::ErrorData::invalid_params(
+                            format!("invalid HTTP direct-connect project binding: {err}"),
+                            None,
+                        )
+                    })?;
+                Some(canonical_project)
             }
             ProjectBindingSource::WorkspaceRoot(root) => Some(
                 self.resolve_or_register_workspace_root(root)
@@ -492,8 +578,17 @@ fn http_session_identity(
         identity.agent_identity_id =
             header_string(parts, crate::session_identity::HEADER_AGENT_IDENTITY)
                 .or(identity.agent_identity_id);
-        identity.project =
-            header_string(parts, crate::session_identity::HEADER_PROJECT).or(identity.project);
+        match header_string_result(parts, crate::session_identity::HEADER_PROJECT) {
+            Ok(Some(value)) => {
+                identity.project = Some(value);
+                identity.project_error = None;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                identity.project = None;
+                identity.project_error = Some(err);
+            }
+        }
         // #1251: read the per-call recursion-depth marker off the wire. This is
         // the ONLY correct place to learn the caller's depth in the daemon-proxy
         // topology — `handle_tachi_dispatch` runs in the daemon carrying the
@@ -532,8 +627,15 @@ fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessio
         .or_else(|| meta_string(meta, "tachi.client"));
     identity.agent_identity_id = meta_string(meta, crate::session_identity::META_AGENT_IDENTITY)
         .or_else(|| meta_string(meta, "tachi.agentIdentity"));
-    identity.project = meta_string(meta, crate::session_identity::META_PROJECT)
-        .or_else(|| meta_string(meta, "tachi.project"));
+    match meta_string_result(meta, crate::session_identity::META_PROJECT) {
+        Ok(Some(value)) => identity.project = Some(value),
+        Ok(None) => match meta_string_result(meta, "tachi.project") {
+            Ok(Some(value)) => identity.project = Some(value),
+            Ok(None) => {}
+            Err(err) => identity.project_error = Some(err),
+        },
+        Err(err) => identity.project_error = Some(err),
+    }
     // Review finding [3] (#1207): unlike the fields above, a PRESENT-but-
     // malformed `_meta.tachiWorkspaceRoot` (non-string type, or blank) must
     // be recorded as an error, not silently treated the same as "the caller
@@ -762,7 +864,8 @@ impl ServerHandler for MemoryServer {
 
             let bound_project = self.session_project();
             if let Some(project) = bound_project.as_deref() {
-                crate::session_identity::enforce_session_project(
+                crate::session_identity::enforce_server_session_project(
+                    self,
                     name,
                     &mut params.arguments,
                     project,
@@ -872,7 +975,7 @@ impl ServerHandler for MemoryServer {
             let tool_name_owned = name.to_string();
             let tool_args_for_dlq = params.arguments.clone();
 
-            let result = {
+            let mut result = {
                 // 1. Native tools first (highest priority)
                 if self.tool_router.has_route(name) {
                     let context =
@@ -940,6 +1043,28 @@ impl ServerHandler for MemoryServer {
                     {
                         let mut dlq = self.dead_letters_lock();
                         push_dead_letter_with_limits(&mut dlq, dl, Utc::now());
+                    }
+                } else {
+                    let error_category = categorize_error(&err.to_string());
+                    let reason = dlq_capture_refusal_reason(&tool_name_owned, is_native);
+                    if let Err(signal_error) = record_dlq_capture_refused(
+                        self,
+                        &tool_name_owned,
+                        action_arg.as_deref(),
+                        reason,
+                        is_native,
+                        &error_category,
+                        bound_project.as_deref(),
+                    ) {
+                        if let Err(error) = &mut result {
+                            attach_dlq_capture_refusal_fallback(
+                                error,
+                                &tool_name_owned,
+                                action_arg.as_deref(),
+                                reason,
+                                &signal_error,
+                            );
+                        }
                     }
                 }
             }
@@ -1210,6 +1335,21 @@ mod tests {
         assert!(identity.profile.is_none());
         assert!(identity.client.is_none());
         assert!(identity.project.is_none());
+        assert!(identity.project_error.is_none());
+    }
+
+    #[test]
+    fn initialize_meta_malformed_project_is_recorded_as_an_error_not_absence() {
+        for value in [json!("   "), json!(12345)] {
+            let mut map = serde_json::Map::new();
+            map.insert(crate::session_identity::META_PROJECT.to_string(), value);
+            let identity = identity_from_initialize_meta(Some(&rmcp::model::Meta(map)));
+            assert!(identity.project.is_none());
+            assert!(
+                identity.project_error.is_some(),
+                "a present malformed project must not become an unbound session"
+            );
+        }
     }
 
     /// #1120 PR1: `_meta.tachiWorkspaceRoot` parses into `HttpSessionIdentity`
@@ -1321,6 +1461,23 @@ mod tests {
         assert!(err.contains("UTF-8"), "unexpected error message: {err}");
     }
 
+    #[test]
+    fn non_utf8_project_header_is_recorded_as_an_error_not_absence() {
+        let parts = axum::http::Request::builder()
+            .header(
+                crate::session_identity::HEADER_PROJECT,
+                axum::http::HeaderValue::from_bytes("量化".as_bytes())
+                    .expect("HTTP permits opaque obs-text bytes"),
+            )
+            .body(())
+            .expect("build request")
+            .into_parts()
+            .0;
+        let err = header_string_result(&parts, crate::session_identity::HEADER_PROJECT)
+            .expect_err("an undecodable project header must fail closed");
+        assert!(err.contains("UTF-8"), "unexpected error message: {err}");
+    }
+
     /// Review finding [3] (#1207) twin: a present-but-blank header value is
     /// malformed, not absent.
     #[test]
@@ -1399,6 +1556,7 @@ mod tests {
             client: None,
             agent_identity_id: None,
             project: Some("sigil".to_string()),
+            project_error: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
             dispatch_depth: None,
@@ -1416,6 +1574,7 @@ mod tests {
             client: None,
             agent_identity_id: None,
             project: None,
+            project_error: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
             dispatch_depth: None,

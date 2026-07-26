@@ -38,6 +38,7 @@ pub mod store;
 pub mod types;
 #[cfg(feature = "admin")]
 pub mod vault;
+pub mod vector_backfill;
 
 #[cfg(feature = "admin")]
 pub use agent_profile::{
@@ -121,8 +122,9 @@ pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use namespace::{
     is_anchor_entry, is_eval_entry, is_handoff_entry, is_kanban_entry, is_namespace_search_noise,
     is_recall_cache_entry, is_wiki_entry, path_contains_recall_cache, path_in_namespace,
-    path_prefix_opts_into_recall_cache, FOUNDRY_RECALL_CACHE_SOURCE, RECALL_CACHE_SQL_WHERE,
-    RECALL_CACHE_SQL_WHERE_M,
+    path_prefix_opts_into_recall_cache, surface_of, surface_sql_clause, Surface,
+    DOCS_SURFACE_SQL_WHERE, DOCS_SURFACE_SQL_WHERE_M, FOUNDRY_RECALL_CACHE_SOURCE,
+    RECALL_CACHE_SQL_WHERE, RECALL_CACHE_SQL_WHERE_M,
 };
 pub use near_dup::{near_duplicate_raw_pairs, text_token_jaccard, NEAR_DUP_RAW_SCAN_CAP};
 pub use noise::{is_noise_text, should_skip_query};
@@ -151,6 +153,7 @@ pub use vault::{
     VaultKeyRotation, SECRET_TYPES, SECRET_TYPE_API_KEY, SECRET_TYPE_COOKIE, SECRET_TYPE_JSON_BLOB,
     SECRET_TYPE_OAUTH_TOKEN, SECRET_TYPE_OTHER,
 };
+pub use vector_backfill::{VectorBackfillCounts, VectorBackfillEntry, VectorBackfillScope};
 
 use rusqlite::Connection;
 
@@ -166,6 +169,7 @@ use rusqlite::Connection;
 /// are compiled only when the `admin` feature is enabled.
 pub struct MemoryStore {
     pub(crate) conn: Connection,
+    pub(crate) reserved_reference_write: db::ReservedReferenceWriteFlag,
     pub vec_available: bool,
     /// Manifest label for this DB ("global", "wiki", a project name, or
     /// "unknown"). Used by path validation at write time.
@@ -174,6 +178,9 @@ pub struct MemoryStore {
     /// db_label is unknown to avoid breaking unlabeled callers.
     pub(crate) path_validation: bool,
 }
+
+#[cfg(test)]
+mod test_fixtures;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

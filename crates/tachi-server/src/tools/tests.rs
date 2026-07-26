@@ -43,6 +43,97 @@ fn facade_response_markdown_parse_failure_is_visible() {
     assert!(err.contains("expected JSON"));
 }
 
+#[tokio::test]
+async fn facade_board_markdown_surfaces_capped_empty_response() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = server.tachi_home_dir().join("runs");
+    std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+    for index in 0..=50 {
+        std::fs::write(runs_dir.join(format!("ignored-{index:04}")), "fixture")
+            .expect("write capped fallback fixture");
+    }
+    let raw = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        crate::tool_params::TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(1),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("bounded board response");
+
+    let markdown = format_facade_response(
+        "Tachi task board",
+        "board",
+        &raw,
+        Some("markdown"),
+        false,
+        false,
+    )
+    .expect("format incomplete board");
+
+    assert!(markdown.contains("incomplete: `true`"), "{markdown}");
+    assert!(
+        markdown.contains("run_fallback_scan_truncated"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("directory order is not a recency index"),
+        "{markdown}"
+    );
+    assert!(
+        !markdown.contains("_No board data._"),
+        "an incomplete empty board must not render as clean: {markdown}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn facade_board_markdown_surfaces_invalid_empty_fallback() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = server.tachi_home_dir().join("runs");
+    std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+    let outside = server.tachi_home_dir().join("outside-run");
+    std::fs::create_dir_all(&outside).expect("create outside run");
+    std::os::unix::fs::symlink(&outside, runs_dir.join("20260725T000000Z-invalid-link"))
+        .expect("symlink invalid fallback run");
+    let raw = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        crate::tool_params::TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(1),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("invalid fallback board response");
+
+    let markdown = format_facade_response(
+        "Tachi task board",
+        "board",
+        &raw,
+        Some("markdown"),
+        false,
+        false,
+    )
+    .expect("format invalid fallback board");
+
+    assert!(markdown.contains("incomplete: `true`"), "{markdown}");
+    assert!(
+        markdown.contains("run_fallback_invalid_entries"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("run_scan_invalid_entries: `1`"),
+        "{markdown}"
+    );
+}
+
 #[test]
 fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
     let recommend_raw = r#"{
@@ -333,7 +424,7 @@ fn local_skill_discovery_scans_host_skill_dirs() {
         .unwrap_or_else(|e| e.into_inner());
     let original_home = std::env::var_os("HOME");
     let temp_home =
-        std::env::temp_dir().join(format!("tachi-local-skill-test-{}", uuid::Uuid::new_v4()));
+        crate::utils::test_fixture_path(format!("tachi-local-skill-test-{}", uuid::Uuid::new_v4()));
     let skill_dir = temp_home.join(".agents/skills/agent-only-probe");
     let duplicate_skill_dir = temp_home.join(".codex/skills/agent-only-probe");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
@@ -376,7 +467,7 @@ fn local_skill_discovery_expands_common_chinese_queries() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let original_home = std::env::var_os("HOME");
-    let temp_home = std::env::temp_dir().join(format!(
+    let temp_home = crate::utils::test_fixture_path(format!(
         "tachi-local-skill-zh-test-{}",
         uuid::Uuid::new_v4()
     ));

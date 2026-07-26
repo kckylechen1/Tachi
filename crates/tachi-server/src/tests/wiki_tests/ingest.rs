@@ -128,23 +128,33 @@ async fn tachi_wiki_ingest_propagates_edge_write_errors() {
     )
     .expect("write ingest source");
 
-    server
-        .with_named_project_store("wiki", |store| {
+    let wiki_db: String = server
+        .with_named_project_store_read("wiki", |store| {
             store
                 .connection()
-                .execute_batch(
-                    r#"
-                    CREATE TRIGGER inject_edge_write_failure
-                    BEFORE INSERT ON memory_edges
-                    BEGIN
-                        SELECT RAISE(ABORT, 'injected edge failure');
-                    END;
-                    "#,
+                .query_row(
+                    "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                    [],
+                    |row| row.get(0),
                 )
-                .map_err(|e| e.to_string())?;
-            Ok(())
+                .map_err(|error| error.to_string())
         })
-        .expect("create edge failure trigger");
+        .expect("resolve wiki DB path");
+    let offline =
+        rusqlite::Connection::open(wiki_db).expect("open edge failure fixture connection");
+    offline
+        .execute_batch(
+            r#"
+            INSERT INTO memory_edges
+                (source_id, target_id, relation, weight, metadata, created_at)
+            VALUES
+                ('edge-failure-blocker', 'edge-failure-blocker', 'test', 1.0, '{}', '');
+            CREATE UNIQUE INDEX "injected edge failure"
+                ON memory_edges ((1));
+            "#,
+        )
+        .expect("create edge failure constraint");
+    drop(offline);
 
     let err = server
         .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {

@@ -252,22 +252,6 @@ mod tests {
     use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
 
-    /// Extract the first text content block's JSON payload from a
-    /// `CallToolResult`. Mirrors `bootstrap/serve/stdio/tests.rs`'s
-    /// `first_text`/`first_text_json` helpers of the same shape.
-    fn first_text_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
-        let text = result
-            .content
-            .iter()
-            .find_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .expect("text tool result");
-        serde_json::from_str(&text)
-            .unwrap_or_else(|err| panic!("tool result json: {err}; text={text:?}"))
-    }
-
     /// tachi#1224: `remember --project X` with no separate `--project-db`
     /// must translate into an `X-Tachi-Project: X` daemon-forward binding
     /// header — the exact discriminator the frozen spec calls for at the
@@ -1168,46 +1152,11 @@ mod tests {
         rt.block_on(daemon_task).expect("daemon task");
     }
 
-    /// THIS PINS BUG #1228 — a live specimen, not a regression lock.
-    ///
-    /// Ground truth (verified directly against `http` 1.4.2, this crate's
-    /// pinned version per Cargo.lock, in an isolated scratch crate — NOT
-    /// this repo's build) is that `HeaderValue::from_str` accepts non-ASCII
-    /// UTF-8 text; it only rejects embedded control characters
-    /// (CR/LF/NUL/DEL). It does NOT reject Chinese, emoji, or any other
-    /// valid non-ASCII text (see transport.rs's own test module for the
-    /// header-construction-layer half of this pin). That much was already
-    /// correctly documented here. What this test got wrong was what happens
-    /// NEXT: the dispatch packet (and the prior version of this test)
-    /// expected the non-ASCII name to reach `apply_http_session_identity`
-    /// and fail closed as an unknown project, the same failure family as
-    /// `daemon_call_rejects_nonexistent_ascii_project_name_binding` above.
-    ///
-    /// Oz run 2026-07-17 (three-run deterministic red) shows that is not
-    /// what happens: `"量化"` is entirely non-ASCII, so
-    /// `sanitize_safe_path_name` (crates/tachi-server/src/utils/text.rs)
-    /// maps every character to `_`, trims the `_`/`.`/`-` boundary chars,
-    /// and lands on an EMPTY string — which its own empty-collapse fallback
-    /// then rewrites to the literal project name `"unnamed"`. `"unnamed"`
-    /// resolves successfully (it is the sanitizer's own fallback identity,
-    /// not a real caller-registered project), so
-    /// `apply_http_session_identity` binds the session as `unnamed` instead
-    /// of rejecting it, and the `tachi_memory` briefing call SUCCEEDS
-    /// (`"status":"completed"`) instead of failing closed. This is
-    /// tachi#1228: a non-ASCII (or any all-punctuation/all-non-alnum)
-    /// `--project` name silently collapses onto a shared fallback project
-    /// rather than being rejected as unknown or preserved verbatim — a
-    /// binding-confusion hole, not the fail-closed behavior every other
-    /// malformed-name case in this file exhibits.
-    ///
-    /// This test PINS the current (buggy) success so a future fix to #1228
-    /// shows up as a red here, not a silent regression. When #1228 lands
-    /// fail-closed behavior for the sanitize-collapse case, FLIP this
-    /// assertion to expect an error containing "invalid HTTP direct-connect
-    /// project binding" (or whatever the fixed rejection text becomes) —
-    /// do not just delete this test.
+    /// #1228 full-stack discrimination: HeaderValue accepts UTF-8, so the
+    /// daemon's identity resolver must reject a raw non-ASCII project before
+    /// it can collapse onto a historical `unnamed` alias and execute a tool.
     #[test]
-    fn non_ascii_project_binding_currently_succeeds_via_sanitize_collapse_bug_1228() {
+    fn non_ascii_project_binding_fails_closed_before_tool_execution() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1237,24 +1186,10 @@ mod tests {
             (result, ct, daemon_task)
         });
 
-        let call_result = result.unwrap_or_else(|err| {
-            panic!(
-                "THIS PINS BUG #1228 as a live success, not a failure — if \
-                 the daemon now rejects this call, #1228's sanitize collapse \
-                 has apparently already changed shape; do not silently \
-                 delete this test, re-diagnose and update its pin. Got \
-                 error instead of success: {err}"
-            )
-        });
-        let status = first_text_json(&call_result)["status"].clone();
-        assert_eq!(
-            status,
-            serde_json::json!("completed"),
-            "BUG #1228 live specimen: a non-ASCII --project value \
-             (\"量化\") collapses via sanitize_safe_path_name to the empty \
-             string, which falls back to the shared \"unnamed\" project, so \
-             the briefing call succeeds instead of failing closed as an \
-             unknown project. full result={call_result:?}"
+        let error = result.expect_err("non-ASCII project identity must fail closed");
+        assert!(
+            error.to_string().contains("daemon handshake failed"),
+            "unexpected rejection: {error}"
         );
 
         ct.cancel();
@@ -1331,17 +1266,11 @@ mod tests {
         rt.block_on(daemon_task).expect("daemon task");
     }
 
-    /// CONCERN item 4, full stack: an empty `--project ""` header value is
-    /// accepted by header construction (see transport.rs's own test) AND then
-    /// normalized away to "absent" server-side
-    /// (`session_identity::normalize_identity_value("")` is `None` — already
-    /// pinned by that module's own `normalize_identity_trims_and_rejects_empty`
-    /// test). The net effect, proven live here, is that the session binds as
-    /// UNBOUND rather than failing closed: the call succeeds (no "invalid
-    /// HTTP direct-connect project binding" error) — an empty `--project` is
-    /// treated as though it were never passed, not rejected.
+    /// #1228 full-stack boundary: an explicitly present empty project identity
+    /// is malformed, not absent. It must fail during initialize rather than
+    /// silently degrading to an unbound session.
     #[test]
-    fn daemon_call_with_empty_project_name_is_treated_as_unbound_not_rejected() {
+    fn daemon_call_with_empty_project_name_fails_closed() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1371,11 +1300,10 @@ mod tests {
             (result, ct, daemon_task)
         });
 
+        let error = result.expect_err("an empty project identity must fail closed");
         assert!(
-            result.is_ok(),
-            "an empty --project value must not fail the daemon binding check \
-             (it is normalized away to \"absent\", not rejected); got: {:?}",
-            result.err().map(|e| e.to_string())
+            error.to_string().contains("daemon handshake failed"),
+            "unexpected rejection: {error}"
         );
 
         ct.cancel();
@@ -1402,7 +1330,7 @@ mod tests {
     /// per the dispatch packet's STOP-on-silent-misrouting clause. Test-only;
     /// zero product code changed by this contract.
     #[test]
-    fn non_ascii_only_project_name_collides_with_the_literal_project_named_unnamed() {
+    fn non_ascii_only_and_ambiguous_unnamed_project_names_fail_closed() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1417,18 +1345,17 @@ mod tests {
         std::fs::write(&unnamed_db, b"unnamed project db placeholder")
             .expect("write placeholder db");
 
-        let resolved = crate::MemoryServer::resolve_named_project_db_path("量化").expect(
-            "sanitize_safe_path_name collapses an all-non-ASCII project name to \
-             \"unnamed\" with no rejection — this resolves successfully, which \
-             is exactly the silent-collision behavior this test pins",
-        );
-
+        for project in ["量化", "unnamed"] {
+            let error = crate::MemoryServer::resolve_named_project_db_path(project)
+                .expect_err("ambiguous project identity must fail before DB open");
+            assert!(
+                error.contains("project identity"),
+                "unexpected refusal for {project}: {error}"
+            );
+        }
         assert_eq!(
-            resolved, unnamed_db,
-            "a caller declaring --project 量化 must not silently resolve to the \
-             SAME database path as a caller who declared --project unnamed — \
-             this is a candidate silent cross-project misroute (see this \
-             test's doc comment); escalated, not fixed, by this test-only change"
+            std::fs::read(unnamed_db).unwrap(),
+            b"unnamed project db placeholder"
         );
     }
 }

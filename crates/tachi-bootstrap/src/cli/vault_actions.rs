@@ -241,6 +241,40 @@ pub enum VaultAction {
         #[arg(long)]
         insecure_password_file: bool,
     },
+    /// Run a command with Vault-backed environment variables injected.
+    Exec {
+        /// Read password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
+        /// Optional Vault consumer identity for project-bound secret ACL checks.
+        #[arg(long, value_name = "ID")]
+        consumer: Option<String>,
+        /// Comma-separated environment variable names that must be present before spawning.
+        #[arg(long, value_name = "NAME,NAME", value_delimiter = ',')]
+        require: Vec<String>,
+        /// Allow spawning the child with the inherited environment when the Vault
+        /// cannot be unlocked (or its environment cannot be loaded) AND no
+        /// `--require` names were set. Without this flag (the default) `vault
+        /// exec` refuses to spawn a credential-less child and exits nonzero
+        /// before exec — so a caller that only checks exit status never silently
+        /// gets a Vault-less run (#1413 concern 4). `--require` always wins: a
+        /// required name that cannot be satisfied fails before spawn regardless
+        /// of this flag.
+        #[arg(long)]
+        allow_unauthenticated: bool,
+        /// Command and arguments to execute. Use `--` before the command.
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
     /// Remove a secret from the vault.
     Remove {
         /// Secret name.
@@ -337,13 +371,23 @@ pub enum VaultAction {
         mark_only: bool,
     },
     /// Diagnose a credential profile without decrypting or writing secrets.
+    ///
+    /// With `--providers`, report OpenCode provider apiKey shapes against vault
+    /// metadata only (no profile/consumer required; no writes).
     Doctor {
+        /// Report-only OpenCode providers view (apiKey shape / admitted / vault age).
+        #[arg(long)]
+        providers: bool,
+        /// OpenCode config path. Defaults to ~/.config/opencode/opencode.json.
+        /// Env `TACHI_OPENCODE_CONFIG` is also honored (CLI flag wins when both set).
+        #[arg(long, value_name = "PATH")]
+        opencode_config: Option<PathBuf>,
         /// Credential profile name to diagnose.
-        #[arg(long)]
-        profile: String,
+        #[arg(long, required_unless_present = "providers")]
+        profile: Option<String>,
         /// Agent or dispatch-profile consumer id requesting the credential.
-        #[arg(long)]
-        consumer: String,
+        #[arg(long, required_unless_present = "providers")]
+        consumer: Option<String>,
         /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,

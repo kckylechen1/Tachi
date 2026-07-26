@@ -2,7 +2,7 @@ use super::*;
 use crate::tool_params::{TachiVerifyCheckItem, TachiVerifyParams};
 use crate::MemoryServer;
 fn test_server() -> MemoryServer {
-    let db = std::env::temp_dir().join(format!(
+    let db = crate::utils::test_fixture_path(format!(
         "verify-receipt-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

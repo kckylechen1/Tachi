@@ -115,6 +115,13 @@ fn build_metadata(candidate: &LessonCandidateV1, redactions: usize) -> Value {
     map.insert("refs".to_string(), json!(candidate.refs));
     map.insert("source_row_id".to_string(), json!(candidate.source_row_id));
     map.insert(
+        "source_route".to_string(),
+        json!(candidate
+            .source_row_id
+            .split_once(':')
+            .map(|(route, _)| route)),
+    );
+    map.insert(
         "source_revision".to_string(),
         json!(candidate.source_revision),
     );
@@ -332,7 +339,7 @@ mod tests {
             why: "attacker-controllable".to_string(),
             how_to_apply: "require signed capability token".to_string(),
             refs: vec![sample_ref()],
-            source_row_id: "row-1".to_string(),
+            source_row_id: "antigravity:row-1".to_string(),
             source_revision: "3".to_string(),
             coverage: LessonCoverageV1::full(1200),
             candidate_status: LessonCandidateStatusV1::Pending,
@@ -352,6 +359,7 @@ mod tests {
         let metadata = build_metadata(&sample_candidate(), 0);
         assert_eq!(metadata["candidate_status"], json!("pending"));
         assert_eq!(metadata["established"], json!(false));
+        assert_eq!(metadata["source_route"], json!("antigravity"));
         assert!(metadata.get("secret_redactions").is_none());
     }
 

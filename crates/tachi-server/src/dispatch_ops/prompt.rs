@@ -800,13 +800,31 @@ mod tests {
             .expect("seed seat-card mirror row");
     }
 
+    fn seed_typed_card(
+        server: &MemoryServer,
+        seat: &str,
+        kind: &str,
+        text: &str,
+        counter_clauses: Option<&str>,
+    ) {
+        let mut entry = seat_card_entry(seat, text, counter_clauses);
+        entry.metadata["card_id"] = json!(format!("{kind}/{seat}"));
+        entry.metadata["card_kind"] = json!(kind);
+        entry.metadata["card_status"] = json!("active");
+        entry.metadata["card_aliases"] = json!([]);
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| e.to_string()))
+            .expect("seed typed card mirror row");
+    }
+
     #[test]
     fn matching_seat_card_countermeasures_are_injected_under_marked_header() {
         let temp = tempfile::tempdir().expect("tempdir");
         let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
-        seed_seat_card(
+        seed_typed_card(
             &server,
             "glm-5.2",
+            "seat",
             "详见 Claude 记忆.\n\n## 反制条款(派单必带)\n- 只给窄单,架构类绝对不给。\n- 自报永不可信。\n\n## 流量定向\n- 量上去。\n",
             Some("## 反制条款(派单必带)\n- 只给窄单,架构类绝对不给。\n- 自报永不可信。"),
         );
@@ -828,6 +846,33 @@ mod tests {
             !prompt.contains("流量定向"),
             "only the metadata-extracted counter-clause text should be inlined, not sibling sections of the raw card body: {prompt}"
         );
+    }
+
+    #[test]
+    fn typed_harness_card_does_not_suppress_legacy_seat_prefix_match() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_seat_card(
+            &server,
+            "grok-4.5",
+            "## 反制条款\n- legacy seat clause\n",
+            Some("## 反制条款\n- legacy seat clause"),
+        );
+        seed_typed_card(
+            &server,
+            "grok-cli",
+            "harness",
+            "## 反制条款\n- harness-only clause\n",
+            Some("## 反制条款\n- harness-only clause"),
+        );
+        let params = seat_card_dispatch_params("grok", None);
+
+        let prompt = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(assemble_prompt(&server, &params));
+
+        assert!(prompt.contains("legacy seat clause"), "{prompt}");
+        assert!(!prompt.contains("harness-only clause"), "{prompt}");
     }
 
     #[test]

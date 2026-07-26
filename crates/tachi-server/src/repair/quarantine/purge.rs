@@ -58,7 +58,7 @@ pub fn cmd_purge(
     }
     let mut purged = 0usize;
     for (db_path, group) in by_src {
-        let mut conn = Connection::open(&db_path)?;
+        let mut conn = open_repair_connection(&db_path)?;
         let tx = conn.transaction()?;
         for q in group {
             tx.execute("DELETE FROM memories WHERE id = ?1", params![&q.id])?;

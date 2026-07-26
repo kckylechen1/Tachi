@@ -6,6 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";
 const MAX_GH_OUTPUT_CHARS: usize = 50_000;
+#[cfg(test)]
+std::thread_local! {
+    static GITHUB_COMMAND_RUNNER_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 const GH_ENV_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",
@@ -181,22 +185,52 @@ pub(in crate::gh_ops) fn build_gh_command(
 ) -> Result<(Command, String), String> {
     let gh_path = resolve_gh_path()?;
     let token = resolve_gh_token(server)?;
+    let cmd = build_gh_command_for_resolved_credential(&gh_path, token.as_deref());
 
-    let mut cmd = Command::new(&gh_path);
+    Ok((cmd, token.unwrap_or_default()))
+}
+
+/// Rebuild the hardened `gh` command from an already-resolved executable and
+/// credential. The approver-authority probe uses this after it pins one
+/// credential context for an entire verification round; keeping the command
+/// hardening here prevents that special case from growing a second, weaker
+/// environment builder.
+pub(in crate::gh_ops) fn build_gh_command_for_resolved_credential(
+    gh_path: &str,
+    token: Option<&str>,
+) -> Command {
+    let mut cmd = Command::new(gh_path);
     cmd.env_clear();
 
     preserve_gh_env(&mut cmd);
-    if let Some(token) = token.as_deref() {
+    if let Some(token) = token {
         cmd.env("GH_TOKEN", token);
     }
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.env("NO_COLOR", "1");
 
-    Ok((cmd, token.unwrap_or_default()))
+    cmd
+}
+
+#[cfg(test)]
+pub(crate) fn reset_github_command_runner_call_count() {
+    GITHUB_COMMAND_RUNNER_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn github_command_runner_call_count() -> u64 {
+    GITHUB_COMMAND_RUNNER_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn note_github_command_runner_call() {
+    GITHUB_COMMAND_RUNNER_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
 }
 
 /// Execute a gh command and return sanitized output, truncated to MAX_GH_OUTPUT_CHARS
 pub(in crate::gh_ops) fn run_gh(mut cmd: Command, token: &str) -> Result<String, String> {
+    #[cfg(test)]
+    note_github_command_runner_call();
     let output = cmd
         .output()
         .map_err(|e| format!("Failed to execute `gh`: {e}"))?;
@@ -231,6 +265,8 @@ pub(in crate::gh_ops) fn run_gh(mut cmd: Command, token: &str) -> Result<String,
 }
 
 pub(in crate::gh_ops) fn run_gh_json(mut cmd: Command, token: &str) -> Result<String, String> {
+    #[cfg(test)]
+    note_github_command_runner_call();
     let output = cmd
         .output()
         .map_err(|e| format!("Failed to execute `gh`: {e}"))?;

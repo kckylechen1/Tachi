@@ -289,12 +289,39 @@ pub(super) fn write_status_json(
                 "execution_level",
                 "identity_receipt",
                 "resolved_completion",
+                "completion_recovery",
             ] {
                 if !obj.contains_key(key) {
                     if let Some(value) = previous.get(key) {
                         obj.insert(key.to_string(), value.clone());
                     }
                 }
+            }
+            // A bounded local lock exhaustion has durable eval evidence but
+            // no canonical dispatch outcome yet. Keep the run observably
+            // non-terminal until a later completion call reconciles that
+            // outcome and clears this marker itself.
+            if previous.get("completion_recovery").is_some()
+                && !obj.contains_key("resolved_completion")
+            {
+                let non_terminal_state = previous
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .filter(|state| {
+                        matches!(
+                            *state,
+                            "TASK_STATE_PENDING"
+                                | "TASK_STATE_WORKING"
+                                | "TASK_STATE_RUNNING"
+                                | "TASK_STATE_INPUT_REQUIRED"
+                        )
+                    })
+                    .unwrap_or("TASK_STATE_WORKING");
+                obj.insert(
+                    "state".to_string(),
+                    Value::String(non_terminal_state.to_string()),
+                );
+                obj.insert("closure_kind".to_string(), Value::Null);
             }
         }
     }
@@ -447,6 +474,59 @@ mod tests {
             status["resolved_completion"]["closure_kind"],
             serde_json::json!("partial"),
             "terminal rewrite must not erase the handler's authoritative receipt"
+        );
+    }
+
+    /// A completion whose canonical outcome write exhausted its bounded local
+    /// lock retry is still pending recovery. An exit-zero finalizer must not
+    /// replace that barrier with a terminal success or erase the receipt the
+    /// next `tachi_complete` needs to reconcile safely.
+    #[test]
+    fn terminal_status_rewrite_preserves_pending_completion_recovery_barrier() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        let recovery = serde_json::json!({
+            "status": "pending_canonical_outcome",
+            "state": "TASK_STATE_COMPLETED",
+            "eval_ledger_id": "eval-pending-recovery",
+            "reviewed": true,
+            "dispatch_outcome": {"recorded": false, "error": "database is locked"},
+        });
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({
+                "state": "TASK_STATE_WORKING",
+                "completion_recovery": recovery,
+            })
+            .to_string(),
+        )
+        .expect("write pending completion recovery receipt");
+
+        write_status_json(
+            temp.path(),
+            "20260726T000001Z-pending-completion-recovery",
+            false,
+            None,
+            None,
+            "n/a",
+            Some(0),
+            None,
+            None,
+            None,
+            Some(serde_json::json!({ "state": "TASK_STATE_COMPLETED" })),
+        );
+
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("status.json")).expect("read rewritten status"),
+        )
+        .expect("rewritten status JSON");
+        assert_eq!(
+            status["completion_recovery"], recovery,
+            "a final status rewrite must retain the pending canonical-outcome barrier"
+        );
+        assert_eq!(
+            status["state"],
+            serde_json::json!("TASK_STATE_WORKING"),
+            "exit zero must not terminalize a run whose canonical outcome is still pending"
         );
     }
 

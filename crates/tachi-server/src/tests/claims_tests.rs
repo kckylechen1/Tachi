@@ -22,14 +22,15 @@ use crate::claims_ops::{
 /// damaged file) so the hook's fail-safe path is exercised for real rather
 /// than just at the guard-condition level.
 fn drop_claims_table(server: &crate::server_state::MemoryServer) {
-    server
-        .with_global_store(|store| {
-            store
-                .connection_mut()
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| {
+            connection
                 .execute("DROP TABLE session_claims", [])
-                .map_err(|e| e.to_string())
-        })
-        .expect("drop session_claims table for fail-safe test setup");
+                .map(|_| ())
+        },
+    )
+    .expect("drop session_claims table for fail-safe test setup");
 }
 
 #[test]

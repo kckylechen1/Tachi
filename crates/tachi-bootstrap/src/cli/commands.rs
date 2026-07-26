@@ -1,8 +1,8 @@
 use super::{
     BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction, EnvAction,
-    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, ManifestAction, McpAction,
-    PokeAction, RepairAction, RescueAction, SkillSurfaceAction, VaultAction, WatcherAction,
-    WikiAction, WorktreeAction,
+    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction,
+    ManifestAction, McpAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction,
+    VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -64,7 +64,7 @@ pub enum Commands {
         /// Skip per-DB interactive confirmation prompts (requires --execute)
         #[arg(long)]
         yes: bool,
-        /// Override the migration target DB (defaults to ~/.tachi/global/memory.db)
+        /// Override the migration target DB (defaults to ~/.tachi/global/tachi-memory.db)
         #[arg(long, value_name = "PATH")]
         target_db: Option<PathBuf>,
     },
@@ -117,7 +117,7 @@ pub enum Commands {
     },
     /// Enumerate every known memory DB (global, manifest-addressed named
     /// projects resolved to their real backing file, and the current
-    /// workspace's `.tachi/memory.db`) and report each one's schema-version
+    /// workspace's `.tachi/tachi-memory.db`) and report each one's schema-version
     /// gap against this binary's `EXPECTED_SCHEMA_VERSION` (kckylechen1/tachi#1223).
     ///
     /// Plan-only (read-only, zero writes) by default. `--apply` authorizes
@@ -163,6 +163,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: SkillSurfaceAction,
     },
+    /// Cross-harness injection-surface doctor (MCP/plugin/credential/env planes)
+    InjectionSurface {
+        #[command(subcommand)]
+        action: InjectionSurfaceAction,
+    },
     /// Inspect Tachikoma Cards projected from dispatch profiles.
     Card {
         #[command(subcommand)]
@@ -190,11 +195,14 @@ pub enum Commands {
     /// Backfill missing vector embeddings using Voyage API
     BackfillVectors {
         /// Target DB path (defaults to global DB)
-        #[arg(long, value_name = "PATH", conflicts_with = "project")]
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["project", "all_projects"])]
         db: Option<PathBuf>,
-        /// Target named project DB under ~/.tachi/projects/<name>/memory.db
-        #[arg(long)]
+        /// Target named project DB under ~/.tachi/projects/<name>/tachi-memory.db
+        #[arg(long, conflicts_with = "all_projects")]
         project: Option<String>,
+        /// Run against every manifest-owned writable Tachi DB.
+        #[arg(long)]
+        all_projects: bool,
         /// Batch size for Voyage API calls (max 128)
         #[arg(long, default_value_t = 64)]
         batch_size: usize,
@@ -236,7 +244,8 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Run batch memory distill (raw API by default; Claude CLI when configured).
+    /// Run batch memory distill through the configured API lane. The legacy
+    /// backend selector remains accepted but never launches Claude CLI.
     Distill {
         #[command(subcommand)]
         action: DistillAction,

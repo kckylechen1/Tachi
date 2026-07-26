@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_run_scoped_cleanup_rejects_parent_dir_targets() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-cleanup-parent-dir-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

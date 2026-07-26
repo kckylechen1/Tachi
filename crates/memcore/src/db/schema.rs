@@ -37,8 +37,15 @@ mod ddl;
 /// with concurrent writers must switch to [`init_schema_with_label_mut`]'s
 /// transactional entry instead.
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
+    super::ensure_reserved_reference_write_guard(conn)?;
     apply_connection_pragmas(conn)?;
-    init_schema_inner(conn)
+    init_schema_inner(conn)?;
+    // This bare entry point is fresh, private in-memory/test setup and does
+    // not participate in the file-backed version-stamp lifecycle. Mirror the
+    // v23 migration's canonical guards here only after the final memories
+    // table exists; operational file opens install them through v23 below.
+    install_reserved_reference_guard(conn)?;
+    super::validate_persistent_trigger_inventory(conn, true)
 }
 
 /// Initialize schema and run data migrations with a known DB label and path.
@@ -75,6 +82,7 @@ pub fn init_schema_with_label_mut(
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
 ) -> Result<crate::db::migrations::MigrationReport, MemoryError> {
+    super::ensure_reserved_reference_write_guard(conn)?;
     crate::db::migrations::check_schema_version_gate(conn)?;
     // #1119: typed migration gate. Runs BEFORE any backup/DDL/migration/stamp
     // mutates the DB — an unauthorized `OpenExisting + Deny` open of a
@@ -90,6 +98,7 @@ pub fn init_schema_with_label_mut(
     test_hooks::fail_after_legacy_work_before_stamp()?;
     let report = crate::db::migrations::run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
     crate::db::migrations::write_schema_version_stamp(&tx)?;
+    super::validate_persistent_trigger_inventory(&tx, true)?;
     tx.commit()?;
 
     remember_migration_fingerprint(conn, current_db_path)?;
@@ -138,6 +147,16 @@ fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::BASE_SCHEMA_SQL)?;
+
+    // Legacy recall-cache rows predate database-authoritative generation
+    // snapshots. The empty default is intentionally non-matching, so the first
+    // read after migration recomputes instead of presenting an old row as clean.
+    ensure_column(
+        conn,
+        "recall_cache",
+        "generation_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
 
     // Forward-compatible migrations for existing DB files created before
     // archived/created_at/updated_at columns existed.
@@ -292,15 +311,46 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // Relocate legacy location before enum rebuild copies rows without that column.
     let _ = crate::db::migrations::migrate_v9_relocate_and_drop_location(conn)?;
 
+    // Install the authority before any projection-only drift repair. File-backed
+    // opens run this whole block inside BEGIN IMMEDIATE, so repaired FTS rows and
+    // the bump commit together. A later memories-table rebuild may drop these
+    // triggers; the second ensure below reinstalls and validates them.
+    crate::db::search_generation::ensure_search_generation_schema(conn)?;
     ensure_fts_backfilled(conn)?;
 
     migrate_enum_constraints(conn)?;
 
+    // Must run after any legacy `memories` rebuild because SQLite drops table
+    // triggers during that migration. The trigger is the cross-process cache
+    // authority; drift is an open failure, never a silently stale cache hit.
+    crate::db::search_generation::ensure_search_generation_schema(conn)?;
     ensure_optimization_indexes(conn);
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
     Ok(())
+}
+
+pub(crate) fn install_reserved_reference_guard(conn: &Connection) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::RESERVED_REFERENCE_GUARD_SQL)
+}
+
+pub(crate) fn expected_reserved_reference_trigger(
+    name: &str,
+) -> Option<(&'static str, &'static str)> {
+    if name.eq_ignore_ascii_case(ddl::RESERVED_REFERENCE_INSERT_TRIGGER_NAME) {
+        Some((
+            ddl::RESERVED_REFERENCE_INSERT_TRIGGER_NAME,
+            ddl::RESERVED_REFERENCE_INSERT_TRIGGER_SQL,
+        ))
+    } else if name.eq_ignore_ascii_case(ddl::RESERVED_REFERENCE_UPDATE_TRIGGER_NAME) {
+        Some((
+            ddl::RESERVED_REFERENCE_UPDATE_TRIGGER_NAME,
+            ddl::RESERVED_REFERENCE_UPDATE_TRIGGER_SQL,
+        ))
+    } else {
+        None
+    }
 }
 
 fn ensure_optimization_indexes(conn: &Connection) {
@@ -493,7 +543,15 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         )
         .ok();
     if let Some(sql) = existing_sql.as_deref() {
-        let has_source_check = sql.contains("CHECK (source") || sql.contains("CHECK(source");
+        // SQLite preserves formatting in sqlite_schema. Canonical rebuild SQL
+        // writes `CHECK (` and `source` on separate lines, so a raw substring
+        // probe falsely rebuilt the table on every open and dropped its
+        // triggers. Remove formatting whitespace before testing the shape.
+        let compact_sql: String = sql
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace())
+            .collect();
+        let has_source_check = compact_sql.contains("CHECK(source");
         // #964: 'sticky' is the newest category value: check it (not 'eval')
         // so DBs stamped before the sticky category was added re-run this
         // rebuild once, same idempotent-sentinel pattern as every prior
@@ -945,12 +1003,12 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         return Ok(());
     }
 
-    conn.execute(
+    let mut projection_changes = conn.execute(
         "DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)",
         [],
     )?;
 
-    conn.execute(
+    projection_changes += conn.execute(
         r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
            SELECT
              m.id,
@@ -976,17 +1034,21 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         )
         .unwrap_or(false);
     if symbolic_fts_present {
-        conn.execute(
+        projection_changes += conn.execute(
             "DELETE FROM memories_symbolic_fts WHERE id NOT IN (SELECT id FROM memories)",
             [],
         )?;
-        conn.execute(
+        projection_changes += conn.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT m.id, m.path, m.summary, m.text, m.keywords, m.entities, m.topic
                FROM memories m
                WHERE NOT EXISTS (SELECT 1 FROM memories_symbolic_fts f WHERE f.id = m.id)"#,
             [],
         )?;
+    }
+
+    if projection_changes > 0 {
+        crate::db::search_generation::bump_search_generation(conn)?;
     }
 
     Ok(())

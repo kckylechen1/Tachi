@@ -536,6 +536,17 @@ impl MemoryServer {
         }
 
         // 4. Write results back to DB
+        //
+        // tachi#1435 slice 4 / #2059 codex round 2 (BUG fix): enrichment can
+        // add a vector/keywords/summary to an entry that was already
+        // searchable when it was first saved — the FTS/keyword content a
+        // subsequent search reads changes here, so a stale cached search
+        // result must not survive this flush. Tracked once per BATCH (not
+        // per item — see `any_field_write` below) and invalidated once after
+        // the whole loop, so a fully no-op batch (e.g. every item's keyword
+        // stage was `skipped` with no other field write) never pays for a
+        // DELETE against a table that could not possibly be stale.
+        let mut any_field_write = false;
         for (i, item) in items.iter().enumerate() {
             let new_vec = embed_results[i].as_deref();
             let new_summary = summaries[i].as_deref();
@@ -589,6 +600,10 @@ impl MemoryServer {
 
                 match res {
                     Ok(true) => {
+                        // This item's enriched fields (vector/summary/keywords/
+                        // entities) actually landed — searchable content
+                        // changed, so this batch must invalidate below.
+                        any_field_write = true;
                         // Re-apply keyword status after field update: success path
                         // clears failure metadata, so keyword stage outcome must
                         // land after that write (including failed keyword stage
@@ -672,6 +687,13 @@ impl MemoryServer {
                     write_keyword_enrichment_status(self, item, status);
                 }
             }
+        }
+
+        // Batch-granularity recall-cache bust (not per item — see the
+        // comment at this loop's start). Shares the same choke point +
+        // epoch bump as `save_memory`'s and `contradiction`'s invalidation.
+        if any_field_write {
+            crate::memory_search_ops::invalidate_recall_cache_after_write(self, "enrichment_flush");
         }
 
         tracing::info!("[enrichment-batcher] batch of {batch_size} complete");
@@ -798,8 +820,10 @@ mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
     use crate::tests::make_server;
+    use crate::tool_params::SearchMemoryParams;
     use chrono::Utc;
     use memcore::MemoryEntry;
+    use rmcp::handler::server::wrapper::Parameters;
     use serde_json::json;
 
     #[test]
@@ -945,24 +969,37 @@ mod tests {
         }
     }
 
-    async fn spawn_mock_extract_llm(body: serde_json::Value) -> (u16, tokio::task::JoinHandle<()>) {
+    async fn spawn_recording_mock_extract_llm(
+        body: serde_json::Value,
+    ) -> (
+        u16,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
         use axum::{routing::post, Json, Router};
 
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let app = Router::new().route(
             "/chat/completions",
-            post(move || {
+            post({
                 let body = body.clone();
-                async move {
-                    Json(serde_json::json!({
-                        "choices": [{
-                            "message": {
-                                "role": "assistant",
-                                "content": body.to_string()
-                            },
-                            "finish_reason": "stop"
-                        }],
-                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-                    }))
+                let requests = std::sync::Arc::clone(&requests);
+                move |Json(request): Json<serde_json::Value>| {
+                    let body = body.clone();
+                    let requests = std::sync::Arc::clone(&requests);
+                    async move {
+                        requests.lock().expect("record mock request").push(request);
+                        Json(serde_json::json!({
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": body.to_string()
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                        }))
+                    }
                 }
             }),
         );
@@ -975,7 +1012,24 @@ mod tests {
         });
         // Give the server a tick to accept.
         tokio::task::yield_now().await;
+        (port, handle, requests)
+    }
+
+    async fn spawn_mock_extract_llm(body: serde_json::Value) -> (u16, tokio::task::JoinHandle<()>) {
+        let (port, handle, _requests) = spawn_recording_mock_extract_llm(body).await;
         (port, handle)
+    }
+
+    fn assert_mock_saw_keyword_enrichment_request(
+        requests: &std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let requests = requests.lock().expect("read mock requests");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.to_string().contains("Existing keywords:")),
+            "extract mock must receive a keyword-enrichment request; got {requests:?}"
+        );
     }
 
     /// (a) Generated keywords are retrievable through the normal FTS search path.
@@ -988,7 +1042,7 @@ mod tests {
         let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
         let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
 
-        let (port, mock) = spawn_mock_extract_llm(json!({
+        let (port, mock, requests) = spawn_recording_mock_extract_llm(json!({
             "keywords": ["synapse-recall", "双语检索", "write-side-enrichment"]
         }))
         .await;
@@ -999,9 +1053,22 @@ mod tests {
         let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
         let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
 
-        // Construct server AFTER extract env is pointed at the mock so the
-        // LlmClient binds the mock extract lane.
-        let server = make_server();
+        let llm = tachi_llm::LlmClient::new().expect("construct mock extract lane");
+        assert_eq!(
+            llm.expand_search_keywords("provider/parser probe", &[])
+                .await
+                .expect("mock keyword response must parse"),
+            vec![
+                "synapse-recall".to_string(),
+                "双语检索".to_string(),
+                "write-side-enrichment".to_string(),
+            ]
+        );
+
+        // Construct server AFTER extract env is pointed at the mock, then
+        // inject the probed client so the flush uses the same extract lane.
+        let mut server = make_server();
+        server.replace_llm(llm);
         let id = format!("kw-search-{}", uuid::Uuid::new_v4());
         // Text deliberately omits the synonym; only enrichment adds it.
         let entry = seed_entry(
@@ -1022,6 +1089,7 @@ mod tests {
                     10,
                     false,
                     false,
+                    None,
                     None,
                     None,
                 )
@@ -1050,6 +1118,8 @@ mod tests {
         );
         server.flush_enrichment_batch(&mut batch).await;
 
+        assert_mock_saw_keyword_enrichment_request(&requests);
+
         let loaded = server
             .with_global_store(|store| {
                 store
@@ -1058,6 +1128,12 @@ mod tests {
                     .map(|e| e.expect("entry exists"))
             })
             .expect("load");
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("enriched"),
+            "mock response must parse and the keyword stage must succeed: {:?}",
+            loaded.metadata
+        );
         assert!(
             loaded
                 .keywords
@@ -1065,10 +1141,6 @@ mod tests {
                 .any(|k| k.eq_ignore_ascii_case("synapse-recall")),
             "keywords must include expanded synonym: {:?}",
             loaded.keywords
-        );
-        assert_eq!(
-            loaded.metadata["enrichment"]["keywords_status"],
-            json!("enriched")
         );
 
         let after = server
@@ -1081,6 +1153,7 @@ mod tests {
                     false,
                     None,
                     None,
+                    None,
                 )
                 .map_err(|e| format!("fts after: {e}"))
             })
@@ -1088,6 +1161,188 @@ mod tests {
         assert!(
             after.contains_key(&id),
             "post-enrichment FTS must hit via generated synonym; got {after:?}"
+        );
+
+        mock.abort();
+    }
+
+    fn search_params_for(query: &str) -> SearchMemoryParams {
+        SearchMemoryParams {
+            query: query.to_string(),
+            query_vec: None,
+            top_k: 10,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+            // Explicit JSON so assertions can index rows by id instead of
+            // parsing the markdown digest (tachi#1201 k3 default).
+            format: Some("json".to_string()),
+        }
+    }
+
+    /// tachi#1435 slice 4 / #2059 codex round 2, "tooth 1" (BUG, pre-fix RED):
+    /// enrichment flush write-back can add FTS-visible content (a synonym
+    /// keyword here) to an entry that was already searchable — a query this
+    /// change newly matches must not keep serving a cached answer computed
+    /// before the flush. Reuses this file's existing keyword-enrichment mock
+    /// harness (see `write_side_keyword_enrichment_hits_search_via_synonym`
+    /// above) rather than reinventing it.
+    ///
+    /// `git stash` this file's `any_field_write` tracking + its
+    /// `invalidate_recall_cache_after_write` call at the end of
+    /// `flush_enrichment_batch` and rerun this single test to see it fail
+    /// pre-fix (the post-flush search still shows only the decoy row).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn enrichment_flush_keyword_write_back_busts_a_warm_recall_cache() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
+        let _cache_flag = EnvRestore::set("TACHI_ENABLE_RECALL_CACHE", "true");
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        let sentinel = format!("EnrichFlushSentinel{}", uuid::Uuid::new_v4().simple());
+
+        let (port, mock, requests) =
+            spawn_recording_mock_extract_llm(json!({ "keywords": [sentinel.clone()] })).await;
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let llm = tachi_llm::LlmClient::new().expect("construct mock extract lane");
+        assert_eq!(
+            llm.expand_search_keywords("provider/parser probe", &[])
+                .await
+                .expect("mock keyword response must parse"),
+            vec![sentinel.clone()]
+        );
+
+        // Construct server AFTER extract env is pointed at the mock, then
+        // inject the probed client so the flush uses the same extract lane.
+        let mut server = make_server();
+        server.replace_llm(llm);
+
+        // Decoy: an unrelated, already-searchable memory that literally
+        // contains the sentinel token — warms the cache for `sentinel`
+        // pre-enrichment with a non-empty (thus cacheable) result.
+        let decoy_id = format!("decoy-{}", uuid::Uuid::new_v4());
+        let decoy = seed_entry(
+            &decoy_id,
+            &format!("{sentinel} already appears in this unrelated memory."),
+            vec![],
+        );
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&decoy)
+                    .map_err(|e| format!("upsert decoy: {e}"))
+            })
+            .expect("seed decoy");
+
+        // Target: does NOT contain the sentinel yet — the keyword
+        // enrichment stage will add it.
+        let target_id = format!("target-{}", uuid::Uuid::new_v4());
+        let target = seed_entry(
+            &target_id,
+            "Enrichment flush write-back cache-bust probe body.",
+            vec![],
+        );
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&target)
+                    .map_err(|e| format!("upsert target: {e}"))
+            })
+            .expect("seed target");
+
+        // Warm the cache: pre-enrichment, the sentinel query hits only the
+        // decoy.
+        let first = server
+            .search_memory(Parameters(search_params_for(&sentinel)))
+            .await
+            .expect("warm search");
+        let first_rows: serde_json::Value = serde_json::from_str(&first).expect("warm search json");
+        let first_rows = first_rows.as_array().expect("warm search rows array");
+        assert!(
+            first_rows.iter().any(|r| r["id"] == decoy_id),
+            "decoy must be visible pre-enrichment: {first_rows:#?}"
+        );
+        assert!(
+            !first_rows.iter().any(|r| r["id"] == target_id),
+            "target must NOT match before enrichment: {first_rows:#?}"
+        );
+
+        // Flush enrichment on the target: the keyword stage adds `sentinel`.
+        let mut batch = vec![build_enrichment_item(
+            &target,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            target.revision,
+        )];
+        assert!(
+            batch[0].needs_keyword_enrichment,
+            "flag-on target must request keyword enrichment"
+        );
+        server.flush_enrichment_batch(&mut batch).await;
+
+        assert_mock_saw_keyword_enrichment_request(&requests);
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&target_id)
+                    .map_err(|e| format!("get enriched target: {e}"))
+                    .map(|entry| entry.expect("enriched target exists"))
+            })
+            .expect("load enriched target");
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("enriched"),
+            "cache assertion requires keyword stage success: {:?}",
+            loaded.metadata
+        );
+        assert!(
+            loaded.keywords.iter().any(|keyword| keyword == &sentinel),
+            "cache assertion requires a successful keyword write: {:?}",
+            loaded.keywords
+        );
+
+        // Post-fix: the SAME query must now surface BOTH rows, not the
+        // stale decoy-only answer cached before the flush.
+        let second = server
+            .search_memory(Parameters(search_params_for(&sentinel)))
+            .await
+            .expect("post-enrichment search");
+        let second_rows: serde_json::Value =
+            serde_json::from_str(&second).expect("post search json");
+        let second_rows = second_rows.as_array().expect("post search rows array");
+        assert!(
+            second_rows.iter().any(|r| r["id"] == target_id),
+            "the just-enriched target must appear in the very next identical \
+             search instead of being masked by the pre-enrichment cached \
+             answer: {second_rows:#?}"
         );
 
         mock.abort();
@@ -1249,6 +1504,7 @@ mod tests {
                     false,
                     None,
                     None,
+                    None,
                 )
                 .map_err(|e| format!("fts: {e}"))
             })
@@ -1272,7 +1528,7 @@ mod tests {
         let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
 
         let oversized = "x".repeat(MAX_KEYWORD_LEN + 32);
-        let (port, mock) = spawn_mock_extract_llm(json!({
+        let (port, mock, requests) = spawn_recording_mock_extract_llm(json!({
             "keywords": [
                 oversized,
                 "good\u{0001}keyword",
@@ -1291,7 +1547,22 @@ mod tests {
         let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
         let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
 
-        let server = make_server();
+        let llm = tachi_llm::LlmClient::new().expect("construct mock extract lane");
+        assert_eq!(
+            llm.expand_search_keywords("provider/parser probe", &[])
+                .await
+                .expect("mock keyword response must parse"),
+            vec![
+                "x".repeat(MAX_KEYWORD_LEN),
+                "goodkeyword".to_string(),
+                "dup".to_string(),
+                "DUP".to_string(),
+                "safe-term".to_string(),
+            ]
+        );
+
+        let mut server = make_server();
+        server.replace_llm(llm);
         let id = format!("kw-sanitize-{}", uuid::Uuid::new_v4());
         let entry = seed_entry(
             &id,
@@ -1315,6 +1586,8 @@ mod tests {
         )];
         server.flush_enrichment_batch(&mut batch).await;
 
+        assert_mock_saw_keyword_enrichment_request(&requests);
+
         let loaded = server
             .with_global_store(|store| {
                 store
@@ -1323,6 +1596,13 @@ mod tests {
                     .map(|e| e.expect("entry exists"))
             })
             .expect("load");
+
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("enriched"),
+            "mock response must parse and the keyword stage must succeed: {:?}",
+            loaded.metadata
+        );
 
         assert!(
             loaded

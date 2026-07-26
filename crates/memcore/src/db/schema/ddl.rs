@@ -9,6 +9,105 @@ pub(super) const CONNECTION_PRAGMA_SQL: &str = r#"
         PRAGMA cache_size = -16000;   -- 16 MB page cache
 "#;
 
+pub(super) const RESERVED_REFERENCE_GUARD_SQL: &str = r#"
+        DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
+        DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
+
+        CREATE TRIGGER memories_reserved_refs_insert_guard
+        BEFORE INSERT ON memories
+        WHEN (
+             json_type(NEW.metadata, '$.evidence_refs_v1') IS NOT NULL
+             OR json_type(NEW.metadata, '$.source_refs') IS NOT NULL
+         )
+         AND NOT EXISTS (
+             SELECT 1
+             FROM memories AS current
+             WHERE current.id = NEW.id
+               AND json_type(current.metadata, '$.evidence_refs_v1')
+                   IS json_type(NEW.metadata, '$.evidence_refs_v1')
+               AND json_quote(json_extract(current.metadata, '$.evidence_refs_v1'))
+                   IS json_quote(json_extract(NEW.metadata, '$.evidence_refs_v1'))
+               AND json_type(current.metadata, '$.source_refs')
+                   IS json_type(NEW.metadata, '$.source_refs')
+               AND json_quote(json_extract(current.metadata, '$.source_refs'))
+                   IS json_quote(json_extract(NEW.metadata, '$.source_refs'))
+         )
+         AND tachi_reserved_reference_write_enabled() = 0
+        BEGIN
+            SELECT RAISE(ABORT, 'reserved memory reference metadata requires typed mutation');
+        END;
+
+        CREATE TRIGGER memories_reserved_refs_update_guard
+        BEFORE UPDATE OF metadata ON memories
+        WHEN (
+             json_type(NEW.metadata, '$.evidence_refs_v1')
+                 IS NOT json_type(OLD.metadata, '$.evidence_refs_v1')
+             OR json_quote(json_extract(NEW.metadata, '$.evidence_refs_v1'))
+                 IS NOT json_quote(json_extract(OLD.metadata, '$.evidence_refs_v1'))
+             OR json_type(NEW.metadata, '$.source_refs')
+                 IS NOT json_type(OLD.metadata, '$.source_refs')
+             OR json_quote(json_extract(NEW.metadata, '$.source_refs'))
+                 IS NOT json_quote(json_extract(OLD.metadata, '$.source_refs'))
+         )
+         AND tachi_reserved_reference_write_enabled() = 0
+        BEGIN
+            SELECT RAISE(ABORT, 'reserved memory reference metadata requires typed mutation');
+        END;
+"#;
+
+pub(super) const RESERVED_REFERENCE_INSERT_TRIGGER_NAME: &str =
+    "memories_reserved_refs_insert_guard";
+pub(super) const RESERVED_REFERENCE_UPDATE_TRIGGER_NAME: &str =
+    "memories_reserved_refs_update_guard";
+
+// Keep these definitions token-for-token aligned with the CREATE statements
+// in RESERVED_REFERENCE_GUARD_SQL. Open-time trigger inventory validation
+// compares normalized sqlite_schema SQL against these canonical definitions.
+pub(super) const RESERVED_REFERENCE_INSERT_TRIGGER_SQL: &str = r#"
+        CREATE TRIGGER memories_reserved_refs_insert_guard
+        BEFORE INSERT ON memories
+        WHEN (
+             json_type(NEW.metadata, '$.evidence_refs_v1') IS NOT NULL
+             OR json_type(NEW.metadata, '$.source_refs') IS NOT NULL
+         )
+         AND NOT EXISTS (
+             SELECT 1
+             FROM memories AS current
+             WHERE current.id = NEW.id
+               AND json_type(current.metadata, '$.evidence_refs_v1')
+                   IS json_type(NEW.metadata, '$.evidence_refs_v1')
+               AND json_quote(json_extract(current.metadata, '$.evidence_refs_v1'))
+                   IS json_quote(json_extract(NEW.metadata, '$.evidence_refs_v1'))
+               AND json_type(current.metadata, '$.source_refs')
+                   IS json_type(NEW.metadata, '$.source_refs')
+               AND json_quote(json_extract(current.metadata, '$.source_refs'))
+                   IS json_quote(json_extract(NEW.metadata, '$.source_refs'))
+         )
+         AND tachi_reserved_reference_write_enabled() = 0
+        BEGIN
+            SELECT RAISE(ABORT, 'reserved memory reference metadata requires typed mutation');
+        END
+"#;
+
+pub(super) const RESERVED_REFERENCE_UPDATE_TRIGGER_SQL: &str = r#"
+        CREATE TRIGGER memories_reserved_refs_update_guard
+        BEFORE UPDATE OF metadata ON memories
+        WHEN (
+             json_type(NEW.metadata, '$.evidence_refs_v1')
+                 IS NOT json_type(OLD.metadata, '$.evidence_refs_v1')
+             OR json_quote(json_extract(NEW.metadata, '$.evidence_refs_v1'))
+                 IS NOT json_quote(json_extract(OLD.metadata, '$.evidence_refs_v1'))
+             OR json_type(NEW.metadata, '$.source_refs')
+                 IS NOT json_type(OLD.metadata, '$.source_refs')
+             OR json_quote(json_extract(NEW.metadata, '$.source_refs'))
+                 IS NOT json_quote(json_extract(OLD.metadata, '$.source_refs'))
+         )
+         AND tachi_reserved_reference_write_enabled() = 0
+        BEGIN
+            SELECT RAISE(ABORT, 'reserved memory reference metadata requires typed mutation');
+        END
+"#;
+
 pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE TABLE IF NOT EXISTS memories (
             id           TEXT PRIMARY KEY,
@@ -458,6 +557,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- `updated_at`, checked at read time.
         CREATE TABLE IF NOT EXISTS recall_cache (
             cache_id      TEXT PRIMARY KEY,
+            generation_fingerprint TEXT NOT NULL DEFAULT '',
             query         TEXT NOT NULL DEFAULT '',
             rows_json     TEXT NOT NULL DEFAULT '[]',
             result_count  INTEGER NOT NULL DEFAULT 0,

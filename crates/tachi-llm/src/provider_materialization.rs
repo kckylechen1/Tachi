@@ -11,6 +11,9 @@ pub struct MaterializeReport {
     pub from_vault: usize,
     pub from_alias: usize,
     pub env_fallbacks_bypassed: usize,
+    /// Env/config key names whose plaintext values were ignored because vault won.
+    /// Names only — never secret values.
+    pub bypassed_names: Vec<String>,
     pub skipped_aliases: Vec<(String, String)>,
 }
 
@@ -104,6 +107,7 @@ where
                     }]
                 })
             }) else {
+                resolved_pools.remove(&key);
                 report.skipped_aliases.push((
                     key.clone(),
                     format!(
@@ -115,12 +119,14 @@ where
             resolved_pools.insert(key.clone(), pool);
             report.from_alias += 1;
             report.env_fallbacks_bypassed += 1;
+            report.bypassed_names.push(key.clone());
             continue;
         }
 
         if vault_map.contains_key(&key) {
             // Vault wins over duplicate plaintext in env/config.env.
             report.env_fallbacks_bypassed += 1;
+            report.bypassed_names.push(key.clone());
             continue;
         }
 
@@ -211,6 +217,7 @@ mod tests {
 
         assert_eq!(report.from_alias, 1);
         assert_eq!(report.env_fallbacks_bypassed, 1);
+        assert_eq!(report.bypassed_names, vec!["VOYAGE_API_KEY".to_string()]);
         assert_eq!(
             llm.provider_secret_for_tests(&["VOYAGE_API_KEY"])
                 .as_deref(),
@@ -240,6 +247,7 @@ mod tests {
 
         assert_eq!(report.from_alias, 0);
         assert_eq!(report.env_fallbacks_bypassed, 1);
+        assert_eq!(report.bypassed_names, vec!["OPENAI_API_KEY".to_string()]);
         assert_eq!(
             llm.provider_secret_for_tests(&["OPENAI_API_KEY"])
                 .as_deref(),
@@ -273,6 +281,66 @@ mod tests {
         assert!(llm
             .provider_secret_for_tests(&["TACHI_TEST_PROVIDER_ALIAS_KEY"])
             .is_none());
+    }
+
+    // Discrimination test: before tachi#1287's missing-alias path removed the
+    // same-named cloned base pool, this assertion observed `stale-secret`.
+    #[test]
+    fn materialize_provider_secrets_removes_same_named_stale_pool_for_missing_alias() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let key = "TACHI_TEST_MISSING_ALIAS_STALE_POOL_KEY";
+        let _env = EnvGuard::set(key, "vault:MISSING_ALIAS");
+        let llm = LlmClient::new().expect("llm client");
+        let vault_pools = HashMap::from([(
+            key.to_string(),
+            vec![ProviderSecret {
+                key_id: key.to_string(),
+                value: "stale-secret".to_string(),
+            }],
+        )]);
+
+        let report = materialize_provider_secrets(&llm, &vault_pools, [key])
+            .expect("missing alias should remain a tolerable skip");
+
+        assert_eq!(report.skipped_aliases.len(), 1);
+        assert!(llm.provider_secret_for_tests(&[key]).is_none());
+    }
+
+    // Discrimination test: the missing alias must remove only its same-named
+    // stale pool. Before the fix, the first assertion below observed
+    // `stale-secret`; the second protects unrelated Vault pools from removal.
+    #[test]
+    fn materialize_provider_secrets_preserves_unrelated_pools_when_removing_stale_alias_pool() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let key = "TACHI_TEST_MISSING_ALIAS_WITH_UNRELATED_POOL_KEY";
+        let unrelated_key = "TACHI_TEST_UNRELATED_VAULT_POOL_KEY";
+        let _env = EnvGuard::set(key, "vault:MISSING_ALIAS");
+        let llm = LlmClient::new().expect("llm client");
+        let vault_pools = HashMap::from([
+            (
+                key.to_string(),
+                vec![ProviderSecret {
+                    key_id: key.to_string(),
+                    value: "stale-secret".to_string(),
+                }],
+            ),
+            (
+                unrelated_key.to_string(),
+                vec![ProviderSecret {
+                    key_id: unrelated_key.to_string(),
+                    value: "unrelated-secret".to_string(),
+                }],
+            ),
+        ]);
+
+        materialize_provider_secrets(&llm, &vault_pools, [key])
+            .expect("missing alias should remain a tolerable skip");
+
+        assert!(llm.provider_secret_for_tests(&[key]).is_none());
+        assert_eq!(
+            llm.provider_secret_for_tests(&[unrelated_key]).as_deref(),
+            Some("unrelated-secret")
+        );
     }
 
     // Discrimination test for tachi#1279: on the old batch-abort implementation, the

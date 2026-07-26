@@ -313,7 +313,48 @@ pub enum EvalAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum DedupeAction {
+    /// Plan exact same-path byte-identical duplicates without writing the DB.
+    Exact {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        output: std::path::PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        path_prefix: Option<String>,
+    },
+    /// Apply a saved exact-dedupe plan atomically. Writes a durable receipt
+    /// (audit + restore input) to `--receipt-out` before reporting success.
+    Apply {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        plan: std::path::PathBuf,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, value_name = "FILE")]
+        receipt_out: std::path::PathBuf,
+    },
+    /// Restore every loser archived by one exact-dedupe apply receipt.
+    Restore {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        receipt: std::path::PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum RepairAction {
+    /// Plan or apply deterministic duplicate repair.
+    Dedupe {
+        #[command(subcommand)]
+        action: DedupeAction,
+    },
     /// Quarantine resolution helpers (PR-3 v4 migration aftermath).
     Quarantine {
         #[command(subcommand)]
@@ -628,6 +669,25 @@ pub enum SkillSurfaceAction {
     },
     /// Read-only reviewed-sync plan for upstream Superpowers and Waza changes
     SyncPlan {
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Cross-harness injection-surface doctor (#1307): report-only inventory of
+/// MCP / plugin / credential / environment / density planes. Never writes,
+/// never chmods, never uninstalls, never prints credential values.
+#[derive(Subcommand, Debug, Clone)]
+pub enum InjectionSurfaceAction {
+    /// Report-only doctor over a local fleet registry of harness injection planes
+    Doctor {
+        /// Path to the fleet registry JSON (local to this doctor; not #871)
+        #[arg(long, value_name = "PATH")]
+        registry: PathBuf,
+        /// Optional root for resolving relative plane paths in fixtures
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,

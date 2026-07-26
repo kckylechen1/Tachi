@@ -3,6 +3,7 @@ use memcore::MemoryStore;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use tachi_bootstrap::cli::Cli;
 
 mod backfill;
@@ -12,6 +13,7 @@ mod cli_tool;
 mod env_cmd;
 mod eval_cli;
 mod harness_cli;
+mod injection_surface_cli;
 mod manifest_cli;
 mod migrate_cli;
 mod poke_cli;
@@ -24,6 +26,36 @@ mod tidy;
 mod vault_sync;
 
 mod vault_cli;
+
+#[derive(Debug)]
+pub(crate) struct VaultExecExit {
+    code: i32,
+    status: ExitStatus,
+}
+
+impl VaultExecExit {
+    pub(crate) fn from_status(status: ExitStatus) -> Self {
+        Self {
+            // A signal has no portable process exit code to re-emit. Keep the
+            // conventional non-zero failure code while preserving every real
+            // child exit code unchanged.
+            code: status.code().unwrap_or(1),
+            status,
+        }
+    }
+
+    pub(crate) fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+impl std::fmt::Display for VaultExecExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "vault exec child exited with {}", self.status)
+    }
+}
+
+impl std::error::Error for VaultExecExit {}
 
 // Re-exports preserving the legacy public surface so external callers
 // (`main.rs`, `tests.rs`) keep resolving symbols via `crate::bootstrap::<name>`.
@@ -69,16 +101,45 @@ pub(super) const SETUP_API_KEYS: [SetupApiKey; 6] = [
     },
     SetupApiKey {
         key: "MINIMAX_API_KEY",
-        label:
-            "MiniMax distill/summary — DEPRECATED (Phase 2: routed via Claude pool + SiliconFlow)",
+        label: "MiniMax distill/summary — DEPRECATED compatibility key",
         deprecated: true,
     },
     SetupApiKey {
         key: "REASONING_API_KEY",
-        label: "GLM-5.1 reasoning lane — DEPRECATED (Phase 2: skill-evolve uses Claude pool)",
-        deprecated: true,
+        label: "Reasoning API fallback (optional)",
+        deprecated: false,
     },
 ];
+
+#[cfg(test)]
+mod setup_api_key_tests {
+    use super::SETUP_API_KEYS;
+
+    #[test]
+    fn deprecated_compatibility_keys_do_not_claim_active_routing() {
+        let entry = SETUP_API_KEYS
+            .iter()
+            .find(|entry| entry.key == "MINIMAX_API_KEY")
+            .expect("deprecated setup key must remain listed");
+        assert!(entry.deprecated, "MINIMAX_API_KEY must remain deprecated");
+        assert!(
+            entry.label.contains("DEPRECATED compatibility key"),
+            "MINIMAX_API_KEY must be described only as a compatibility key: {}",
+            entry.label
+        );
+        assert!(!entry.label.contains("Claude pool"));
+    }
+
+    #[test]
+    fn live_reasoning_key_remains_available_to_setup() {
+        let entry = SETUP_API_KEYS
+            .iter()
+            .find(|entry| entry.key == "REASONING_API_KEY")
+            .expect("live reasoning key must remain listed");
+        assert!(!entry.deprecated, "live reasoning key must be prompted");
+        assert!(!entry.label.contains("DEPRECATED"));
+    }
+}
 
 pub(super) const DEFAULT_STANDARD_PROFILE_NOTICE: &str =
     "No profile specified; defaulting to 'standard'. Set TACHI_PROFILE=admin to restore legacy full surface (148 tools).";

@@ -1,6 +1,8 @@
 mod env;
 mod file;
 mod locks;
+#[cfg(test)]
+mod test_fixtures;
 mod text;
 mod validation;
 mod workspace;
@@ -9,14 +11,17 @@ mod workspace;
 mod tests;
 
 pub(super) use self::env::{parse_env_bool, parse_env_u64};
+#[cfg(test)]
+pub(super) use self::file::read_to_string_allow_missing;
 pub(super) use self::file::{
-    append_owner_only_jsonl_line, append_run_event, read_to_string_allow_missing, sync_parent_dir,
-    write_json_file_owner_only, write_owner_only_file, write_owner_only_file_atomic,
-    write_run_status_file,
+    append_owner_only_jsonl_line, append_run_event, sync_parent_dir, write_json_file_owner_only,
+    write_owner_only_file, write_owner_only_file_atomic, write_run_status_file,
 };
 #[cfg(test)]
 pub(crate) use self::locks::global_test_lock;
 pub(super) use self::locks::{lock_or_recover, read_or_recover, write_or_recover};
+#[cfg(test)]
+pub(crate) use self::test_fixtures::test_fixture_path;
 pub(crate) use self::text::{compact_text_line, sanitize_safe_path_name};
 pub(super) use self::text::{
     redact_sensitive_value, render_skill_prompt_template, stable_hash, value_to_template_text,

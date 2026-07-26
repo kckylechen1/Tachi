@@ -221,12 +221,15 @@ pub fn foundry_job_status_counts(conn: &Connection) -> FoundryJobStatusCounts {
     counts
 }
 
-/// Open a connection for a checkpoint-copy step: read-write, best-effort 5s
-/// busy timeout (matches the prior inline behavior — a timeout failure is
-/// not fatal, the checkpoint attempt still proceeds).
+/// Open an existing checkpoint copy with only the authority needed by
+/// [`checkpoint_wal_truncate`]. Schema mutation and protected memory writes
+/// remain denied even though SQLite requires a read-write handle for the WAL
+/// checkpoint itself.
 pub fn open_for_wal_checkpoint(path: &str) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(path)?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let _ = conn.busy_timeout(Duration::from_millis(5_000));
+    let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
+    super::install_reserved_reference_authorizer(&conn, None)?;
     Ok(conn)
 }
 
@@ -237,10 +240,23 @@ pub fn checkpoint_wal_truncate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
 }
 
-/// Open a raw read-write connection for building ad hoc (possibly
-/// non-canonical) sqlite fixtures, e.g. in `doctor` tests that simulate
-/// legacy/partial schemas `MemoryStore::open` would never produce on its
-/// own (it always runs the full schema migration).
+/// Compatibility fixture seam for ad hoc non-canonical SQLite schemas used by
+/// doctor and bootstrap migration tests. This skips schema migration and the
+/// normal `MemoryStore` configuration, but installs a deny-by-default reserved
+/// reference guard and connection authorizer. On a canonical database, raw
+/// memory inserts and authority-bearing classifier/lifecycle writes fail
+/// closed; production code must use `MemoryStore` typed operations instead.
+/// Non-memory fixture schemas stay writable for doctor probes.
 pub fn open_raw(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open(path)
+    let conn = Connection::open(path)?;
+    let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
+    super::install_reserved_reference_authorizer(&conn, None)?;
+    super::validate_persistent_trigger_inventory(&conn, false).map_err(|error| match error {
+        crate::error::MemoryError::Sqlite(error) => error,
+        other => rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
+            Some(other.to_string()),
+        ),
+    })?;
+    Ok(conn)
 }

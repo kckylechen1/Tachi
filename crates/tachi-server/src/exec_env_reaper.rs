@@ -1,12 +1,22 @@
 //! Orphan build-artifact reaper (#894 S2b) — the bytes nobody is holding.
 //!
-//! # REPORT-ONLY. The destructive path is NOT certified and is REFUSED.
+//! # REPORT-ONLY. The destructive path is RE-SHEATHED and is REFUSED.
 //!
 //! An adversarial review of the delete path (codex, audit `codex-g6f99`) returned
-//! **NOT-SAFE**, and every defect it found was reproduced. So this module ships with
-//! its knife sheathed: [`run_orphan_reap`] **refuses `--force`** and returns a typed
+//! **NOT-SAFE** against #1062; every defect it found was closed, pinned by this
+//! module's own standing test suite, kill-tested, and receipted on 2026-07-17 —
+//! [`DESTRUCTIVE_CERTIFIED`] flipped to `true` and `--force` reached the delete path
+//! for six days. On 2026-07-23, `tachi#1379` showed the one fence that receipt never
+//! exercised — the pinned `(dev, ino)` identity ([`FileIdentity`]) — can itself be
+//! defeated on ext4 by deleting and recreating a directory at the same path fast
+//! enough to land on the SAME reused inode, a scenario the 2026-07-17 matrix never
+//! staged. This module's own doctrine (below, and the const's own doc) is that
+//! touching the reap path invalidates a certification "morally if not mechanically";
+//! a hole in the exact fence the receipt certified is exactly that, so the knife is
+//! sheathed again: [`run_orphan_reap`] **refuses `--force`** and returns a typed
 //! [`DestructiveRefusal`]; the CLI prints that refusal and exits non-zero. Nothing is
-//! deleted, by any caller, on any path.
+//! deleted, by any caller, on any path, until `tachi#1379`'s handle-pinning fix lands
+//! and an inode-reuse scenario is added to the kill-test matrix and re-run.
 //!
 //! This is the doctrine S2d applies to everything else in #894 — *a capability is
 //! fail-closed until a kill-test certifies it* — and it binds us too, most of all when
@@ -14,15 +24,21 @@
 //!
 //! ## The blocking defect (why the knife stays sheathed) — [`BLOCKING_DEFECTS`]
 //!
-//! * **The kill-test matrix has not been EXECUTED and receipted (#1062).** BUGs 1, 2 and
-//!   4 below are closed in source and pinned by this module's own standing test suite —
-//!   but S2d's own doctrine (*a capability is fail-closed until a kill-test certifies
-//!   it*) does not accept "the unit tests pass" as that certification. An executed
+//! * **The 2026-07-17 kill-test receipt never staged inode reuse, and `tachi#1379`
+//!   showed that gap is exploitable (2026-07-23).** BUGs 1, 2 and 4 below are closed in
+//!   source and pinned by this module's own standing test suite, and S2d's own doctrine
+//!   (*a capability is fail-closed until a kill-test certifies it*) — which does not
+//!   accept "the unit tests pass" as that certification — WAS satisfied: an executed
 //!   kill-test matrix, checked in as a receipt naming the binary version, the OS, the
-//!   matrix, and the git blob hash of the test source that ran — the same shape
-//!   `tachi-dispatch`'s codex sandbox certification (`crates/tachi-dispatch/src/
-//!   certification.rs`, #894 S2d) uses — is what flips [`DESTRUCTIVE_CERTIFIED`]. The
-//!   matrix is written and `#[ignore]`d (`kill_tests` below); nobody has run it yet.
+//!   matrix, and the git blob hash of the test source that ran (the same shape
+//!   `tachi-dispatch`'s codex sandbox certification uses,
+//!   `crates/tachi-dispatch/src/certification.rs`, #894 S2d), flipped
+//!   [`DESTRUCTIVE_CERTIFIED`] to `true` on 2026-07-17. That receipt's matrix
+//!   (`kill_tests` below) never staged an ext4 inode-reuse race against the `(dev, ino)`
+//!   fence BUG 2 added — and `tachi#1379`'s 2026-07-23 reproduction on real hardware
+//!   showed a delete-and-recreate-at-the-same-path race can land on the SAME reused
+//!   `(dev, ino)` pair the fence trusts, walking straight through it. The matrix needs
+//!   that scenario added and re-run before this module may claim BUG 2 is closed again.
 //!
 //! ## Closed in this cut (#1062 — sol audit `codex-g6f99` / linear KYL-877)
 //!
@@ -62,10 +78,15 @@
 //!   it. Duplicate `--root`s are deduplicated too, so one subtree is no longer walked,
 //!   counted, and reported twice.
 //!
-//! Re-enabling the destructive path now means exactly one thing: running the kill-test
-//! matrix for real and checking in the receipt. Until that lands, everything below is
-//! still a **report** — [`DESTRUCTIVE_CERTIFIED`] does not flip on a green `cargo test`
-//! alone, on purpose (see the const's own doc).
+//! Re-enabling the destructive path now means two things, not one: landing
+//! `tachi#1379`'s handle-pinning fix for the `(dev, ino)` fence, and adding an
+//! inode-reuse scenario to the kill-test matrix and re-running it for real, checked in
+//! as a fresh receipt. Until both land, everything below is still a **report** —
+//! [`DESTRUCTIVE_CERTIFIED`] does not flip on a green `cargo test` alone, on purpose
+//! (see the const's own doc), and the 2026-07-17 receipt does not carry over: this
+//! module's own doctrine is that touching the reap path invalidates a certification
+//! "morally if not mechanically," and a proven hole in the exact fence it certified is
+//! exactly that.
 //!
 //! ## What it is still for
 //!
@@ -235,41 +256,57 @@ const SECS_PER_DAY: u64 = 24 * 60 * 60;
 
 // ── Certification (the sheath) ──────────────────────────────────────────────
 
-/// Has the destructive path been certified safe to run? **No.** #1062 closed BUGs 1, 2
-/// and 4 (the module docs, and [`BLOCKING_DEFECTS`], have the detail) and pinned each
-/// with a discriminating test in this module's own standing suite — but that is
-/// deliberately NOT what flips this constant. S2d's own doctrine is *a capability is
-/// fail-closed until a kill-test certifies it*, and "the unit tests pass" is not a
-/// kill-test certification: it is this crate believing its own code. The bar is an
-/// EXECUTED, checked-in receipt (binary version, OS, matrix, git blob hash of the test
-/// source) — the shape `crates/tachi-dispatch/src/certification.rs` already ships for
-/// codex's sandbox. The matrix exists here, `#[ignore]`d (`kill_tests`); it was EXECUTED
-/// on 2026-07-17 (Oz seat, all four scenarios pass) and the receipt is checked in at
-/// `crates/tachi-server/certifications/orphan-reaper.toml` — hence `true`. The receipt
-/// certifies exactly one (version, OS, source-blob) triple; touching the kill-test or
-/// the reap path invalidates it morally if not mechanically: re-run and re-receipt.
+/// Has the destructive path been certified safe to run? **No — not right now.** #1062
+/// closed BUGs 1, 2 and 4 (the module docs, and [`BLOCKING_DEFECTS`], have the detail),
+/// each pinned by a discriminating test in this module's own standing suite, and on
+/// 2026-07-17 the kill-test matrix (`kill_tests` below) was EXECUTED for real (Oz seat,
+/// all four #1062 scenarios pass) with a checked-in receipt at
+/// `crates/tachi-server/certifications/orphan-reaper.toml` — the shape
+/// `crates/tachi-dispatch/src/certification.rs` already ships for codex's sandbox. That
+/// flipped this const to `true`, and `--force` reached the delete path for six days.
+///
+/// **On 2026-07-23, `tachi#1379` showed the 2026-07-17 matrix never exercised the one
+/// scenario that mattered.** BUG 2's fence pins a real `(dev, ino)` identity
+/// ([`FileIdentity`]) at judgement and re-`stat`s it immediately before delete — proof
+/// against a symlink retarget or a plain `rm -rf && mkdir` at the judged path. It is not
+/// proof against ext4 handing the SAME inode back to a directory recreated fast enough
+/// at the same path: `tachi#1379` reproduced exactly that on real hardware, and the
+/// fence cannot tell the reused inode from the one it judged. This module's own rule —
+/// touching the reap path invalidates a certification "morally if not mechanically:
+/// re-run and re-receipt" — applies to a hole discovered IN the certified fence exactly
+/// as much as it applies to a code change, so the 2026-07-17 receipt no longer
+/// certifies anything and this const goes back to `false` until `tachi#1379`'s
+/// handle-pinning fix lands and an inode-reuse scenario is added to the kill-test
+/// matrix and re-run.
 ///
 /// A `const` rather than a config flag, on purpose. A flag is something an operator can
 /// flip at 2 a.m. under disk pressure; the gate between a scan of `~/.cache` and
 /// `remove_dir_all` should cost a code change, a review, and a test suite.
-pub(crate) const DESTRUCTIVE_CERTIFIED: bool = true;
+pub(crate) const DESTRUCTIVE_CERTIFIED: bool = false;
 
-/// The audit that sheathed it.
-pub(crate) const BLOCKING_AUDIT: &str = "codex-g6f99";
+/// The finding that sheathed it THIS time. `codex-g6f99` (#1062) is the audit that
+/// sheathed it originally, closed and receipted 2026-07-17; `tachi#1379` is why it is
+/// sheathed again.
+pub(crate) const BLOCKING_AUDIT: &str = "tachi#1379";
 
 /// Why the delete path may not run — verbatim in the refusal, in the report, and on the
 /// CLI's stderr. An operator who types `--force` is told exactly what is broken, not
 /// merely that they were denied.
 ///
-/// #1062 closed BUGs 1, 2 and 4 (each pinned by a discriminating test — see the module
-/// docs for the detail on each) — the one line left is the reason
-/// [`DESTRUCTIVE_CERTIFIED`] still reads `false`.
+/// #1062's BUGs 1, 2 and 4 are still closed in source (each pinned by a discriminating
+/// test — see the module docs for the detail on each); they are not what blocks
+/// `--force` today. The one line below is `tachi#1379`: the 2026-07-17 receipt
+/// certified BUG 2's `(dev, ino)` fence against a matrix that never staged an
+/// inode-reuse race, and #1379 proved that race beats the fence on real hardware.
 pub(crate) const BLOCKING_DEFECTS: &[&str] = &[
-    "no EXECUTED kill-test receipt exists yet for this destructive path (#1062): a matrix \
-     covering an env-var-only live build, a target swapped for a symlink, an uncanonicalizable \
-     protected path, and a ps that cannot spawn is written and #[ignore]d, but S2d's own \
-     doctrine does not accept a green `cargo test` as the certification a checked-in receipt \
-     is — see `crates/tachi-dispatch/src/certification.rs` for the shape this one must match",
+    "the (dev, ino) fence (BUG 2, #1062) is beatable by inode reuse (tachi#1379): on ext4, \
+     a directory deleted and recreated at the judged path fast enough can land on the SAME \
+     (dev, ino) pair the fence trusts, so the re-stat immediately before delete cannot tell \
+     the reused inode from the one judged — reproduced on real hardware 2026-07-23. The \
+     2026-07-17 kill-test receipt (crates/tachi-server/certifications/orphan-reaper.toml) \
+     never exercised this scenario and does not certify against it. Re-enable requires \
+     tachi#1379's handle-pinning fix plus an inode-reuse scenario added to the kill-test \
+     matrix and re-run for a fresh receipt",
 ];
 
 /// The typed refusal a destructive request gets. Not a silent skip, and not an empty
@@ -311,12 +348,12 @@ impl std::fmt::Display for DestructiveRefusal {
 
 /// The ONE gate between any caller and the delete path. The CLI asks it before it opens
 /// the ledger; [`run_orphan_reap`] asks it again so a future caller cannot route around
-/// the CLI. **As of #1062, it always says yes** — `DESTRUCTIVE_CERTIFIED` is `true`, so
-/// this reduces to `Ok(())` for both `force` values; the destructive path is reached
-/// through this gate now, not refused by it. It stays here rather than being deleted:
-/// the day certification is REVOKED (`DESTRUCTIVE_CERTIFIED` flips back to `false`),
-/// this is the one place that must go back to refusing `force`, and every caller already
-/// asks it instead of reading the constant directly.
+/// the CLI. It said yes unconditionally for six days (#1062, 2026-07-17 through
+/// 2026-07-23) while `DESTRUCTIVE_CERTIFIED` was `true`; `tachi#1379` REVOKED that
+/// certification and this const is `false` again, so `force` is refused once more. It
+/// stayed here rather than being deleted for exactly this reason: the day certification
+/// is revoked, this is the one place that must go back to refusing `force`, and every
+/// caller already asks it instead of reading the constant directly.
 pub(crate) fn certify_destructive(force: bool) -> Result<(), DestructiveRefusal> {
     if force && !DESTRUCTIVE_CERTIFIED {
         return Err(DestructiveRefusal::new());
@@ -356,21 +393,61 @@ impl HolderCheck {
 /// Injectable holder probe — the real one shells out to `lsof`; tests pass a
 /// closure so the decision logic is exercised without depending on the host's
 /// process table.
-pub(crate) type HolderProbe = dyn Fn(&Path) -> HolderCheck;
+pub(crate) type HolderProbe = dyn Fn(&Path, Option<HolderExclusion>) -> HolderCheck;
+
+/// The one holder the reaper itself creates while pinning a candidate's inode.
+/// Both fields must match before an `lsof` row is ignored; excluding the whole
+/// process would hide unrelated descriptors and weaken the holder fence.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HolderExclusion {
+    pid: u32,
+    fd: i32,
+}
 
 /// Real probe: `lsof +D <dir>` (recursive — a live `cargo` holds files deep
 /// inside the target, not just at its root).
-pub(crate) fn lsof_holder_probe(path: &Path) -> HolderCheck {
+pub(crate) fn lsof_holder_probe(
+    path: &Path,
+    ignored_holder: Option<HolderExclusion>,
+) -> HolderCheck {
     match Command::new("lsof").arg("+D").arg(path).output() {
-        Ok(out) => interpret_lsof(
-            out.status.code(),
-            &String::from_utf8_lossy(&out.stdout),
-            &String::from_utf8_lossy(&out.stderr),
-        ),
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let filtered = ignored_holder
+                .map(|ignored| without_ignored_holder(&stdout, ignored))
+                .unwrap_or_else(|| stdout.into_owned());
+            interpret_lsof(
+                out.status.code(),
+                &filtered,
+                &String::from_utf8_lossy(&out.stderr),
+            )
+        }
         // No lsof on this host ⇒ we cannot prove "unheld" ⇒ nothing is
         // reclaimed. Loud, not silent.
         Err(err) => HolderCheck::Unknown(format!("cannot run lsof: {err}")),
     }
+}
+
+fn without_ignored_holder(stdout: &str, ignored: HolderExclusion) -> String {
+    stdout
+        .lines()
+        .filter(|line| {
+            let mut fields = line.split_whitespace();
+            let _command = fields.next();
+            let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
+            let _user = fields.next();
+            let fd = fields.next().and_then(|value| {
+                let digits = value
+                    .as_bytes()
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count();
+                value[..digits].parse::<i32>().ok()
+            });
+            pid != Some(ignored.pid) || fd != Some(ignored.fd)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Pure interpreter for an `lsof +D` run — the part worth testing.
@@ -959,6 +1036,15 @@ pub(crate) struct FileIdentity {
 }
 
 impl FileIdentity {
+    #[cfg(unix)]
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }
+    }
+
     /// `symlink_metadata`, not `metadata`: the identity is of the entry AT this
     /// path, not of whatever a symlink there might point through. A candidate is
     /// only ever a directory (the scan uses `symlink_metadata` to enqueue it and
@@ -966,12 +1052,8 @@ impl FileIdentity {
     /// symlink here would already be a lie about what was judged.
     #[cfg(unix)]
     fn of(path: &Path) -> Option<Self> {
-        use std::os::unix::fs::MetadataExt;
         let meta = std::fs::symlink_metadata(path).ok()?;
-        Some(Self {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        })
+        Some(Self::from_metadata(&meta))
     }
 
     /// No portable `(dev, ino)` off Unix, and this module's holder probes (`ps`,
@@ -980,6 +1062,61 @@ impl FileIdentity {
     /// deleter may not act on: fail closed, exactly like [`HolderCheck::Unknown`].
     #[cfg(not(unix))]
     fn of(_path: &Path) -> Option<Self> {
+        None
+    }
+}
+
+/// An open handle to the directory judged by the scan. Holding the handle keeps
+/// its inode allocated until the candidate has either been refused or deleted,
+/// so a remove-and-recreate race cannot make a replacement look identical by
+/// receiving the judged directory's just-freed inode number.
+#[derive(Debug)]
+struct PinnedDirectory {
+    handle: std::fs::File,
+    identity: FileIdentity,
+}
+
+impl PinnedDirectory {
+    #[cfg(unix)]
+    fn open(path: &Path) -> Option<Self> {
+        let handle = std::fs::File::open(path).ok()?;
+        let identity = FileIdentity::from_metadata(&handle.metadata().ok()?);
+        let path_meta = std::fs::symlink_metadata(path).ok()?;
+        if !path_meta.is_dir() || FileIdentity::from_metadata(&path_meta) != identity {
+            return None;
+        }
+        Some(Self { handle, identity })
+    }
+
+    #[cfg(unix)]
+    fn current_identity(&self) -> Option<FileIdentity> {
+        self.handle
+            .metadata()
+            .ok()
+            .map(|meta| FileIdentity::from_metadata(&meta))
+    }
+
+    #[cfg(unix)]
+    fn holder_exclusion(&self) -> Option<HolderExclusion> {
+        use std::os::fd::AsRawFd;
+        Some(HolderExclusion {
+            pid: std::process::id(),
+            fd: self.handle.as_raw_fd(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn open(_path: &Path) -> Option<Self> {
+        None
+    }
+
+    #[cfg(not(unix))]
+    fn current_identity(&self) -> Option<FileIdentity> {
+        None
+    }
+
+    #[cfg(not(unix))]
+    fn holder_exclusion(&self) -> Option<HolderExclusion> {
         None
     }
 }
@@ -1014,7 +1151,7 @@ impl Staleness {
 /// A directory that *looks like* a reclaimable build artifact. Being a
 /// candidate says nothing about whether it may be deleted — that is
 /// [`decide_reap`].
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct OrphanCandidate {
     /// The path as the scan walked it — the caller's spelling, symlinked scan
     /// root and all.
@@ -1050,6 +1187,10 @@ pub(crate) struct OrphanCandidate {
     /// [`decide_reap`] treats that exactly like an unprobed holder check:
     /// unprovable ⇒ never reclaimed.
     pub(crate) file_identity: Option<FileIdentity>,
+    /// Open handle for the judged directory. Unlike `(dev, ino)` alone, this
+    /// prevents the inode from being recycled onto a replacement while the
+    /// delete decision is in flight.
+    identity_pin: Option<PinnedDirectory>,
     pub(crate) kind: ResourceKind,
     pub(crate) staleness: Staleness,
     /// Measured *only* for candidates that survived every cheap gate — a
@@ -1533,6 +1674,7 @@ pub(crate) fn scan_orphan_candidates(
             match walk_disposition(&dir, depth, protection, DEFAULT_MAX_DEPTH) {
                 WalkDisposition::Candidate(kind) => {
                     out.record(&dir, UnitOutcome::Candidate, String::new());
+                    let identity_pin = PinnedDirectory::open(&dir);
                     out.candidates.push(OrphanCandidate {
                         staleness: staleness(&dir, now, cutoff),
                         // Pin the spelling the verdict is about to be rendered against —
@@ -1541,7 +1683,8 @@ pub(crate) fn scan_orphan_candidates(
                         // …and the REAL identity beside it (BUG 2, closed): captured
                         // now, at judgement, and re-checked immediately before the
                         // delete (`delete_resource_bytes`).
-                        file_identity: FileIdentity::of(&dir),
+                        file_identity: identity_pin.as_ref().map(|pin| pin.identity),
+                        identity_pin,
                         path: dir,
                         kind,
                         bytes: None,
@@ -1866,18 +2009,19 @@ pub(crate) struct ReclaimedReport {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ReapReport {
     pub(crate) action: &'static str,
-    /// **`true` as of #1062** (owner-ratified 1A, 2026-07-17: the kill-test matrix was
-    /// executed and its receipt checked in — see [`DESTRUCTIVE_CERTIFIED`]). Mirrors
+    /// **`false` again as of `tachi#1379`** (2026-07-23; was `true` 2026-07-17 through
+    /// 2026-07-23 under #1062's receipt — see [`DESTRUCTIVE_CERTIFIED`]). Mirrors
     /// [`DESTRUCTIVE_CERTIFIED`] into every report so a reader never has to go check the
     /// constant to know whether a `--force` request on this build can act — and, on a
     /// `dry_run` report, whether `reclaimable_bytes` is a preview of what a certified
-    /// reaper would do or a record of what an UNcertified one would have been forbidden
-    /// to. Was hard-coded documentation of `false` before the flip; kept a plain mirror
-    /// of the const now rather than re-describing it, so it cannot go stale again.
+    /// reaper would do or a record of what an UNcertified one is forbidden to. A plain
+    /// mirror of the const rather than re-described documentation, so this field itself
+    /// cannot go stale — only the const's OWN doc (which it does) needs updating when
+    /// the value moves.
     pub(crate) destructive_certified: bool,
-    /// The audit's defects, verbatim, in every report — a historical record of what the
-    /// certification closed ([`BLOCKING_AUDIT`]), not a live blocking condition now that
-    /// [`Self::destructive_certified`] reads `true`.
+    /// The blocking defects, verbatim, in every report — currently `tachi#1379` (the
+    /// finding that resheathed the knife); see [`BLOCKING_AUDIT`] / [`BLOCKING_DEFECTS`]
+    /// for the detail and history.
     pub(crate) blocking_defects: Vec<String>,
     pub(crate) roots: Vec<String>,
     /// What the run refused to look at, so an operator can *see* that the live
@@ -1946,9 +2090,6 @@ pub(crate) struct ReapOptions {
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 
-/// **The only entry point.** Scan → cheap gates → (survivors only) measure + probe →
-/// decide → report.
-///
 /// A `force` request is REFUSED here, with a [`DestructiveRefusal`] that says why
 /// ([`certify_destructive`]). It is refused *before the scan*, so a rejected run does not
 /// so much as stat a directory — and it is an `Err`, not a quietly downgraded dry run. An
@@ -2099,7 +2240,13 @@ fn run_orphan_reap_uncertified(
             // byte walk and an `lsof +D` (which walks the tree again).
             Ok(_) => {
                 candidate.bytes = Some(dir_size(&candidate.path));
-                candidate.holders = Some(probe(&candidate.path));
+                candidate.holders = Some(probe(
+                    &candidate.path,
+                    candidate
+                        .identity_pin
+                        .as_ref()
+                        .and_then(PinnedDirectory::holder_exclusion),
+                ));
                 decide_reap(
                     &candidate,
                     opts.max_age_days,
@@ -2403,6 +2550,7 @@ fn reclaim_candidate(
                 protection,
                 &candidate.identity,
                 candidate.file_identity,
+                candidate.identity_pin.as_ref(),
             )
         })
         .map_err(|err| {
@@ -2518,6 +2666,7 @@ fn delete_resource_bytes(
     protection: &Protection,
     pinned: &Path,
     pinned_identity: Option<FileIdentity>,
+    identity_pin: Option<&PinnedDirectory>,
 ) -> Result<i64, MemoryError> {
     let path = Path::new(&resource.path);
 
@@ -2595,13 +2744,17 @@ fn delete_resource_bytes(
     // `Reclaim` decision without one (BUG 2's fail-closed half), so `None` here means
     // this deleter was invoked outside that gate, and an identity we were never given
     // is not one we may act on.
+    let handle_identity = identity_pin.and_then(PinnedDirectory::current_identity);
     let current_identity = FileIdentity::of(path);
-    if pinned_identity.is_none() || current_identity != pinned_identity {
+    if pinned_identity.is_none()
+        || handle_identity != pinned_identity
+        || current_identity != pinned_identity
+    {
         return Err(MemoryError::InvalidArg(format!(
             "identity unresolved: refusing to reclaim {}: its (dev, ino) identity does not match \
-             the one the verdict was rendered against (captured {pinned_identity:?}, now \
-             {current_identity:?}) — the object at this path was replaced between judgement and \
-             delete",
+             the pinned directory handle or the one the verdict was rendered against (captured \
+             {pinned_identity:?}, handle {handle_identity:?}, now {current_identity:?}) — the object \
+             at this path was replaced between judgement and delete",
             resource.path
         )));
     }
@@ -2609,7 +2762,10 @@ fn delete_resource_bytes(
     // `reclaiming`, but the bytes are still there. A process that grabbed the
     // directory since the scan aborts the delete (row → `reclaim_failed`,
     // retryable) rather than losing a live build's cache.
-    match probe(path) {
+    match probe(
+        path,
+        identity_pin.and_then(PinnedDirectory::holder_exclusion),
+    ) {
         HolderCheck::None => {}
         other => {
             return Err(MemoryError::InvalidArg(format!(
@@ -2942,7 +3098,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        let path = crate::utils::test_fixture_path(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -2957,11 +3113,11 @@ mod tests {
     }
 
     fn unheld_probe() -> Box<HolderProbe> {
-        Box::new(|_path: &Path| HolderCheck::None)
+        Box::new(|_path: &Path, _ignored_holder| HolderCheck::None)
     }
 
     fn held_probe() -> Box<HolderProbe> {
-        Box::new(|_path: &Path| HolderCheck::Held(vec!["cargo 4242".to_string()]))
+        Box::new(|_path: &Path, _ignored_holder| HolderCheck::Held(vec!["cargo 4242".to_string()]))
     }
 
     /// `now` shifted far past every fixture's mtime, so the fixtures read as
@@ -2998,6 +3154,7 @@ mod tests {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
             file_identity: Some(fixture_identity()),
+            identity_pin: None,
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Stale { age_days: 30 },
             bytes: Some(2048),
@@ -3330,6 +3487,23 @@ mod tests {
     }
 
     #[test]
+    fn lsof_excludes_only_the_reapers_exact_pin() {
+        let stdout = "COMMAND   PID USER   FD   TYPE DEVICE  SIZE/OFF NODE NAME\n\
+                      tachi    123 user    7r   DIR   1,16       320  123 /tmp/x-target\n\
+                      tachi    123 user    8r   REG   1,16      2048  124 /tmp/x-target/live\n\
+                      cargo    456 user    7r   REG   1,16      2048  125 /tmp/x-target/other\n";
+        let filtered = without_ignored_holder(stdout, HolderExclusion { pid: 123, fd: 7 });
+
+        assert!(!filtered.contains("123 user    7r"));
+        assert!(filtered.contains("123 user    8r"));
+        assert!(filtered.contains("456 user    7r"));
+        assert_eq!(
+            interpret_lsof(Some(1), &filtered, ""),
+            HolderCheck::Held(vec!["tachi 123".to_string(), "cargo 456".to_string()])
+        );
+    }
+
+    #[test]
     fn lsof_clean_empty_run_means_unheld() {
         assert_eq!(interpret_lsof(Some(1), "", ""), HolderCheck::None);
         assert_eq!(interpret_lsof(Some(0), "", ""), HolderCheck::None);
@@ -3401,7 +3575,7 @@ mod tests {
         let root = unique_temp_dir("tachi-reaper-unknown-holder");
         let dead = make_target_dir(&root, "would-be-dead-target");
         let mut store = open_store(&root);
-        let unknown_probe = |_path: &Path| {
+        let unknown_probe = |_path: &Path, _ignored_holder| {
             HolderCheck::Unknown("cannot run lsof: No such file or directory".to_string())
         };
 
@@ -3447,7 +3621,7 @@ mod tests {
         let target = make_target_dir(&root, "live-target");
         let _handle = std::fs::File::open(target.join("debug/artifact.rlib")).unwrap();
 
-        let check = lsof_holder_probe(&target);
+        let check = lsof_holder_probe(&target, None);
         assert_ne!(
             check,
             HolderCheck::None,
@@ -3456,6 +3630,7 @@ mod tests {
         let candidate = OrphanCandidate {
             identity: std::fs::canonicalize(&target).unwrap(),
             file_identity: FileIdentity::of(&target),
+            identity_pin: PinnedDirectory::open(&target),
             path: target.clone(),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Stale { age_days: 30 },
@@ -3540,7 +3715,7 @@ mod tests {
         // it after the reap has run.
         let probes = std::rc::Rc::new(std::cell::Cell::new(0usize));
         let counter = std::rc::Rc::clone(&probes);
-        let counting_probe = move |_path: &Path| {
+        let counting_probe = move |_path: &Path, _ignored_holder| {
             counter.set(counter.get() + 1);
             HolderCheck::None
         };
@@ -3651,6 +3826,7 @@ mod tests {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
             file_identity: Some(fixture_identity()),
+            identity_pin: None,
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Fresh { age_days: 2 },
             bytes: None,
@@ -3671,6 +3847,7 @@ mod tests {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
             file_identity: Some(fixture_identity()),
+            identity_pin: None,
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Unprovable("cannot read /tmp/x-target/deps".to_string()),
             bytes: None,
@@ -3771,14 +3948,15 @@ mod tests {
             "the report must say how many bytes are dead: {report:?}"
         );
         assert!(report.reclaimable_bytes > 0);
-        // #1062: the knife is certified now (receipt checked in, owner-ratified 1A,
-        // 2026-07-17) — but `dry_run` (checked above) is a SEPARATE property from
-        // certification, and this is the property this test exists to pin: a
-        // report-only request (`force: false`) deletes nothing and books nothing
-        // REGARDLESS of whether the destructive path is certified. Was
-        // `assert!(!report.destructive_certified)` pre-#1062; flipped to match the
-        // now-true constant, the dry-run assertions above and below are unchanged.
-        assert!(report.destructive_certified);
+        // #1062: the knife was certified on 2026-07-17 (receipt checked in,
+        // owner-ratified 1A, 2026-07-17), but `tachi#1379` re-sheathed it on 2026-07-23
+        // when an inode-reuse race showed BUG 2's (dev, ino) fence is beatable by the
+        // very scenario that receipt never staged. This test's core property is
+        // unchanged regardless: a report-only request (`force: false`) deletes nothing
+        // and books nothing. Was `assert!(!report.destructive_certified)` pre-#1062,
+        // `assert!(report.destructive_certified)` while the receipt was valid, and now
+        // `assert!(!report.destructive_certified)` again after #1379 revoked it.
+        assert!(!report.destructive_certified);
         assert!(!report.blocking_defects.is_empty());
         // The bytes are still on disk...
         assert!(dead.join("debug/artifact.rlib").exists());
@@ -3999,7 +4177,7 @@ mod tests {
         let mut store = open_store(&root);
 
         let calls = std::cell::Cell::new(0usize);
-        let probe = move |_path: &Path| {
+        let probe = move |_path: &Path, _ignored_holder| {
             let n = calls.get();
             calls.set(n + 1);
             if n == 0 {
@@ -4059,6 +4237,7 @@ mod tests {
             // set, re-asserted at the line that deletes.
             &std::fs::canonicalize(&shared).unwrap(),
             FileIdentity::of(&shared),
+            PinnedDirectory::open(&shared).as_ref(),
         )
         .expect_err("a protected path must never be deleted");
         assert!(
@@ -4101,7 +4280,7 @@ mod tests {
         let claimed = std::rc::Rc::new(std::cell::Cell::new(false));
         let claiming_probe = {
             let claimed = std::rc::Rc::clone(&claimed);
-            move |_path: &Path| {
+            move |_path: &Path, _ignored_holder| {
                 claimed.set(true);
                 // …and it holds nothing open right now: the fd-only recheck is blind to it.
                 HolderCheck::None
@@ -4280,7 +4459,7 @@ mod tests {
         // below for exactly which fence that lands the refusal on.
         let link_for_probe = link.clone();
         let decoy_for_probe = decoy_root.clone();
-        let retargeting_probe = move |_path: &Path| {
+        let retargeting_probe = move |_path: &Path, _ignored_holder| {
             std::fs::remove_file(&link_for_probe).unwrap();
             std::os::unix::fs::symlink(&decoy_for_probe, &link_for_probe).unwrap();
             HolderCheck::None
@@ -4365,7 +4544,7 @@ mod tests {
         // during the eligibility check — either invocation's identity recheck
         // would catch it (see the assertion below).
         let target_for_probe = target.clone();
-        let swapping_probe = move |_path: &Path| {
+        let swapping_probe = move |_path: &Path, _ignored_holder| {
             std::fs::remove_dir_all(&target_for_probe).unwrap();
             std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
             std::fs::write(
@@ -4461,7 +4640,7 @@ mod tests {
         // directory and passes — leaving only the second recheck to catch this.
         let calls = Arc::new(AtomicUsize::new(0));
         let target_for_probe = target.clone();
-        let swap_on_second_call = move |_path: &Path| {
+        let swap_on_second_call = move |_path: &Path, _ignored_holder| {
             let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
             if call == 2 {
                 std::fs::remove_dir_all(&target_for_probe).unwrap();
@@ -4713,7 +4892,7 @@ mod tests {
         let mut store = open_store(&root);
 
         let calls = std::cell::Cell::new(0usize);
-        let probe = move |_path: &Path| {
+        let probe = move |_path: &Path, _ignored_holder| {
             let n = calls.get();
             calls.set(n + 1);
             if n == 0 {
@@ -4747,78 +4926,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // ── #1062: --force reaches the delete path, and certification ≠ no fences ──
+    // ── #1062/#1379: --force is refused at the entry point, but the delete-path fences
+    // are still pinned by direct calls to `run_orphan_reap_uncertified` ────────
 
-    /// The seal is open (#1062) — and the proof that "open" does not mean "no fences
-    /// left". Renamed from `force_is_refused_at_the_entry_point_and_the_fixture_
-    /// proves_it_was_reapable`, which pinned the pre-#1062 shape: the entry point
-    /// (`reap_sealed`) refused EVERY `--force` request outright via
-    /// `certify_destructive`, and the second half proved that refusal meant
-    /// something (CONCERN 6 — a test that only asserts "the directory still exists"
-    /// passes just as happily against a reaper that does nothing at all) by running
-    /// the SAME fixture through the sheathed body (`reap_uncertified`, which
-    /// bypasses the gate) and watching it really delete. See git blame / #1062 for
-    /// that reading.
+    /// The seal is closed again (`tachi#1379`, 2026-07-23) — and the proof that
+    /// "closed" does not mean the fences behind it are gone. Renamed from
+    /// `force_reclaims_at_the_entry_point_and_a_broken_fence_still_refuses_it`, which
+    /// pinned the #1062 shape: the entry point (`reap_sealed`) let `--force` through
+    /// because `DESTRUCTIVE_CERTIFIED` was `true`, the first half genuinely deleted,
+    /// and the second half proved certification did not disable the per-candidate
+    /// `(dev, ino)` fence. See git blame / #1062 for that reading.
     ///
-    /// Two halves, same design, inverted premise now that certification is real:
+    /// Two halves, same design, inverted premise now that certification is revoked:
     ///
-    /// * **first half — the entry point itself now does the deleting.** `--force`
-    ///   through `reap_sealed` (the REAL entry point `run_orphan_reap_cli` also
-    ///   calls, not the sheathed `run_orphan_reap_uncertified` the old test needed
-    ///   to bypass the gate to reach) on a healthy fixture genuinely reclaims —
-    ///   proving the certified path is not a dead branch behind a gate that never
-    ///   opens.
-    /// * **second half is CONCERN 6 in the certified world: certification is not
-    ///   "no fences".** The exact same entry point, the exact same `--force`, but
-    ///   the `(dev, ino)` identity is swapped out from under the verdict between
-    ///   judgement and delete (BUG 2's own fence — same swap technique as
-    ///   `a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_
-    ///   refused`) — still refused, because `certify_destructive` was never the
-    ///   ONLY fence and flipping it true does not touch the others. The refusal
-    ///   now surfaces as a per-candidate `"refused"` decision inside a
-    ///   successfully-returned `Ok(report)`, not as a top-level `Err` from the
-    ///   gate — that shift in shape is itself part of what changed.
+    /// * **first half — the entry point itself refuses again.** `--force` through
+    ///   `reap_sealed` (the REAL entry point `run_orphan_reap_cli` also calls) on a
+    ///   healthy fixture now returns a top-level `Err(DestructiveRefusal)` without
+    ///   touching the ledger or deleting anything — proving `certify_destructive`
+    ///   went back to being the gate it was in the pre-#1062 shape.
+    /// * **second half keeps CONCERN 6 alive behind the seal.** The `(dev, ino)`
+    ///   identity is swapped out from under the verdict between judgement and delete
+    ///   (BUG 2's own fence — same swap technique as
+    ///   `a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_refused`).
+    ///   Because the entry point now refuses `--force`, this half bypasses the gate
+    ///   via `reap_uncertified` (the sheathed body tests already use) so the fence
+    ///   itself stays pinned: it still refuses the delete even though `force` is
+    ///   present. The day #1379's handle-pinning fix and an inode-reuse kill-test
+    ///   re-certify the path, this half is the existing regression test that the
+    ///   fence still works in the re-opened world.
     #[test]
-    fn force_reclaims_at_the_entry_point_and_a_broken_fence_still_refuses_it() {
-        // Half 1: a healthy fixture, the real entry point, `--force` — genuinely
-        // deletes, and books it, now that the destructive path is certified.
-        let root = unique_temp_dir("tachi-reaper-certified-delete");
+    fn force_is_refused_at_the_entry_point_and_a_broken_fence_still_refuses_behind_it() {
+        // Half 1: a healthy fixture, the real entry point, `--force` — refused
+        // outright now that `tachi#1379` re-sheathed the knife.
+        let root = unique_temp_dir("tachi-reaper-resheathed-delete");
         let dead = make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
 
-        let report = reap_sealed(
+        let refusal = reap_sealed(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
             &*unheld_probe(),
         )
-        .expect("--force is certified now: the entry point must not refuse a healthy request");
+        .expect_err("--force must be refused now: tachi#1379 revoked the 2026-07-17 certification");
 
-        assert_eq!(
-            report.reclaimed.len(),
-            1,
-            "the entry point must actually reach the delete path once certified: {report:?}"
+        assert!(refusal.refused);
+        assert!(
+            refusal.reason.contains("tachi#1379"),
+            "reason: {}",
+            refusal.reason
         );
-        assert!(!dead.exists(), "the target must really be gone: {report:?}");
-        let rows = memcore::list_resources(store.connection(), None, None).unwrap();
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(
-            rows[0].state,
-            ResourceState::Reclaimed,
-            "the delete through the real entry point must still be booked: {rows:?}"
+        // Nothing was scanned, measured, booked or deleted.
+        assert!(
+            dead.join("debug/artifact.rlib").exists(),
+            "a refused --force must not delete anything: {refusal:?}"
+        );
+        assert!(
+            memcore::list_resources(store.connection(), None, None)
+                .unwrap()
+                .is_empty(),
+            "a refused --force must not book anything"
         );
 
         let _ = std::fs::remove_dir_all(&root);
 
-        // Half 2 (CONCERN 6, still true post-#1062): the same entry point, the same
-        // `--force`, but the `(dev, ino)` identity is swapped out from under the
-        // verdict — refused, proving certification did not remove the other fences.
-        let root2 = unique_temp_dir("tachi-reaper-certified-still-fenced");
+        // Half 2 (CONCERN 6, still true behind the seal): the same `--force` intent,
+        // routed through the sheathed body so the per-candidate fences remain covered.
+        let root2 = unique_temp_dir("tachi-reaper-resheathed-still-fenced");
         let target = make_target_dir(&root2, "swapped-target");
         let mut store2 = open_store(&root2);
 
         let target_for_probe = target.clone();
-        let swapping_probe = move |_path: &Path| {
+        let swapping_probe = move |_path: &Path, _ignored_holder| {
             std::fs::remove_dir_all(&target_for_probe).unwrap();
             std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
             std::fs::write(
@@ -4829,22 +5008,16 @@ mod tests {
             HolderCheck::None
         };
 
-        let report2 = reap_sealed(
+        let report2 = reap_uncertified(
             store2.connection_mut(),
             &opts(&root2, true),
             aged_now(30),
             &swapping_probe,
-        )
-        .expect(
-            "certification means the entry point no longer refuses OUTRIGHT — the (dev, ino) \
-             fence still fires per-candidate, inside a successful run, not as an Err from the \
-             gate",
         );
 
         assert!(
             target.join("debug/replacement.rlib").exists(),
-            "the replacement directory must survive: certification did not disable the \
-             identity fence: {report2:?}"
+            "the replacement directory must survive: the identity fence is still armed: {report2:?}"
         );
         assert!(report2.reclaimed.is_empty(), "{report2:?}");
         assert_eq!(report2.candidates.len(), 1, "{report2:?}");
@@ -4854,51 +5027,51 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("(dev, ino) identity")),
-            "the refusal must still name the (dev, ino) mismatch even though force is \
-             certified: {report2:?}"
+            "the refusal must still name the (dev, ino) mismatch behind the seal: {report2:?}"
         );
 
         let _ = std::fs::remove_dir_all(&root2);
     }
 
-    /// `certify_destructive` is the single gate — and once the destructive path is
-    /// certified (#1062), it refuses NEITHER call: a report-only request and a
-    /// `--force` request are both permitted to proceed past THIS gate (other gates
-    /// — the protected set, the holder probe, the pinned `(dev, ino)` identity —
-    /// still stand; see `force_reclaims_at_the_entry_point_and_a_broken_fence_
-    /// still_refuses_it` for the proof that certification did not remove them).
+    /// `certify_destructive` is the single gate — and since `tachi#1379` revoked the
+    /// 2026-07-17 certification, it refuses ONLY the destructive request again: a
+    /// report-only request is still permitted to proceed past this gate, and a
+    /// `--force` request is turned into [`DestructiveRefusal`]. Other fences (the
+    /// protected set, the holder probe, the pinned `(dev, ino)` identity) still
+    /// stand; see `force_is_refused_at_the_entry_point_and_a_broken_fence_still_
+    /// refuses_behind_it` for the proof that they are still armed behind the seal.
     ///
-    /// Renamed from `only_the_destructive_request_is_refused`, which pinned the
-    /// pre-#1062 shape (`certify_destructive(true)` unconditionally `Err`,
+    /// Renamed from `certify_destructive_permits_both_once_certified`, which pinned
+    /// the post-#1062 shape (`certify_destructive(true)` unconditionally `Ok`,
     /// `certify_destructive(false)` unconditionally `Ok`) — and whose own tripwire
-    /// (`assert!(!DESTRUCTIVE_CERTIFIED, …)`) fired exactly as designed the day
-    /// #1062 flipped the constant, which is what sent this test here to be
-    /// reconciled. See git blame / #1062 for that reading.
+    /// (`assert!(DESTRUCTIVE_CERTIFIED, …)`) fired exactly as designed the day
+    /// `tachi#1379` flipped the constant back, which is what sent this test here to
+    /// be reconciled. See git blame / #1379 for that reading.
     #[test]
-    fn certify_destructive_permits_both_once_certified() {
+    fn only_the_destructive_request_is_refused() {
         assert!(
             certify_destructive(false).is_ok(),
             "report-only was never gated by certification"
         );
         assert!(
-            certify_destructive(true).is_ok(),
-            "force must be permitted past this gate once DESTRUCTIVE_CERTIFIED is true — the \
-             gate's own logic only ever refuses `force && !DESTRUCTIVE_CERTIFIED`"
+            certify_destructive(true).is_err(),
+            "force must be refused while DESTRUCTIVE_CERTIFIED is false — the gate's own logic \
+             only ever refuses `force && !DESTRUCTIVE_CERTIFIED`"
         );
 
         // A tripwire on the compile-time constant, deliberately — the same shape the
-        // pre-#1062 test used, pointed the other way. `clippy` calls a constant
+        // post-#1062 test used, pointed the other way. `clippy` calls a constant
         // assertion pointless because a constant cannot surprise you at runtime; that is
         // exactly why this one is here. It states the premise the two assertions above
-        // depend on (they only mean "the gate passes both" while the seal stays open), so
-        // the day somebody REVOKES certification and flips `DESTRUCTIVE_CERTIFIED` back
-        // to `false`, this test goes red and names the seal — symmetric to the tripwire
-        // it replaces, which fired the day certification opened it.
+        // depend on (they only mean "the gate refuses force" while the seal is closed), so
+        // the day somebody RE-certifies the path and flips `DESTRUCTIVE_CERTIFIED` back
+        // to `true`, this test goes red and names the seal — symmetric to the tripwire
+        // it replaces, which fired the day certification was revoked.
         #[allow(clippy::assertions_on_constants)]
         {
             assert!(
-                DESTRUCTIVE_CERTIFIED,
-                "the day this flips back to false, `certify_destructive(true)` refuses again \
+                !DESTRUCTIVE_CERTIFIED,
+                "the day this flips back to true, `certify_destructive(true)` permits again \
                  and the assertion above must flip with it"
             );
         }
@@ -4906,17 +5079,17 @@ mod tests {
 
     /// The report says whether the knife is certified, so a reader cannot mistake
     /// `reclaimable_bytes` for bytes that were freed just because certification
-    /// flipped. Renamed from `the_report_declares_itself_uncertified`, which
-    /// pinned the pre-#1062 `false` reading — see git blame / #1062 for that
+    /// flipped. Renamed from `the_report_declares_itself_certified`, which
+    /// pinned the post-#1062 `true` reading — see git blame / #1062 for that
     /// shape.
     ///
     /// A DRY RUN (`force: false`) still books nothing and frees nothing even
-    /// though the destructive path is now certified — `destructive_certified` and
+    /// though the destructive path is re-sheathed — `destructive_certified` and
     /// `dry_run` are orthogonal fields, and this test's core property (a
     /// report-only run reports, it does not act) is unchanged by the flip; only
     /// the certification bit it now reads back is.
     #[test]
-    fn the_report_declares_itself_certified() {
+    fn the_report_declares_itself_uncertified() {
         let root = unique_temp_dir("tachi-reaper-declares");
         make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
@@ -4929,7 +5102,7 @@ mod tests {
         )
         .expect("a report-only run is never refused");
 
-        assert!(report.destructive_certified);
+        assert!(!report.destructive_certified);
         assert_eq!(report.blocking_defects.len(), BLOCKING_DEFECTS.len());
         assert_eq!(report.reclaimed_bytes, 0, "a report frees nothing");
         assert!(report.reclaimable_bytes > 0, "but it counts what is dead");
@@ -5210,7 +5383,7 @@ mod tests {
         let arrived = Arc::new(AtomicUsize::new(0));
         let rendezvous = {
             let arrived = Arc::clone(&arrived);
-            move |_path: &Path| {
+            move |_path: &Path, _ignored_holder| {
                 arrived.fetch_add(1, Ordering::SeqCst);
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while arrived.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
@@ -5304,7 +5477,7 @@ mod tests {
         }
     }
 
-    // ── #1062 kill-test matrix (S2d shape) — #[ignore]d, not yet executed ────
+    // ── #1062/#1379 kill-test matrix (S2d shape) — #[ignore]d, not yet re-run ────
     //
     // Everything above this line is the STANDING suite: it runs on every `cargo test`,
     // and every assertion in it is discriminating (red on the pre-#1062 code, green
@@ -5317,10 +5490,15 @@ mod tests {
     // `--force` — and PRINTS a receipt in the certification.rs shape when it passes. It
     // never writes one; that is a human/Oz decision, made by reading the printed output
     // and checking a TOML file in by hand (`crates/tachi-dispatch/certifications/
-    // codex-cli.toml` is the precedent for the shape). Until that happens,
-    // `DESTRUCTIVE_CERTIFIED` stays `false` — no code in this module reads the printed
-    // output back to flip it, on purpose: a receipt this crate wrote to itself would
-    // recreate exactly the self-grading S2d exists to rule out.
+    // codex-cli.toml` is the precedent for the shape). A receipt WAS checked in for
+    // 2026-07-17 (`crates/tachi-server/certifications/orphan-reaper.toml`), but
+    // `tachi#1379` showed that matrix never exercised the inode-reuse scenario that can
+    // defeat BUG 2's `(dev, ino)` fence. The 2026-07-17 receipt therefore no longer
+    // certifies the path; `DESTRUCTIVE_CERTIFIED` is `false` again and stays `false`
+    // until #1379's handle-pinning fix lands, an inode-reuse scenario is added below,
+    // and a fresh receipt is checked in by hand. No code in this module reads the
+    // printed output back to flip it, on purpose: a receipt this crate wrote to itself
+    // would recreate exactly the self-grading S2d exists to rule out.
     mod kill_tests {
         use super::*;
 
@@ -5416,7 +5594,7 @@ mod tests {
                 let target = make_target_dir(&root, "kt-swapped-target");
                 let mut store = open_store(&root);
                 let target_for_probe = target.clone();
-                let swapping_probe = move |_path: &Path| {
+                let swapping_probe = move |_path: &Path, _ignored_holder| {
                     std::fs::remove_dir_all(&target_for_probe).unwrap();
                     std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
                     std::fs::write(

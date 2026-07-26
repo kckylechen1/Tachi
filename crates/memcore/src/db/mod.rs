@@ -31,6 +31,7 @@ pub mod open_context;
 mod recall_cache;
 mod sandbox;
 mod schema;
+mod search_generation;
 #[cfg(feature = "admin")]
 pub mod session_claims;
 mod sqlite_extensions;
@@ -86,14 +87,15 @@ pub use gc_candidates::{
 pub use graph::{
     add_component_governance_edge, add_component_governance_edge_with_provenance, add_edge,
     add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
-    count_same_topic, get_contradiction_count, get_edges, get_superseded_ids, graph_expand,
-    invalidate_observation, list_observations_for_edge, remove_edge, EdgeObservation,
-    EdgeProvenance,
+    count_same_topic, get_contradiction_count, get_edges, get_edges_limited, get_superseded_ids,
+    graph_expand, graph_expand_limited, invalidate_observation, list_observations_for_edge,
+    remove_edge, EdgeObservation, EdgeProvenance,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{
-    hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome, hub_record_feedback,
-    hub_search, hub_set_active_version_route, hub_set_enabled, hub_set_review, hub_upsert,
+    hub_get, hub_get_active_version_route, hub_list, hub_list_limited, hub_record_call_outcome,
+    hub_record_feedback, hub_search, hub_search_limited, hub_set_active_version_route,
+    hub_set_enabled, hub_set_review, hub_upsert,
 };
 #[cfg(test)]
 pub(crate) use memory_crud::record_access;
@@ -106,14 +108,25 @@ pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
 pub use memory_crud::{
     archive_memory, archive_memory_if_revision, delete, delete_memories_symbolic_fts, fetch_by_ids,
     find_active_wiki_entry_by_path_or_topic, find_exact_path_text_id, get_access_times, get_all,
-    insert_if_absent, list_by_path, list_by_path_recent, list_wiki_duplicate_candidates,
-    normalize_for_write, record_enrichment_failure, release_event_claim,
-    restore_archived_if_revision, search_fts, search_symbolic_candidates, search_vec,
-    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
-    symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
-    update_enrichment_fields, update_with_revision, upsert, upsert_idless, IdlessUpsertResult,
-    InsertMemoryResult, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    list_by_path, list_by_path_recent, list_wiki_duplicate_candidates, normalize_for_write,
+    record_enrichment_failure, release_event_claim, restore_archived_if_revision, search_fts,
+    search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
+    set_keyword_enrichment_status, supersede_memory, symbolic_trigram_select_sql,
+    sync_memories_symbolic_fts, try_claim_event, update_enrichment_fields, update_with_revision,
+    IdlessUpsertResult, InsertMemoryResult, ValidatedReferenceMutation, MAX_REFERENCE_BYTES,
+    MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES,
+    MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
+    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
+/// Caller-transaction upsert seam for lifecycle-apply: runs the full upsert
+/// body (main row + FTS + vectors + idless semantics) inside a caller-owned
+/// `BEGIN IMMEDIATE` transaction. See `memory_crud::upsert_within_tx`.
+pub(crate) use memory_crud::{
+    insert_if_absent, upsert, upsert_idless, upsert_with_validated_reference_mutations_within_tx,
+    upsert_within_tx,
+};
+/// Public: see `open::ensure_reserved_reference_write_guard`'s doc comment.
+pub use open::ensure_reserved_reference_write_guard;
 /// Public: benchmarks/diagnostics outside this crate read the process-wide
 /// lock-retry backoff counter without needing a tracing subscriber (see
 /// `open::lock_retry_backoff_count`'s doc comment).
@@ -121,22 +134,27 @@ pub use open::lock_retry_backoff_count;
 /// Public: see `open::sqlite_error_is_locked`'s doc comment.
 pub use open::sqlite_error_is_locked;
 pub(crate) use open::{
-    acquire_startup_lock, configure_connection, open_read_only, open_read_write,
-    retry_memory_locked,
+    acquire_startup_lock, authorize_planner_maintenance, authorize_reserved_reference_write,
+    authorize_schema_migration, configure_connection, install_reserved_reference_authorizer,
+    open_read_only, open_read_write, register_reserved_reference_write_guard, retry_memory_locked,
+    validate_persistent_trigger_inventory, ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
 };
 pub use recall_cache::{
-    recall_cache_get, recall_cache_purge_stale, recall_cache_put, recall_cache_record_hit,
-    recall_cache_stats, RecallCacheHit, RecallCacheStats,
+    recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
+    recall_cache_record_hit, recall_cache_stats, RecallCacheHit, RecallCacheStats,
 };
 pub use sandbox::{
     check_sandbox_access, evaluate_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit,
     list_sandbox_exec_audit, list_sandbox_policies, list_sandbox_rules_for_role,
     path_matches_pattern, set_sandbox_policy, set_sandbox_rule,
 };
+#[cfg(test)]
+pub(crate) use schema::install_reserved_reference_guard;
 pub use schema::{init_schema, init_schema_with_label_mut};
+pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
@@ -149,8 +167,9 @@ pub use stats_gc::{archive_stale_memories, gc_tables, stats};
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,
     vault_get_key_health, vault_get_rotation, vault_insert_audit, vault_list_entries,
-    vault_list_entries_by_type, vault_list_key_health, vault_list_rotations, vault_set_config,
-    vault_set_rotation, vault_touch_entry, vault_upsert_entry, vault_upsert_key_health,
+    vault_list_entries_by_type, vault_list_entry_timestamps, vault_list_key_health,
+    vault_list_rotations, vault_set_config, vault_set_rotation, vault_touch_entry,
+    vault_upsert_entry, vault_upsert_key_health,
 };
 #[cfg(feature = "admin")]
 pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};

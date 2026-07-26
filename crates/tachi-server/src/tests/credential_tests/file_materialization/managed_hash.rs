@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_materialize_apply_records_managed_hash_metadata() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-materialize-managed-hash-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

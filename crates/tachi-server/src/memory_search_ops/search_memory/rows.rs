@@ -7,7 +7,10 @@ use super::filters::{
     lesson_candidate_recall_opted_in, project_filter_name, project_scope_allows_memory_with_config,
     training_recall_opted_in,
 };
-use super::store::{with_global_search, with_named_project_search, with_project_search};
+use super::store::{
+    pipeline_rule_read_sources, with_global_search, with_named_project_search, with_project_search,
+    PipelineRuleReadSource, RequestScopedNamedProjectReads,
+};
 use crate::memory_search_ops::auto_link::is_training_seed;
 use crate::memory_search_ops::search_helpers::{
     apply_guide_context_boosts, dedup_search_results, infer_search_project,
@@ -64,12 +67,13 @@ fn recall_quality_for_global(server: &MemoryServer) -> Option<serde_json::Value>
 fn recall_quality_for_project(
     server: &MemoryServer,
     params: &SearchMemoryParams,
+    named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
 ) -> Option<serde_json::Value> {
     if let Some(project_name) = params.project.as_deref() {
-        return server
-            .with_named_project_store_read(project_name, |store| {
-                Ok(recall_quality_from_store(store))
-            })
+        let read_quality = |store: &mut memcore::MemoryStore| Ok(recall_quality_from_store(store));
+        return named_project_reads
+            .and_then(|reads| reads.with_store(project_name, read_quality))
+            .unwrap_or_else(|| server.with_named_project_store_read(project_name, read_quality))
             .ok()
             .flatten();
     }
@@ -118,6 +122,53 @@ pub(super) fn query_with_context_symbols(query: &str, context_symbols: &[String]
     }
 }
 
+/// Whether production row search will ask the embedding provider to create a
+/// query representation. Such requests are not cache-safe before the provider
+/// call: success, lexical degradation, model, and provider state are not
+/// represented by the caller's parameters. Explicit query vectors and paths
+/// where no vector-capable store participates remain deterministic.
+pub(super) fn auto_query_embedding_would_run_with_named_project_reads(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+    mut named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
+) -> bool {
+    if params.query_vec.is_some()
+        || parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
+    {
+        return false;
+    }
+
+    let explicit_named_project_vec_available =
+        params.project.as_deref().is_some_and(|project_name| {
+            named_project_vec_available(server, project_name, named_project_reads.as_deref_mut())
+        });
+    let wiki_path_prefix = params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
+    let default_wiki_vec_available = params.project.is_none()
+        && wiki_path_prefix
+        && named_project_db_exists(server, "wiki")
+        && { named_project_vec_available(server, "wiki", named_project_reads) };
+
+    server.global_vec_available()
+        || server.project_vec_available()
+        || explicit_named_project_vec_available
+        || default_wiki_vec_available
+}
+
+fn named_project_vec_available(
+    server: &MemoryServer,
+    project_name: &str,
+    named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
+) -> bool {
+    let read_vec_available = |store: &mut memcore::MemoryStore| Ok(store.vec_available);
+    named_project_reads
+        .and_then(|reads| reads.with_store(project_name, read_vec_available))
+        .unwrap_or_else(|| server.with_named_project_store_read(project_name, read_vec_available))
+        .unwrap_or(false)
+}
+
 pub(crate) async fn search_memory_rows(
     server: &MemoryServer,
     params: SearchMemoryParams,
@@ -132,15 +183,42 @@ pub(crate) async fn search_memory_rows_with_access(
     project_only: bool,
     record_access: bool,
 ) -> Result<Vec<serde_json::Value>, String> {
-    search_memory_rows_with_recall_config(server, params, project_only, record_access, None).await
+    search_memory_rows_with_named_project_reads(
+        server,
+        params,
+        project_only,
+        record_access,
+        None,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn search_memory_rows_with_recall_config(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_only: bool,
+    record_access: bool,
+    recall_config: Option<&memcore::RecallConfig>,
+) -> Result<Vec<serde_json::Value>, String> {
+    search_memory_rows_with_named_project_reads(
+        server,
+        params,
+        project_only,
+        record_access,
+        recall_config,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn search_memory_rows_with_named_project_reads(
     server: &MemoryServer,
     mut params: SearchMemoryParams,
     project_only: bool,
     record_access: bool,
     recall_config: Option<&memcore::RecallConfig>,
+    mut named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
 ) -> Result<Vec<serde_json::Value>, String> {
     params.query = query_with_context_symbols(&params.query, &params.context_symbols);
     let wiki_path_prefix = params
@@ -154,22 +232,6 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     params.top_k = top_k;
     params.candidates_per_channel = params.normalized_candidates_per_channel();
 
-    let named_project_vec_available = if let Some(ref project_name) = params.project {
-        server
-            .with_named_project_store_read(project_name, |store| Ok(store.vec_available))
-            .unwrap_or(false)
-    } else {
-        false
-    };
-    let default_wiki_vec_available =
-        if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
-            server
-                .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
     let mut searched_default_wiki = false;
     let routing_config = server.routing_config().get();
 
@@ -178,13 +240,11 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     // readable `recall_quality.degraded = "lexical_only: <reason>"` marker.
     let mut embed_degraded: Option<String> = None;
 
-    if params.query_vec.is_none()
-        && !parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
-        && (server.global_vec_available()
-            || server.project_vec_available()
-            || named_project_vec_available
-            || default_wiki_vec_available)
-    {
+    if auto_query_embedding_would_run_with_named_project_reads(
+        server,
+        &params,
+        named_project_reads.as_deref_mut(),
+    ) {
         server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
         let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
         match server.llm.embed_voyage(&scrubbed_query, "query").await {
@@ -200,16 +260,15 @@ pub(crate) async fn search_memory_rows_with_recall_config(
         }
     }
 
-    let pipeline_enabled = server.pipeline_enabled;
-
     let mut combined_results: Vec<(memcore::SearchResult, DbScope)> = Vec::new();
 
     let mut searched_named = false;
     if let Some(ref project_name) = params.project {
-        if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name) {
+        if crate::memory_search_ops::search_helpers::named_project_db_exists(server, project_name) {
             let project_results = with_named_project_search(
                 server,
                 project_name,
+                named_project_reads.as_deref_mut(),
                 &params,
                 record_access,
                 recall_config,
@@ -230,17 +289,19 @@ pub(crate) async fn search_memory_rows_with_recall_config(
         } else if !project_only {
             return Err(format!(
                 "Project '{project_name}' not found (expected DB at {})",
-                crate::MemoryServer::resolve_named_project_db_path(project_name)
+                server
+                    .resolve_server_named_project_db_path(project_name)
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|e| e)
             ));
         }
     }
 
-    if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
+    if params.project.is_none() && wiki_path_prefix && named_project_db_exists(server, "wiki") {
         match with_named_project_search(
             server,
             "wiki",
+            named_project_reads.as_deref_mut(),
             &params,
             record_access,
             recall_config,
@@ -261,12 +322,15 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             let named_project =
                 crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
             if let Some(ref project_name) = named_project {
-                if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name)
-                    && (project_name != "wiki" || !searched_default_wiki)
+                if crate::memory_search_ops::search_helpers::named_project_db_exists(
+                    server,
+                    project_name,
+                ) && (project_name != "wiki" || !searched_default_wiki)
                 {
                     let workspace_path = server.project_db_path_buf();
-                    let named_path =
-                        crate::MemoryServer::resolve_named_project_db_path(project_name).ok();
+                    let named_path = server
+                        .resolve_server_named_project_db_path(project_name)
+                        .ok();
                     let skip_workspace = workspace_path
                         .as_deref()
                         .zip(named_path.as_deref())
@@ -289,6 +353,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                         let project_results = with_named_project_search(
                             server,
                             project_name,
+                            named_project_reads.as_deref_mut(),
                             &params,
                             record_access,
                             recall_config,
@@ -327,7 +392,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             );
             let inferred_db_path = inferred_project
                 .as_deref()
-                .and_then(|name| crate::MemoryServer::resolve_named_project_db_path(name).ok());
+                .and_then(|name| server.resolve_server_named_project_db_path(name).ok());
             let workspace_db_path = server.project_db_path_buf();
             let skip_workspace = inferred_db_path.is_some()
                 && workspace_db_path.as_ref() == inferred_db_path.as_ref();
@@ -349,6 +414,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                     match with_named_project_search(
                         server,
                         project_name,
+                        named_project_reads.as_deref_mut(),
                         &params,
                         record_access,
                         recall_config,
@@ -481,7 +547,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     let project_recall_quality = deduped_results
         .iter()
         .any(|(_, db_scope)| *db_scope == DbScope::Project)
-        .then(|| recall_quality_for_project(server, &params))
+        .then(|| recall_quality_for_project(server, &params, named_project_reads))
         .flatten();
 
     let mut output: Vec<serde_json::Value> = deduped_results
@@ -517,42 +583,41 @@ pub(crate) async fn search_memory_rows_with_recall_config(
         .collect();
     annotate_exact_token_matches(&mut output, &params.query);
 
-    if pipeline_enabled {
+    let pipeline_rule_sources = pipeline_rule_read_sources(server);
+    if !pipeline_rule_sources.is_empty() {
         let mut existing_ids: HashSet<String> = deduped_results
             .iter()
             .map(|(r, _)| r.entry.id.clone())
             .collect();
 
-        if server.has_project_db() {
-            let project_rules = server.with_project_store_read(|store| {
-                Ok(store
-                    .list_by_path("/behavior/global_rules", 50, false)
-                    .unwrap_or_default())
-            })?;
-            for rule in project_rules {
+        for source in pipeline_rule_sources {
+            let (rules, scope) = match source {
+                PipelineRuleReadSource::BoundProject => (
+                    server.with_project_store_read(|store| {
+                        Ok(store
+                            .list_by_path("/behavior/global_rules", 50, false)
+                            .unwrap_or_default())
+                    })?,
+                    DbScope::Project,
+                ),
+                PipelineRuleReadSource::Global => (
+                    server.with_global_store_read(|store| {
+                        Ok(store
+                            .list_by_path("/behavior/global_rules", 50, false)
+                            .unwrap_or_default())
+                    })?,
+                    DbScope::Global,
+                ),
+            };
+            for rule in rules {
                 if !is_active_global_rule(&rule) {
                     continue;
                 }
                 if !existing_ids.insert(rule.id.clone()) {
                     continue;
                 }
-                output.push(slim_l0_rule(&rule, DbScope::Project));
+                output.push(slim_l0_rule(&rule, scope));
             }
-        }
-
-        let global_rules = server.with_global_store_read(|store| {
-            Ok(store
-                .list_by_path("/behavior/global_rules", 50, false)
-                .unwrap_or_default())
-        })?;
-        for rule in global_rules {
-            if !is_active_global_rule(&rule) {
-                continue;
-            }
-            if !existing_ids.insert(rule.id.clone()) {
-                continue;
-            }
-            output.push(slim_l0_rule(&rule, DbScope::Global));
         }
     }
 

@@ -292,13 +292,29 @@ pub(crate) async fn apply_auto_contradiction_detection(
         Ok(count)
     };
 
-    if let Some(project_name) = named_project {
+    let result = if let Some(project_name) = named_project {
         server.with_named_project_store(project_name, persist_action)
     } else if let Some(db_path) = db_path {
         server.with_path_store(db_path, persist_action)
     } else {
         server.with_store_for_scope(target_db, persist_action)
+    };
+
+    // tachi#1435 slice 4 / #2059 codex round 2 (BUG fix): a confirmed
+    // contradiction closes the superseded memory's validity — it drops out
+    // of default search results the same way a fresh save adds a row, so a
+    // stale cached search result that still shows the old (now-superseded)
+    // row must not survive this commit either. Only invalidate on an actual
+    // persisted count > 0, sharing the same choke point + epoch bump as
+    // `save_memory`'s and the enrichment flush's invalidation.
+    if matches!(&result, Ok(count) if *count > 0) {
+        crate::memory_search_ops::invalidate_recall_cache_after_write(
+            server,
+            "contradiction_supersede",
+        );
     }
+
+    result
 }
 
 #[cfg(test)]

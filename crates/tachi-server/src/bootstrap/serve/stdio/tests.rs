@@ -1242,6 +1242,7 @@ fn stdio_proxy_accepts_matching_project_daemon() {
 
     assert!(proxy_can_preserve_project_context(
         &info,
+        Path::new("/tmp/tachi"),
         global,
         Some(project),
         None
@@ -1264,6 +1265,7 @@ fn stdio_proxy_rejects_matching_project_daemon_with_wrong_named_binding() {
     with_tachi_home(&tachi_home, || {
         assert!(!proxy_can_preserve_project_context(
             &info,
+            &tachi_home,
             &global,
             Some(&project),
             Some("Quant-test")
@@ -1280,6 +1282,7 @@ fn stdio_proxy_rejects_named_project_when_daemon_project_differs() {
 
     assert!(!proxy_can_preserve_project_context(
         &info,
+        Path::new("/tmp/tachi"),
         global,
         Some(requested_project),
         Some("Sigil-test")
@@ -1293,7 +1296,11 @@ fn stdio_proxy_rejects_project_daemon_for_no_project_client() {
     let info = daemon(Some(global), Some(project));
 
     assert!(!proxy_can_preserve_project_context(
-        &info, global, None, None
+        &info,
+        Path::new("/tmp/tachi"),
+        global,
+        None,
+        None
     ));
 }
 
@@ -1303,7 +1310,11 @@ fn stdio_proxy_accepts_global_only_daemon_for_no_project_client() {
     let info = daemon(Some(global), None);
 
     assert!(proxy_can_preserve_project_context(
-        &info, global, None, None
+        &info,
+        Path::new("/tmp/tachi"),
+        global,
+        None,
+        None
     ));
 }
 
@@ -1321,6 +1332,7 @@ fn stdio_proxy_accepts_global_only_daemon_for_bound_named_project_client() {
     with_tachi_home(&tachi_home, || {
         assert!(proxy_can_preserve_project_context(
             &info,
+            &tachi_home,
             &global,
             Some(&project),
             Some("Sigil-test")
@@ -1342,6 +1354,7 @@ fn stdio_proxy_rejects_unverified_named_project_binding() {
     with_tachi_home(&tachi_home, || {
         assert!(!proxy_can_preserve_project_context(
             &info,
+            &tachi_home,
             &global,
             Some(&project),
             Some("Sigil-test")

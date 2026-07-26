@@ -311,6 +311,49 @@ mod tests {
     }
 
     #[test]
+    fn format_briefing_surfaces_incomplete_empty_kanban() {
+        let empty = serde_json::json!([]);
+        let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
+        let kanban = serde_json::json!({
+            "count": 0,
+            "tasks": [],
+            "incomplete": true,
+            "limit_incomplete": true,
+            "warning": "board response is incomplete: invalid fallback entries were skipped",
+            "incomplete_reasons": ["run_fallback_invalid_entries"],
+            "run_fallback_incomplete": true,
+            "run_scan_invalid_entries": 1,
+        });
+        let markdown = format_briefing(
+            "q",
+            Some("sigil"),
+            &empty,
+            &empty,
+            &empty,
+            &health,
+            &empty,
+            &kanban,
+            &empty,
+            &[],
+            &serde_json::json!({"matches": []}),
+            &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
+            true,
+        );
+
+        assert!(markdown.contains("### Kanban"), "{markdown}");
+        assert!(markdown.contains("incomplete"), "{markdown}");
+        assert!(
+            markdown.contains("run\\_fallback\\_invalid\\_entries"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("invalid fallback entries were skipped"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
     fn format_briefing_renders_issue_freshness_section_when_nonempty() {
         let empty = serde_json::json!([]);
         let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});

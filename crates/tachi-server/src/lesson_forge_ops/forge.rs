@@ -40,6 +40,7 @@ use super::pilot::PilotManifestV1;
 /// `coverage_reflects_the_true_source_length_never_a_fixed_cap` test below.
 #[derive(Debug, Clone)]
 pub struct SourceBundle {
+    pub source_route: super::pilot::PilotSourceRouteV1,
     pub row_id: String,
     pub revision: i64,
     pub full_text: String,
@@ -64,6 +65,7 @@ pub enum ForgeError {
     /// manifest — the spend gate the frozen contract requires ("Record
     /// ids/revisions and selection reason before model spend").
     NotInFrozenManifest {
+        source_route: super::pilot::PilotSourceRouteV1,
         row_id: String,
         revision: i64,
     },
@@ -76,10 +78,15 @@ pub enum ForgeError {
 impl std::fmt::Display for ForgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotInFrozenManifest { row_id, revision } => write!(
+            Self::NotInFrozenManifest {
+                source_route,
+                row_id,
+                revision,
+            } => write!(
                 f,
-                "source row {row_id}@{revision} is not a member of the frozen pilot manifest \
-                 — refusing to spend a forge call on an unselected row"
+                "source row {}:{row_id}@{revision} is not a member of the frozen pilot manifest \
+                 — refusing to spend a forge call on an unselected row",
+                source_route.as_str()
             ),
             Self::EmptyDraftField(field) => {
                 write!(f, "forge draft field `{field}` is empty")
@@ -121,12 +128,14 @@ fn frame_field(value: &str) -> String {
 /// the SAME row share a group.
 fn group_seed(
     project: &str,
+    source_route: super::pilot::PilotSourceRouteV1,
     row_id: &str,
     kind: LessonCandidateKindV1,
     draft: &ForgeDraft,
 ) -> String {
     let mut seed = String::new();
     seed.push_str(&frame_field(project));
+    seed.push_str(&frame_field(source_route.as_str()));
     seed.push_str(&frame_field(row_id));
     seed.push_str(&frame_field(kind.as_str()));
     seed.push_str(&frame_field(&draft.situation));
@@ -138,11 +147,12 @@ fn group_seed(
 
 fn candidate_group_id(
     project: &str,
+    source_route: super::pilot::PilotSourceRouteV1,
     row_id: &str,
     kind: LessonCandidateKindV1,
     draft: &ForgeDraft,
 ) -> String {
-    hash16(&group_seed(project, row_id, kind, draft))
+    hash16(&group_seed(project, source_route, row_id, kind, draft))
 }
 
 fn candidate_id(
@@ -151,7 +161,7 @@ fn candidate_id(
     draft: &ForgeDraft,
     bundle: &SourceBundle,
 ) -> String {
-    let mut seed = group_seed(project, &bundle.row_id, kind, draft);
+    let mut seed = group_seed(project, bundle.source_route, &bundle.row_id, kind, draft);
     seed.push_str(&frame_field(&bundle.revision.to_string()));
     hash16(&seed)
 }
@@ -166,8 +176,9 @@ pub fn forge_lesson_candidate(
     draft: &ForgeDraft,
     engine_receipt: Option<LessonEngineReceiptV1>,
 ) -> Result<LessonCandidateV1, ForgeError> {
-    if !manifest.contains(&bundle.row_id, bundle.revision) {
+    if !manifest.contains(bundle.source_route, &bundle.row_id, bundle.revision) {
         return Err(ForgeError::NotInFrozenManifest {
+            source_route: bundle.source_route,
             row_id: bundle.row_id.clone(),
             revision: bundle.revision,
         });
@@ -188,7 +199,7 @@ pub fn forge_lesson_candidate(
         return Err(ForgeError::NoSourceRefs);
     }
 
-    let group_id = candidate_group_id(project, &bundle.row_id, kind, draft);
+    let group_id = candidate_group_id(project, bundle.source_route, &bundle.row_id, kind, draft);
     let id = candidate_id(project, kind, draft, bundle);
 
     Ok(LessonCandidateV1 {
@@ -200,7 +211,7 @@ pub fn forge_lesson_candidate(
         why: draft.why.clone(),
         how_to_apply: draft.how_to_apply.clone(),
         refs: bundle.refs.clone(),
-        source_row_id: bundle.row_id.clone(),
+        source_row_id: format!("{}:{}", bundle.source_route.as_str(), bundle.row_id),
         source_revision: bundle.revision.to_string(),
         coverage: LessonCoverageV1::full(bundle.full_text.len()),
         candidate_status: LessonCandidateStatusV1::Pending,
@@ -211,7 +222,9 @@ pub fn forge_lesson_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lesson_forge_ops::pilot::{freeze_pilot_manifest, PilotRowKindV1, PilotRowV1};
+    use crate::lesson_forge_ops::pilot::{
+        freeze_pilot_manifest, PilotRowKindV1, PilotRowV1, PilotSourceRouteV1, PilotStratumV1,
+    };
     use tachi_params::{EvidenceRelationV1, ImmutableRevisionV1, SourceKindV1};
 
     fn sample_ref() -> EvidenceRefV1 {
@@ -234,60 +247,47 @@ mod tests {
         }
     }
 
-    fn manifest_with_row(row_id: &str, revision: i64) -> PilotManifestV1 {
-        let mut rows = Vec::new();
-        for i in 0..49 {
-            rows.push(PilotRowV1 {
-                row_id: format!("filler-{i}"),
-                revision: 1,
-                kind: PilotRowKindV1::Narrative,
-                selection_reason: "filler".to_string(),
-                reference_decision: "filler decision".to_string(),
+    fn manifest_with_rows(entries: &[(&str, i64)]) -> PilotManifestV1 {
+        let mut rows: Vec<PilotRowV1> = (0..50)
+            .map(|index| PilotRowV1 {
+                source_route: if index < 25 {
+                    PilotSourceRouteV1::Antigravity
+                } else {
+                    PilotSourceRouteV1::Hapi
+                },
+                source_id: format!("filler-{index}"),
+                source_revision: 1,
+                content_sha256: format!("{index:064x}"),
+                capture_timestamp: "2026-07-24T00:00:00Z".to_string(),
+                kind: if index % 2 == 0 {
+                    PilotRowKindV1::Narrative
+                } else {
+                    PilotRowKindV1::StructuredControl
+                },
+                stratum: match index {
+                    0..=16 => PilotStratumV1::CorrectionAlignment,
+                    17..=33 => PilotStratumV1::VerificationRecovery,
+                    _ => PilotStratumV1::RoutingStoreProvenance,
+                },
+                selection_reason: "fixture reason".to_string(),
+                reference_decision: "fixture decision".to_string(),
                 target_kind: LessonCandidateKindV1::Precedent,
-            });
+            })
+            .collect();
+        for (index, (row_id, revision)) in entries.iter().enumerate() {
+            rows[index].source_id = (*row_id).to_string();
+            rows[index].source_revision = *revision;
         }
-        rows.push(PilotRowV1 {
-            row_id: row_id.to_string(),
-            revision,
-            kind: PilotRowKindV1::StructuredControl,
-            selection_reason: "control row for forge test".to_string(),
-            reference_decision: "reference decision".to_string(),
-            target_kind: LessonCandidateKindV1::Precedent,
-        });
         freeze_pilot_manifest(rows).expect("test manifest must freeze")
     }
 
-    /// Like `manifest_with_row`, but freezes every `(row_id, revision)` pair
-    /// given, padded to 50 with filler narrative rows — used by the
-    /// candidate-grouping tests below, which need more than one real row in
-    /// the same frozen manifest.
-    fn manifest_with_rows(entries: &[(&str, i64)]) -> PilotManifestV1 {
-        let mut rows = Vec::new();
-        for i in 0..(50 - entries.len()) {
-            rows.push(PilotRowV1 {
-                row_id: format!("filler-{i}"),
-                revision: 1,
-                kind: PilotRowKindV1::Narrative,
-                selection_reason: "filler".to_string(),
-                reference_decision: "filler decision".to_string(),
-                target_kind: LessonCandidateKindV1::Precedent,
-            });
-        }
-        for (row_id, revision) in entries {
-            rows.push(PilotRowV1 {
-                row_id: row_id.to_string(),
-                revision: *revision,
-                kind: PilotRowKindV1::StructuredControl,
-                selection_reason: "control row for forge test".to_string(),
-                reference_decision: "reference decision".to_string(),
-                target_kind: LessonCandidateKindV1::Precedent,
-            });
-        }
-        freeze_pilot_manifest(rows).expect("test manifest must freeze")
+    fn manifest_with_row(row_id: &str, revision: i64) -> PilotManifestV1 {
+        manifest_with_rows(&[(row_id, revision)])
     }
 
     fn valid_bundle() -> SourceBundle {
         SourceBundle {
+            source_route: PilotSourceRouteV1::Antigravity,
             row_id: "row-0".to_string(),
             revision: 1,
             full_text: "x".repeat(5000),
@@ -499,6 +499,66 @@ mod tests {
     }
 
     #[test]
+    fn same_id_revision_in_different_routes_has_distinct_identity_and_provenance() {
+        let mut rows: Vec<PilotRowV1> = (0..50)
+            .map(|index| PilotRowV1 {
+                source_route: if index < 25 {
+                    PilotSourceRouteV1::Antigravity
+                } else {
+                    PilotSourceRouteV1::Hapi
+                },
+                source_id: format!("route-filler-{index}"),
+                source_revision: 1,
+                content_sha256: format!("{index:064x}"),
+                capture_timestamp: "2026-07-24T00:00:00Z".to_string(),
+                kind: if index % 2 == 0 {
+                    PilotRowKindV1::Narrative
+                } else {
+                    PilotRowKindV1::StructuredControl
+                },
+                stratum: match index {
+                    0..=16 => PilotStratumV1::CorrectionAlignment,
+                    17..=33 => PilotStratumV1::VerificationRecovery,
+                    _ => PilotStratumV1::RoutingStoreProvenance,
+                },
+                selection_reason: "public-safe route fixture".to_string(),
+                reference_decision: "public-safe route decision".to_string(),
+                target_kind: LessonCandidateKindV1::Precedent,
+            })
+            .collect();
+        rows[0].source_id = "shared-id".to_string();
+        rows[25].source_id = "shared-id".to_string();
+        let manifest = freeze_pilot_manifest(rows).expect("cross-route ids are valid");
+        let mut antigravity = valid_bundle();
+        antigravity.row_id = "shared-id".to_string();
+        let mut hapi = antigravity.clone();
+        hapi.source_route = PilotSourceRouteV1::Hapi;
+
+        let first = forge_lesson_candidate(
+            "proj",
+            &manifest,
+            &antigravity,
+            LessonCandidateKindV1::Precedent,
+            &valid_draft(),
+            None,
+        )
+        .expect("antigravity forge");
+        let second = forge_lesson_candidate(
+            "proj",
+            &manifest,
+            &hapi,
+            LessonCandidateKindV1::Precedent,
+            &valid_draft(),
+            None,
+        )
+        .expect("hapi forge");
+
+        assert_ne!(first.candidate_id, second.candidate_id);
+        assert_ne!(first.candidate_group_id, second.candidate_group_id);
+        assert_ne!(first.source_row_id, second.source_row_id);
+    }
+
+    #[test]
     fn two_revisions_of_the_same_row_share_a_group_but_not_an_id() {
         // The other half of the same guarantee: `candidate_group_id` omits
         // ONLY `source_revision` (per `LessonCandidateV1`'s doc) — two
@@ -551,6 +611,7 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
+            ..Default::default()
         };
         let candidate = forge_lesson_candidate(
             "proj",

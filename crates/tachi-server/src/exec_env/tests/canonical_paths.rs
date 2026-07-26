@@ -57,7 +57,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+    let path = crate::utils::test_fixture_path(format!("{prefix}-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&path).expect("create test root");
     path
 }

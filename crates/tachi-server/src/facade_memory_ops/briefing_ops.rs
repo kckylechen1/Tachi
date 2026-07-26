@@ -55,15 +55,28 @@ fn compact_section_is_empty(value: &Value) -> bool {
         Value::Null => true,
         Value::Array(rows) => rows.is_empty(),
         Value::Object(map) => {
-            map.is_empty()
+            let carries_incomplete_evidence = map
+                .get("incomplete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
                 || map
-                    .get("count")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|count| count == 0)
+                    .get("warning")
+                    .and_then(Value::as_str)
+                    .is_some_and(|warning| !warning.is_empty())
                 || map
-                    .get("tasks")
+                    .get("incomplete_reasons")
                     .and_then(Value::as_array)
-                    .is_some_and(|tasks| tasks.is_empty())
+                    .is_some_and(|reasons| !reasons.is_empty());
+            !carries_incomplete_evidence
+                && (map.is_empty()
+                    || map
+                        .get("count")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|count| count == 0)
+                    || map
+                        .get("tasks")
+                        .and_then(Value::as_array)
+                        .is_some_and(|tasks| tasks.is_empty()))
         }
         _ => false,
     }
@@ -72,6 +85,27 @@ fn compact_section_is_empty(value: &Value) -> bool {
 fn insert_non_empty_compact_section(map: &mut Map<String, Value>, key: &str, value: Value) {
     if !compact_section_is_empty(&value) {
         map.insert(key.to_string(), value);
+    }
+}
+
+#[cfg(test)]
+mod compact_section_tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_empty_kanban_is_not_omitted_from_compact_briefing() {
+        let board = json!({
+            "count": 0,
+            "tasks": [],
+            "incomplete": true,
+            "warning": "bounded fallback is incomplete",
+            "incomplete_reasons": ["run_fallback_scan_truncated"],
+        });
+
+        assert!(
+            !compact_section_is_empty(&board),
+            "incomplete board evidence must survive compact briefing shaping"
+        );
     }
 }
 
@@ -287,6 +321,7 @@ pub(crate) async fn handle_memory_briefing(
         async {
             if let Some(project_name) = named_project.as_deref() {
                 crate::status_ops::list_recent_checkpoint_entries_for_project(
+                    server,
                     project_name,
                     checkpoint_cap,
                 )

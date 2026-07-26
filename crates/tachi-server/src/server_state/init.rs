@@ -23,6 +23,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::mpsc;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_BACKGROUND_WORKERS_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -39,7 +46,9 @@ fn embedded_mcp_facade() -> bool {
 fn background_workers_enabled() -> bool {
     #[cfg(test)]
     {
-        env_truthy("TACHI_TEST_ENABLE_BACKGROUND_WORKERS")
+        TEST_BACKGROUND_WORKERS_OVERRIDE
+            .get()
+            .unwrap_or_else(|| env_truthy("TACHI_TEST_ENABLE_BACKGROUND_WORKERS"))
     }
     #[cfg(not(test))]
     {
@@ -79,6 +88,20 @@ fn parse_auto_lock_secs() -> u64 {
 }
 
 impl MemoryServer {
+    #[cfg(test)]
+    pub(crate) fn new_with_background_workers_for_test(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        enabled: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        TEST_BACKGROUND_WORKERS_OVERRIDE.with(|override_value| {
+            let previous = override_value.replace(Some(enabled));
+            let result = Self::new(global_db_path, project_db_path);
+            override_value.set(previous);
+            result
+        })
+    }
+
     /// Fail-closed constructor: no schema-migration authority
     /// ([`MigrationAuthority::Deny`]). Every existing caller (tests, CLI tools
     /// that are not the deploy daemon) keeps this behavior — a fresh DB
@@ -96,6 +119,20 @@ impl MemoryServer {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_home_for_test(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        home_dir: PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_migration_authority_and_home(
+            global_db_path,
+            project_db_path,
+            MigrationAuthority::Deny,
+            home_dir,
+        )
+    }
+
     /// #1119: construct with an explicit schema-migration authority threaded
     /// down to every write-open point (global store, the initial project
     /// store, and the [`DbRuntime`] that owns *dynamic* project opens). Callers
@@ -106,6 +143,20 @@ impl MemoryServer {
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,
         schema_migration: MigrationAuthority,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_migration_authority_and_home(
+            global_db_path,
+            project_db_path,
+            schema_migration,
+            crate::path_utils::tachi_home(),
+        )
+    }
+
+    fn new_with_migration_authority_and_home(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        schema_migration: MigrationAuthority,
+        home_dir: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         ensure_db_parent(&global_db_path)?;
         if let Some(project_db_path) = project_db_path.as_ref() {
@@ -148,7 +199,7 @@ impl MemoryServer {
         // server's own `home_dir` field and the recorder bind to the SAME
         // resolution instead of each independently re-reading
         // TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME (#1096 leaf-2a).
-        let home_dir = Arc::new(crate::path_utils::tachi_home());
+        let home_dir = Arc::new(home_dir);
         let routing_config = Arc::new(RoutingConfigProvider::new((*home_dir).clone()));
         // #1261: `CLAUDE_POOL_MAX_CONCURRENT` env name is kept for back-compat
         // (existing deployments pin it); it now controls the LLM-call
@@ -201,6 +252,7 @@ impl MemoryServer {
             global_store: Arc::new(StdMutex::new(global_store)),
             global_read_pool,
             global_rw_gate: Arc::new(StdRwLock::new(())),
+            global_contention_recorder: Arc::new(std::sync::OnceLock::new()),
             global_db_path: Arc::new(global_db_path),
             global_vec_available,
             project_db: Arc::new(StdRwLock::new(project_db_state)),
@@ -287,6 +339,12 @@ impl MemoryServer {
             {
                 let foundry_server = server.clone();
                 tokio::spawn(run_foundry_maintenance_worker(foundry_server, foundry_rx));
+            }
+            {
+                let auto_ingest_server = server.clone();
+                tokio::spawn(crate::pipeline_ops::run_auto_ingest_replay_consumer(
+                    auto_ingest_server,
+                ));
             }
 
             // Replay pending foundry jobs from DB (survive process restart)

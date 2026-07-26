@@ -55,6 +55,12 @@ pub(crate) enum CallOutcome {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ConcurrencyCallReceipt {
     pub call_id: usize,
+    /// Transport boundary: all records in this harness are `transport` calls.
+    pub phase: &'static str,
+    /// Concrete action: `runtime_info`, `save`, or `search`.
+    pub action: &'static str,
+    /// The transport resource, distinct from the DbRuntime samples emitted below.
+    pub resource: &'static str,
     pub mode: &'static str,
     pub caller_idx: usize,
     /// Unix-epoch millis when the call started (local clock).
@@ -77,6 +83,11 @@ pub(crate) struct ConcurrencyCallReceipt {
     pub daemon_id: String,
     pub daemon_pid: Option<i64>,
     pub tool: &'static str,
+}
+
+struct RecordedDaemonCall {
+    receipt: ConcurrencyCallReceipt,
+    result: Result<rmcp::model::CallToolResult, DaemonCallError>,
 }
 
 /// Server-side observation for the receipt harness (tool-handler enter/exit).
@@ -314,16 +325,46 @@ fn runtime_info_params(call_id: usize) -> CallToolRequestParams {
     params
 }
 
-async fn record_runtime_info_call(
+fn tachi_memory_save_params(call_id: usize, text: &str) -> CallToolRequestParams {
+    let mut params = CallToolRequestParams::new("tachi_memory".to_string());
+    let mut args = serde_json::Map::new();
+    args.insert("action".into(), serde_json::json!("save"));
+    args.insert("text".into(), serde_json::json!(text));
+    args.insert(
+        "path".into(),
+        serde_json::json!(format!("/scratch/1255/{call_id}")),
+    );
+    args.insert("format".into(), serde_json::json!("json"));
+    args.insert("receipt_marker".into(), serde_json::json!(call_id as u64));
+    params.arguments = Some(args);
+    params
+}
+
+fn tachi_memory_search_params(call_id: usize, query: &str) -> CallToolRequestParams {
+    let mut params = CallToolRequestParams::new("tachi_memory".to_string());
+    let mut args = serde_json::Map::new();
+    args.insert("action".into(), serde_json::json!("search"));
+    args.insert("query".into(), serde_json::json!(query));
+    args.insert("scope".into(), serde_json::json!("all"));
+    args.insert("top_k".into(), serde_json::json!(10));
+    args.insert("format".into(), serde_json::json!("json"));
+    args.insert("receipt_marker".into(), serde_json::json!(call_id as u64));
+    params.arguments = Some(args);
+    params
+}
+
+async fn record_daemon_call(
     info: DaemonInfo,
     call_id: usize,
     mode: &'static str,
     caller_idx: usize,
     harness_epoch: Instant,
-) -> ConcurrencyCallReceipt {
+    params: CallToolRequestParams,
+    tool: &'static str,
+    action: &'static str,
+) -> RecordedDaemonCall {
     let start_unix_ms = unix_ms_now();
     let start_rel_ms = rel_ms(harness_epoch);
-    let params = runtime_info_params(call_id);
     let (result, phases) = call_daemon_tool_raw_with_phases(&info, params, None).await;
     let end_unix_ms = unix_ms_now();
     let end_rel_ms = rel_ms(harness_epoch);
@@ -340,24 +381,162 @@ async fn record_runtime_info_call(
         total_ms,
     } = phases;
 
-    ConcurrencyCallReceipt {
+    RecordedDaemonCall {
+        receipt: ConcurrencyCallReceipt {
+            call_id,
+            phase: "transport",
+            action,
+            resource: "daemon_mcp",
+            mode,
+            caller_idx,
+            start_unix_ms,
+            end_unix_ms,
+            start_rel_ms,
+            end_rel_ms,
+            duration_ms: total_ms.max(end_rel_ms.saturating_sub(start_rel_ms)),
+            handshake_ms,
+            call_ms,
+            outcome,
+            message_class,
+            daemon_endpoint: sanitize_daemon_endpoint(&info.url),
+            daemon_id: opaque_daemon_id(&info.url),
+            daemon_pid: info.pid,
+            tool,
+        },
+        result,
+    }
+}
+
+async fn record_runtime_info_call(
+    info: DaemonInfo,
+    call_id: usize,
+    mode: &'static str,
+    caller_idx: usize,
+    harness_epoch: Instant,
+) -> ConcurrencyCallReceipt {
+    record_daemon_call(
+        info,
         call_id,
         mode,
         caller_idx,
-        start_unix_ms,
-        end_unix_ms,
-        start_rel_ms,
-        end_rel_ms,
-        duration_ms: total_ms.max(end_rel_ms.saturating_sub(start_rel_ms)),
-        handshake_ms,
-        call_ms,
-        outcome,
-        message_class,
-        daemon_endpoint: sanitize_daemon_endpoint(&info.url),
-        daemon_id: opaque_daemon_id(&info.url),
-        daemon_pid: info.pid,
-        tool: "runtime_info",
+        harness_epoch,
+        runtime_info_params(call_id),
+        "runtime_info",
+        "runtime_info",
+    )
+    .await
+    .receipt
+}
+
+fn response_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
+    result
+        .content
+        .iter()
+        .find_map(|content| match &content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+}
+
+fn search_result_rows_contain(value: &serde_json::Value, expected_text: &str) -> bool {
+    value
+        .get("sections")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|section| section.get("rows").and_then(serde_json::Value::as_array))
+        .flatten()
+        .any(|row| {
+            ["summary", "excerpt", "text"].into_iter().any(|field| {
+                row.get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value.contains(expected_text))
+            })
+        })
+}
+
+fn assert_tachi_memory_response(
+    result: &Result<rmcp::model::CallToolResult, DaemonCallError>,
+    action: &str,
+    expected_text: Option<&str>,
+) {
+    let result = result
+        .as_ref()
+        .unwrap_or_else(|err| panic!("tachi_memory(action={action}) transport failed: {err:?}"));
+    assert!(
+        !result.is_error.unwrap_or(false),
+        "tachi_memory(action={action}) returned a tool error: {result:?}"
+    );
+    let text = response_text(result).unwrap_or_else(|| {
+        panic!("tachi_memory(action={action}) returned no text response: {result:?}")
+    });
+    let value: serde_json::Value = serde_json::from_str(text).unwrap_or_else(|err| {
+        panic!("tachi_memory(action={action}) must honor format=json; body={text:?}; err={err}")
+    });
+    let expected_status = match action {
+        "save" => "saved",
+        "search" => "completed",
+        _ => panic!("unsupported tachi_memory action in receipt harness: {action}"),
+    };
+    assert_eq!(
+        value.get("status").and_then(serde_json::Value::as_str),
+        Some(expected_status),
+        "tachi_memory(action={action}) must report status={expected_status}: {value}"
+    );
+    if let Some(expected_text) = expected_text {
+        assert!(
+            search_result_rows_contain(&value, expected_text),
+            "tachi_memory(action={action}) must return the saved unique text in an actual \
+             result row's summary/excerpt/text field; expected={expected_text:?} body={text:?}"
+        );
     }
+}
+
+async fn record_tachi_memory_save(
+    info: DaemonInfo,
+    call_id: usize,
+    mode: &'static str,
+    caller_idx: usize,
+    harness_epoch: Instant,
+    text: String,
+) -> ConcurrencyCallReceipt {
+    let call = record_daemon_call(
+        info,
+        call_id,
+        mode,
+        caller_idx,
+        harness_epoch,
+        tachi_memory_save_params(call_id, &text),
+        "tachi_memory",
+        "save",
+    )
+    .await;
+    assert_tachi_memory_response(&call.result, "save", None);
+    call.receipt
+}
+
+async fn record_tachi_memory_search(
+    info: DaemonInfo,
+    call_id: usize,
+    mode: &'static str,
+    caller_idx: usize,
+    harness_epoch: Instant,
+    query: String,
+    expected_text: String,
+) -> ConcurrencyCallReceipt {
+    let call = record_daemon_call(
+        info,
+        call_id,
+        mode,
+        caller_idx,
+        harness_epoch,
+        tachi_memory_search_params(call_id, &query),
+        "tachi_memory",
+        "search",
+    )
+    .await;
+    assert_tachi_memory_response(&call.result, "search", Some(&expected_text));
+    call.receipt
 }
 
 fn emit_receipt_jsonl(receipts: &[ConcurrencyCallReceipt]) {
@@ -366,6 +545,95 @@ fn emit_receipt_jsonl(receipts: &[ConcurrencyCallReceipt]) {
         // Machine-readable receipt stream for harness consumers / CI logs.
         println!("1255_concurrency_receipt {line}");
     }
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn emit_db_contention_receipt_jsonl(
+    load_phase: &str,
+    batch: &memory_server_runtime::DbContentionBatch,
+) {
+    let status = serde_json::json!({
+        "load_phase": load_phase,
+        "sample_count": batch.receipts.len(),
+        "dropped_samples": batch.dropped_samples,
+    });
+    println!("1255_db_contention_collection {status}");
+    for receipt in &batch.receipts {
+        let line = serde_json::json!({
+            "load_phase": load_phase,
+            "phase": receipt.phase,
+            "action": receipt.action,
+            "resource": receipt.resource,
+            "mode": receipt.mode,
+            "gate": receipt.gate,
+            "gate_wait_us": duration_us(receipt.gate_wait),
+            "resource_wait_us": duration_us(receipt.resource_wait),
+            "resource_hold_us": duration_us(receipt.resource_hold),
+            "gate_hold_us": duration_us(receipt.gate_hold),
+            "completed": receipt.completed,
+        });
+        println!("1255_db_contention_receipt {line}");
+    }
+}
+
+fn assert_db_contention_phase(
+    load_phase: &str,
+    batch: &memory_server_runtime::DbContentionBatch,
+    minimum_writes: usize,
+    minimum_reads: usize,
+) {
+    assert_eq!(
+        batch.dropped_samples,
+        0,
+        "{load_phase} DB contention collection overflowed; retained={} dropped={}",
+        batch.receipts.len(),
+        batch.dropped_samples
+    );
+    let valid_write_count = batch
+        .receipts
+        .iter()
+        .filter(|sample| {
+            sample.phase == "db_runtime"
+                && sample.action == "write"
+                && sample.resource == "global_store"
+                && sample.mode == "exclusive"
+                && sample.gate == "global_rw_gate"
+                && sample.resource_hold > Duration::ZERO
+                && sample.gate_hold >= sample.resource_hold
+                && sample.completed
+        })
+        .count();
+    let valid_read_count = batch
+        .receipts
+        .iter()
+        .filter(|sample| {
+            sample.phase == "db_runtime"
+                && sample.action == "read"
+                && sample.resource == "global_read_pool"
+                && sample.mode == "shared"
+                && sample.gate == "global_rw_gate"
+                && sample.resource_hold > Duration::ZERO
+                && sample.gate_hold >= sample.resource_hold
+                && sample.completed
+        })
+        .count();
+    assert!(
+        valid_write_count >= minimum_writes,
+        "{load_phase} real tachi_memory saves must independently produce at least \
+         {minimum_writes} complete global_store write samples; valid={valid_write_count} \
+         samples={:?}",
+        batch.receipts
+    );
+    assert!(
+        valid_read_count >= minimum_reads,
+        "{load_phase} real tachi_memory searches must independently produce at least \
+         {minimum_reads} complete global_read_pool read samples; valid={valid_read_count} \
+         samples={:?}",
+        batch.receipts
+    );
 }
 
 async fn spawn_receipt_http_daemon(
@@ -502,6 +770,104 @@ async fn run_concurrent_burst(
     out
 }
 
+async fn run_serial_memory_calls(
+    info: &DaemonInfo,
+    harness_epoch: Instant,
+    next_id: &mut usize,
+) -> Vec<ConcurrencyCallReceipt> {
+    let save_id = *next_id;
+    *next_id += 1;
+    let saved_text = format!("1255 serial transport memory {save_id}");
+    let save = record_tachi_memory_save(
+        info.clone(),
+        save_id,
+        "serial",
+        0,
+        harness_epoch,
+        saved_text.clone(),
+    )
+    .await;
+
+    let search_id = *next_id;
+    *next_id += 1;
+    let search = record_tachi_memory_search(
+        info.clone(),
+        search_id,
+        "serial",
+        0,
+        harness_epoch,
+        saved_text.clone(),
+        saved_text.clone(),
+    )
+    .await;
+    vec![save, search]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ConcurrentMemoryPairPlan {
+    save_text: String,
+    search_query: String,
+    expected_text: String,
+}
+
+fn concurrent_memory_pair_plan(save_id: usize) -> ConcurrentMemoryPairPlan {
+    let save_text = format!("1255 concurrent transport memory {save_id}");
+    ConcurrentMemoryPairPlan {
+        search_query: save_text.clone(),
+        expected_text: save_text.clone(),
+        save_text,
+    }
+}
+
+async fn run_concurrent_memory_calls(
+    info: &DaemonInfo,
+    callers: usize,
+    harness_epoch: Instant,
+    next_id: &mut usize,
+) -> Vec<ConcurrencyCallReceipt> {
+    let mut handles = Vec::with_capacity(callers);
+    for caller_idx in 0..callers {
+        let save_id = *next_id;
+        *next_id += 1;
+        let search_id = *next_id;
+        *next_id += 1;
+        let pair_info = info.clone();
+        let plan = concurrent_memory_pair_plan(save_id);
+        handles.push(tokio::spawn(async move {
+            let save = record_tachi_memory_save(
+                pair_info.clone(),
+                save_id,
+                "concurrent",
+                caller_idx,
+                harness_epoch,
+                plan.save_text,
+            )
+            .await;
+            let search = record_tachi_memory_search(
+                pair_info,
+                search_id,
+                "concurrent",
+                caller_idx,
+                harness_epoch,
+                plan.search_query,
+                plan.expected_text,
+            )
+            .await;
+            [save, search]
+        }));
+    }
+    let mut out = Vec::with_capacity(callers * 2);
+    for handle in handles {
+        out.extend(
+            handle
+                .await
+                .expect("join concurrent tachi_memory receipt task"),
+        );
+    }
+    out.sort_by_key(|receipt| receipt.call_id);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,6 +974,9 @@ mod tests {
     fn receipt_json_shape_has_required_fields_without_secrets() {
         let receipt = ConcurrencyCallReceipt {
             call_id: 1,
+            phase: "transport",
+            action: "runtime_info",
+            resource: "daemon_mcp",
             mode: "serial",
             caller_idx: 0,
             start_unix_ms: 1_000,
@@ -626,6 +995,9 @@ mod tests {
         };
         let value = serde_json::to_value(&receipt).expect("serialize");
         assert_eq!(value["call_id"], json!(1));
+        assert_eq!(value["phase"], json!("transport"));
+        assert_eq!(value["action"], json!("runtime_info"));
+        assert_eq!(value["resource"], json!("daemon_mcp"));
         assert_eq!(value["mode"], json!("serial"));
         assert_eq!(value["outcome"], json!("ok"));
         assert_eq!(value["handshake_ms"], json!(30));
@@ -645,6 +1017,9 @@ mod tests {
     fn concurrent_overlap_detector_requires_real_interval_overlap() {
         let a = ConcurrencyCallReceipt {
             call_id: 0,
+            phase: "transport",
+            action: "runtime_info",
+            resource: "daemon_mcp",
             mode: "concurrent",
             caller_idx: 0,
             start_unix_ms: 0,
@@ -673,6 +1048,44 @@ mod tests {
         assert!(!concurrent_receipts_overlap(&[a, b]));
     }
 
+    #[test]
+    fn search_result_discrimination_rejects_echoes_without_result_rows() {
+        let expected = "1255 saved memory needle";
+        let echoed_only = json!({
+            "status": "completed",
+            "query": expected,
+            "arguments": { "query": expected },
+            "sections": [{ "name": "Memory", "rows": [] }],
+        });
+        assert!(
+            !search_result_rows_contain(&echoed_only, expected),
+            "an echoed query or argument must not satisfy search-result discrimination"
+        );
+
+        let returned_row = json!({
+            "status": "completed",
+            "query": expected,
+            "sections": [{
+                "name": "Memory",
+                "rows": [{ "excerpt": expected }],
+            }],
+        });
+        assert!(search_result_rows_contain(&returned_row, expected));
+    }
+
+    #[test]
+    fn concurrent_memory_pair_searches_for_its_own_saved_text() {
+        let plan = concurrent_memory_pair_plan(12);
+        assert_eq!(
+            plan.search_query, plan.save_text,
+            "a concurrent search query must target its corresponding concurrent save"
+        );
+        assert_eq!(
+            plan.expected_text, plan.save_text,
+            "structured-row discrimination must expect the corresponding concurrent save"
+        );
+    }
+
     /// Live transport-path harness: serial baseline + concurrent burst via
     /// `call_daemon_tool_raw_with_phases` against an in-process test daemon
     /// with server-side call observation.
@@ -682,6 +1095,20 @@ mod tests {
     /// cargo test -p tachi-server --lib concurrency_receipt
     /// ```
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    // `global_test_lock()` is a process-wide `std::sync::Mutex<()>` (see
+    // `utils::locks`) that serializes every test mutating global env. This test
+    // sets a temp `TACHI_HOME` (plus clears `SIGIL_HOME`/`TACHI_APP_HOME`) and
+    // must keep that env window stable across `.await`, because
+    // `MemoryServer::new`, `spawn_receipt_http_daemon`, and the serial/burst runs
+    // all re-resolve `path_utils::tachi_home()` from that env while awaiting. The
+    // guard is acquired exactly once at the top of the test and is the ONLY
+    // `global_test_lock()` acquisition on this async path — neither
+    // `ensure_tls_provider` nor `spawn_receipt_http_daemon` (nor the axum task it
+    // spawns) re-acquires it — so holding it across await cannot self-deadlock.
+    // Concurrent tests merely block on `.lock()` until this test's env window
+    // closes, which is exactly the intended serialization; the lint fires on the
+    // held-across-await guard but the pattern is deliberate and safe here.
+    #[allow(clippy::await_holding_lock)]
     async fn transport_concurrency_receipt_serial_and_burst() {
         crate::ensure_tls_provider();
 
@@ -715,6 +1142,9 @@ mod tests {
             "LlmCallRecorder must create foundry-runs under the temp home; path={}",
             foundry_runs.display()
         );
+        // #1255 opt-in: every clone servicing this in-process daemon shares
+        // this collector, while normal production runtimes leave it disabled.
+        let db_contention = server.db.enable_global_contention_receipts();
 
         // 40ms enter-hold widens the overlap window so concurrent sessions can
         // prove a real in-flight high-water mark ≥ 2 on the tool handler.
@@ -731,6 +1161,8 @@ mod tests {
         const SERIAL_N: usize = 4;
         const CALLERS: usize = 2;
         const CALLS_PER_CALLER: usize = 3;
+        const MEMORY_SERIAL_CALLS: usize = 2;
+        const MEMORY_CALLS_PER_CALLER: usize = 2;
 
         let mut serial = run_serial_baseline(&daemon, SERIAL_N, harness_epoch, &mut next_id).await;
         wait_until_server_saw(&observer, SERIAL_N as u64, "serial").await;
@@ -739,6 +1171,23 @@ mod tests {
             SERIAL_N as u64,
             "server-observed serial tool calls must equal client-emitted receipts"
         );
+
+        let mut serial_memory = run_serial_memory_calls(&daemon, harness_epoch, &mut next_id).await;
+        let serial_expected = SERIAL_N + MEMORY_SERIAL_CALLS;
+        wait_until_server_saw(
+            &observer,
+            serial_expected as u64,
+            "serial runtime+tachi_memory",
+        )
+        .await;
+        assert_eq!(
+            observer.tool_call_count(),
+            serial_expected as u64,
+            "serial tachi_memory save/search must be observed by the same transport daemon"
+        );
+        let serial_db_samples = db_contention.drain();
+        assert_db_contention_phase("serial", &serial_db_samples, 1, 1);
+        emit_db_contention_receipt_jsonl("serial", &serial_db_samples);
 
         let max_after_serial = observer.max_in_flight();
         let mut concurrent = run_concurrent_burst(
@@ -750,11 +1199,20 @@ mod tests {
         )
         .await;
 
-        let expected = SERIAL_N + CALLERS * CALLS_PER_CALLER;
+        let runtime_expected = serial_expected + CALLERS * CALLS_PER_CALLER;
+        wait_until_server_saw(&observer, runtime_expected as u64, "runtime burst").await;
+
+        let mut concurrent_memory =
+            run_concurrent_memory_calls(&daemon, CALLERS, harness_epoch, &mut next_id).await;
+
+        let expected = runtime_expected + CALLERS * MEMORY_CALLS_PER_CALLER;
         wait_until_server_saw(&observer, expected as u64, "total").await;
+        let concurrent_db_samples = db_contention.drain();
+        assert_db_contention_phase("concurrent", &concurrent_db_samples, CALLERS, CALLERS);
+        emit_db_contention_receipt_jsonl("concurrent", &concurrent_db_samples);
 
         assert_eq!(
-            serial.len() + concurrent.len(),
+            serial.len() + serial_memory.len() + concurrent.len() + concurrent_memory.len(),
             expected,
             "harness must record every call"
         );
@@ -770,7 +1228,12 @@ mod tests {
             expected,
             "server must see every unique receipt_marker; markers={markers:?}"
         );
-        for receipt in serial.iter().chain(concurrent.iter()) {
+        for receipt in serial
+            .iter()
+            .chain(serial_memory.iter())
+            .chain(concurrent.iter())
+            .chain(concurrent_memory.iter())
+        {
             assert!(
                 markers.contains(&(receipt.call_id as u64)),
                 "missing server marker for call_id={}",
@@ -792,6 +1255,11 @@ mod tests {
             concurrent_receipts_overlap(&concurrent),
             "concurrent mode must produce overlapping wall times; receipts={concurrent:?}"
         );
+        assert!(
+            concurrent_receipts_overlap(&concurrent_memory),
+            "concurrent tachi_memory save/search calls must overlap at the transport boundary; \
+             receipts={concurrent_memory:?}"
+        );
 
         let max_in_flight = observer.max_in_flight();
         assert!(
@@ -804,7 +1272,14 @@ mod tests {
         let expected_endpoint = sanitize_daemon_endpoint(&daemon.url);
         let expected_daemon_id = opaque_daemon_id(&daemon.url);
         let mut seen_call_ids = HashSet::new();
-        for receipt in serial.iter().chain(concurrent.iter()) {
+        let mut save_calls = 0usize;
+        let mut search_calls = 0usize;
+        for receipt in serial
+            .iter()
+            .chain(serial_memory.iter())
+            .chain(concurrent.iter())
+            .chain(concurrent_memory.iter())
+        {
             // Pin the full receipt shape (review non-blocking #1338).
             assert!(
                 seen_call_ids.insert(receipt.call_id),
@@ -816,7 +1291,14 @@ mod tests {
                 "mode must be serial|concurrent: {:?}",
                 receipt.mode
             );
-            assert_eq!(receipt.tool, "runtime_info");
+            assert_eq!(receipt.phase, "transport");
+            assert_eq!(receipt.resource, "daemon_mcp");
+            match (receipt.tool, receipt.action) {
+                ("runtime_info", "runtime_info") => {}
+                ("tachi_memory", "save") => save_calls += 1,
+                ("tachi_memory", "search") => search_calls += 1,
+                other => panic!("unexpected #1255 transport receipt labels: {other:?}"),
+            }
             assert_eq!(receipt.daemon_endpoint, expected_endpoint);
             assert_eq!(receipt.daemon_id, expected_daemon_id);
             assert_eq!(receipt.daemon_id.len(), 16);
@@ -842,10 +1324,22 @@ mod tests {
             }
         }
         assert_eq!(seen_call_ids.len(), expected);
+        assert_eq!(
+            save_calls,
+            1 + CALLERS,
+            "one serial and one-per-caller concurrent real tachi_memory save must complete"
+        );
+        assert_eq!(
+            search_calls,
+            1 + CALLERS,
+            "one serial and one-per-caller concurrent real tachi_memory search must complete"
+        );
 
         let mut all = Vec::with_capacity(expected);
         all.append(&mut serial);
+        all.append(&mut serial_memory);
         all.append(&mut concurrent);
+        all.append(&mut concurrent_memory);
         emit_receipt_jsonl(&all);
 
         let timeout_count = all

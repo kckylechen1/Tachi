@@ -18,7 +18,7 @@ impl std::ops::Deref for RunsRootGuard {
 
 fn temp_runs_root() -> RunsRootGuard {
     let guard = runs_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let d = std::env::temp_dir().join(format!(
+    let d = crate::utils::test_fixture_path(format!(
         "tachi-shell-test-{}",
         Utc::now().format("%Y%m%dT%H%M%S%fZ")
     ));

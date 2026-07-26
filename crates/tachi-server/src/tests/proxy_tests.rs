@@ -9,7 +9,7 @@ use memory_server_runtime::AgentProfile;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::json;
 
-use super::{make_server, make_test_tool};
+use super::{call_tool_on_server, make_server, make_test_tool};
 
 mod connect;
 mod exposure;

@@ -1,9 +1,9 @@
 //! Argon2id key derivation + key/string zeroization.
 //!
 //! Moved verbatim from `tachi-server/src/vault_crypto.rs` (tachi#1080 v1).
-//! `derive`/`active_kdf_params_json` keep the exact compile-time-constant
-//! behavior every existing caller relies on (zero call-site changes on
-//! adoption). The versioned, storage-driven counterpart lives in
+//! `derive`/`active_kdf_params_json` always use the production profile. The
+//! feature-gated test-support helpers make the lightweight profile an explicit
+//! test-fixture choice. The versioned, storage-driven counterpart lives in
 //! [`crate::kdf_params`] and is new, additive API — see that module for why
 //! `derive` itself is intentionally left alone.
 
@@ -12,34 +12,18 @@ use rand::RngCore;
 
 use crate::kdf_params::{KdfParams, KdfParamsError};
 
-// The weak (lightweight) test profile must NEVER be reachable from a
-// release build, no matter what feature flags a downstream consumer or a
-// `--all-features` sweep turns on. `feature = "test-support"` alone is not
-// enough of a guard: `cargo build --release --all-features` (or a
-// downstream crate mistakenly enabling the feature in its own
-// `[dependencies]`, not just `[dev-dependencies]`) would flip it on in a
-// real release binary. Gating on `debug_assertions` too closes that: Cargo
-// disables `debug_assertions` in `--release` profiles by default, so the
-// weak branch is compiled out of every release build regardless of which
-// features are active — `test-support` only has an effect in a `dev`
-// (debug_assertions-on) build, which is the only place it's meant to help
-// (a downstream crate's own `cargo test`).
-#[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
 const PRODUCTION_KDF_MEMORY_COST: u32 = 65_536;
-#[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
 const PRODUCTION_KDF_TIME_COST: u32 = 3;
-#[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
 const PRODUCTION_KDF_PARALLELISM: u32 = 4;
-#[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
 const PRODUCTION_KDF_PARAMS_JSON: &str = r#"{"m":65536,"t":3,"p":4}"#;
 
-#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+#[cfg(feature = "test-support")]
 const TEST_KDF_MEMORY_COST: u32 = 64;
-#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+#[cfg(feature = "test-support")]
 const TEST_KDF_TIME_COST: u32 = 1;
-#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+#[cfg(feature = "test-support")]
 const TEST_KDF_PARALLELISM: u32 = 1;
-#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+#[cfg(feature = "test-support")]
 const TEST_KDF_PARAMS_JSON: &str = r#"{"m":64,"t":1,"p":1}"#;
 
 #[derive(Clone, Copy)]
@@ -50,21 +34,10 @@ struct VaultKdfParams {
 }
 
 fn active_kdf_params() -> VaultKdfParams {
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-    {
-        VaultKdfParams {
-            memory_cost: TEST_KDF_MEMORY_COST,
-            time_cost: TEST_KDF_TIME_COST,
-            parallelism: TEST_KDF_PARALLELISM,
-        }
-    }
-    #[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
-    {
-        VaultKdfParams {
-            memory_cost: PRODUCTION_KDF_MEMORY_COST,
-            time_cost: PRODUCTION_KDF_TIME_COST,
-            parallelism: PRODUCTION_KDF_PARALLELISM,
-        }
+    VaultKdfParams {
+        memory_cost: PRODUCTION_KDF_MEMORY_COST,
+        time_cost: PRODUCTION_KDF_TIME_COST,
+        parallelism: PRODUCTION_KDF_PARALLELISM,
     }
 }
 
@@ -73,14 +46,7 @@ fn active_kdf_params() -> VaultKdfParams {
 /// never read it back at unlock — see [`crate::kdf_params`] for the
 /// versioned type that closes that gap for new call sites.
 pub fn active_kdf_params_json() -> &'static str {
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-    {
-        TEST_KDF_PARAMS_JSON
-    }
-    #[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
-    {
-        PRODUCTION_KDF_PARAMS_JSON
-    }
+    PRODUCTION_KDF_PARAMS_JSON
 }
 
 /// Derive a 32-byte encryption key from password + salt using Argon2id,
@@ -122,9 +88,7 @@ impl std::fmt::Debug for DerivedVaultKey {
 }
 
 impl DerivedVaultKey {
-    /// Derive using the compile-time production/test Argon2 profile
-    /// (`active_kdf_params_json()`), exactly as every existing caller does
-    /// today. Unchanged on adoption.
+    /// Derive using the compile-time production Argon2 profile.
     pub fn derive(password: &str, salt: &[u8]) -> Result<Self, String> {
         let mut bytes = [0u8; 32];
         derive_key_into(password, salt, &mut bytes)?;
@@ -158,6 +122,30 @@ impl DerivedVaultKey {
 
     pub fn bytes(&self) -> &[u8; 32] {
         &self.bytes
+    }
+}
+
+/// Explicit lightweight KDF helpers for test fixtures. Production APIs never
+/// select this profile implicitly, even when this feature is enabled.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::*;
+
+    /// The lightweight `vault_config.kdf_params` JSON used by a test fixture.
+    pub fn cheap_kdf_params_json() -> &'static str {
+        TEST_KDF_PARAMS_JSON
+    }
+
+    /// Derive a fixture key with the lightweight Argon2id profile.
+    pub fn derive_cheap(password: &str, salt: &[u8]) -> Result<DerivedVaultKey, String> {
+        let kdf = VaultKdfParams {
+            memory_cost: TEST_KDF_MEMORY_COST,
+            time_cost: TEST_KDF_TIME_COST,
+            parallelism: TEST_KDF_PARALLELISM,
+        };
+        let mut bytes = [0u8; 32];
+        derive_key_into_with(password, salt, kdf, &mut bytes)?;
+        Ok(DerivedVaultKey { bytes })
     }
 }
 
@@ -210,12 +198,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_kdf_params_use_lightweight_test_profile() {
+    fn ordinary_api_uses_production_profile_in_unit_tests() {
         let params = active_kdf_params();
-        assert_eq!(params.memory_cost, TEST_KDF_MEMORY_COST);
-        assert_eq!(params.time_cost, TEST_KDF_TIME_COST);
-        assert_eq!(params.parallelism, TEST_KDF_PARALLELISM);
-        assert_eq!(active_kdf_params_json(), TEST_KDF_PARAMS_JSON);
+        assert_eq!(params.memory_cost, PRODUCTION_KDF_MEMORY_COST);
+        assert_eq!(params.time_cost, PRODUCTION_KDF_TIME_COST);
+        assert_eq!(params.parallelism, PRODUCTION_KDF_PARALLELISM);
+        assert_eq!(active_kdf_params_json(), PRODUCTION_KDF_PARAMS_JSON);
     }
 
     #[test]

@@ -4,9 +4,10 @@ use super::{
     collect_daily_health_snapshot, count_active_observations, count_chunks_rows,
     count_distinct_access_days, count_memories_missing_domain, count_memories_rows,
     count_memories_vec_rows, delete, ensure_anchor, fetch_by_ids, foundry_job_status_counts,
-    gc_tables, get_all, get_edges, get_sandbox_policy, graph_expand, init_schema,
-    insert_tachi_event, insert_tachi_event_if_absent, invalidate_observation, list_by_path,
-    list_eval_evidence, list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
+    gc_tables, get_all, get_edges, get_edges_limited, get_sandbox_policy, graph_expand,
+    graph_expand_limited, init_schema, insert_tachi_event, insert_tachi_event_if_absent,
+    invalidate_observation, list_by_path, list_eval_evidence,
+    list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
     list_observations_for_edge, list_sandbox_policies, list_tachi_events,
     list_wiki_duplicate_candidates, normalize_for_write, now_utc_iso, open_for_wal_checkpoint,
     open_immutable_readonly, open_raw, probe_keyword_suspects, promote_memory_to_durable,
@@ -40,8 +41,10 @@ mod gc_candidates_ops;
 mod graph;
 mod read_ops;
 mod sandbox_ops;
+mod search_generation;
 mod search_ops;
 mod stats_ops;
+mod surface_ops;
 mod tier;
 mod vec_archived_overfetch;
 mod write_ops;

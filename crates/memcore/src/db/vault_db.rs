@@ -166,6 +166,15 @@ pub fn vault_list_entries(conn: &Connection) -> Result<Vec<VaultEntry>, MemoryEr
     entries.collect::<Result<_, _>>().map_err(|e| e.into())
 }
 
+/// Metadata-only vault listing: `name` + `updated_at` (no ciphertext/nonce).
+pub fn vault_list_entry_timestamps(
+    conn: &Connection,
+) -> Result<Vec<(String, String)>, MemoryError> {
+    let mut stmt = conn.prepare("SELECT name, updated_at FROM vault_entries ORDER BY name")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.into())
+}
+
 pub fn vault_list_entries_by_type(
     conn: &Connection,
     secret_type: &str,

@@ -23,30 +23,39 @@ pub(super) async fn ensure_stdio_proxy_daemon(
     match compatible_daemon(app_home, global_db_path, project_db_path, client_project).await {
         DaemonCompatibility::Compatible(info) => return Some(info),
         DaemonCompatibility::Incompatible => return None,
-        DaemonCompatibility::Missing => {}
-    }
-
-    if auto_daemon_disabled {
-        eprintln!("[auto-daemon] disabled by TACHI_DISABLE_AUTO_DAEMON");
-        return None;
+        DaemonCompatibility::Missing(failure) => {
+            if auto_daemon_disabled {
+                // Terminal Missing: cannot spawn — name which probe failed.
+                crate::cli_client::emit_daemon_missing_reason(&failure);
+                eprintln!("[auto-daemon] disabled by TACHI_DISABLE_AUTO_DAEMON");
+                return None;
+            }
+            // Pre-spawn absence is routine — stay quiet and try auto-daemon.
+        }
     }
 
     spawn_stdio_daemon(app_home, global_db_path, project_db_path, client_project).await;
     match compatible_daemon(app_home, global_db_path, project_db_path, client_project).await {
         DaemonCompatibility::Compatible(info) => Some(info),
-        DaemonCompatibility::Missing | DaemonCompatibility::Incompatible => None,
+        DaemonCompatibility::Missing(failure) => {
+            // Terminal Missing after spawn/ready wait — shout once.
+            crate::cli_client::emit_daemon_missing_reason(&failure);
+            None
+        }
+        DaemonCompatibility::Incompatible => None,
     }
 }
 
 pub(super) fn proxy_can_preserve_project_context(
     info: &crate::cli_client::DaemonInfo,
+    app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
     client_project: Option<&str>,
 ) -> bool {
     if crate::cli_client::daemon_matches_requested_dbs(info, global_db_path, project_db_path) {
         if let (Some(project_db_path), Some(_)) = (project_db_path, client_project) {
-            return valid_proxy_project_binding(project_db_path, client_project);
+            return valid_proxy_project_binding(app_home, project_db_path, client_project);
         }
         return true;
     }
@@ -55,15 +64,23 @@ pub(super) fn proxy_can_preserve_project_context(
     }
     match project_db_path {
         None => false,
-        Some(project_db_path) => valid_proxy_project_binding(project_db_path, client_project),
+        Some(project_db_path) => {
+            valid_proxy_project_binding(app_home, project_db_path, client_project)
+        }
     }
 }
 
-fn valid_proxy_project_binding(project_db_path: &Path, client_project: Option<&str>) -> bool {
+fn valid_proxy_project_binding(
+    app_home: &Path,
+    project_db_path: &Path,
+    client_project: Option<&str>,
+) -> bool {
     let Some(project) = client_project else {
         return false;
     };
-    let Ok(bound_path) = crate::MemoryServer::resolve_named_project_db_path(project) else {
+    let Ok(bound_path) =
+        crate::MemoryServer::resolve_named_project_db_path_in_home(project, app_home)
+    else {
         return false;
     };
     paths_match(project_db_path, &bound_path)
@@ -231,7 +248,10 @@ fn env_truthy(value: &str) -> bool {
 
 enum DaemonCompatibility {
     Compatible(crate::cli_client::DaemonInfo),
-    Missing,
+    /// No live matching daemon. Carries the probe failure so a *terminal*
+    /// Missing path can emit one stderr line; pre-spawn / ready-poll Missing
+    /// stays quiet (routine local fallback must not shout).
+    Missing(crate::cli_client::DaemonProbeFailure),
     Incompatible,
 }
 
@@ -241,13 +261,16 @@ async fn compatible_daemon(
     project_db_path: Option<&Path>,
     client_project: Option<&str>,
 ) -> DaemonCompatibility {
-    let Some(info) = crate::cli_client::detect_daemon_for_global_db(app_home, global_db_path).await
-    else {
-        return DaemonCompatibility::Missing;
+    let info = match crate::cli_client::detect_daemon_for_global_db_result(app_home, global_db_path)
+        .await
+    {
+        Ok(info) => info,
+        Err(failure) => return DaemonCompatibility::Missing(failure),
     };
     if crate::cli_client::daemon_version_matches(&info) {
         if proxy_can_preserve_project_context(
             &info,
+            app_home,
             global_db_path,
             project_db_path,
             client_project,
@@ -368,7 +391,7 @@ async fn wait_for_daemon_ready(
             {
                 DaemonCompatibility::Compatible(_) => return true,
                 DaemonCompatibility::Incompatible => return false,
-                DaemonCompatibility::Missing => {}
+                DaemonCompatibility::Missing(_) => {}
             }
         }
         false
@@ -426,6 +449,7 @@ impl StdioProxyServer {
         .await?;
         if !proxy_can_preserve_project_context(
             &fresh,
+            &self.app_home,
             &self.global_db_path,
             self.project_db_path.as_deref(),
             self.client_project.as_deref(),

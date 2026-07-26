@@ -91,7 +91,7 @@ fn resolve_slice_id_rejects_traversal() {
 async fn convoy_dispatch_creates_slice_dirs_and_status() {
     let _root = temp_runs_root();
     let server = {
-        let db_path = std::env::temp_dir().join(format!(
+        let db_path = crate::utils::test_fixture_path(format!(
             "memory-server-convoy-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ));

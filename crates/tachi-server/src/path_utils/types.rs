@@ -14,7 +14,7 @@ pub(crate) struct PlanCSplitBrain {
 impl PlanCSplitBrain {
     pub(crate) fn warning_message(&self) -> String {
         format!(
-            "Plan C split-brain detected for project '{}': repo-local DB {} (rows={}, bytes={}) and alias DB {} (rows={}, bytes={}) are different regular files. Back up both, merge by id into the repo-local DB, then replace the alias with a symlink to the repo-local DB.",
+            "Plan C split-brain detected for project '{}': repo-local DB {} (rows={}, bytes={}) and alias DB {} (rows={}, bytes={}) are different regular files; refusing ownership guess and refusing to choose or modify either DB.",
             self.project_name,
             self.canonical_db.display(),
             opt_i64(self.canonical_rows),
@@ -26,11 +26,85 @@ impl PlanCSplitBrain {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum PlanCAliasIntegrity {
+    IdentityUnresolved {
+        project_root: PathBuf,
+        error: String,
+    },
+    SymlinkUnresolvable {
+        alias_db: PathBuf,
+        expected_db: PathBuf,
+        error: String,
+    },
+    WrongTarget {
+        alias_db: PathBuf,
+        expected_db: PathBuf,
+        actual_db: PathBuf,
+    },
+    UnexpectedAliasType {
+        alias_db: PathBuf,
+        file_type: &'static str,
+    },
+}
+
+impl PlanCAliasIntegrity {
+    pub(crate) fn warning_message(&self) -> String {
+        match self {
+            Self::IdentityUnresolved {
+                project_root,
+                error,
+            } => format!(
+                "Plan C alias integrity failure for project root {}: {}. Refusing to choose or modify an alias.",
+                project_root.display(),
+                error
+            ),
+            Self::SymlinkUnresolvable {
+                alias_db,
+                expected_db,
+                error,
+            } => format!(
+                "Plan C alias integrity failure: symlink {} cannot be resolved to canonical DB {}: {}. Refusing to modify the alias.",
+                alias_db.display(),
+                expected_db.display(),
+                error
+            ),
+            Self::WrongTarget {
+                alias_db,
+                expected_db,
+                actual_db,
+            } => format!(
+                "Plan C alias integrity failure: symlink {} resolves to {} instead of canonical DB {}. Refusing to modify the alias.",
+                alias_db.display(),
+                actual_db.display(),
+                expected_db.display()
+            ),
+            Self::UnexpectedAliasType {
+                alias_db,
+                file_type,
+            } => format!(
+                "Plan C alias integrity failure: alias {} is an unsupported {}. Refusing to modify the alias.",
+                alias_db.display(),
+                file_type
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanCAliasInspection {
+    Absent,
+    MatchingSymlink,
+    SplitBrain(PlanCSplitBrain),
+    Integrity(PlanCAliasIntegrity),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlanCLinkOutcome {
     AlreadyLinked,
     Created(PathBuf),
     SplitBrain(PlanCSplitBrain),
+    AliasIntegrity(PlanCAliasIntegrity),
     Skipped(&'static str),
     Failed { path: PathBuf, error: String },
 }

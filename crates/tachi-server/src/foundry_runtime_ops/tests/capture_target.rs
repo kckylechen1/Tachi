@@ -1,4 +1,65 @@
 use super::*;
+
+#[test]
+fn capture_provenance_uses_server_home_after_environment_drift() {
+    let _guard = tachi_home_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let project_root = crate::utils::find_project_git_root().expect("test project root");
+    let project_name =
+        crate::path_utils::plan_c_dir_name_from_root(&project_root).expect("test project identity");
+    let (server, fixture_db) = crate::tests::make_server_with_project_fixture(&project_name);
+
+    let ambient_home = tempdir().expect("ambient home");
+    let ambient_db = ambient_home.path().join("ambient-project.db");
+    memcore::MemoryStore::open(ambient_db.to_str().expect("utf8 ambient DB")).expect("ambient DB");
+    Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: ambient_db.display().to_string(),
+            role: DbRole::Project,
+            owner: "test".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: format!("project:{project_name}"),
+            notes: String::new(),
+        }],
+    }
+    .save(&ambient_home.path().join("manifest.json"))
+    .expect("ambient manifest");
+    let _ambient = crate::test_support::EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+    let entry = crate::tests::make_entry("capture-env-drift-provenance");
+    persist_capture_entry(&server, DbScope::Project, Some(&project_name), None, &entry)
+        .expect("persist capture through server-bound project");
+
+    let stored = server
+        .with_named_project_store_read(&project_name, |store| {
+            store.get(&entry.id).map_err(|error| error.to_string())
+        })
+        .expect("read fixture project")
+        .expect("capture stored in fixture project");
+    assert_eq!(
+        stored.metadata["provenance"]["db_path"],
+        std::fs::canonicalize(&fixture_db)
+            .expect("canonical fixture DB")
+            .display()
+            .to_string()
+    );
+    assert!(
+        memcore::MemoryStore::open(ambient_db.to_str().expect("utf8 ambient DB"))
+            .expect("reopen ambient DB")
+            .get(&entry.id)
+            .expect("read ambient DB")
+            .is_none(),
+        "capture must not follow post-construction TACHI_HOME"
+    );
+}
 #[tokio::test]
 async fn resolve_capture_target_prefers_explicit_project() {
     let tmp = tempdir().expect("tempdir");

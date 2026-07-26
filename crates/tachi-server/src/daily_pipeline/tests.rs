@@ -37,8 +37,6 @@ async fn collect_database_stats_for_targets_preserves_manifest_order() {
     assert!(stats.iter().all(|stat| stat.error.is_some()));
 }
 
-use crate::test_support::EnvRestore;
-
 #[test]
 fn truth_maintenance_routes_external_project_target_by_path() {
     let tmp = crate::test_support::non_skipped_fixture_tempdir("daily-pipeline-");
@@ -52,7 +50,12 @@ fn truth_maintenance_routes_external_project_target_by_path() {
     let external = tmp.path().join("agent").join("memory.db");
     let target = manifest_target("agent", external.clone());
 
-    let route = resolve_truth_maintenance_route_for_paths(&global, Some(&current_project), &target);
+    let route = resolve_truth_maintenance_route_for_paths_in_home(
+        tmp.path(),
+        &global,
+        Some(&current_project),
+        &target,
+    );
 
     assert_eq!(route.target_db, DbScope::Project);
     assert_eq!(route.named_project, None);
@@ -72,7 +75,12 @@ fn truth_maintenance_routes_external_global_target_as_global_path() {
     let external_global = tmp.path().join("archive").join("global-memory.db");
     let target = manifest_target("global", external_global.clone());
 
-    let route = resolve_truth_maintenance_route_for_paths(&global, Some(&current_project), &target);
+    let route = resolve_truth_maintenance_route_for_paths_in_home(
+        tmp.path(),
+        &global,
+        Some(&current_project),
+        &target,
+    );
 
     assert_eq!(route.target_db, DbScope::Global);
     assert_eq!(route.named_project, None);
@@ -81,11 +89,7 @@ fn truth_maintenance_routes_external_global_target_as_global_path() {
 
 #[test]
 fn truth_maintenance_routes_plan_c_project_by_name() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let tmp = crate::test_support::non_skipped_fixture_tempdir("daily-pipeline-");
-    let _tachi_home = EnvRestore::set_path("TACHI_HOME", tmp.path());
 
     let global = tmp.path().join("global").join("memory.db");
     let current_project = tmp
@@ -97,7 +101,12 @@ fn truth_maintenance_routes_plan_c_project_by_name() {
     let named = tmp.path().join("projects").join("sigil").join("memory.db");
     let target = manifest_target("project", named);
 
-    let route = resolve_truth_maintenance_route_for_paths(&global, Some(&current_project), &target);
+    let route = resolve_truth_maintenance_route_for_paths_in_home(
+        tmp.path(),
+        &global,
+        Some(&current_project),
+        &target,
+    );
 
     assert_eq!(route.target_db, DbScope::Project);
     assert_eq!(route.named_project.as_deref(), Some("sigil"));

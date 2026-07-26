@@ -50,12 +50,77 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         aliases: &["DISTILL_API_KEY", "REASONING_API_KEY"],
     },
     ApiKeyDef {
+        key: "DISTILL_API_KEY",
+        label: "Distill API lane override before provider fallbacks",
+        required: false,
+        deprecated: false,
+        canonical_key: "DISTILL_API_KEY",
+        aliases: &[],
+    },
+    ApiKeyDef {
         key: "ZAI_API_KEY",
         label: "Zhipu/BigModel OpenAI-compatible LLM",
         required: false,
         deprecated: false,
         canonical_key: "ZAI_API_KEY",
         aliases: &["BIGMODEL_API_KEY"],
+    },
+    // #1355: the grok/xai opencode lane provider must be a recognized
+    // provider-key name so an unlocked-vault xAI secret is injected into the
+    // lane subprocess env (via `load_unlocked_provider_env_secrets`, gated by
+    // `provider_api_key_env_names()`). That lets `opencode.json`'s `xai`
+    // provider use `{env:XAI_API_KEY}` substitution — no literal secret on
+    // disk for vault "收权" to blank. `GROK_API_KEY` is carried as an alias
+    // (alternate ecosystem name, cf. GOOGLE/GEMINI) so whichever name the
+    // owner stored the vault secret under is admitted by the filter; the
+    // injected env-var name is always the vault entry's own name, so that
+    // name must match the `{env:...}` reference in opencode.json.
+    ApiKeyDef {
+        key: "XAI_API_KEY",
+        label: "xAI/Grok OpenAI-compatible LLM",
+        required: false,
+        deprecated: false,
+        canonical_key: "XAI_API_KEY",
+        aliases: &["GROK_API_KEY"],
+    },
+    // #1355(b): the opencode `zhipuai-coding-plan` GLM lane provider must
+    // also be a recognized provider-key name so an unlocked-vault ZHIPUAI
+    // secret is injected into the lane subprocess env (via
+    // `load_unlocked_provider_env_secrets`, gated by
+    // `provider_api_key_env_names()`). That lets `opencode.json`'s
+    // `zhipuai-coding-plan` provider use `{env:ZHIPUAI_API_KEY}`
+    // substitution — no literal secret on disk for vault "收权" to blank.
+    // This is deliberately separate from the `ZAI_API_KEY` entry above:
+    // the vault stores a distinct `ZHIPUAI_API_KEY` secret (verified by SHA
+    // match against the working opencode literal) that is NOT the same
+    // value as `ZAI_API_KEY`, so no alias is added either direction.
+    ApiKeyDef {
+        key: "ZHIPUAI_API_KEY",
+        label: "Zhipu AI (GLM coding-plan) OpenAI-compatible LLM",
+        required: false,
+        deprecated: false,
+        canonical_key: "ZHIPUAI_API_KEY",
+        aliases: &[],
+    },
+    // #1355 follow-up: the `kimi-for-coding`/K3 opencode lane provider must
+    // also be a recognized provider-key name so an unlocked-vault Kimi
+    // secret is injected into the lane subprocess env (via
+    // `load_unlocked_provider_env_secrets`, gated by
+    // `provider_api_key_env_names()`). That lets the lane's provider config
+    // use `{env:KIMI_API_KEY}` substitution (or direct env read) — no
+    // literal secret on disk for vault "收权" to blank. `MOONSHOT_API_KEY`
+    // is carried as an alias (alternate ecosystem name — Moonshot AI is
+    // Kimi's vendor) so whichever name the owner stored the vault secret
+    // under is admitted by the filter; the injected env-var name is always
+    // the vault entry's own name, so that name must match the lane's
+    // `{env:...}` reference.
+    ApiKeyDef {
+        key: "KIMI_API_KEY",
+        label: "Kimi/Moonshot OpenAI-compatible LLM",
+        required: false,
+        deprecated: false,
+        canonical_key: "KIMI_API_KEY",
+        aliases: &["MOONSHOT_API_KEY"],
     },
     ApiKeyDef {
         key: "OPENAI_API_KEY",
@@ -107,10 +172,10 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
     },
     ApiKeyDef {
         key: "REASONING_API_KEY",
-        label: "Legacy reasoning lane",
+        label: "Reasoning API lane after DeepSeek and before provider fallbacks",
         required: false,
-        deprecated: true,
-        canonical_key: "DEEPSEEK_API_KEY",
+        deprecated: false,
+        canonical_key: "REASONING_API_KEY",
         aliases: &["ZAI_API_KEY", "BIGMODEL_API_KEY"],
     },
 ];

@@ -81,6 +81,16 @@ mod action_effect;
 mod agent_eval;
 mod agent_markdown;
 mod agent_registry;
+/// #1382 — server-verified human approver authority for governed apply gates.
+/// The decision logic is `tachi_params::approver_authority` (pure); this
+/// module is its live GitHub probe plus the owner-controlled policy loader.
+///
+/// **NOT WIRED YET.** #1077 owns the governed precedent establishment /
+/// overturn transition that must call `authorize_governed_mutation` at its
+/// mutation choke point and `revalidate_governed_mutation` immediately before
+/// it writes. No such transition exists in this crate today, so this
+/// declaration is the module's only reference: nothing is gated by it yet.
+pub mod approver_authority;
 mod arena_ops;
 mod bootstrap;
 mod build_broker;
@@ -129,6 +139,7 @@ mod foundry_runtime_ops;
 mod foundry_scheduler;
 mod gh_ops;
 mod gh_safe_merge;
+pub mod github_corpus_ops;
 mod handoff_ops;
 mod host_profile;
 mod host_spawn_bridge;
@@ -211,6 +222,11 @@ pub fn run_cli() {
         error
             .downcast_ref::<repair::RepairExit>()
             .map(|exit| exit.code())
+            .or_else(|| {
+                error
+                    .downcast_ref::<bootstrap::VaultExecExit>()
+                    .map(|exit| exit.code())
+            })
     });
 }
 
@@ -220,6 +236,16 @@ pub fn run_cli() {
 /// wiki_ops) share one idempotent install site.
 pub fn ensure_tls_provider() {
     tachi_llm::install_tls_provider();
+}
+
+/// Resolve the existing Tachi provider runtime for a server-owned operator
+/// binary. Credential reads and injection remain inside `provider_config`; the
+/// public result reveals only whether one or more provider entries materialized.
+pub fn resolve_standalone_tachi_model_client() -> Result<(tachi_llm::LlmClient, bool), String> {
+    let global_db = provider_config::default_global_db_path();
+    let llm = tachi_llm::LlmClient::new_with_vault_db(Some(&global_db))?;
+    let materialized = provider_config::materialize_standalone(&llm, &global_db)?;
+    Ok((llm, materialized.loaded > 0))
 }
 
 #[cfg(test)]

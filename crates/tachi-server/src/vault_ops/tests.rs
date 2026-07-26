@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn with_vault_key_drops_vault_lock_before_running_work() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-lock-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -46,7 +46,7 @@ async fn auto_lock_clears_key_but_preserves_provider_secrets() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-auto-lock-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -80,7 +80,7 @@ async fn auto_lock_clears_key_but_preserves_provider_secrets() {
 
 #[tokio::test]
 async fn vault_unlock_rejects_password_and_fifo_path_together() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-unlock-fifo-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -125,7 +125,7 @@ async fn vault_unlock_rejects_password_and_fifo_path_together() {
 // check must short-circuit before either is touched.
 #[tokio::test]
 async fn vault_unlock_rejects_password_and_keychain_together() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-unlock-keychain-password-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -166,7 +166,7 @@ async fn vault_unlock_rejects_password_and_keychain_together() {
 
 #[tokio::test]
 async fn vault_unlock_rejects_fifo_and_keychain_together() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-unlock-keychain-fifo-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -231,7 +231,7 @@ async fn vault_unlock_rejects_fifo_and_keychain_together() {
 // config-integrity problem, not a password problem.
 #[tokio::test]
 async fn vault_unlock_kdf_algorithm_mismatch_does_not_feed_lockout_counter() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-unlock-kdf-algorithm-mismatch-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -320,7 +320,7 @@ fn vault_unlock_use_keychain_succeeds_via_injected_password() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _keychain_env = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", "correct-password");
 
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-unlock-keychain-ok-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -372,7 +372,7 @@ fn vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _keychain_env = EnvRestore::set("TACHI_TEST_FORCE_KEYCHAIN_MISSING", "1");
 
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-unlock-keychain-missing-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -508,7 +508,7 @@ fn vault_lock_clears_key_and_provider_secrets() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-lock-full-clear-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -556,7 +556,7 @@ async fn autolock_disabled_when_env_zero() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _env = EnvRestore::set("TACHI_VAULT_AUTOLOCK_SECS", "0");
     let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-autolock-disabled-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -620,7 +620,7 @@ async fn autolock_disabled_reports_unlocked_in_runtime_status() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _env = EnvRestore::set("TACHI_VAULT_AUTOLOCK_SECS", "0");
     let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-autolock-disabled-status-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -665,7 +665,7 @@ async fn autolock_disabled_reports_unlocked_in_runtime_status() {
 #[tokio::test]
 #[ignore = "touches real macOS Keychain; run explicitly with --ignored"]
 async fn keychain_auto_unlock_smoke() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-keychain-smoke-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

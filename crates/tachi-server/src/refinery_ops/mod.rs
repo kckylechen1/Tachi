@@ -121,7 +121,9 @@ mod compiler;
 mod disposition;
 mod doc_resolver;
 mod live_signals;
-mod parse;
+// `pub(crate)` so sibling leaves (e.g. `github_corpus_ops`) can reuse the
+// pure gh-JSON → IssueSnapshotV1 parser without duplicating it (#1059).
+pub(crate) mod parse;
 
 #[cfg(test)]
 mod fixtures;

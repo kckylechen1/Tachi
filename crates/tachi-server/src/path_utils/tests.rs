@@ -1,4 +1,5 @@
 use super::*;
+use crate::manifest::{DbEntry, DbRole};
 use crate::test_support::{CwdRestore, EnvRestore};
 use std::path::{Path, PathBuf};
 
@@ -7,6 +8,83 @@ fn with_env_lock<F: FnOnce()>(f: F) {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     f();
+}
+
+fn manifest_entry(path: &Path, role: DbRole, scope_hint: &str) -> DbEntry {
+    DbEntry {
+        path: path.to_string_lossy().into_owned(),
+        role,
+        owner: "test".into(),
+        schema_kind: "tachi".into(),
+        vec_enabled: false,
+        allow_write: true,
+        last_doctor_at: String::new(),
+        last_classification: "healthy".into(),
+        scope_hint: scope_hint.into(),
+        notes: String::new(),
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn manifest_leaf_protects_valid_project_scope_when_role_is_stale() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let foreign_db = dir.path().join("foreign.db");
+    std::fs::write(&foreign_db, b"foreign").expect("foreign DB");
+    let linked_project = dir.path().join("linked-project.db");
+    std::os::unix::fs::symlink(&foreign_db, &linked_project).expect("linked project DB");
+    let stale_linked = manifest_entry(&linked_project, DbRole::Unknown, "project:test");
+    let linked_error = manifest_db_leaf_exists(&stale_linked)
+        .expect_err("valid project scope must reject a linked project DB");
+    assert!(
+        linked_error.contains("canonical repo DB path"),
+        "{linked_error}"
+    );
+
+    let missing_target = dir.path().join("missing.db");
+    let dangling_project = dir.path().join("dangling-project.db");
+    std::os::unix::fs::symlink(&missing_target, &dangling_project).expect("dangling project DB");
+    let stale_dangling = manifest_entry(&dangling_project, DbRole::Unknown, "project:test");
+    let dangling_error = manifest_db_leaf_exists(&stale_dangling)
+        .expect_err("valid project scope must reject a dangling project DB");
+    assert!(
+        dangling_error.contains("canonical repo DB path"),
+        "{dangling_error}"
+    );
+
+    for scope_hint in [
+        "project:",
+        "project: bad",
+        "project:../test",
+        "project:test/path",
+        "project:test\\path",
+        "project:.hidden",
+        "project:unnamed",
+        "project:test:stale",
+        "project",
+        "projects:test",
+    ] {
+        let entry = manifest_entry(&linked_project, DbRole::Unknown, scope_hint);
+        assert_eq!(
+            manifest_db_leaf_exists(&entry),
+            Ok(true),
+            "non-canonical scope '{scope_hint}' must not become project authority"
+        );
+    }
+
+    for (role, scope_hint) in [
+        (DbRole::Global, "global"),
+        (DbRole::Agent, "runtime"),
+        (DbRole::Foundry, "foundry"),
+        (DbRole::Unknown, "runtime"),
+    ] {
+        let entry = manifest_entry(&linked_project, role, scope_hint);
+        assert_eq!(
+            manifest_db_leaf_exists(&entry),
+            Ok(true),
+            "non-project role/scope '{scope_hint}' must retain target-following behavior"
+        );
+    }
 }
 
 #[test]
@@ -86,20 +164,22 @@ fn tachi_home_detects_workspace_data_tachi_layout() {
 
 #[test]
 fn named_project_from_path_accepts_canonical_layout() {
-    with_env_lock(|| {
-        let _tachi_home = EnvRestore::set("TACHI_HOME", "/tmp/tachi-test-home");
-        let path = PathBuf::from("/tmp/tachi-test-home/projects/sigil/memory.db");
-        assert_eq!(named_project_from_path(&path).as_deref(), Some("sigil"));
-    });
+    let home = Path::new("/tmp/tachi-test-home");
+    let path = home.join("projects/sigil/memory.db");
+    assert_eq!(
+        named_project_from_path_in_home(&path, home).as_deref(),
+        Some("sigil")
+    );
 }
 
 #[test]
 fn named_project_from_path_honors_custom_tachi_home() {
-    with_env_lock(|| {
-        let _tachi_home = EnvRestore::set("TACHI_HOME", "/tmp/custom-tachi-root");
-        let path = PathBuf::from("/tmp/custom-tachi-root/projects/my_app/memory.db");
-        assert_eq!(named_project_from_path(&path).as_deref(), Some("my_app"));
-    });
+    let home = Path::new("/tmp/custom-tachi-root");
+    let path = home.join("projects/my_app/memory.db");
+    assert_eq!(
+        named_project_from_path_in_home(&path, home).as_deref(),
+        Some("my_app")
+    );
 }
 
 #[test]
@@ -123,7 +203,7 @@ fn list_named_projects_finds_dirs_with_memory_db() {
 #[test]
 fn named_project_from_path_rejects_external_projects_dir() {
     let path = PathBuf::from("/data/tachi/projects/hyperion/memory.db");
-    assert!(named_project_from_path(&path).is_none());
+    assert!(named_project_from_path_in_home(&path, Path::new("/tmp/tachi-home")).is_none());
 }
 
 #[test]
@@ -188,6 +268,238 @@ fn plan_c_regular_alias_file_reports_split_brain() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn plan_c_wrong_target_symlink_is_refused_without_mutating_alias() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Wrong-Target-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
+
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        let wrong_db = tmp.path().join("wrong-target.db");
+        std::fs::write(&wrong_db, b"wrong target").expect("wrong DB");
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&wrong_db, &alias_db).expect("wrong alias symlink");
+
+        let outcome = ensure_plan_c_symlink(&local_db, &repo);
+        assert!(matches!(
+            outcome,
+            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::WrongTarget { .. })
+        ));
+        assert_eq!(
+            std::fs::canonicalize(&alias_db).expect("alias remains readable"),
+            std::fs::canonicalize(&wrong_db).expect("wrong target remains readable"),
+            "detection must not replace the existing alias"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_matching_symlink_remains_valid() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Matching-Alias-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&local_db, &alias_db).expect("matching alias symlink");
+
+        assert!(matches!(
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
+            PlanCAliasInspection::MatchingSymlink
+        ));
+        assert!(matches!(
+            ensure_plan_c_symlink(&local_db, &repo),
+            PlanCLinkOutcome::AlreadyLinked
+        ));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_symlink_eexist_race_regular_file_returns_split_brain() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Race-Regular-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+
+        let outcome =
+            super::symlink::ensure_plan_c_symlink_with_test_hook(&local_db, &repo, |alias_db| {
+                std::fs::write(alias_db, b"racing-regular").expect("racing alias")
+            });
+
+        let PlanCLinkOutcome::SplitBrain(issue) = outcome else {
+            panic!("expected split-brain race outcome, got {outcome:?}");
+        };
+        assert_eq!(std::fs::read(&issue.alias_db).unwrap(), b"racing-regular");
+        assert!(!issue.alias_db.is_symlink());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_symlink_eexist_race_wrong_target_returns_integrity() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Race-Wrong-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        let wrong_db = tmp.path().join("wrong-target.db");
+        std::fs::write(&wrong_db, b"wrong").expect("wrong DB");
+
+        let outcome =
+            super::symlink::ensure_plan_c_symlink_with_test_hook(&local_db, &repo, |alias_db| {
+                std::os::unix::fs::symlink(&wrong_db, alias_db).expect("racing wrong symlink")
+            });
+
+        let PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::WrongTarget {
+            alias_db,
+            actual_db,
+            ..
+        }) = outcome
+        else {
+            panic!("expected wrong-target integrity outcome, got {outcome:?}");
+        };
+        assert_eq!(actual_db, std::fs::canonicalize(&wrong_db).unwrap());
+        assert_eq!(std::fs::read_link(alias_db).unwrap(), wrong_db);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_symlink_eexist_race_matching_target_is_accepted() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Race-Matching-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+
+        let outcome =
+            super::symlink::ensure_plan_c_symlink_with_test_hook(&local_db, &repo, |alias_db| {
+                std::os::unix::fs::symlink(&local_db, alias_db).expect("racing matching symlink")
+            });
+
+        assert!(matches!(outcome, PlanCLinkOutcome::AlreadyLinked));
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        assert_eq!(std::fs::read_link(alias_db).unwrap(), local_db);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_dangling_alias_is_a_typed_integrity_failure() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Dangling-Alias-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(tmp.path().join("missing-target.db"), &alias_db)
+            .expect("dangling alias symlink");
+
+        assert!(matches!(
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+        assert!(matches!(
+            ensure_plan_c_symlink(&local_db, &repo),
+            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+        assert!(alias_db.is_symlink(), "dangling alias must not be replaced");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_c_looped_alias_is_a_typed_integrity_failure() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Looped-Alias-Repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("local DB");
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path(&alias_name);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&alias_db, &alias_db).expect("looped alias symlink");
+
+        assert!(matches!(
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+        assert!(matches!(
+            ensure_plan_c_symlink(&local_db, &repo),
+            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+    });
+}
+
+#[test]
+fn plan_c_alias_resolution_rejects_divergent_compatibility_candidates() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let current = plan_c_dir_name_from_root(&repo).expect("current identity");
+        let previous = plan_c_previous_dir_name_from_root(&repo).expect("previous identity");
+        assert_ne!(current, previous);
+
+        for (name, bytes) in [
+            (&current, b"current".as_slice()),
+            (&previous, b"previous".as_slice()),
+        ] {
+            let db = plan_c_global_db_path(name);
+            std::fs::create_dir_all(db.parent().unwrap()).expect("alias parent");
+            std::fs::write(db, bytes).expect("alias DB");
+        }
+
+        let error = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
+            .expect_err("divergent current and compatibility aliases must fail closed");
+        assert!(
+            error.contains("ambiguous across divergent aliases"),
+            "{error}"
+        );
+    });
+}
+
 #[test]
 fn validate_project_db_relpath_rejects_parent_dir() {
     assert!(validate_project_db_relpath(Path::new("../secrets.db")).is_err());
@@ -195,7 +507,9 @@ fn validate_project_db_relpath_rejects_parent_dir() {
 
 #[test]
 fn plan_c_dir_name_sanitizes_spaces() {
-    let root = PathBuf::from("/tmp/My Cool Repo");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("My Cool Repo");
+    std::fs::create_dir(&root).expect("root");
     // Legacy name is the bare sanitized basename; the current name carries a
     // stable-hash suffix but still starts with the sanitized basename.
     assert_eq!(
@@ -210,8 +524,11 @@ fn plan_c_dir_name_sanitizes_spaces() {
 fn plan_c_dir_name_same_basename_distinct_roots_differ() {
     // Two different absolute roots that share a basename must produce
     // DISTINCT alias dir names so they no longer collide on one alias path.
-    let a = PathBuf::from("/tmp/workspace-a/api");
-    let b = PathBuf::from("/tmp/workspace-b/api");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let a = tmp.path().join("workspace-a/api");
+    let b = tmp.path().join("workspace-b/api");
+    std::fs::create_dir_all(&a).expect("a root");
+    std::fs::create_dir_all(&b).expect("b root");
     let name_a = plan_c_dir_name_from_root(&a).expect("a");
     let name_b = plan_c_dir_name_from_root(&b).expect("b");
     assert!(name_a.starts_with("api-"), "{name_a}");
@@ -225,15 +542,49 @@ fn plan_c_dir_name_same_basename_distinct_roots_differ() {
 #[test]
 fn plan_c_dir_name_is_stable_for_same_root() {
     // The same root must always hash to the same alias dir name.
-    let root = PathBuf::from("/tmp/workspace/service");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workspace/service");
+    std::fs::create_dir_all(&root).expect("root");
     let first = plan_c_dir_name_from_root(&root).expect("first");
     let second = plan_c_dir_name_from_root(&root).expect("second");
     assert_eq!(first, second);
     assert!(first.starts_with("service-"), "{first}");
-    // 8 hex chars of suffix after the "service-" prefix.
+    // A cryptographic, collision-resistant suffix follows the readable prefix.
     let suffix = first.strip_prefix("service-").expect("suffix");
-    assert_eq!(suffix.len(), 8);
+    assert_eq!(suffix.len(), 24);
     assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "{suffix}");
+}
+
+#[test]
+fn plan_c_identity_bounds_prefix_and_never_generates_unnamed_for_non_ascii_roots() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let non_ascii_root = tmp.path().join("workspace/量化");
+    std::fs::create_dir_all(&non_ascii_root).expect("non-ASCII root");
+    let non_ascii = plan_c_dir_name_from_root(&non_ascii_root).expect("non-ASCII project identity");
+    assert!(non_ascii.starts_with("project-"), "{non_ascii}");
+    assert!(!non_ascii.starts_with("unnamed-"), "{non_ascii}");
+
+    let long_root = tmp.path().join("a".repeat(200));
+    std::fs::create_dir(&long_root).expect("long root");
+    let long = plan_c_dir_name_from_root(&long_root).expect("bounded project identity");
+    let (prefix, suffix) = long.rsplit_once('-').expect("hash suffix");
+    assert!(prefix.len() <= 48, "prefix was not bounded: {prefix}");
+    assert_eq!(suffix.len(), 24);
+}
+
+#[test]
+fn plan_c_identity_uses_physical_root_identity_for_unicode_normalization_forms() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let nfc_root = tmp.path().join("one/caf\u{e9}");
+    let nfd_root = tmp.path().join("two/cafe\u{301}");
+    std::fs::create_dir_all(&nfc_root).expect("NFC root");
+    std::fs::create_dir_all(&nfd_root).expect("NFD root");
+    let nfc = plan_c_dir_name_from_root(&nfc_root).expect("NFC identity");
+    let nfd = plan_c_dir_name_from_root(&nfd_root).expect("NFD identity");
+    assert_ne!(
+        nfc, nfd,
+        "distinct physical root paths remain distinct even when display names are canonically equivalent"
+    );
 }
 
 /// Regression for issue #493: on case-insensitive filesystems (macOS APFS,
@@ -244,28 +595,19 @@ fn plan_c_dir_name_is_stable_for_same_root() {
 /// identity and intermittently breaking strict resolver paths. The Plan C
 /// alias rule now case-folds the canonical path before hashing on those
 /// platforms, so case-only spelling differences map to one stable alias.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(unix)]
 #[test]
-fn plan_c_dir_name_case_stable_on_case_insensitive_fs() {
-    // Non-existent paths keep canonicalize on its fallback branch (the raw
-    // input), so the result is deterministic regardless of the test host.
-    let upper = Path::new("/Users/plan_c/Quant_Analyzer_2026");
-    let lower = Path::new("/Users/plan_c/quant_analyzer_2026");
-    let name_upper = plan_c_dir_name_from_root(upper).expect("upper name");
-    let name_lower = plan_c_dir_name_from_root(lower).expect("lower name");
-    let (_, suffix_upper) = name_upper.rsplit_once('-').expect("upper suffix");
-    let (_, suffix_lower) = name_lower.rsplit_once('-').expect("lower suffix");
+fn plan_c_identity_is_identical_through_differently_named_symlink() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let physical = tmp.path().join("Physical-Repo");
+    let alias = tmp.path().join("different-display-name");
+    std::fs::create_dir(&physical).expect("physical root");
+    std::os::unix::fs::symlink(&physical, &alias).expect("root symlink");
+    let physical_name = plan_c_dir_name_from_root(&physical).expect("physical identity");
+    let alias_name = plan_c_dir_name_from_root(&alias).expect("symlink identity");
     assert_eq!(
-        suffix_upper, suffix_lower,
-        "stable-hash suffix must be identical for case-only path differences"
-    );
-    // The basename is intentionally NOT folded (preserves legacy casing and
-    // existing assertions); under case-insensitive FS semantics the two alias
-    // names still denote the same directory.
-    assert_eq!(
-        name_upper.to_lowercase(),
-        name_lower.to_lowercase(),
-        "alias must be equal under case-insensitive FS semantics"
+        physical_name, alias_name,
+        "both readable prefix and digest must derive from the canonical physical root"
     );
 }
 
@@ -276,12 +618,121 @@ fn plan_c_dir_name_case_stable_on_case_insensitive_fs() {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[test]
 fn plan_c_dir_name_case_distinct_on_case_sensitive_fs() {
-    let upper = Path::new("/tmp/plan_c/Repo");
-    let lower = Path::new("/tmp/plan_c/repo");
-    let name_upper = plan_c_dir_name_from_root(upper).expect("upper name");
-    let name_lower = plan_c_dir_name_from_root(lower).expect("lower name");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let upper = tmp.path().join("Repo");
+    let lower = tmp.path().join("repo");
+    std::fs::create_dir(&upper).expect("upper root");
+    std::fs::create_dir(&lower).expect("lower root");
+    let name_upper = plan_c_dir_name_from_root(&upper).expect("upper name");
+    let name_lower = plan_c_dir_name_from_root(&lower).expect("lower name");
     assert_ne!(
         name_upper, name_lower,
         "case-sensitive platforms must not collapse case-only paths into one alias"
     );
+}
+
+/// Hole 1 (#1356 salvage): the gen-2 raw-canonical FNV-8 alias scheme (#424,
+/// commit b1c3bb26) must be a compatibility candidate. On case-insensitive
+/// hosts a repo whose canonical path contains ASCII uppercase materialized a
+/// gen-2 suffix that differs from the gen-3 case-folded suffix (#493) and from
+/// the gen-4 BLAKE2s suffix (this PR). The salvage draft's {gen-4, gen-3, gen-1}
+/// chain missed it, so resolution would ignore real on-disk data and let the
+/// caller register a fresh empty DB — orphaning it (fail-closed violation).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn plan_c_gen2_raw_canonical_alias_is_recognized_not_orphaned() {
+    with_env_lock(|| {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        // An uppercase segment makes the raw vs case-folded canonical paths
+        // differ, so this host+path genuinely exercises the gen-2 gap.
+        let repo = tmp.path().join("Gen2Repo");
+        std::fs::create_dir(&repo).expect("repo");
+
+        let gen2 = plan_c_previous_raw_dir_name_from_root(&repo).expect("gen-2 identity");
+        let gen3 = plan_c_previous_dir_name_from_root(&repo).expect("gen-3 identity");
+        let gen4 = plan_c_dir_name_from_root(&repo).expect("gen-4 identity");
+        assert_ne!(
+            gen2, gen3,
+            "test host does not exercise the gen-2/gen-3 split"
+        );
+        assert_ne!(gen2, gen4);
+
+        // Only the gen-2 alias exists on disk (real historical data).
+        let gen2_db = plan_c_global_db_path(&gen2);
+        std::fs::create_dir_all(gen2_db.parent().unwrap()).expect("gen-2 alias parent");
+        std::fs::write(&gen2_db, b"gen-2 data").expect("gen-2 alias DB");
+
+        let resolved = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
+            .expect("gen-2 alias must resolve, not fail");
+        assert_eq!(
+            std::fs::canonicalize(&resolved).unwrap(),
+            std::fs::canonicalize(&gen2_db).unwrap(),
+            "gen-2 alias data must be reused, never orphaned by a fresh gen-4 path"
+        );
+    });
+}
+
+/// Hole 1 (#1356 salvage): a genuinely new project — no on-disk alias under ANY
+/// of the four naming generations — must still resolve to a fresh gen-4 path so
+/// the fail-closed candidate set never over-closes and blocks new registration.
+#[test]
+fn plan_c_genuinely_absent_project_resolves_to_fresh_gen4_path() {
+    with_env_lock(|| {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("BrandNew");
+        std::fs::create_dir(&repo).expect("repo");
+
+        let gen4 = plan_c_dir_name_from_root(&repo).expect("gen-4 identity");
+        let resolved =
+            plan_c_alias_db_for_root_in_home(&repo, &tachi_home).expect("fresh registration path");
+        assert_eq!(resolved, plan_c_global_db_path(&gen4));
+        assert!(matches!(
+            inspect_plan_c_alias_in_home(&repo.join(".tachi/tachi-memory.db"), &repo, &tachi_home),
+            PlanCAliasInspection::Absent
+        ));
+    });
+}
+
+/// Compatibility aliases that diverge are an alias-integrity finding, never a
+/// fabricated clean split-brain result.
+#[test]
+fn plan_c_split_brain_defers_to_routing_gate_on_ambiguous_identity() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("Repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let local_db = repo.join(".tachi/tachi-memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local db parent");
+        std::fs::write(&local_db, b"repo-local").expect("local db");
+
+        let current = plan_c_dir_name_from_root(&repo).expect("current identity");
+        let previous = plan_c_previous_dir_name_from_root(&repo).expect("previous identity");
+        assert_ne!(current, previous);
+        for (name, bytes) in [
+            (&current, b"one".as_slice()),
+            (&previous, b"two".as_slice()),
+        ] {
+            let db = plan_c_global_db_path(name);
+            std::fs::create_dir_all(db.parent().unwrap()).expect("alias parent");
+            std::fs::write(db, bytes).expect("divergent alias DB");
+        }
+
+        // The routing gate fails closed on the ambiguity...
+        let gate = plan_c_alias_db_for_root_in_home(&repo, &tachi_home);
+        assert!(
+            gate.is_err(),
+            "ambiguous identity must fail closed at the gate"
+        );
+        // ...and the diagnostic surface returns the typed integrity failure.
+        assert!(matches!(
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+        ));
+    });
 }

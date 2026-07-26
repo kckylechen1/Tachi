@@ -13,6 +13,124 @@ use memcore::{
 use napi_derive::napi;
 use std::sync::{Arc, Mutex};
 
+const DEFAULT_GET_ALL_LIMIT: usize = 200;
+const MAX_GET_ALL_LIMIT: usize = 500;
+const DEFAULT_HUB_DISCOVER_LIMIT: usize = 100;
+const MAX_HUB_DISCOVER_LIMIT: usize = 500;
+const DEFAULT_GET_EDGES_LIMIT: usize = 100;
+const MAX_GET_EDGES_LIMIT: usize = 500;
+const DEFAULT_GRAPH_EXPAND_EDGE_LIMIT: usize = 100;
+const MAX_GRAPH_EXPAND_EDGE_LIMIT: usize = 500;
+const DEFAULT_GRAPH_EXPAND_HOPS: usize = 2;
+const MAX_GRAPH_EXPAND_HOPS: usize = 50;
+const MIN_SEARCH_TOP_K: usize = 1;
+const MAX_SEARCH_TOP_K: usize = 100;
+const DEFAULT_SEARCH_CANDIDATES_PER_CHANNEL: usize = 20;
+const MAX_SEARCH_CANDIDATES_PER_CHANNEL: usize = 500;
+
+/// Mirrors the portable service limits before a JavaScript number can reach
+/// memcore's result collection or SQLite limit binding.
+fn clamp_u64_to_usize(value: u64, maximum: usize) -> usize {
+    let maximum = u64::try_from(maximum).expect("usize must fit into u64");
+    value.min(maximum) as usize
+}
+
+fn normalized_top_k(value: u64) -> usize {
+    // A zero result limit still returns the smallest meaningful search page.
+    clamp_u64_to_usize(value, MAX_SEARCH_TOP_K).max(MIN_SEARCH_TOP_K)
+}
+
+fn normalized_candidates_per_channel(value: Option<u64>, top_k: usize) -> usize {
+    let requested = match value {
+        Some(0) => top_k,
+        None => DEFAULT_SEARCH_CANDIDATES_PER_CHANNEL,
+        Some(value) => clamp_u64_to_usize(value, MAX_SEARCH_CANDIDATES_PER_CHANNEL),
+    };
+    requested.max(top_k).min(MAX_SEARCH_CANDIDATES_PER_CHANNEL)
+}
+
+fn normalize_js_limit(
+    name: &str,
+    value: Option<f64>,
+    default: usize,
+    maximum: usize,
+) -> napi::Result<usize> {
+    let Some(value) = value else {
+        return Ok(default.min(maximum));
+    };
+    if !value.is_finite() {
+        return Err(napi::Error::from_reason(format!(
+            "{name} must be a finite number"
+        )));
+    }
+    if value < 0.0 {
+        return Err(napi::Error::from_reason(format!(
+            "{name} must be non-negative"
+        )));
+    }
+    if value.fract() != 0.0 {
+        return Err(napi::Error::from_reason(format!(
+            "{name} must be an integer"
+        )));
+    }
+
+    Ok(value.min(maximum as f64) as usize)
+}
+
+fn search_options_from_json(options_json: Option<&str>) -> SearchOptions {
+    let mut opts = SearchOptions::default();
+    if let Some(json_str) = options_json {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+            let requested_top_k = val.get("top_k").and_then(|v| v.as_u64());
+            let requested_candidates = val.get("candidates").and_then(|v| v.as_u64());
+            if requested_top_k.is_some() || requested_candidates.is_some() {
+                opts.top_k = requested_top_k
+                    .map(normalized_top_k)
+                    .unwrap_or_else(|| opts.top_k.clamp(MIN_SEARCH_TOP_K, MAX_SEARCH_TOP_K));
+                opts.candidates_per_channel =
+                    normalized_candidates_per_channel(requested_candidates, opts.top_k);
+            }
+            if let Some(p) = val.get("path_prefix").and_then(|v| v.as_str()) {
+                if !p.is_empty() {
+                    opts.path_prefix = Some(p.to_string());
+                }
+            }
+            if let Some(ra) = val.get("record_access").and_then(|v| v.as_bool()) {
+                opts.record_access = ra;
+            }
+            if val.get("mmr_threshold").is_some() {
+                opts.mmr_threshold = val.get("mmr_threshold").and_then(|v| v.as_f64());
+            }
+            if let Some(arr) = val.get("query_vec").and_then(|v| v.as_array()) {
+                let mut qv = Vec::with_capacity(arr.len());
+                for item in arr {
+                    if let Some(num) = item.as_f64() {
+                        qv.push(num as f32);
+                    }
+                }
+                if !qv.is_empty() {
+                    opts.query_vec = Some(qv);
+                }
+            }
+            if let Some(w) = val.get("weights").and_then(|v| v.as_object()) {
+                if let Some(s) = w.get("semantic").and_then(|v| v.as_f64()) {
+                    opts.weights.semantic = s;
+                }
+                if let Some(f) = w.get("fts").and_then(|v| v.as_f64()) {
+                    opts.weights.fts = f;
+                }
+                if let Some(sym) = w.get("symbolic").and_then(|v| v.as_f64()) {
+                    opts.weights.symbolic = sym;
+                }
+                if let Some(d) = w.get("decay").and_then(|v| v.as_f64()) {
+                    opts.weights.decay = d;
+                }
+            }
+        }
+    }
+    opts
+}
+
 /// Thread-safe wrapper around the Rust MemoryStore.
 #[napi]
 pub struct JsMemoryStore {
@@ -47,53 +165,7 @@ impl JsMemoryStore {
     /// }
     #[napi]
     pub fn search(&self, query: String, options_json: Option<String>) -> napi::Result<String> {
-        let mut opts = SearchOptions::default();
-        if let Some(json_str) = options_json {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                if let Some(k) = val.get("top_k").and_then(|v| v.as_u64()) {
-                    opts.top_k = k as usize;
-                }
-                if let Some(c) = val.get("candidates").and_then(|v| v.as_u64()) {
-                    opts.candidates_per_channel = c as usize;
-                }
-                if let Some(p) = val.get("path_prefix").and_then(|v| v.as_str()) {
-                    if !p.is_empty() {
-                        opts.path_prefix = Some(p.to_string());
-                    }
-                }
-                if let Some(ra) = val.get("record_access").and_then(|v| v.as_bool()) {
-                    opts.record_access = ra;
-                }
-                if val.get("mmr_threshold").is_some() {
-                    opts.mmr_threshold = val.get("mmr_threshold").and_then(|v| v.as_f64());
-                }
-                if let Some(arr) = val.get("query_vec").and_then(|v| v.as_array()) {
-                    let mut qv = Vec::with_capacity(arr.len());
-                    for item in arr {
-                        if let Some(num) = item.as_f64() {
-                            qv.push(num as f32);
-                        }
-                    }
-                    if !qv.is_empty() {
-                        opts.query_vec = Some(qv);
-                    }
-                }
-                if let Some(w) = val.get("weights").and_then(|v| v.as_object()) {
-                    if let Some(s) = w.get("semantic").and_then(|v| v.as_f64()) {
-                        opts.weights.semantic = s;
-                    }
-                    if let Some(f) = w.get("fts").and_then(|v| v.as_f64()) {
-                        opts.weights.fts = f;
-                    }
-                    if let Some(sym) = w.get("symbolic").and_then(|v| v.as_f64()) {
-                        opts.weights.symbolic = sym;
-                    }
-                    if let Some(d) = w.get("decay").and_then(|v| v.as_f64()) {
-                        opts.weights.decay = d;
-                    }
-                }
-            }
-        }
+        let opts = search_options_from_json(options_json.as_deref());
 
         let store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let results = store
@@ -143,10 +215,16 @@ impl JsMemoryStore {
         }
     }
 
-    /// Get most recent entries up to `limit`. Returns JSON string of MemoryEntry[].
+    /// Get most recent entries up to `limit`. Zero returns an empty list; positive
+    /// values are capped at this binding's named ceiling. Returns JSON string of MemoryEntry[].
     #[napi]
-    pub fn get_all(&self, limit: Option<u32>) -> napi::Result<String> {
-        let lim = limit.unwrap_or(200) as usize;
+    pub fn get_all(&self, limit: Option<f64>) -> napi::Result<String> {
+        let lim = normalize_js_limit(
+            "getAll limit",
+            limit,
+            DEFAULT_GET_ALL_LIMIT,
+            MAX_GET_ALL_LIMIT,
+        )?;
         let entries = self
             .inner
             .lock()
@@ -203,14 +281,21 @@ impl JsMemoryStore {
         memory_id: String,
         direction: Option<String>,
         relation_filter: Option<String>,
+        limit: Option<f64>,
     ) -> napi::Result<String> {
         let dir = direction.as_deref().unwrap_or("both");
         let rel = relation_filter.as_deref();
+        let limit = normalize_js_limit(
+            "getEdges limit",
+            limit,
+            DEFAULT_GET_EDGES_LIMIT,
+            MAX_GET_EDGES_LIMIT,
+        )?;
         let edges = self
             .inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get_edges(&memory_id, dir, rel)
+            .get_edges_limited(&memory_id, dir, rel, limit)
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
         serde_json::to_string(&edges).map_err(|e| napi::Error::from_reason(e.to_string()))
@@ -221,19 +306,31 @@ impl JsMemoryStore {
     pub fn graph_expand(
         &self,
         seed_ids_json: String,
-        max_hops: Option<u32>,
+        max_hops: Option<f64>,
         relation_filter: Option<String>,
+        edge_limit: Option<f64>,
     ) -> napi::Result<String> {
+        let hops = normalize_js_limit(
+            "graphExpand maxHops",
+            max_hops,
+            DEFAULT_GRAPH_EXPAND_HOPS,
+            MAX_GRAPH_EXPAND_HOPS,
+        )? as u32;
+        let edge_limit = normalize_js_limit(
+            "graphExpand edgeLimit",
+            edge_limit,
+            DEFAULT_GRAPH_EXPAND_EDGE_LIMIT,
+            MAX_GRAPH_EXPAND_EDGE_LIMIT,
+        )?;
         let seeds: Vec<String> = serde_json::from_str(&seed_ids_json)
             .map_err(|e| napi::Error::from_reason(format!("invalid seed_ids JSON: {e}")))?;
-        let hops = max_hops.unwrap_or(2);
         let rel = relation_filter.as_deref();
 
         let result = self
             .inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .graph_expand(&seeds, hops, rel)
+            .graph_expand_limited(&seeds, hops, rel, edge_limit)
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
         serde_json::to_string(&result).map_err(|e| napi::Error::from_reason(e.to_string()))
@@ -260,15 +357,22 @@ impl JsMemoryStore {
         &self,
         query: Option<String>,
         cap_type: Option<String>,
+        limit: Option<f64>,
     ) -> napi::Result<String> {
+        let limit = normalize_js_limit(
+            "hubDiscover limit",
+            limit,
+            DEFAULT_HUB_DISCOVER_LIMIT,
+            MAX_HUB_DISCOVER_LIMIT,
+        )?;
         let store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let caps = if let Some(ref q) = query {
             store
-                .hub_search(q, cap_type.as_deref())
+                .hub_search_limited(q, cap_type.as_deref(), limit)
                 .map_err(|e| napi::Error::from_reason(e.to_string()))?
         } else {
             store
-                .hub_list(cap_type.as_deref(), true)
+                .hub_list_limited(cap_type.as_deref(), true, limit)
                 .map_err(|e| napi::Error::from_reason(e.to_string()))?
         };
         serde_json::to_string(&caps).map_err(|e| napi::Error::from_reason(e.to_string()))
@@ -317,4 +421,379 @@ pub fn is_noise(text: String) -> bool {
 #[napi]
 pub fn should_skip(query: String) -> bool {
     should_skip_query(&query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_STORE: AtomicU64 = AtomicU64::new(0);
+
+    struct TempJsStore {
+        store: Option<JsMemoryStore>,
+        dir: PathBuf,
+    }
+
+    impl TempJsStore {
+        fn new() -> Self {
+            let sequence = NEXT_TEST_STORE.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "memory-node-bounds-{}-{sequence}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("create temporary memory-node test directory");
+            let db_path = dir.join("memory.db");
+            let store = JsMemoryStore::new(db_path.to_string_lossy().into_owned())
+                .expect("open temporary JsMemoryStore");
+            Self {
+                store: Some(store),
+                dir,
+            }
+        }
+
+        fn store(&self) -> &JsMemoryStore {
+            self.store.as_ref().expect("test store must be open")
+        }
+    }
+
+    impl Drop for TempJsStore {
+        fn drop(&mut self) {
+            self.store.take();
+            std::fs::remove_dir_all(&self.dir)
+                .expect("remove temporary memory-node test directory");
+        }
+    }
+
+    fn upsert_test_memory(store: &JsMemoryStore, id: &str, text: &str) {
+        store
+            .upsert(
+                json!({
+                    "id": id,
+                    "path": "/test/napi-bounds",
+                    "summary": text,
+                    "text": text,
+                    "timestamp": "2026-07-25T00:00:00Z"
+                })
+                .to_string(),
+            )
+            .expect("upsert test memory through N-API method");
+    }
+
+    fn register_test_capability(store: &JsMemoryStore, index: usize) {
+        store
+            .hub_register(
+                json!({
+                    "id": format!("skill:napi-bound-{index:03}"),
+                    "cap_type": "skill",
+                    "name": format!("NAPI bounded capability {index:03}"),
+                    "version": 1,
+                    "description": "NAPI bounded capability",
+                    "definition": "{}",
+                    "enabled": true,
+                    "uses": index,
+                    "successes": 0,
+                    "failures": 0,
+                    "avg_rating": 0.0,
+                    "last_used": null,
+                    "created_at": "",
+                    "updated_at": ""
+                })
+                .to_string(),
+            )
+            .expect("register test capability through N-API method");
+    }
+
+    fn seed_star_graph(store: &JsMemoryStore, edge_count: usize) {
+        upsert_test_memory(store, "graph-root", "graph root");
+        for index in 0..edge_count {
+            let target = format!("graph-target-{index:03}");
+            upsert_test_memory(store, &target, "graph target");
+            store
+                .add_edge(
+                    json!({
+                        "source_id": "graph-root",
+                        "target_id": target,
+                        "relation": "supports",
+                        "weight": 1.0,
+                        "metadata": {},
+                        "created_at": "",
+                        "valid_from": "",
+                        "valid_to": null
+                    })
+                    .to_string(),
+                )
+                .expect("add test edge through N-API method");
+        }
+    }
+
+    fn parse_json_array(json: String) -> Vec<Value> {
+        serde_json::from_str(&json).expect("parse N-API JSON array")
+    }
+
+    #[test]
+    fn search_options_cap_u64_bounds_before_the_core_search() {
+        let options = search_options_from_json(Some(
+            r#"{"top_k":18446744073709551615,"candidates":18446744073709551615}"#,
+        ));
+
+        assert_eq!(options.top_k, MAX_SEARCH_TOP_K);
+        assert_eq!(
+            options.candidates_per_channel,
+            MAX_SEARCH_CANDIDATES_PER_CHANNEL
+        );
+    }
+
+    #[test]
+    fn search_options_define_zero_bounds() {
+        let options = search_options_from_json(Some(r#"{"top_k":0,"candidates":0}"#));
+
+        assert_eq!(options.top_k, MIN_SEARCH_TOP_K);
+        assert_eq!(
+            options.candidates_per_channel, options.top_k,
+            "explicit candidates=0 must floor to normalized top_k"
+        );
+    }
+
+    #[test]
+    fn search_options_cover_omission_and_candidates_below_top_k_through_store() {
+        let default_options = SearchOptions::default();
+        let only_top_k = search_options_from_json(Some(r#"{"top_k":1}"#));
+        assert_eq!(
+            only_top_k.candidates_per_channel,
+            DEFAULT_SEARCH_CANDIDATES_PER_CHANNEL
+        );
+
+        let only_candidates = search_options_from_json(Some(r#"{"candidates":1}"#));
+        assert_eq!(only_candidates.top_k, default_options.top_k);
+        assert_eq!(
+            only_candidates.candidates_per_channel,
+            default_options.top_k
+        );
+
+        let temp = TempJsStore::new();
+        for index in 0..3 {
+            upsert_test_memory(
+                temp.store(),
+                &format!("search-bound-{index}"),
+                &format!("production boundary needle row {index}"),
+            );
+        }
+        let results = parse_json_array(
+            temp.store()
+                .search(
+                    "production boundary needle".to_string(),
+                    Some(r#"{"top_k":3,"candidates":1,"mmr_threshold":null}"#.to_string()),
+                )
+                .expect("search through exported production method"),
+        );
+        assert_eq!(results.len(), 3, "candidates below top_k must be raised");
+
+        let top_only = parse_json_array(
+            temp.store()
+                .search(
+                    "production boundary needle".to_string(),
+                    Some(r#"{"top_k":1,"mmr_threshold":null}"#.to_string()),
+                )
+                .expect("search with candidates omitted through exported production method"),
+        );
+        assert_eq!(top_only.len(), 1);
+
+        let candidates_only = parse_json_array(
+            temp.store()
+                .search(
+                    "production boundary needle".to_string(),
+                    Some(r#"{"candidates":1,"mmr_threshold":null}"#.to_string()),
+                )
+                .expect("search with top_k omitted through exported production method"),
+        );
+        assert_eq!(candidates_only.len(), 3);
+
+        let zero_candidates = parse_json_array(
+            temp.store()
+                .search(
+                    "production boundary needle".to_string(),
+                    Some(r#"{"top_k":3,"candidates":0,"mmr_threshold":null}"#.to_string()),
+                )
+                .expect("search with zero candidates through exported production method"),
+        );
+        assert_eq!(zero_candidates.len(), 3);
+    }
+
+    #[test]
+    fn js_limit_normalization_rejects_invalid_numbers_before_narrowing() {
+        assert_eq!(
+            normalize_js_limit("limit", None, DEFAULT_GET_ALL_LIMIT, MAX_GET_ALL_LIMIT)
+                .expect("default limit"),
+            DEFAULT_GET_ALL_LIMIT
+        );
+        assert_eq!(
+            normalize_js_limit(
+                "limit",
+                Some(f64::MAX),
+                DEFAULT_GET_ALL_LIMIT,
+                MAX_GET_ALL_LIMIT
+            )
+            .expect("huge finite limit"),
+            MAX_GET_ALL_LIMIT
+        );
+        for invalid in [-1.0, 1.5, f64::NAN, f64::INFINITY] {
+            assert!(
+                normalize_js_limit(
+                    "limit",
+                    Some(invalid),
+                    DEFAULT_GET_ALL_LIMIT,
+                    MAX_GET_ALL_LIMIT
+                )
+                .is_err(),
+                "invalid JavaScript number must be rejected: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn napi_get_all_caps_huge_limit_before_sqlite() {
+        let temp = TempJsStore::new();
+        for index in 0..=MAX_GET_ALL_LIMIT {
+            upsert_test_memory(
+                temp.store(),
+                &format!("get-all-bound-{index:03}"),
+                "get all bounded row",
+            );
+        }
+
+        let rows = parse_json_array(
+            temp.store()
+                .get_all(Some(f64::MAX))
+                .expect("getAll through exported production method"),
+        );
+        assert_eq!(rows.len(), MAX_GET_ALL_LIMIT);
+
+        assert!(
+            parse_json_array(temp.store().get_all(Some(0.0)).expect("zero getAll limit"))
+                .is_empty()
+        );
+        for invalid in [-1.0, 1.5, f64::NAN, f64::INFINITY] {
+            assert!(
+                temp.store().get_all(Some(invalid)).is_err(),
+                "getAll must reject invalid JavaScript number: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn napi_hub_discover_is_bounded_by_default() {
+        let temp = TempJsStore::new();
+        for index in 0..=DEFAULT_HUB_DISCOVER_LIMIT {
+            register_test_capability(temp.store(), index);
+        }
+
+        let rows = parse_json_array(
+            temp.store()
+                .hub_discover(None, None, None)
+                .expect("hubDiscover through exported production method"),
+        );
+        assert_eq!(rows.len(), DEFAULT_HUB_DISCOVER_LIMIT);
+
+        let searched = parse_json_array(
+            temp.store()
+                .hub_discover(Some("bounded capability".to_string()), None, Some(2.0))
+                .expect("limited hub search through exported production method"),
+        );
+        assert_eq!(searched.len(), 2);
+        assert!(parse_json_array(
+            temp.store()
+                .hub_discover(None, None, Some(0.0))
+                .expect("zero hub list limit")
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn napi_get_edges_is_bounded_by_default() {
+        let temp = TempJsStore::new();
+        seed_star_graph(temp.store(), DEFAULT_GET_EDGES_LIMIT + 1);
+
+        let edges = parse_json_array(
+            temp.store()
+                .get_edges(
+                    "graph-root".to_string(),
+                    Some("outgoing".to_string()),
+                    None,
+                    None,
+                )
+                .expect("getEdges through exported production method"),
+        );
+        assert_eq!(edges.len(), DEFAULT_GET_EDGES_LIMIT);
+
+        let limited = parse_json_array(
+            temp.store()
+                .get_edges(
+                    "graph-root".to_string(),
+                    Some("outgoing".to_string()),
+                    None,
+                    Some(3.0),
+                )
+                .expect("limited getEdges through exported production method"),
+        );
+        assert_eq!(limited.len(), 3);
+        assert!(parse_json_array(
+            temp.store()
+                .get_edges(
+                    "graph-root".to_string(),
+                    Some("outgoing".to_string()),
+                    None,
+                    Some(0.0),
+                )
+                .expect("zero getEdges limit")
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn napi_graph_expand_bounds_edge_accumulation_by_default() {
+        let temp = TempJsStore::new();
+        seed_star_graph(temp.store(), DEFAULT_GRAPH_EXPAND_EDGE_LIMIT + 1);
+
+        let result: Value = serde_json::from_str(
+            &temp
+                .store()
+                .graph_expand("[\"graph-root\"]".to_string(), Some(1.0), None, None)
+                .expect("graphExpand through exported production method"),
+        )
+        .expect("parse graph expansion result");
+        assert_eq!(
+            result["edges"].as_array().expect("graph edges").len(),
+            DEFAULT_GRAPH_EXPAND_EDGE_LIMIT
+        );
+
+        let limited: Value = serde_json::from_str(
+            &temp
+                .store()
+                .graph_expand("[\"graph-root\"]".to_string(), Some(1.0), None, Some(4.0))
+                .expect("limited graphExpand through exported production method"),
+        )
+        .expect("parse limited graph expansion result");
+        assert_eq!(limited["edges"].as_array().expect("graph edges").len(), 4);
+
+        let zero: Value = serde_json::from_str(
+            &temp
+                .store()
+                .graph_expand("[\"graph-root\"]".to_string(), Some(1.0), None, Some(0.0))
+                .expect("zero graph edge limit"),
+        )
+        .expect("parse zero graph expansion result");
+        assert!(zero["edges"].as_array().expect("graph edges").is_empty());
+        assert!(zero["entries"]
+            .as_array()
+            .expect("graph entries")
+            .is_empty());
+
+        assert!(temp
+            .store()
+            .graph_expand("[\"graph-root\"]".to_string(), Some(1.5), None, Some(1.0),)
+            .is_err());
+    }
 }

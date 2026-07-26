@@ -44,16 +44,10 @@ async fn tachi_task_facade_defaults_to_markdown_and_keeps_json_escape_hatch() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn tachi_task_wait_returns_terminal_dispatch_status() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let server = make_server();
     let dispatch_id = "dispatch-wait-complete";
-    let run_dir = temp_home.path().join("runs").join(dispatch_id);
+    let run_dir = crate::dispatch_ops::runs_dir_for_server(&server).join(dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("run dir");
     std::fs::write(
         run_dir.join("status.json"),

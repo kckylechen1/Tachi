@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_materialize_cleans_temp_file_on_chmod_failure() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-temp-cleanup-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

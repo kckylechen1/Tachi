@@ -593,6 +593,7 @@ async fn handle_tachi_status_detail(
                 "namespace_issues": namespace_issues,
                 "continuity": continuity_summary,
                 "plan_c_split_brain": snapshot.plan_c_split_brain,
+                "plan_c_alias_integrity": snapshot.plan_c_alias_integrity,
                 "provider_auth_failures": auth_failures,
                 "latest_failed_jobs": failed_jobs,
             },
@@ -660,6 +661,7 @@ async fn handle_tachi_status_detail(
             "enrichment_failures": enrichment_failure_dbs.len(),
             "namespace_issues": namespace_issues.len(),
             "plan_c_split_brain": snapshot.plan_c_split_brain.len(),
+            "plan_c_alias_integrity": snapshot.plan_c_alias_integrity.len(),
             "provider_auth_failures": auth_failures.len(),
             "api_keys": {
                 "drift": api_key_drift,

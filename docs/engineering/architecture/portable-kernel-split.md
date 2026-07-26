@@ -105,6 +105,18 @@ store.search(query, Some(opts))?;
 
 Do not re-hardcode A-share / character-card decay constants into `memcore`.
 
+### Exact-dedupe downstream sync
+
+`crates/memcore/src/store/exact_dedupe.rs` is the portable source of truth;
+`crates/tachi-server/src/repair/exact_dedupe.rs` is the Tachi-owned CLI/daemon
+ownership adapter. HyperTachi tracks the portable core in downstream
+[HyperTachi#61](https://github.com/kckylechen1/Hyperion-HyperTachi/issues/61),
+with reference commit
+[`74c66dec`](https://github.com/kckylechen1/Hyperion-HyperTachi/commit/74c66dec).
+Until HyperTachi consumes the shared crate directly, changes to the portable
+source must be synced there and its exact-dedupe compatibility tests must pass
+against the same plan/apply fixtures.
+
 ## Targeted issue lanes (after this split)
 
 | Lane | Scope | Examples |

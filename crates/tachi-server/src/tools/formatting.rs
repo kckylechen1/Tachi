@@ -148,6 +148,21 @@ pub(super) fn format_facade_response(
     append_known_field(&mut lines, &value, "context_file");
     append_known_field(&mut lines, &value, "message");
     append_known_field(&mut lines, &value, "dispatch_error");
+    if action == "board" {
+        for field in [
+            "incomplete",
+            "limit_incomplete",
+            "warning",
+            "incomplete_reasons",
+            "kanban_fetch_truncated",
+            "flow_fetch_truncated",
+            "run_fallback_incomplete",
+            "run_scan_truncated",
+            "run_scan_invalid_entries",
+        ] {
+            append_known_field(&mut lines, &value, field);
+        }
+    }
     append_host_admission_markdown(&mut lines, &value);
 
     if let Some(eval_entry) = value.get("eval_entry") {

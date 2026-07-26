@@ -88,6 +88,18 @@ fn collect_sweep_paths_inner(
                 if !entry.allow_write || entry.schema_kind != "tachi" {
                     continue;
                 }
+                match crate::path_utils::manifest_db_leaf_exists(&entry) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %entry.path,
+                            error = %error,
+                            "vector sweep refused manifest DB"
+                        );
+                        continue;
+                    }
+                }
                 push(PathBuf::from(entry.path));
             }
         }
@@ -376,8 +388,45 @@ fn record_disabled_sweep_state(
 mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
+    use memcore::{MemoryEntry, MemoryStore};
+    use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
+
+    fn insert_memory(store: &mut MemoryStore, id: &str, path: &str, text: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .upsert(&MemoryEntry {
+                id: id.to_string(),
+                path: path.to_string(),
+                summary: String::new(),
+                text: text.to_string(),
+                importance: 0.5,
+                timestamp: now.clone(),
+                valid_from: now,
+                valid_until: None,
+                category: "fact".to_string(),
+                topic: "status".to_string(),
+                keywords: Vec::new(),
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                source: "manual".to_string(),
+                scope: "project".to_string(),
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                metadata: json!({}),
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
+            })
+            .expect("insert typed memory fixture");
+    }
 
     #[test]
     fn collect_sweep_paths_includes_global_and_manifest_entries() {
@@ -528,18 +577,14 @@ mod tests {
     async fn daemon_sweep_records_partial_progress_when_later_batch_fails() {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("partial-failure.db");
-        let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).unwrap();
         for index in 0..33 {
-            store
-                .connection()
-                .execute(
-                    "INSERT INTO memories
-                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
-                     VALUES (?1, '/facts/partial', '', ?2, 0.5, ?3, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?3, ?3, 0, 1, '{}')",
-                    rusqlite::params![format!("partial-{index}"), format!("body {index}"), now],
-                )
-                .unwrap();
+            insert_memory(
+                &mut store,
+                &format!("partial-{index}"),
+                "/facts/partial",
+                &format!("body {index}"),
+            );
         }
         drop(store);
 
@@ -611,24 +656,15 @@ mod tests {
     async fn daemon_sweep_does_not_count_unattempted_pending_rows_as_failed() {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("below-threshold.db");
-        let mut store = memcore::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).unwrap();
         let dummy_vec = vec![0.0_f32; 1024];
         for index in 0..100 {
             let id = format!("threshold-{index}");
-            store
-                .connection()
-                .execute(
-                    "INSERT INTO memories
-                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
-                     VALUES (?1, '/facts/skipped', '', 'body', 0.5, ?2, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
-                    rusqlite::params![id, now],
-                )
-                .unwrap();
+            insert_memory(&mut store, &id, "/facts/skipped", "body");
             if index < 99 {
-                store
-                    .update_enrichment_fields(&id, None, Some(&dummy_vec), None, None, 1)
-                    .unwrap();
+                let mut entry = store.get(&id).unwrap().expect("typed fixture exists");
+                entry.vector = Some(dummy_vec.clone());
+                store.upsert(&entry).expect("write typed vector fixture");
             }
         }
         drop(store);

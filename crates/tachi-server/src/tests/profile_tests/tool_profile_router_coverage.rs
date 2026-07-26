@@ -23,7 +23,7 @@ pub(super) fn native_route_definitions() -> Vec<rmcp::model::Tool> {
         .build()
         .expect("profiles test runtime");
     let _guard = runtime.enter();
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "profiles-metadata-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -47,7 +47,7 @@ fn native_route_descriptions() -> BTreeMap<String, String> {
         .build()
         .expect("profiles test runtime");
     let _guard = runtime.enter();
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "profiles-description-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -435,14 +435,95 @@ fn f1098_cache_policy_entries_are_live_registered_routes() {
     }
 }
 
+enum LiveActionInventory {
+    Absent,
+    Unbounded,
+    Enumerated(Vec<String>),
+}
+
+fn action_inventory_from_live_schema(tool: &rmcp::model::Tool) -> LiveActionInventory {
+    let schema = serde_json::to_value(&tool.input_schema)
+        .expect("live MCP tool input schema must serialize for effect coverage");
+    let Some(action_schema) = schema.pointer("/properties/action") else {
+        return LiveActionInventory::Absent;
+    };
+    let Some(actions) = action_schema
+        .get("enum")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return LiveActionInventory::Unbounded;
+    };
+    LiveActionInventory::Enumerated(
+        actions
+            .iter()
+            .map(|action| {
+                action
+                    .as_str()
+                    .expect("action enums must contain strings")
+                    .to_string()
+            })
+            .collect(),
+    )
+}
+
+/// #1098 / #1170 ratchet: enumerate the live registered router and compare each
+/// advertised action enum to the independent typed effect map. An action newly
+/// added to a schema must be added to that map explicitly; an invented action
+/// must have no metadata and therefore fail closed at the production gate.
+#[test]
+fn f1098_live_action_inventory_has_explicit_effect_metadata() {
+    let mut missing_effects = Vec::new();
+    let mut implicit_unknowns = Vec::new();
+
+    for tool in native_route_definitions() {
+        let tool_name = tool.name.to_string();
+        let actions = match action_inventory_from_live_schema(&tool) {
+            LiveActionInventory::Absent => continue,
+            LiveActionInventory::Unbounded => {
+                assert!(
+                    crate::action_effect::facade_action_effect(
+                        &tool_name,
+                        Some("__action_without_schema_inventory"),
+                    )
+                    .is_none(),
+                    "{tool_name} has no action enum but grants per-action effect metadata"
+                );
+                continue;
+            }
+            LiveActionInventory::Enumerated(actions) => actions,
+        };
+
+        for action in &actions {
+            let metadata = crate::action_effect::facade_action_effect(&tool_name, Some(action));
+            if metadata.is_none() {
+                missing_effects.push(format!("{tool_name}(action='{action}')"));
+            }
+        }
+
+        if crate::action_effect::facade_action_effect(
+            &tool_name,
+            Some("__new_action_without_effect_authority"),
+        )
+        .is_some()
+        {
+            implicit_unknowns.push(tool_name);
+        }
+    }
+
+    assert!(
+        missing_effects.is_empty(),
+        "live actions missing explicit typed effect mappings: {missing_effects:?}"
+    );
+    assert!(
+        implicit_unknowns.is_empty(),
+        "action schemas granting implicit metadata to new actions: {implicit_unknowns:?}"
+    );
+}
+
 /// #1098 acceptance: "dynamically enumerate every ... direct tool route;
-/// every routable operation has effect/replay metadata or fails a
-/// completeness test." `dlq_mutation_is_unsafe` is a total function (a
-/// canonicalized name outside its known universe defaults to `false`,
-/// matching legacy behavior for unrecognized routes) — this dynamically
-/// walks the real, live router and proves the classification pass runs
-/// clean (no panic) end to end for every tool name the server actually
-/// exposes today, native or facade.
+/// every routable operation has effect/replay metadata or fails closed." This
+/// dynamically walks the real, live router and proves the replay authority runs
+/// clean end to end for every tool name the server actually exposes today.
 ///
 /// codex review (PR #1213, checkpoint 3): the pre-fix-round version of this
 /// test discarded the boolean result, proving only "did not panic". It now
@@ -450,14 +531,14 @@ fn f1098_cache_policy_entries_are_live_registered_routes() {
 /// unit test in `action_effect` checks in isolation), that every currently
 /// registered cache-invalidating standalone route this fix round fixed
 /// (`remember`/`extract_facts`/`ingest_event`) really does classify unsafe
-/// end to end through `shared_defs::dlq_mutation_is_unsafe` — catching a
+/// end to end through `shared_defs::dlq_replay_is_explicitly_safe` — catching a
 /// future regression where the route stays registered but drops out of
 /// `STANDALONE_UNSAFE_ROUTES`.
 #[test]
 fn f1098_every_live_native_route_classifies_without_panicking() {
     let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
     for name in &route_names {
-        let _ = crate::shared_defs::dlq_mutation_is_unsafe(name, None);
+        let _ = crate::shared_defs::dlq_replay_is_explicitly_safe(name, None);
     }
 
     for fixed_route in ["remember", "extract_facts", "ingest_event"] {
@@ -467,7 +548,7 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
              #1213 fail-open fix to mean anything"
         );
         assert!(
-            crate::shared_defs::dlq_mutation_is_unsafe(fixed_route, None),
+            !crate::shared_defs::dlq_replay_is_explicitly_safe(fixed_route, None),
             "'{fixed_route}' must classify unsafe-to-replay through the live \
              router (PR #1213 checkpoint 4 fix)"
         );

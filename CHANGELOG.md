@@ -44,9 +44,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Added
+
+- **Presence claims and peer publication**: lease-based presence board with zero-ceremony hooks, advisory file-scope collision warnings, and the read-only `peer_query` broker (`presence` board plus an observe-only `run` projection) so same-host sessions can see each other's active work without Tachi owning their lifecycle (#1001, #1016).
+- **Sticky notes** for short agent-to-agent messages: `tachi_memory(action='sticky_leave'|'sticky_check')` with TTL and read-once claim semantics; the legacy `handoff_leave`/`handoff_check` memo routes are deprecated in favor of sticky notes and HandoffPacket (#1016, #1019).
+- **Graph ontology and observation ledger**: edge relation ontology v1, `ensure_anchor`, retirement of the fuzzy `auto_link` fog, an append-only `edge_observations` ledger, and exact-dedupe durable receipt/restore with graph-edge transfer (#773, #774).
+- **Issue Refinery v1**: immutable evidence capture, disposition proposals, and a freshness layer (zombie scan, stale-candidate heuristics) with briefing queues and GitHub write-back (#1000, #1002).
+- **Dispatch evidence spine**: `dispatch_outcomes` execution facts, append-only `dispatch_adjudications` keyed by outcome, frozen dispatch identity receipts, verdict-driven terminal accounting, and principle-level precedent candidates decomposed from completion rulings (#1024, #1035, #1065, #1076).
+- **Execution environments**: resource ledger (bytes, not rows), env classes with a serialized build broker, a report-only orphan reaper, and an authority contract compiler certified by an executed kill-test (#894).
+- **Harness-native subagent eval bridge**: mirror eval intake and host-native spawn receipts feed per-agent/per-profile routing scores without Tachi owning worker lifecycles (#1066, #1249).
+- **`tachi migrate`** — cross-library schema sweep with per-apply liveness re-judgment (#1223).
+- **Typed lane-card declarations**: `tachi cards sync|list` mirrors dispatch-ledger cards read-only and projects countermeasures into dispatch prompts; the TOML seed layer is retired (#1202).
+- **Wiki reviewed-projection lifecycle** with provenance and truthful retrieval states (#1072).
+- **Surface-scoped recall**: Memory/Docs classifier plus `SearchOptions.surface`, evidence-gated decision boost, and a read-only GitHub corpus source adapter producing idempotent evidence and Pending candidates (#1059).
+- **`tachi vault exec`** — run a child command with Vault-delivered credentials: Vault only fills missing env names, `--require` gives fail-loud pre-spawn gating, injection diagnostics are name-only, and the child exit code propagates. By default it is fail-closed: if the Vault cannot be unlocked or its environment cannot be loaded, it refuses to spawn a credential-less child before exec; `--allow-unauthenticated` opts back into running with the inherited environment (#1316, #1384, #1413 concern 4).
+- **LLM chat-lane cross-provider fallback** with loud `LANE_OUTAGE` recording on full-chain exhaustion, plus an extract-lane discriminative quality golden (#1197, #1198).
+- **Provider-key allowlist admissions**: `ZHIPUAI_API_KEY` (opencode GLM lane) and `KIMI_API_KEY`, plus env-substitution for vault-backed lane providers (#1355).
+- **Memory hygiene**: near-duplicate raw merge proposals (light-sleep detection port), the raw tier included in vector backfill behind a gate with a per-tier similarity floor, and vector backfill made portable across maintenance paths (#775, #788, #1242).
+- **Campaign handoff verb**: `handoff_draft` / `handoff_publish` / `handoff_repair` plus a restricted `issue_close` (#1285).
+- **Build-resource governance**: packet guard, doctor patrol, and the worktree-location law for shared build caches (#1184).
+
 ### Changed
 
 - **Every standalone-Tachi SQLite store file is renamed `memory.db` -> `tachi-memory.db`** (`~/.tachi/global/`, `~/.tachi/projects/<name>/`, repo-local `.tachi/`) — owner-ratified naming rule "system in the filename, scope stays in the directory" (#1132). A one-time rename-on-open migration handles existing installs transparently: the first `open()` of a directory still carrying the legacy filename renames it and leaves a `memory.db` -> `tachi-memory.db` symlink behind for one release window, so anything still hard-coded to the old name keeps working through this release. The `memory-server` `[[bin]]` PATH-compat alias (unused since the #890/#912 brand rename; never distributed) is retired in the same change.
+- **Claude CLI pool retired**: background extraction/summary/distillation lanes now call configured API providers directly (with the cross-provider fallback above); the CLI spawn path and the `claude_pool` fallback chain were removed (#1261).
+- **Shell contracted to dispatch and status**: kanban translation, vendored-skill resolution, and flow-artifact path safety were relocated out of Shell onto their owning surfaces (#1319).
+- **Recall receipts carry measured latency**: pool-checkout wait, spawn-queue, search, and write phases are separated in receipts, and symbolic candidate retrieval is bounded at large corpora (#1093, #1125, #1255).
+- **Facade output economics**: `tachi_status` and `search_memory` default to markdown; the recommend/profiles/card read endpoints are slimmed; agent briefing defaults to the compact packet (#527, #1201).
+- **Capture lifecycle**: session capture is idempotent with typed retention, an opt-in capture archive sweep is available, and write-only namespaces are TTL'd with fail-closed lease checks (#1301).
+- **CI gates**: a Format Gate workflow, a known-deterministic-reds nextest group with a JUnit gate, and the `nextest-census.sh` failure-signature script; vendored-corpus tests are marked provisioning-dependent (#1278, #1378). The known-reds gate matches the EXACT full test paths (anchored, no substring/prefix absorption) and refuses a valid-but-incomplete (truncated) JUnit before declaring OK (#1413 concern 5).
+
+### Fixed
+
+- **Save-to-retrievability contract**: recall-cache invalidation choke point and epoch-fenced write-through, so a fresh save is immediately recallable (#2059, PR #1361).
+- **Project identity repair**: fail-closed gen-2 recovery with resolver/manifest invariants (#1356).
+- **Vault**: auto-lock clears only the vault key (unified `0=never` sentinel, #400); stored `kdf_params` are enforced at every key-derivation site with a fail-closed algorithm check; honest no-TTY errors and a Keychain path for MCP `vault_unlock`.
+- **Recall**: vector KNN over-fetches past the archived post-JOIN filter (#1245); pure-Han FTS fallback candidates recovered; atomic dedup for id-less memory saves.
+- **Daemon and lifecycle**: `tachi serve` exits on SIGTERM with per-parent age-ordered reap dedup (#1273); daemon locks unified and live-DB copies guarded; doctor fails closed when DB ownership is indeterminate; WAL checkpoint copy fails honestly (#1118, #1323).
+- **Schema-init ordering escape**: evolution-column indexes, dedup-before-unique, and a 3-way schema oracle (#1289).
+- **Provider secret materialization**: per-alias tolerance with loud skip observability (#1279).
+- The orphan reaper's destructive path was re-sheathed (report-only) pending fence repair (#1379).
+
+### Security
+
+- Recursive-dispatch depth gate v1 against accidental runaway dispatch, and bounded untrusted dispatch prompt inputs (#1251).
 
 ## [1.9.0] - 2026-07-11
 

@@ -115,6 +115,11 @@ impl MemoryStore {
         db::vault_list_entries(&self.conn)
     }
 
+    /// List vault entry names with `updated_at` only (no ciphertext/nonce).
+    pub fn vault_list_entry_timestamps(&self) -> Result<Vec<(String, String)>, MemoryError> {
+        db::vault_list_entry_timestamps(&self.conn)
+    }
+
     /// List secrets filtered by type.
     pub fn vault_list_entries_by_type(
         &self,
@@ -257,6 +262,41 @@ mod tests {
     /// change that quietly adds validation here (which would violate the
     /// #1106 layering ruling by requiring a `vault-kit` dependency) goes red.
     #[test]
+    fn vault_list_entry_timestamps_returns_name_and_updated_at_only() {
+        let store = MemoryStore::open_in_memory().expect("open test store");
+        let mut a = test_entry("ALPHA_KEY");
+        a.encrypted_value = "ciphertext-must-not-be-required".to_string();
+        a.nonce = "nonce-must-not-be-required".to_string();
+        let b = test_entry("BETA_KEY");
+        store.vault_upsert_entry(&a).expect("upsert a");
+        store.vault_upsert_entry(&b).expect("upsert b");
+
+        let timestamps = store
+            .vault_list_entry_timestamps()
+            .expect("list timestamps");
+        assert_eq!(
+            timestamps
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ALPHA_KEY", "BETA_KEY"]
+        );
+        assert!(
+            timestamps
+                .iter()
+                .all(|(_, updated_at)| !updated_at.is_empty()),
+            "updated_at must be populated"
+        );
+
+        // Discrimination: narrow listing must agree with full-list metadata
+        // without forcing callers to materialize ciphertext fields.
+        let full = store.vault_list_entries().expect("full list");
+        let from_full: Vec<(String, String)> =
+            full.into_iter().map(|e| (e.name, e.updated_at)).collect();
+        assert_eq!(timestamps, from_full);
+    }
+
+    #[test]
     fn vault_import_bundle_unchecked_persists_unsupported_kdf_params_raw() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         let config = VaultConfig {
@@ -291,9 +331,11 @@ mod tests {
 
     #[test]
     fn vault_replace_api_key_pool_rolls_back_when_rotation_write_fails() {
-        let mut store = MemoryStore::open_in_memory().expect("open test store");
-        store
-            .conn
+        let dir = tempfile::tempdir().expect("vault rollback temp dir");
+        let path = dir.path().join("memory.db");
+        let mut store = MemoryStore::open(&path.to_string_lossy()).expect("open test store");
+        let offline = rusqlite::Connection::open(&path).expect("open offline trigger fixture");
+        offline
             .execute_batch(
                 "CREATE TRIGGER fail_pool_rotation
                  BEFORE INSERT ON vault_key_rotations
@@ -303,6 +345,7 @@ mod tests {
                  END;",
             )
             .expect("install failure trigger");
+        drop(offline);
 
         let err = store
             .vault_replace_api_key_pool(

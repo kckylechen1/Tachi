@@ -97,6 +97,7 @@ base64 = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 dialoguer = "0.12"
 rpassword = "7"
 glob = "0.3"
@@ -117,12 +118,14 @@ vault-kit = { path = "../vault-kit" }
 
 [dev-dependencies]
 tempfile = "3"
+memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }
 tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
-# Unifies in vault-kit's lightweight Argon2 test profile (m=64 KiB vs the
-# production m=65536 KiB) for tachi-server's own test binary only — Cargo
-# feature unification for `[dev-dependencies]` only applies when a
-# test/bench/example target is actually built, so `cargo build --release`
-# never sees this feature (see vault-kit's Cargo.toml feature docs).
+# Dev-dep only, so `cargo build --release` never sees this feature. It
+# makes vault-kit's `test_support::derive_cheap` (m=64 KiB vs the
+# production m=65536 KiB) available to tachi-server's own test binary; it
+# does not make the ordinary `derive()` calls in the same test binary
+# cheap — those still run the production Argon2 profile (see vault-kit's
+# Cargo.toml feature docs).
 vault-kit = { path = "../vault-kit", features = ["test-support"] }
 # `test-util` enables `tokio::time::pause()` / `#[tokio::test(start_paused)]`
 # for the ci_watch backoff test (finding #2): it virtualizes the watcher's
@@ -138,6 +141,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "tachi-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "github-corpus-pilot"
+path = "src/bin/github_corpus_pilot.rs"
 
 # Install/PATH compatibility alias for the MemCore/Tachi brand rename
 # (#912 / #890). Compiles the SAME `src/main.rs`, so with default flags

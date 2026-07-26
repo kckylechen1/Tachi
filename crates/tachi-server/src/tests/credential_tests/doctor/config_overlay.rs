@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_doctor_reports_plaintext_config_overlay_secret_drift() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-doctor-plaintext-config-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -66,7 +66,7 @@ fn credential_doctor_reports_plaintext_config_overlay_secret_drift() {
 
 #[test]
 fn credential_doctor_allows_config_overlay_env_and_vault_references() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-doctor-config-ref-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -123,7 +123,7 @@ fn credential_doctor_allows_config_overlay_env_and_vault_references() {
 
 #[test]
 fn credential_doctor_detects_compound_secretish_config_keys() {
-    let db_path = std::env::temp_dir().join(format!(
+    let db_path = crate::utils::test_fixture_path(format!(
         "credential-doctor-compound-config-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));

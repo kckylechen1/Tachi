@@ -255,3 +255,78 @@ pub(in crate::copilot_ops) fn guide_hit_row(
         "applies_to": metadata.get("applies_to").cloned().unwrap_or(Value::Null),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_wiki_guide(home: &Path, id: &str, text: &str) -> std::path::PathBuf {
+        let db_path = home
+            .join("projects")
+            .join("wiki")
+            .join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db_path.parent().expect("wiki DB parent"))
+            .expect("create wiki DB parent");
+        let mut store =
+            MemoryStore::open(db_path.to_str().expect("utf8 wiki DB")).expect("open wiki DB");
+        let mut entry = crate::tests::make_entry(id);
+        entry.path = format!("/guide/{id}");
+        entry.summary = text.to_string();
+        entry.text = text.to_string();
+        store.upsert(&entry).expect("seed wiki guide");
+        drop(store);
+
+        let mut manifest = crate::manifest::Manifest::load_or_empty(&home.join("manifest.json"));
+        manifest
+            .dbs
+            .retain(|entry| entry.scope_hint != "project:wiki");
+        manifest.dbs.push(crate::manifest::DbEntry {
+            path: db_path.display().to_string(),
+            role: crate::manifest::DbRole::Project,
+            owner: "test".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "project:wiki".to_string(),
+            notes: String::new(),
+        });
+        manifest
+            .save(&home.join("manifest.json"))
+            .expect("save wiki manifest");
+        db_path
+    }
+
+    #[test]
+    fn wiki_and_guide_visibility_use_server_home_after_environment_drift() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let server = crate::tests::make_server();
+        seed_wiki_guide(
+            &server.tachi_home_dir(),
+            "fixture-guide-after-env-drift",
+            "fixture guide remains visible",
+        );
+
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        seed_wiki_guide(
+            ambient_home.path(),
+            "ambient-guide-after-env-drift",
+            "ambient guide must stay hidden",
+        );
+        let _ambient = crate::test_support::EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        assert!(default_named_project_available(&server, "wiki"));
+        let params: TachiTaskParams =
+            serde_json::from_value(json!({"action": "briefing"})).expect("task params");
+        let candidates = load_feature_guide_candidates(&server, &params, 20);
+        let ids = candidates
+            .iter()
+            .map(|(entry, _, _)| entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"fixture-guide-after-env-drift"));
+        assert!(!ids.contains(&"ambient-guide-after-env-drift"));
+    }
+}

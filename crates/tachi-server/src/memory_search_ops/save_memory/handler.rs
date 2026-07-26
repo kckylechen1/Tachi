@@ -2,18 +2,246 @@ use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
     find_exact_path_text_duplicate, lookup_existing_entry, spawn_save_contradiction_detection,
-    upsert_idless_save_entry, upsert_save_entry,
+    upsert_idless_save_entry, upsert_save_entry, AtomicReferenceWrite,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
 use super::write_affinity::{apply_write_affinity, AffinityNote};
 use crate::memory_search_ops::auto_link::{is_training_seed, spawn_auto_linking};
 use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
-use crate::tool_params::SaveMemoryParams;
+use crate::tool_params::{build_evidence_refs_v1, SaveMemoryParams};
 use crate::{DbScope, MemoryServer};
 use blake2::{Blake2s256, Digest};
 use chrono::Utc;
 use serde_json::json;
+
+pub(super) struct AuthorizedReferenceMutations(Vec<memcore::db::ValidatedReferenceMutation>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaveMetadataAuthority {
+    Public,
+    ServerVerified,
+}
+
+impl AuthorizedReferenceMutations {
+    pub(super) fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    pub(super) fn from_authorized(mutations: Vec<memcore::db::ValidatedReferenceMutation>) -> Self {
+        Self(mutations)
+    }
+
+    fn validate(references: &[String]) -> Result<Self, String> {
+        crate::wiki_ops::validate_references(references)?;
+        let captured_at = Utc::now().to_rfc3339();
+        build_evidence_refs_v1(references, &captured_at)
+            .into_iter()
+            .map(|reference| {
+                let target_kind = reference
+                    .target_kind
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| format!("serialize trusted evidence target kind: {error}"))?
+                    .and_then(|value| value.as_str().map(str::to_string));
+                memcore::db::ValidatedReferenceMutation::evidence(
+                    reference.target_ref,
+                    reference.captured_at,
+                    target_kind,
+                )
+                .map_err(|error| format!("construct trusted evidence ref: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
+    }
+}
+
+#[cfg(test)]
+struct PreUpsertBarrier {
+    entry_id: String,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static PRE_UPSERT_BARRIER: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsertBarrier>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct PreUpsertPause {
+    entry_id: String,
+    pause_trusted_append: bool,
+    arrived: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static PRE_UPSERT_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsertPause>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct PreUpsertBarrierGuard;
+
+#[cfg(test)]
+pub(crate) struct PreUpsertPauseGuard;
+
+#[cfg(test)]
+pub(crate) fn install_pre_upsert_barrier(
+    entry_id: &str,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+) -> PreUpsertBarrierGuard {
+    let slot = PRE_UPSERT_BARRIER.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PreUpsertBarrier {
+        entry_id: entry_id.to_string(),
+        barrier,
+    });
+    PreUpsertBarrierGuard
+}
+
+#[cfg(test)]
+impl Drop for PreUpsertBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = PRE_UPSERT_BARRIER.get() {
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_pre_upsert_pause(
+    entry_id: &str,
+    pause_trusted_append: bool,
+    arrived: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+) -> PreUpsertPauseGuard {
+    let slot = PRE_UPSERT_PAUSE.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PreUpsertPause {
+        entry_id: entry_id.to_string(),
+        pause_trusted_append,
+        arrived,
+        release,
+    });
+    PreUpsertPauseGuard
+}
+
+#[cfg(test)]
+impl Drop for PreUpsertPauseGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = PRE_UPSERT_PAUSE.get() {
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn wait_at_pre_upsert_barrier(entry_id: &str) {
+    let barrier = PRE_UPSERT_BARRIER.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|configured| configured.entry_id == entry_id)
+            .map(|configured| std::sync::Arc::clone(&configured.barrier))
+    });
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+#[cfg(test)]
+fn wait_at_pre_upsert_pause(entry_id: &str, trusted_append: bool) {
+    let pause = PRE_UPSERT_PAUSE.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|configured| {
+                configured.entry_id == entry_id && configured.pause_trusted_append == trusted_append
+            })
+            .map(|configured| {
+                (
+                    std::sync::Arc::clone(&configured.arrived),
+                    std::sync::Arc::clone(&configured.release),
+                )
+            })
+    });
+    if let Some((arrived, release)) = pause {
+        arrived.wait();
+        release.wait();
+    }
+}
+
+fn atomic_evidence_metadata_patch(
+    existing: Option<&serde_json::Value>,
+    final_metadata: &serde_json::Value,
+    explicit_keys: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    let Some(final_object) = final_metadata.as_object() else {
+        return serde_json::Map::new();
+    };
+    let existing_object = existing.and_then(serde_json::Value::as_object);
+    let mut patch = serde_json::Map::new();
+    for key in explicit_keys {
+        if !matches!(key.as_str(), "evidence_refs_v1" | "source_refs") {
+            if let Some(value) = final_object.get(key) {
+                patch.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    for (key, value) in final_object {
+        if matches!(key.as_str(), "evidence_refs_v1" | "source_refs") {
+            continue;
+        }
+        if existing_object.and_then(|object| object.get(key)) != Some(value) {
+            patch.insert(key.clone(), value.clone());
+        }
+    }
+    patch
+}
+
+fn strip_reserved_reference_metadata(metadata: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(object)) = metadata {
+        object.remove("evidence_refs_v1");
+        object.remove("source_refs");
+    }
+}
+
+fn is_wiki_namespace(path: &str) -> bool {
+    let normalized = memcore::path_router::normalize_path(path);
+    normalized == "/wiki" || normalized.starts_with("/wiki/")
+}
+
+const PUBLIC_WIKI_AUTHORITY_KEYS: [&str; 3] =
+    ["review_receipt", "source_bundle_hash", "source_ref"];
+
+fn is_wiki_classified(entry: &memcore::MemoryEntry) -> bool {
+    is_wiki_namespace(&entry.path)
+        || matches!(
+            entry.category.trim().to_ascii_lowercase().as_str(),
+            "wiki" | "guide"
+        )
+        || entry
+            .domain
+            .as_deref()
+            .is_some_and(|domain| domain.trim().eq_ignore_ascii_case("wiki"))
+        || entry
+            .metadata
+            .get("wiki")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn constrain_public_wiki_metadata(metadata: &mut serde_json::Value) -> Result<(), String> {
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| "metadata must be a JSON object for wiki-classified saves".to_string())?;
+
+    for key in PUBLIC_WIKI_AUTHORITY_KEYS {
+        object.remove(key);
+    }
+    object.insert("lifecycle".to_string(), json!("pending_review"));
+    object.insert("status".to_string(), json!("pending_review"));
+    object.insert("review_status".to_string(), json!("pending"));
+    object.insert("authority".to_string(), json!("advisory"));
+    Ok(())
+}
 
 fn idless_save_identity(path: &str, text: &str) -> String {
     let path = memcore::path_router::normalize_path(path);
@@ -50,8 +278,47 @@ fn domain_affinity_note_json(note: &AffinityNote) -> serde_json::Value {
 
 pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
-    mut params: SaveMemoryParams,
+    params: SaveMemoryParams,
 ) -> Result<String, String> {
+    handle_save_memory_impl(
+        server,
+        params,
+        AuthorizedReferenceMutations::empty(),
+        SaveMetadataAuthority::Public,
+    )
+    .await
+}
+
+pub(crate) async fn handle_save_memory_with_references(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+    references: Vec<String>,
+) -> Result<String, String> {
+    let evidence_refs = AuthorizedReferenceMutations::validate(&references)?;
+    handle_save_memory_impl(server, params, evidence_refs, SaveMetadataAuthority::Public).await
+}
+
+pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+    mutations: Vec<memcore::db::ValidatedReferenceMutation>,
+) -> Result<String, String> {
+    handle_save_memory_impl(
+        server,
+        params,
+        AuthorizedReferenceMutations::from_authorized(mutations),
+        SaveMetadataAuthority::ServerVerified,
+    )
+    .await
+}
+
+async fn handle_save_memory_impl(
+    server: &MemoryServer,
+    mut params: SaveMemoryParams,
+    evidence_refs: AuthorizedReferenceMutations,
+    metadata_authority: SaveMetadataAuthority,
+) -> Result<String, String> {
+    strip_reserved_reference_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
     params.summary = scrub_think_tags(&params.summary);
     let (safe_text, secret_redactions) = scrub_secrets(&params.text);
@@ -78,6 +345,9 @@ pub(crate) async fn handle_save_memory(
         .unwrap_or_else(|| timestamp.clone());
     let requested_scope = params.scope.clone();
     let named_project = params.project.clone();
+    if let Some(project) = named_project.as_deref() {
+        server.prepare_named_project_store_for_write(project)?;
+    }
     let (target_db, warning) = if named_project.is_some() {
         (DbScope::Project, None) // Will use named project below
     } else {
@@ -207,6 +477,12 @@ pub(crate) async fn handle_save_memory(
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
     let emit_continuity = params.emit_continuity;
+    let explicit_metadata_keys = params
+        .metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
     let mut entry = build_save_entry(
         server,
         params,
@@ -229,7 +505,7 @@ pub(crate) async fn handle_save_memory(
     // broader pre-#1041 bug instead of closing it) — the invariant is
     // `provenance.db_path` always matches where the row actually landed.
     if let Some(project_name) = named_project.as_deref() {
-        if let Ok(named_project_path) = MemoryServer::resolve_named_project_db_path(project_name) {
+        if let Ok(named_project_path) = server.resolve_server_named_project_db_path(project_name) {
             entry.metadata = crate::provenance::correct_provenance_db_path_for_named_project(
                 entry.metadata,
                 &named_project_path,
@@ -237,13 +513,44 @@ pub(crate) async fn handle_save_memory(
         }
     }
 
+    // Public metadata is caller-controlled. Decide from the completed row,
+    // after patch inheritance and domain resolution, and retain the existing
+    // row's classification as a one-way authority constraint even when a
+    // public update tries to declassify the candidate.
+    let metadata_removals = if metadata_authority == SaveMetadataAuthority::Public
+        && (is_wiki_classified(&entry) || existing_entry.as_ref().is_some_and(is_wiki_classified))
+    {
+        constrain_public_wiki_metadata(&mut entry.metadata)?;
+        PUBLIC_WIKI_AUTHORITY_KEYS.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    #[cfg(test)]
+    let trusted_append = !evidence_refs.0.is_empty();
+    let evidence_write = AtomicReferenceWrite {
+        metadata_patch: atomic_evidence_metadata_patch(
+            existing_entry.as_ref().map(|existing| &existing.metadata),
+            &entry.metadata,
+            &explicit_metadata_keys,
+        ),
+        metadata_removals,
+        mutations: evidence_refs.0,
+    };
+
+    #[cfg(test)]
+    wait_at_pre_upsert_barrier(&entry.id);
+    #[cfg(test)]
+    wait_at_pre_upsert_pause(&entry.id, trusted_append);
+
     if let Some(identity) = idless_identity.as_deref() {
         match upsert_idless_save_entry(
             server,
-            &entry,
+            &mut entry,
             identity,
             target_db,
             named_project.as_deref(),
+            &evidence_write,
         )? {
             memcore::db::IdlessUpsertResult::Saved => {}
             memcore::db::IdlessUpsertResult::Duplicate { id } => {
@@ -253,8 +560,24 @@ pub(crate) async fn handle_save_memory(
             }
         }
     } else {
-        upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
+        upsert_save_entry(
+            server,
+            &mut entry,
+            target_db,
+            named_project.as_deref(),
+            &evidence_write,
+        )?;
     }
+
+    // #1435 slice 3 / #2059: write-side recall-cache bust, shared with the
+    // enrichment-flush and contradiction-supersede paths (see
+    // `search_memory::cache::invalidate_recall_cache_after_write`'s doc for
+    // the epoch guard + cross-process boundary). Both dedupe short-circuits
+    // above (`find_exact_path_text_duplicate` and
+    // `IdlessUpsertResult::Duplicate`) already returned before this point,
+    // so an exact-duplicate no-write correctly never invalidates.
+    let recall_fence =
+        crate::memory_search_ops::invalidate_recall_cache_after_write(server, "save");
 
     let continuity_event = if emit_continuity {
         Some(crate::continuity_ops::emit_memory_saved_event(
@@ -284,6 +607,7 @@ pub(crate) async fn handle_save_memory(
         &entry,
         &timestamp,
         target_db,
+        named_project.as_deref(),
         enrichment_enqueued,
         needs_embedding,
         needs_summary,
@@ -292,6 +616,7 @@ pub(crate) async fn handle_save_memory(
         secret_redactions,
         &requested_scope,
         scope_warning,
+        recall_fence,
     );
     if let Some(event) = continuity_event {
         response.insert("continuity_event".into(), event);

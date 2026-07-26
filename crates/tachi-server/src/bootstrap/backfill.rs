@@ -4,7 +4,8 @@ use crate::vector_backfill::{
     VectorSweepStateUpdate,
 };
 use futures::{stream, StreamExt};
-use memcore::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent};
+use memcore::store::open::ReadOnlyBackfillOperation;
+use memcore::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, VectorBackfillScope};
 use std::error::Error;
 use std::fmt::Display;
 use std::io::{Error as IoError, ErrorKind};
@@ -56,47 +57,18 @@ fn backfill_write_open_context(schema_migration: &MigrationAuthority) -> DbOpenC
 }
 
 /// Total / with-vector counts for `tachi backfill-vectors`'s Total/Missing
-/// report, over "durable" rows.
-///
-/// #736 requirement 3: this MUST use the SAME durable-row predicate `tachi
-/// status`'s vector-coverage warning uses
-/// (`crate::status_ops::RECALL_CACHE_WHERE[_M]`), not a narrower
-/// single-condition `source != 'foundry_recall_rerank_cache'` filter. The two
-/// surfaces previously counted different bases: the narrow filter only
-/// excludes rows whose `source` column is exactly the recall-cache marker
-/// string, while the broad predicate also excludes rows identified by
-/// id/topic/path pattern or a metadata flag. A DB with recall-cache rows
-/// shaped the second way could show, say, 39 missing under `tachi status`
-/// and 0 missing here for the identical file. Sharing the constant makes the
-/// two surfaces agree by construction (see
-/// `bootstrap::backfill::tests::g3_counting_basis_matches_status_recall_cache_predicate`).
+/// report, over the portable memcore backfill population. That population
+/// preserves status's full recall-cache classification (id/source/topic/path/
+/// metadata/cache-key) while also keeping selection and count membership in
+/// one implementation.
 fn durable_vector_counts(
     store: &MemoryStore,
     skip_recall_cache: bool,
 ) -> Result<(i64, i64), Box<dyn Error>> {
-    if !skip_recall_cache {
-        return Ok(store.vector_stats()?);
-    }
-    let total: i64 = store.connection().query_row(
-        &format!(
-            "SELECT COUNT(*) FROM memories WHERE NOT ({})",
-            crate::status_ops::RECALL_CACHE_WHERE
-        ),
-        [],
-        |r| r.get(0),
-    )?;
-    let with_vec: i64 = store.connection().query_row(
-        &format!(
-            "SELECT COUNT(DISTINCT v.id)
-             FROM memories_vec v
-             JOIN memories m ON m.id = v.id
-             WHERE NOT ({})",
-            crate::status_ops::RECALL_CACHE_WHERE_M
-        ),
-        [],
-        |r| r.get(0),
-    )?;
-    Ok((total, with_vec))
+    let counts = store.vector_backfill_counts(VectorBackfillScope {
+        include_cache: !skip_recall_cache,
+    })?;
+    Ok((counts.total as i64, counts.with_vector as i64))
 }
 
 /// Backfill missing vector embeddings for a given DB.
@@ -117,7 +89,10 @@ pub(super) async fn run_backfill_vectors(
     let open_ctx = backfill_write_open_context(schema_migration);
 
     let store = if dry_run {
-        MemoryStore::open_read_only(db_str)?
+        MemoryStore::open_read_only_existing_schema_compat(
+            db_str,
+            ReadOnlyBackfillOperation::Vectors,
+        )?
     } else {
         MemoryStore::open_with_context(db_str, &open_ctx)?
     };
@@ -186,7 +161,7 @@ pub(super) async fn run_backfill_vectors(
         }
     }
 
-    let (total, final_vec) = store.vector_stats()?;
+    let (total, final_vec) = durable_vector_counts(&store, skip_recall_cache)?;
     record_cli_vector_sweep_state(db_path, skip_recall_cache, processed, failed, last_error);
     println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
     Ok(())
@@ -251,7 +226,10 @@ pub(super) async fn run_backfill_summaries(
     // ... only show stats". Mirror run_backfill_vectors's pattern: read-only
     // when dry_run, migration-capable only for a real write.
     let store = if dry_run {
-        MemoryStore::open_read_only(db_str)?
+        MemoryStore::open_read_only_existing_schema_compat(
+            db_str,
+            ReadOnlyBackfillOperation::Summaries,
+        )?
     } else {
         MemoryStore::open_with_context(db_str, &open_ctx)?
     };
@@ -360,7 +338,10 @@ pub(super) async fn run_backfill_metadata(
     // ... only show stats". Mirror run_backfill_vectors's pattern: read-only
     // when dry_run, migration-capable only for a real write.
     let store = if dry_run {
-        MemoryStore::open_read_only(db_str)?
+        MemoryStore::open_read_only_existing_schema_compat(
+            db_str,
+            ReadOnlyBackfillOperation::Metadata,
+        )?
     } else {
         MemoryStore::open_with_context(db_str, &open_ctx)?
     };
@@ -563,7 +544,7 @@ pub(super) async fn run_backfill_fts(
     // stats, don't modify". Mirror run_backfill_vectors's pattern:
     // read-only when dry_run, migration-capable only for a real write.
     let store = if dry_run {
-        MemoryStore::open_read_only(db_str)?
+        MemoryStore::open_read_only_existing_schema_compat(db_str, ReadOnlyBackfillOperation::Fts)?
     } else {
         MemoryStore::open_with_context(db_str, &open_ctx)?
     };
@@ -609,11 +590,11 @@ pub(super) async fn run_backfill_fts(
 #[cfg(test)]
 mod tests {
     use super::{
-        durable_vector_counts, record_cli_vector_sweep_state, run_backfill_fts,
-        run_backfill_metadata, run_backfill_summaries, run_backfill_vectors,
+        record_cli_vector_sweep_state, run_backfill_fts, run_backfill_metadata,
+        run_backfill_summaries, run_backfill_vectors,
     };
-    use memcore::{MemoryStore, MigrationAuthority};
-    use rusqlite::params;
+    use memcore::{AnchorKind, MemoryEntry, MemoryStore, MigrationAuthority, VectorBackfillScope};
+    use serde_json::json;
     use std::path::Path;
 
     #[derive(Debug, PartialEq, Eq)]
@@ -625,21 +606,48 @@ mod tests {
         sibling_files: Vec<String>,
     }
 
-    fn insert_memory(store: &MemoryStore, id: &str, source: &str, topic: &str) {
+    fn insert_memory(store: &mut MemoryStore, id: &str, source: &str, topic: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         store
-            .connection()
-            .execute(
-                "INSERT INTO memories (
-                    id, path, summary, text, importance, timestamp, category, topic,
-                    keywords, entities, source, scope, archived,
-                    created_at, updated_at, access_count, revision, metadata
-                 ) VALUES (?1, '/p', '', 'body', 0.5, ?2, 'fact', ?3,
-                           '[]', '[]', ?4, 'project', 0,
-                           ?2, ?2, 0, 1, '{}')",
-                params![id, now, topic, source],
-            )
-            .expect("insert memory");
+            .upsert(&MemoryEntry {
+                id: id.to_string(),
+                path: "/p".to_string(),
+                summary: String::new(),
+                text: "body".to_string(),
+                importance: 0.5,
+                timestamp: now.clone(),
+                valid_from: now,
+                valid_until: None,
+                category: "fact".to_string(),
+                topic: topic.to_string(),
+                keywords: Vec::new(),
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                source: source.to_string(),
+                scope: "project".to_string(),
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                metadata: json!({}),
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
+            })
+            .expect("insert typed memory fixture");
+    }
+
+    fn write_fixture_vector(store: &mut MemoryStore, id: &str, vector: Vec<f32>) {
+        let mut entry = store
+            .get(id)
+            .expect("read typed memory fixture")
+            .expect("typed memory fixture exists");
+        entry.vector = Some(vector);
+        store.upsert(&entry).expect("write typed vector fixture");
     }
 
     fn dry_run_db_snapshot(db_path: &Path) -> DryRunDbSnapshot {
@@ -716,44 +724,36 @@ mod tests {
             .expect("collect snapshot")
     }
 
-    /// G3 (counting basis): a row shaped like recall-cache content by `topic`
-    /// (not by the literal `source` marker string) must be excluded from the
-    /// durable-row basis by BOTH `tachi status`'s vector-coverage warning
-    /// and `tachi backfill-vectors`'s Total/Missing counters — the two
-    /// surfaces must agree on what "durable" means. Before #736's fix,
-    /// `durable_vector_counts` only excluded rows whose `source` column was
-    /// exactly `'foundry_recall_rerank_cache'`; a row shaped like recall
-    /// cache in every OTHER way (topic here) slipped through as a "missing"
-    /// durable row, while `tachi status`'s broader predicate already
-    /// excluded it — the two surfaces counted different bases for the
-    /// identical DB.
+    /// G3 (cross-face counting): status and vector backfill must exclude the
+    /// same anchor plumbing rows from their missing-vector population.
     #[test]
-    fn g3_counting_basis_matches_status_recall_cache_predicate() {
+    fn g3_vector_health_matches_backfill_anchor_membership() {
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("g3.db");
-        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
 
-        // Durable row: source unrelated to recall cache, no vector -> must
-        // always count as 1 missing.
-        insert_memory(&store, "durable-1", "manual", "note");
+        // Durable content without a vector is the sole pending row.
+        insert_memory(&mut store, "durable-1", "manual", "note");
+        // Anchors are graph plumbing, not vector-backfill work.
+        store
+            .ensure_anchor(AnchorKind::Issue, "x")
+            .expect("create typed anchor fixture");
 
-        // Recall-cache-shaped row identified by `topic`, not by `source` ->
-        // must be excluded from the durable basis (matches
-        // `status_ops::db_probe::RECALL_CACHE_WHERE`'s `topic = 'recall_rerank_cache'`
-        // arm), even though its `source` is NOT the literal marker string
-        // the pre-fix narrow filter checked.
-        insert_memory(&store, "cache-1", "auto", "recall_rerank_cache");
-
-        let (total, with_vec) = durable_vector_counts(&store, true).expect("durable_vector_counts");
-        let missing = total - with_vec;
+        let status_missing = crate::status_ops::vector_health(store.connection())
+            .expect("vector health")
+            .missing;
+        let backfill_pending = store
+            .vector_backfill_counts(VectorBackfillScope::default())
+            .expect("vector backfill counts")
+            .pending;
 
         assert_eq!(
-            total, 1,
-            "the recall-cache-shaped row must not count toward the durable total"
+            status_missing, backfill_pending,
+            "status and vector backfill must share the exact membership set"
         );
         assert_eq!(
-            missing, 1,
-            "only the genuinely durable row is missing a vector"
+            status_missing, 1,
+            "only the durable row is missing a vector"
         );
     }
 
@@ -762,8 +762,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("dry-run.db");
         let vault_path = dir.path().join("vault.db");
-        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
-        insert_memory(&store, "durable-1", "manual", "note");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&mut store, "durable-1", "manual", "note");
         drop(store);
         let migration_marker = dir.path().join("dry-run.db.migration-marker");
         std::fs::remove_file(&migration_marker).expect("remove migration marker");
@@ -841,11 +841,9 @@ mod tests {
         let db_path = dir.path().join("dry-run-complete.db");
         let vault_path = dir.path().join("vault.db");
         let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
-        insert_memory(&store, "durable-1", "manual", "note");
+        insert_memory(&mut store, "durable-1", "manual", "note");
         let dummy_vec = vec![0.0_f32; 1024];
-        store
-            .update_enrichment_fields("durable-1", None, Some(&dummy_vec), None, None, 1)
-            .expect("write vector");
+        write_fixture_vector(&mut store, "durable-1", dummy_vec);
         drop(store);
 
         crate::vector_backfill::record_vector_sweep_state(
@@ -890,11 +888,9 @@ mod tests {
         let db_path = dir.path().join("cli-schedule.db");
         let vault_path = dir.path().join("vault.db");
         let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
-        insert_memory(&store, "durable-1", "manual", "note");
+        insert_memory(&mut store, "durable-1", "manual", "note");
         let dummy_vec = vec![0.0_f32; 1024];
-        store
-            .update_enrichment_fields("durable-1", None, Some(&dummy_vec), None, None, 1)
-            .expect("write vector");
+        write_fixture_vector(&mut store, "durable-1", dummy_vec);
         drop(store);
 
         crate::vector_backfill::record_vector_sweep_state(
@@ -1019,10 +1015,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("backfill-fts-write-pass.db");
         {
-            let store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
                 .expect("seed current-schema db");
-            insert_memory(&store, "fts-missing-1", "manual", "note");
-            insert_memory(&store, "fts-missing-2", "manual", "note");
+            insert_memory(&mut store, "fts-missing-1", "manual", "note");
+            insert_memory(&mut store, "fts-missing-2", "manual", "note");
         }
         let conn = rusqlite::Connection::open(&db_path).expect("reopen to roll back stamp");
         conn.execute_batch(&format!(
@@ -1235,6 +1231,57 @@ mod tests {
             read_user_version(&db_path),
             memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
             "dry-run must never mutate the schema stamp, even under Allow"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_operations_require_only_their_v22_optional_capabilities() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run-optional-vector.db");
+        let vault_path = dir.path().join("vault.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open fixture DB");
+        conn.execute("DROP TABLE memories_vec", [])
+            .expect("remove optional vector capability");
+        drop(conn);
+        let before = dry_run_db_snapshot(&db_path);
+
+        run_backfill_summaries(&db_path, &vault_path, true, &MigrationAuthority::Deny)
+            .await
+            .expect("summary dry-run must not require memories_vec");
+        run_backfill_metadata(&db_path, &vault_path, true, &MigrationAuthority::Deny)
+            .await
+            .expect("metadata dry-run must not require memories_vec");
+        run_backfill_fts(&db_path, false, true, &MigrationAuthority::Deny)
+            .await
+            .expect("FTS dry-run must require memories_fts, not memories_vec");
+        assert_eq!(
+            dry_run_db_snapshot(&db_path),
+            before,
+            "summary/metadata/FTS dry-runs must remain exactly read-only"
+        );
+
+        let error = run_backfill_vectors(
+            &db_path,
+            &vault_path,
+            16,
+            true,
+            false,
+            &MigrationAuthority::Deny,
+        )
+        .await
+        .expect_err("vector dry-run must refuse a DB without memories_vec at open");
+        assert!(
+            error
+                .to_string()
+                .contains("vector dry-run requires virtual table 'memories_vec'"),
+            "unexpected vector capability refusal: {error}"
+        );
+        assert_eq!(
+            dry_run_db_snapshot(&db_path),
+            before,
+            "refused vector dry-run must not mutate the older DB"
         );
     }
 

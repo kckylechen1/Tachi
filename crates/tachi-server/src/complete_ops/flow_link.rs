@@ -5,12 +5,14 @@ pub(super) fn resolve_flow_id_for_dispatch(
     server: &MemoryServer,
     dispatch_id: &str,
     explicit_flow_id: Option<&str>,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     if let Some(flow_id) = explicit_flow_id.map(str::trim).filter(|id| !id.is_empty()) {
-        return Some(flow_id.to_string());
+        return Ok(Some(flow_id.to_string()));
     }
-    flow_id_from_kanban(server, dispatch_id)
-        .or_else(|| flow_id_from_run_ledger(server, dispatch_id))
+    if let Some(flow_id) = flow_id_from_kanban(server, dispatch_id) {
+        return Ok(Some(flow_id));
+    }
+    flow_id_from_run_ledger(server, dispatch_id)
 }
 
 fn flow_id_from_kanban(server: &MemoryServer, dispatch_id: &str) -> Option<String> {
@@ -38,18 +40,18 @@ fn flow_id_from_kanban(server: &MemoryServer, dispatch_id: &str) -> Option<Strin
     server.with_global_store_read(read).ok().flatten()
 }
 
-fn flow_id_from_run_ledger(server: &MemoryServer, dispatch_id: &str) -> Option<String> {
-    let task = crate::dispatch_ops::collect_run_task_for_server(server, dispatch_id)?;
-    let run_dir = task.get("run_dir").and_then(serde_json::Value::as_str)?;
-    let status_path = std::path::Path::new(run_dir).join("status.json");
-    let status = crate::task_lifecycle::read_json_file(&status_path)
-        .ok()
-        .flatten()?;
-    status
+fn flow_id_from_run_ledger(
+    server: &MemoryServer,
+    dispatch_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(task) = crate::dispatch_ops::collect_run_task_for_server(server, dispatch_id)? else {
+        return Ok(None);
+    };
+    Ok(task
         .get("flow_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
-        .filter(|flow_id| !flow_id.trim().is_empty())
+        .filter(|flow_id| !flow_id.trim().is_empty()))
 }
 
 /// #773 (S2 prep, sol-terminal-review-certified): auto-inject `issue_ref` at
@@ -203,8 +205,9 @@ mod tests {
         rt.block_on(handle_save_memory(&server, save))
             .expect("seed kanban");
 
-        let resolved =
-            resolve_flow_id_for_dispatch(&server, dispatch_id, None).expect("flow id from kanban");
+        let resolved = resolve_flow_id_for_dispatch(&server, dispatch_id, None)
+            .expect("flow id lookup")
+            .expect("flow id from kanban");
         assert_eq!(resolved, flow_id);
     }
 

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 
 use crate::error::MemoryError;
 use crate::types::MemorySource;
@@ -66,7 +66,10 @@ pub fn update_with_revision(
     let new_revision = expected_revision + 1;
     // Normalize source to satisfy CHECK constraint.
     let new_source = MemorySource::parse_or_external(new_source);
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let incoming_metadata = serde_json::from_str(new_metadata)?;
+    let metadata = super::merge_ordinary_reserved_metadata(&tx, id, &incoming_metadata)?;
+    let metadata_json = serde_json::to_string(&metadata)?;
 
     let clean_text = crate::noise::scrub_think_tags(new_text);
     let clean_summary = crate::noise::scrub_think_tags(new_summary);
@@ -79,7 +82,7 @@ pub fn update_with_revision(
             &clean_text,
             &clean_summary,
             new_source,
-            new_metadata,
+            metadata_json,
             &now,
             new_revision,
             id,

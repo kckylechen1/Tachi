@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn tidy_execute_migrates_rows_and_archives_source() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-exec-{}", uuid::Uuid::new_v4()));
+    let root = crate::utils::test_fixture_path(format!("tachi-tidy-exec-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -122,7 +122,8 @@ impl Drop for ClearOwnershipInject {
 #[cfg(unix)]
 #[test]
 fn tidy_execute_rolls_back_when_source_db_is_owned() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-owned-{}", uuid::Uuid::new_v4()));
+    let root =
+        crate::utils::test_fixture_path(format!("tachi-tidy-owned-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -212,7 +213,8 @@ fn tidy_execute_rolls_back_when_source_db_is_owned() {
 #[cfg(unix)]
 #[test]
 fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-unknown-{}", uuid::Uuid::new_v4()));
+    let root =
+        crate::utils::test_fixture_path(format!("tachi-tidy-unknown-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -287,7 +289,8 @@ fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
 /// lsof-based ownership probe ever runs.
 #[test]
 fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-srclock-{}", uuid::Uuid::new_v4()));
+    let root =
+        crate::utils::test_fixture_path(format!("tachi-tidy-srclock-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -409,7 +412,8 @@ fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
 /// `ScopedDaemonLock` (scoped-only, no legacy re-attempt) it is green.
 #[test]
 fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
-    let root = std::env::temp_dir().join(format!("tachi-tidy-crossscope-{}", uuid::Uuid::new_v4()));
+    let root =
+        crate::utils::test_fixture_path(format!("tachi-tidy-crossscope-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
