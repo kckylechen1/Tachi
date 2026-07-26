@@ -282,15 +282,18 @@ fn seed_entry(s: &Seed) -> MemoryEntry {
     e
 }
 
-fn seed_corpus(conn: &mut Connection) {
+/// `pub(super)`: reused by `search/tests/rank_attribution.rs` (tachi#1344
+/// boost-attribution harness) so it seeds the byte-identical corpus rather
+/// than inventing a parallel one.
+pub(super) fn seed_corpus(conn: &mut Connection) {
     for s in SEEDS {
         insert_entry(conn, seed_entry(s));
     }
 }
 
-/// The five labeled query slices (spec §4.1).
+/// The five labeled query slices (spec §4.1). `pub(super)`: see `seed_corpus`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Slice {
+pub(super) enum Slice {
     /// Natural-language paraphrase of an entry — the query carries words the
     /// target lacks, so conjunctive FTS zeroes and only symbolic (low, RRF-flat)
     /// keeps the target alive. The M1+M2 failure slice.
@@ -306,15 +309,16 @@ enum Slice {
     WikiScoped,
 }
 
-struct QuerySpec {
-    slice: Slice,
-    query: &'static str,
-    expected: &'static str,
+/// `pub(super)`: see `seed_corpus`.
+pub(super) struct QuerySpec {
+    pub(super) slice: Slice,
+    pub(super) query: &'static str,
+    pub(super) expected: &'static str,
 }
 
 /// ~50 labeled queries, 10 per slice. Each `expected` names one determinate
-/// target entry from `SEEDS`.
-const QUERIES: &[QuerySpec] = &[
+/// target entry from `SEEDS`. `pub(super)`: see `seed_corpus`.
+pub(super) const QUERIES: &[QuerySpec] = &[
     // ---- Summary-derived (paraphrases; deliberately hard) ----
     QuerySpec {
         slice: Slice::Summary,
