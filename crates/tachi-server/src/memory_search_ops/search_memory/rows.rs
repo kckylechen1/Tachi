@@ -9,7 +9,7 @@ use super::filters::{
 };
 use super::store::{
     pipeline_rule_read_sources, with_global_search, with_named_project_search, with_project_search,
-    PipelineRuleReadSource,
+    PipelineRuleReadSource, RequestScopedNamedProjectReads,
 };
 use crate::memory_search_ops::auto_link::is_training_seed;
 use crate::memory_search_ops::search_helpers::{
@@ -67,12 +67,13 @@ fn recall_quality_for_global(server: &MemoryServer) -> Option<serde_json::Value>
 fn recall_quality_for_project(
     server: &MemoryServer,
     params: &SearchMemoryParams,
+    named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
 ) -> Option<serde_json::Value> {
     if let Some(project_name) = params.project.as_deref() {
-        return server
-            .with_named_project_store_read(project_name, |store| {
-                Ok(recall_quality_from_store(store))
-            })
+        let read_quality = |store: &mut memcore::MemoryStore| Ok(recall_quality_from_store(store));
+        return named_project_reads
+            .and_then(|reads| reads.with_store(project_name, read_quality))
+            .unwrap_or_else(|| server.with_named_project_store_read(project_name, read_quality))
             .ok()
             .flatten();
     }
@@ -126,9 +127,10 @@ pub(super) fn query_with_context_symbols(query: &str, context_symbols: &[String]
 /// call: success, lexical degradation, model, and provider state are not
 /// represented by the caller's parameters. Explicit query vectors and paths
 /// where no vector-capable store participates remain deterministic.
-pub(super) fn auto_query_embedding_would_run(
+pub(super) fn auto_query_embedding_would_run_with_named_project_reads(
     server: &MemoryServer,
     params: &SearchMemoryParams,
+    mut named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
 ) -> bool {
     if params.query_vec.is_some()
         || parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
@@ -136,11 +138,10 @@ pub(super) fn auto_query_embedding_would_run(
         return false;
     }
 
-    let named_project_vec_available = params.project.as_deref().is_some_and(|project_name| {
-        server
-            .with_named_project_store_read(project_name, |store| Ok(store.vec_available))
-            .unwrap_or(false)
-    });
+    let explicit_named_project_vec_available =
+        params.project.as_deref().is_some_and(|project_name| {
+            named_project_vec_available(server, project_name, named_project_reads.as_deref_mut())
+        });
     let wiki_path_prefix = params
         .path_prefix
         .as_deref()
@@ -148,16 +149,24 @@ pub(super) fn auto_query_embedding_would_run(
     let default_wiki_vec_available = params.project.is_none()
         && wiki_path_prefix
         && named_project_db_exists(server, "wiki")
-        && {
-            server
-                .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
-                .unwrap_or(false)
-        };
+        && { named_project_vec_available(server, "wiki", named_project_reads.as_deref_mut()) };
 
     server.global_vec_available()
         || server.project_vec_available()
-        || named_project_vec_available
+        || explicit_named_project_vec_available
         || default_wiki_vec_available
+}
+
+fn named_project_vec_available(
+    server: &MemoryServer,
+    project_name: &str,
+    named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
+) -> bool {
+    let read_vec_available = |store: &mut memcore::MemoryStore| Ok(store.vec_available);
+    named_project_reads
+        .and_then(|reads| reads.with_store(project_name, read_vec_available))
+        .unwrap_or_else(|| server.with_named_project_store_read(project_name, read_vec_available))
+        .unwrap_or(false)
 }
 
 pub(crate) async fn search_memory_rows(
@@ -174,15 +183,42 @@ pub(crate) async fn search_memory_rows_with_access(
     project_only: bool,
     record_access: bool,
 ) -> Result<Vec<serde_json::Value>, String> {
-    search_memory_rows_with_recall_config(server, params, project_only, record_access, None).await
+    search_memory_rows_with_named_project_reads(
+        server,
+        params,
+        project_only,
+        record_access,
+        None,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn search_memory_rows_with_recall_config(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_only: bool,
+    record_access: bool,
+    recall_config: Option<&memcore::RecallConfig>,
+) -> Result<Vec<serde_json::Value>, String> {
+    search_memory_rows_with_named_project_reads(
+        server,
+        params,
+        project_only,
+        record_access,
+        recall_config,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn search_memory_rows_with_named_project_reads(
     server: &MemoryServer,
     mut params: SearchMemoryParams,
     project_only: bool,
     record_access: bool,
     recall_config: Option<&memcore::RecallConfig>,
+    mut named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
 ) -> Result<Vec<serde_json::Value>, String> {
     params.query = query_with_context_symbols(&params.query, &params.context_symbols);
     let wiki_path_prefix = params
@@ -204,7 +240,11 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     // readable `recall_quality.degraded = "lexical_only: <reason>"` marker.
     let mut embed_degraded: Option<String> = None;
 
-    if auto_query_embedding_would_run(server, &params) {
+    if auto_query_embedding_would_run_with_named_project_reads(
+        server,
+        &params,
+        named_project_reads.as_deref_mut(),
+    ) {
         server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
         let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
         match server.llm.embed_voyage(&scrubbed_query, "query").await {
@@ -228,6 +268,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             let project_results = with_named_project_search(
                 server,
                 project_name,
+                named_project_reads.as_deref_mut(),
                 &params,
                 record_access,
                 recall_config,
@@ -260,6 +301,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
         match with_named_project_search(
             server,
             "wiki",
+            named_project_reads.as_deref_mut(),
             &params,
             record_access,
             recall_config,
@@ -311,6 +353,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                         let project_results = with_named_project_search(
                             server,
                             project_name,
+                            named_project_reads.as_deref_mut(),
                             &params,
                             record_access,
                             recall_config,
@@ -371,6 +414,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                     match with_named_project_search(
                         server,
                         project_name,
+                        named_project_reads.as_deref_mut(),
                         &params,
                         record_access,
                         recall_config,
@@ -503,7 +547,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     let project_recall_quality = deduped_results
         .iter()
         .any(|(_, db_scope)| *db_scope == DbScope::Project)
-        .then(|| recall_quality_for_project(server, &params))
+        .then(|| recall_quality_for_project(server, &params, named_project_reads.as_deref_mut()))
         .flatten();
 
     let mut output: Vec<serde_json::Value> = deduped_results

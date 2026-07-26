@@ -3,12 +3,14 @@ use serde_json::json;
 use super::cache::{
     invalidate_recall_cache_after_write, recall_cache_epoch, recall_cache_generation_fingerprint,
     recall_cache_key as build_recall_cache_key, recall_cache_write_through,
-    recall_cache_write_through_is_safe, unique_database_targets, SearchDatabaseTarget,
+    recall_cache_write_through_is_safe, unique_database_targets, RecallCacheRaceHook,
+    RecallCacheRacePoint, RecallCacheTestOverride, SearchDatabaseTarget,
 };
 use super::filters::project_scope_allows_memory_with_config;
+use super::handlers::handle_search_memory;
 use crate::memory_search_ops::routing_config::RoutingConfig;
 use crate::test_support::EnvRestore;
-use crate::tests::make_server;
+use crate::tests::{make_server, make_server_with_temp_home};
 use crate::tool_params::SearchMemoryParams;
 
 fn entry(domain: Option<&str>, path: &str) -> memcore::MemoryEntry {
@@ -71,6 +73,119 @@ fn params(query: &str) -> SearchMemoryParams {
 
 fn recall_cache_key(params: &SearchMemoryParams, top_k: usize, project_only: bool) -> String {
     build_recall_cache_key(params, top_k, project_only, false).expect("cache request key")
+}
+
+#[tokio::test]
+async fn cacheable_unattached_named_project_reuses_one_read_store_and_rejects_stale_write_through()
+{
+    let _cache = RecallCacheTestOverride::enabled();
+    let (mut server, _temp_home) = make_server_with_temp_home();
+    let _embedding = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "0");
+    // Keep this request cache-eligible on sqlite-vec-enabled builds while the
+    // named DB below genuinely lacks its vector table. This test exercises the
+    // named capability read; vector search itself is outside its contract.
+    server.db.global_vec_available = false;
+
+    let project_name = format!("one_open_{}", uuid::Uuid::new_v4().simple());
+    let named_db = crate::path_utils::plan_c_global_db_path(&project_name);
+    std::fs::create_dir_all(named_db.parent().expect("named project DB parent"))
+        .expect("create named project DB parent");
+    let needle = format!("OnePhysicalReadStore{}", uuid::Uuid::new_v4().simple());
+    let seed_id = format!("one-open-seed-{}", uuid::Uuid::new_v4());
+    let mut seed = entry(None, "/scratch/one-open/seed");
+    seed.id = seed_id.clone();
+    seed.text = format!("{needle} seed row");
+    seed.summary = seed.text.clone();
+    let mut named_store = memcore::MemoryStore::open_with_label(
+        named_db.to_str().expect("named project DB path"),
+        &project_name,
+    )
+    .expect("create named project DB");
+    named_store.upsert(&seed).expect("seed named project DB");
+    drop(named_store);
+    crate::test_support::with_unrestricted_fixture_connection(&named_db, |connection| {
+        connection.execute_batch("DROP TABLE memories_vec")
+    })
+    .expect("remove named vector table for capability probe");
+    let named_vec_available =
+        memcore::MemoryStore::open_read_only(named_db.to_str().expect("named project DB path"))
+            .expect("inspect named vector availability")
+            .vec_available;
+    assert!(
+        !named_vec_available,
+        "this discriminator requires a vector-unavailable named store so handle_search_memory reads vec_available before caching"
+    );
+    assert!(
+        server
+            .db
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty(),
+        "fixture must begin with no durable named-project attachment"
+    );
+
+    let later_id = format!("one-open-later-{}", uuid::Uuid::new_v4());
+    let later_db = named_db.clone();
+    let later_project = project_name.clone();
+    let later_needle = needle.clone();
+    let _race = RecallCacheRaceHook::install(
+        RecallCacheRacePoint::AfterQueryBeforeValidation,
+        move || {
+            let mut later = entry(None, "/scratch/one-open/later");
+            later.id = later_id;
+            later.text = format!("{later_needle} row committed after search");
+            later.summary = later.text.clone();
+            memcore::MemoryStore::open_with_label(
+                later_db.to_str().expect("named project DB path"),
+                &later_project,
+            )
+            .expect("open independent named writer")
+            .upsert(&later)
+            .expect("commit independent named write");
+        },
+    );
+    let observation = memory_server_runtime::observe_read_store_opens_for_test(&named_db)
+        .expect("install named read-store observer");
+
+    let mut request = params(&needle);
+    request.project = Some(project_name);
+    request.format = Some("json".to_string());
+    let response = handle_search_memory(&server, request, false)
+        .await
+        .expect("cacheable named-project search");
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&response).expect("named-project JSON response");
+    assert!(
+        rows.iter().any(|row| row["id"] == seed_id),
+        "the cache-miss search must return the named seed row: {rows:#?}"
+    );
+    assert_eq!(
+        observation.count(),
+        1,
+        "the whole handler request must reuse one direct named read store for vec_available, generation-before, rows, recall-quality, and generation-after"
+    );
+    let cache_entries = server
+        .with_global_store_read(|store| {
+            store
+                .recall_cache_stats()
+                .map_err(|error| error.to_string())
+        })
+        .expect("global recall cache stats")
+        .entries;
+    assert_eq!(
+        cache_entries, 0,
+        "the generation-after statement must reject the stale write-through after the independent named write"
+    );
+    assert!(
+        server
+            .db
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty(),
+        "a read-only request must not create a durable named-project attachment"
+    );
 }
 
 fn domain_pack_routing_config() -> RoutingConfig {

@@ -1,11 +1,13 @@
 use super::cache::{
-    recall_cache_epoch, recall_cache_generation_fingerprint, recall_cache_key,
+    prepare_request_scoped_named_project_reads, recall_cache_epoch,
+    recall_cache_generation_fingerprint_with_named_project_reads, recall_cache_key,
     recall_cache_read_enabled, recall_cache_ttl_secs, recall_cache_write_through,
 };
 #[cfg(test)]
 use super::cache::{run_recall_cache_race_hook, RecallCacheRacePoint};
 use super::rows::{
-    auto_query_embedding_would_run, query_with_context_symbols, search_memory_rows_with_access,
+    auto_query_embedding_would_run_with_named_project_reads, query_with_context_symbols,
+    search_memory_rows_with_named_project_reads,
 };
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
@@ -66,12 +68,33 @@ pub(crate) async fn handle_search_memory_with_access(
         .agent_role
         .as_deref()
         .is_some_and(|role| !role.trim().is_empty());
-    let auto_query_embedding = auto_query_embedding_would_run(server, &params);
-    let cache_eligible = recall_cache_read_enabled()
-        && !auto_query_embedding
+    let cache_candidate = recall_cache_read_enabled()
         && !sandboxed_search
         && !record_access
         && !memcore::should_skip_query(&params.query);
+    // A session is prepared before the vec-capability probe so every named
+    // read in a cache-capable request shares its one physical read-only open.
+    // Planning failures retain the existing fail-open cache bypass behavior;
+    // the normal search path below still returns its own routing error.
+    let mut named_project_reads = if cache_candidate {
+        match prepare_request_scoped_named_project_reads(server, &params, project_only) {
+            Ok(reads) => Some(reads),
+            Err(error) => {
+                tracing::warn!(
+                    "[recall_cache] bypassing request-scoped named read reuse because target planning failed: {error}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let auto_query_embedding = auto_query_embedding_would_run_with_named_project_reads(
+        server,
+        &params,
+        named_project_reads.as_mut(),
+    );
+    let cache_eligible = cache_candidate && !auto_query_embedding;
     let cache_key = if cache_eligible {
         Some(recall_cache_key(
             &params,
@@ -113,7 +136,12 @@ pub(crate) async fn handle_search_memory_with_access(
         #[cfg(test)]
         run_recall_cache_race_hook(RecallCacheRacePoint::AfterLookupBeforeValidation);
         match lookup {
-            Ok(hit) => match recall_cache_generation_fingerprint(server, &params, project_only) {
+            Ok(hit) => match recall_cache_generation_fingerprint_with_named_project_reads(
+                server,
+                &params,
+                project_only,
+                named_project_reads.as_mut(),
+            ) {
                 Ok(current_generation) => {
                     if let Some(hit) = hit {
                         // The generation comparison runs after lookup, closing
@@ -154,8 +182,15 @@ pub(crate) async fn handle_search_memory_with_access(
 
     let mut search_params = params.clone();
     expand_search_params_for_rerank(&mut search_params, top_k);
-    let mut rows =
-        search_memory_rows_with_access(server, search_params, project_only, record_access).await?;
+    let mut rows = search_memory_rows_with_named_project_reads(
+        server,
+        search_params,
+        project_only,
+        record_access,
+        None,
+        named_project_reads.as_mut(),
+    )
+    .await?;
     let (reranked_rows, _rerank_policy) =
         apply_search_rerank_policy(server, &params.query, rows, top_k, params.enable_rerank).await;
     rows = reranked_rows;
@@ -187,7 +222,12 @@ pub(crate) async fn handle_search_memory_with_access(
     // Discarding is always safe: the next miss just recomputes fresh.
     if let Some((key, generation_before_search)) = cache_write_context {
         if !rows.is_empty() {
-            match recall_cache_generation_fingerprint(server, &params, project_only) {
+            match recall_cache_generation_fingerprint_with_named_project_reads(
+                server,
+                &params,
+                project_only,
+                named_project_reads.as_mut(),
+            ) {
                 Ok(generation_after_search)
                     if generation_after_search == generation_before_search =>
                 {

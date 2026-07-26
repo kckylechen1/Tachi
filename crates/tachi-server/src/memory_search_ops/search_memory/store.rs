@@ -3,6 +3,8 @@ use crate::MemoryServer;
 use memcore::{MemoryStore, RecallConfig};
 #[cfg(test)]
 use memory_server_runtime::ReadPoolCheckoutReceipt;
+use memory_server_runtime::RequestScopedReadStore;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Physical stores read by pipeline row augmentation. Both the row producer
@@ -25,6 +27,50 @@ pub(super) fn pipeline_rule_read_sources(server: &MemoryServer) -> Vec<PipelineR
     }
     sources.push(PipelineRuleReadSource::Global);
     sources
+}
+
+/// Direct read-only stores retained for one cache-capable request. Entries are
+/// installed only for currently unattached named paths; attached paths retain
+/// their established pool routing instead.
+pub(super) struct RequestScopedNamedProjectReads {
+    stores: HashMap<String, RequestScopedReadStore>,
+}
+
+impl RequestScopedNamedProjectReads {
+    pub(super) fn new() -> Self {
+        Self {
+            stores: HashMap::new(),
+        }
+    }
+
+    pub(super) fn open_if_unattached(
+        &mut self,
+        server: &MemoryServer,
+        project_name: &str,
+        canonical_path: &Path,
+    ) -> Result<(), String> {
+        if self.stores.contains_key(project_name) {
+            return Ok(());
+        }
+        let label = format!("named-project:{project_name}");
+        if let Some(store) = server
+            .db
+            .open_unattached_path_store_read_session_with_label(canonical_path, &label)?
+        {
+            self.stores.insert(project_name.to_string(), store);
+        }
+        Ok(())
+    }
+
+    pub(super) fn with_store<T>(
+        &mut self,
+        project_name: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Option<Result<T, String>> {
+        self.stores
+            .get_mut(project_name)
+            .map(|store| store.with_store(f))
+    }
 }
 
 fn search_store(
@@ -84,6 +130,7 @@ fn search_store_recording(
 pub(super) fn with_named_project_search(
     server: &MemoryServer,
     project_name: &str,
+    named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
     params: &SearchMemoryParams,
     record_access: bool,
     recall_config: Option<&RecallConfig>,
@@ -98,6 +145,10 @@ pub(super) fn with_named_project_search(
     };
     if effective_record_access {
         server.with_named_project_store(project_name, action)
+    } else if let Some(result) =
+        named_project_reads.and_then(|reads| reads.with_store(project_name, action))
+    {
+        result
     } else {
         server.with_named_project_store_read(project_name, action)
     }

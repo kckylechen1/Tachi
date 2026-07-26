@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::store::{pipeline_rule_read_sources, PipelineRuleReadSource};
+use super::store::{
+    pipeline_rule_read_sources, PipelineRuleReadSource, RequestScopedNamedProjectReads,
+};
 
 pub(super) fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
     memcore::path_prefix_opts_into_recall_cache(path_prefix)
@@ -134,7 +136,11 @@ impl SearchDatabaseTarget {
         }
     }
 
-    fn read_generation(&self, server: &MemoryServer) -> Result<i64, String> {
+    fn read_generation(
+        &self,
+        server: &MemoryServer,
+        named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
+    ) -> Result<i64, String> {
         match self {
             Self::Global(_) => server.with_global_store_read(|store| {
                 store.search_generation().map_err(|error| error.to_string())
@@ -142,10 +148,18 @@ impl SearchDatabaseTarget {
             Self::BoundProject(_) => server.with_project_store_read(|store| {
                 store.search_generation().map_err(|error| error.to_string())
             }),
-            Self::NamedProject { name, .. } => server
-                .with_named_project_store_read(name, |store| {
+            Self::NamedProject { name, .. } => {
+                let read_generation = |store: &mut memcore::MemoryStore| {
                     store.search_generation().map_err(|error| error.to_string())
-                }),
+                };
+                if let Some(result) =
+                    named_project_reads.and_then(|reads| reads.with_store(name, read_generation))
+                {
+                    result
+                } else {
+                    server.with_named_project_store_read(name, read_generation)
+                }
+            }
         }
     }
 }
@@ -371,19 +385,45 @@ pub(super) fn recall_cache_generation_fingerprint(
     params: &SearchMemoryParams,
     project_only: bool,
 ) -> Result<String, String> {
+    recall_cache_generation_fingerprint_with_named_project_reads(server, params, project_only, None)
+}
+
+/// Open request-scoped stores for named targets selected by the cache
+/// generation plan. `DatabaseFileIdentity` supplies the canonical, validated
+/// path, so the direct read-only session preserves the plan's alias and
+/// hard-link checks without attaching or migrating a database.
+pub(super) fn prepare_request_scoped_named_project_reads(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+    project_only: bool,
+) -> Result<RequestScopedNamedProjectReads, String> {
     let targets = unique_database_targets(search_database_targets(server, params, project_only)?)?;
-    let databases = targets
-        .into_iter()
-        .map(|(target, identity)| {
-            target
-                .read_generation(server)
-                .map(|generation| DatabaseGeneration {
-                    identity: identity.physical_key(),
-                    generation,
-                })
-                .map_err(|error| format!("{} generation read failed: {error}", target.label()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut named_project_reads = RequestScopedNamedProjectReads::new();
+    for (target, identity) in targets {
+        if let SearchDatabaseTarget::NamedProject { name, .. } = target {
+            named_project_reads.open_if_unattached(server, &name, &identity.canonical_path)?;
+        }
+    }
+    Ok(named_project_reads)
+}
+
+pub(super) fn recall_cache_generation_fingerprint_with_named_project_reads(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+    project_only: bool,
+    mut named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
+) -> Result<String, String> {
+    let targets = unique_database_targets(search_database_targets(server, params, project_only)?)?;
+    let mut databases = Vec::with_capacity(targets.len());
+    for (target, identity) in targets {
+        let generation = target
+            .read_generation(server, named_project_reads.as_deref_mut())
+            .map_err(|error| format!("{} generation read failed: {error}", target.label()))?;
+        databases.push(DatabaseGeneration {
+            identity: identity.physical_key(),
+            generation,
+        });
+    }
     serde_json::to_string(&GenerationFingerprint {
         version: 1,
         databases,

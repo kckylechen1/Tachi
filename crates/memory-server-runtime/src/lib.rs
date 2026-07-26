@@ -2,7 +2,7 @@ use memcore::MemoryStore;
 use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -671,6 +671,24 @@ pub struct DbRuntime {
     pub schema_migration: MigrationAuthority,
 }
 
+/// A request-owned read-only store.
+///
+/// Unlike a [`ReadStorePool`] checkout, this contains no mutex or `RwLock`
+/// guard. Callers may retain it across async boundaries, but it is intentionally
+/// single-owner and exposes the store only through synchronous closures.
+pub struct RequestScopedReadStore {
+    store: MemoryStore,
+}
+
+impl RequestScopedReadStore {
+    pub fn with_store<T>(
+        &mut self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        f(&mut self.store)
+    }
+}
+
 impl DbRuntime {
     /// Enable isolated observation of future global read/write contention.
     ///
@@ -803,6 +821,40 @@ impl DbRuntime {
         let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
         let mut store = open_read_store(&key, label)?;
         f(&mut store)
+    }
+
+    /// Open one read-only store for a request that targets a currently
+    /// unattached path. The returned session owns no runtime lock or pool
+    /// checkout, so retaining it across an async await cannot block writers.
+    ///
+    /// A cached attached path deliberately returns `None`: its established
+    /// read-pool routing and LRU touch behavior remain unchanged. The direct
+    /// branch only validates an existing DB and opens it read-only; it never
+    /// initializes, migrates, or attaches the path.
+    pub fn open_unattached_path_store_read_session_with_label(
+        &self,
+        db_path: &Path,
+        label: &str,
+    ) -> Result<Option<RequestScopedReadStore>, String> {
+        let key = project_db_read_cache_key(db_path)?;
+        let attached = self
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .map(|entry| entry.touch())
+            .is_some();
+        if attached {
+            return Ok(None);
+        }
+
+        // This gate protects the open itself just as the existing unattached
+        // read closure does. It is dropped before the request session escapes.
+        let store = {
+            let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
+            open_read_store(&key, label)?
+        };
+        Ok(Some(RequestScopedReadStore { store }))
     }
 
     fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
@@ -1425,6 +1477,81 @@ fn write_or_recover<'a, T>(
     }
 }
 
+#[derive(Clone)]
+struct ReadStoreOpenObserver {
+    db_path: PathBuf,
+    count: Arc<AtomicUsize>,
+}
+
+/// Test instrumentation for physical direct read-store opens at one canonical
+/// DB path. Pool construction does not use this path; the observer therefore
+/// counts precisely the one-off opens used by unattached path reads.
+#[doc(hidden)]
+pub struct ReadStoreOpenObservation {
+    observer: ReadStoreOpenObserver,
+}
+
+impl ReadStoreOpenObservation {
+    pub fn count(&self) -> usize {
+        self.observer.count.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ReadStoreOpenObservation {
+    fn drop(&mut self) {
+        let mut guard = lock_or_recover(read_store_open_observer(), "read_store_open_observer");
+        if guard
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&active.count, &self.observer.count))
+        {
+            *guard = None;
+        }
+    }
+}
+
+/// Install one path-filtered observer for a targeted test. The observation is
+/// process-global because direct unattached opens do not carry `DbRuntime`
+/// state; callers must serialize tests that observe the same process.
+#[doc(hidden)]
+pub fn observe_read_store_opens_for_test(
+    db_path: &Path,
+) -> Result<ReadStoreOpenObservation, String> {
+    let db_path = std::fs::canonicalize(db_path).map_err(|error| {
+        format!(
+            "canonicalize observed read store {}: {error}",
+            db_path.display()
+        )
+    })?;
+    let observer = ReadStoreOpenObserver {
+        db_path,
+        count: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut guard = lock_or_recover(read_store_open_observer(), "read_store_open_observer");
+    if guard.is_some() {
+        return Err("a read-store open observation is already active".to_string());
+    }
+    *guard = Some(observer.clone());
+    Ok(ReadStoreOpenObservation { observer })
+}
+
+fn read_store_open_observer() -> &'static StdMutex<Option<ReadStoreOpenObserver>> {
+    static OBSERVER: OnceLock<StdMutex<Option<ReadStoreOpenObserver>>> = OnceLock::new();
+    OBSERVER.get_or_init(|| StdMutex::new(None))
+}
+
+fn record_read_store_open(db_path: &Path) {
+    let observer = lock_or_recover(read_store_open_observer(), "read_store_open_observer").clone();
+    if observer
+        .as_ref()
+        .is_some_and(|observer| observer.db_path == db_path)
+    {
+        observer
+            .expect("observer checked above")
+            .count
+            .fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
     let db_str = db_path.to_str().ok_or_else(|| {
         format!(
@@ -1433,7 +1560,10 @@ fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
             db_path.display()
         )
     })?;
-    MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))
+    let store =
+        MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))?;
+    record_read_store_open(db_path);
+    Ok(store)
 }
 
 fn zero_key(key: &mut [u8; 32]) {
