@@ -84,6 +84,88 @@ pub(crate) const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,
 /// from the string it counts.
 pub(crate) const MEMORY_EMBEDDING_COLUMN_INDEX: usize = 27;
 
+/// The bare `memories` column names [`MEMORY_SELECT_COLUMNS`] requires a table
+/// to actually carry.
+///
+/// Two entries in that list are synthesized by the SELECT itself rather than
+/// read from the table — `'[]' AS persons` and `'' AS location`, both relics of
+/// dropped physical columns — so they are filtered out here. Everything else is
+/// a hard requirement: name one of them in a query against a table that lacks
+/// it and SQLite fails the whole statement with `no such column`.
+#[cfg(test)]
+pub(crate) fn memory_select_required_columns() -> Vec<&'static str> {
+    MEMORY_SELECT_COLUMNS
+        .split(',')
+        .map(str::trim)
+        .filter(|column| !column.contains(" AS "))
+        .collect()
+}
+
+/// Fail loudly, by name, when a `memories` table has fallen behind
+/// [`MEMORY_SELECT_COLUMNS`] — tachi#1446.
+///
+/// # Why this exists
+///
+/// Adding `last_use_at` to the select list broke
+/// `symbolic_pre_cap_legacy_null_json_columns_fall_back_to_empty_arrays`, a
+/// test in an unrelated suite that hand-writes its own `CREATE TABLE memories`
+/// and never runs `init_schema`. The symptom was a raw
+/// `Sqlite(... "no such column: last_use_at")` several files away from the
+/// change that caused it, and — because the suite runs fail-fast — it cancelled
+/// 113 later tests, hiding whether there were siblings.
+///
+/// A hand-built fixture is sometimes the *correct* choice: that test needs NULL
+/// JSON columns, which the current DDL forbids and which
+/// `rebuild_memories_with_check_constraints` would reject outright
+/// (`memories_new.keywords` is `TEXT NOT NULL`). So the fix is not "always run
+/// `init_schema`" — it is to make the drift say what it is. Call this
+/// immediately after building such a fixture; the panic then names the missing
+/// columns and the fixture, instead of surfacing as a query error.
+///
+/// The paired guard for the other direction — a column named in the select list
+/// but missing from the *production* schema — is
+/// `every_selected_memory_column_exists_on_every_init_path` in
+/// `db/schema/migration_tests.rs`.
+///
+/// # Residual gap, stated rather than papered over
+///
+/// This is opt-in: a *newly written* hand-built fixture that forgets to call it
+/// is not covered. A source-scanning test could close that, but scanning Rust
+/// source text for `CREATE TABLE memories` is brittle against formatting and
+/// would not reach sibling crates, so it is deliberately not done. Instead, the
+/// predicate for re-finding candidates is written down here: a function that
+/// opens a raw `Connection`, executes a `CREATE TABLE memories` naming ~20 or
+/// more columns, and calls a reader built on `MEMORY_SELECT_COLUMNS`
+/// (`hybrid_search`, `search_symbolic_candidates`, `fetch_by_ids`, anything
+/// funnelling into `row_to_entry`) **without** `init_schema` / `MemoryStore::open`
+/// / a `setup()`-style helper in between. As of tachi#1446 that predicate
+/// matched exactly one function in the whole workspace: the caller below.
+#[cfg(test)]
+pub(crate) fn assert_memories_fixture_matches_select_columns(conn: &Connection, fixture: &str) {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(memories)")
+        .expect("PRAGMA table_info(memories) must prepare");
+    let present: std::collections::BTreeSet<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("PRAGMA table_info(memories) must run")
+        .collect::<Result<_, _>>()
+        .expect("PRAGMA table_info(memories) must decode");
+
+    let missing: Vec<&str> = memory_select_required_columns()
+        .into_iter()
+        .filter(|column| !present.contains(*column))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "hand-built `memories` fixture `{fixture}` has drifted behind MEMORY_SELECT_COLUMNS: \
+         missing {missing:?}. Add the column(s) to that fixture's CREATE TABLE — NOT to its \
+         INSERT list, and do NOT switch the fixture to init_schema (the rebuild in \
+         `rebuild_memories_with_check_constraints` would destroy whatever legacy shape the \
+         fixture exists to exercise)."
+    );
+}
+
 static FTS_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
 fn acquire_fts_sync_lock() -> MutexGuard<'static, ()> {
@@ -3117,8 +3199,42 @@ mod tests {
 #[cfg(test)]
 mod select_column_ordinal_tests {
     use super::{
-        MEMORY_EMBEDDING_COLUMN_INDEX, MEMORY_SELECT_COLUMNS, MEMORY_SELECT_COLUMNS_QUALIFIED,
+        memory_select_required_columns, MEMORY_EMBEDDING_COLUMN_INDEX, MEMORY_SELECT_COLUMNS,
+        MEMORY_SELECT_COLUMNS_QUALIFIED,
     };
+
+    /// Pins the ` AS ` filter in [`memory_select_required_columns`]. Every guard
+    /// built on that function is only as good as this extraction: if a future
+    /// column were named such that the filter dropped it, the guards would go
+    /// quietly blind rather than fail.
+    #[test]
+    fn required_columns_are_the_select_list_minus_exactly_the_two_synthesized_literals() {
+        let required = memory_select_required_columns();
+        assert_eq!(
+            required.len(),
+            MEMORY_SELECT_COLUMNS.split(',').count() - 2,
+            "exactly two entries are synthesized by the SELECT (persons, location); \
+             got {required:?}"
+        );
+        for synthesized in ["persons", "location"] {
+            assert!(
+                !required.contains(&synthesized),
+                "{synthesized} is supplied as a literal by the SELECT, not read from the table"
+            );
+        }
+        for real in ["id", "last_access", "last_use_at", "tier"] {
+            assert!(
+                required.contains(&real),
+                "{real} is a real column and must be required of any table this SELECT runs against"
+            );
+        }
+        assert!(
+            required.iter().all(|column| !column.contains('\'')
+                && !column.contains(' ')
+                && !column.is_empty()),
+            "a required column name must be a bare identifier; got {required:?}"
+        );
+    }
 
     /// tachi#1446 regression guard. `get_many_with_vectors` (`read.rs`) selects
     /// `{MEMORY_SELECT_COLUMNS_QUALIFIED}, v.embedding` and reads the blob by

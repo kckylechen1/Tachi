@@ -474,11 +474,13 @@ fn migration_adds_lifecycle_columns_when_rebuilding_legacy_table() {
 ///    `BASE_SCHEMA_SQL` creates `memories` without the CHECK constraints, so
 ///    the shape probe misses on first open.
 ///
-/// Asserted on the legacy path (which starts without the column) and on the
-/// fresh path (which starts with it), because the two reach the rebuild through
-/// different branches of the guarded expression.
+/// Asserted on the legacy path specifically, because that is the branch of the
+/// guarded expression a fresh DB never takes: the fixture starts *without* the
+/// column (negative control), acquires it, and keeps it NULL across the rebuild.
+/// Plain existence on the other init paths is covered for every selected column
+/// by [`every_selected_memory_column_exists_on_every_init_path`].
 #[test]
-fn last_use_at_survives_the_check_constraint_rebuild_on_both_paths() {
+fn last_use_at_lands_on_a_legacy_db_and_survives_the_check_constraint_rebuild() {
     let legacy = open_with_legacy_row("manual", "fact", "general", None, "/notes/x", "{}");
     assert!(
         !has_column(&legacy, "memories", "last_use_at").unwrap(),
@@ -506,18 +508,77 @@ fn last_use_at_survives_the_check_constraint_rebuild_on_both_paths() {
          rebuild invented one"
     );
 
-    let (fresh, _tmp) = sigil_1289_fresh_full_path();
+    // Existence on the fresh and init-only paths is covered for *every* selected
+    // column by `every_selected_memory_column_exists_on_every_init_path` below;
+    // what is unique here is the legacy transition and the NULL value.
+}
+
+/// The class-level guard, tachi#1446: **every** bare column named in
+/// `MEMORY_SELECT_COLUMNS` must exist on **every** path that produces a live
+/// `memories` table.
+///
+/// This is the dangerous half of the column-list drift. Its sibling —
+/// `assert_memories_fixture_matches_select_columns` — catches a hand-built test
+/// fixture falling behind the select list, which breaks one test. This catches
+/// the select list running ahead of the *production* schema, which breaks every
+/// read in the product: `no such column` out of `row_to_entry`'s callers, on a
+/// real database.
+///
+/// Four paths, because a `memories` column can be carried by four different
+/// mechanisms and each has been the sole carrier of some column at some point:
+///   * fresh-full — `BASE_SCHEMA_SQL` + `ensure_column` + sentinel migrations;
+///   * init-only — no sentinel migrations at all, the path a migration-only
+///     column would miss (owner ruling A: `init_schema`'s product IS the
+///     complete current schema);
+///   * pre-v21 legacy replay — legacy *sibling* tables upgraded in place, with
+///     `memories` coming from `BASE_SCHEMA_SQL`;
+///   * legacy `memories` shape — the one that matters most here: a real
+///     pre-CHECK-constraint `memories` table, which sends `init_schema` through
+///     `rebuild_memories_with_check_constraints`, a DROP-and-recreate from a
+///     literal column list that will silently discard whatever `ensure_column`
+///     added moments earlier if the list was not updated too.
+///
+/// Unlike `init_paths_converge_to_the_same_schema`, which asserts the paths
+/// agree with *each other*, this asserts they agree with the thing production
+/// actually queries. Paths converging on a schema that is missing a selected
+/// column would pass that test and fail every read.
+#[test]
+fn every_selected_memory_column_exists_on_every_init_path() {
+    let required = crate::db::memory_select_required_columns();
     assert!(
-        has_column(&fresh, "memories", "last_use_at").unwrap(),
-        "fresh DB must carry last_use_at after the full init path"
+        required.len() > 20,
+        "sanity: the required-column extraction returned {} names, which cannot be right",
+        required.len()
     );
 
+    let (fresh, _fresh_tmp) = sigil_1289_fresh_full_path();
     let init_only = sigil_1289_init_schema_only();
-    assert!(
-        has_column(&init_only, "memories", "last_use_at").unwrap(),
-        "the init_schema-only path must carry it too — this is the path a sentinel-migration-only \
-         column would miss"
-    );
+    let (replay, _replay_tmp) = sigil_1289_init_full_path_with_setup(SIGIL_1289_PRE_V21_LEGACY_SQL);
+    let legacy_memories = open_with_legacy_row("manual", "fact", "general", None, "/notes/x", "{}");
+    let _ = crate::db::enable_simple_auto_extension();
+    init_schema(&legacy_memories).unwrap();
+
+    for (label, conn) in [
+        ("fresh-full", &fresh),
+        ("init_schema-only", &init_only),
+        ("pre-v21 legacy replay", &replay),
+        ("legacy `memories` shape + rebuild", &legacy_memories),
+    ] {
+        let missing: Vec<&str> = required
+            .iter()
+            .copied()
+            .filter(|column| !has_column(conn, "memories", column).unwrap())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the `{label}` init path produced a `memories` table missing {missing:?}, but \
+             MEMORY_SELECT_COLUMNS names them — every production read against a database built \
+             this way would fail with `no such column`. Add the column to ddl.rs's \
+             BASE_SCHEMA_SQL, to init_schema_inner's ensure_column block, AND to \
+             rebuild_memories_with_check_constraints (all three: they are three different \
+             carriers and the rebuild will drop what the other two add)."
+        );
+    }
 }
 
 #[test]
