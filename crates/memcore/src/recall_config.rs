@@ -504,10 +504,16 @@ mod tests {
     #[test]
     fn use_provenance_recency_defaults_off_and_is_opt_in() {
         assert!(!RecallConfig::default().use_provenance_recency);
-        assert!(
-            !DEFAULT_USE_PROVENANCE_RECENCY,
-            "flipping this const is a ranking-semantics change, not a config tweak"
-        );
+        // A `const` block, not a runtime `assert!`: the value is known at
+        // compile time, so flipping the const fails the build rather than a
+        // test run — strictly earlier than the tripwire this replaced, and it
+        // is what `clippy::assertions_on_constants` asks for under `-D warnings`.
+        const {
+            assert!(
+                !DEFAULT_USE_PROVENANCE_RECENCY,
+                "flipping this const is a ranking-semantics change, not a config tweak"
+            )
+        };
 
         let on = RecallConfig::from_config_env_source("TACHI_RECALL_USE_PROVENANCE_RECENCY=true\n");
         assert!(on.use_provenance_recency);
