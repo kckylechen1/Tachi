@@ -743,3 +743,37 @@ fn vault_sync_help_names_offline_guessing_risk() {
     );
     assert!(import_help.contains("--allow-unsigned"), "{import_help}");
 }
+
+#[test]
+fn help_reports_api_only_distill_and_canonical_db_paths() {
+    let mut root_cmd = Cli::command();
+    let root_help = root_cmd.render_long_help().to_string();
+    assert!(
+        root_help.contains("Run batch memory distill through the configured API lane"),
+        "{root_help}"
+    );
+    assert!(
+        root_help.contains("never launches Claude CLI"),
+        "{root_help}"
+    );
+    assert!(
+        !root_help.contains("Claude CLI when configured"),
+        "{root_help}"
+    );
+    assert!(root_help.contains(".tachi/tachi-memory.db"), "{root_help}");
+
+    let mut backfill_cmd = Cli::command();
+    let backfill_help = backfill_cmd
+        .find_subcommand_mut("backfill-vectors")
+        .expect("backfill-vectors command")
+        .render_long_help()
+        .to_string();
+    assert!(
+        backfill_help.contains("~/.tachi/projects/<name>/tachi-memory.db"),
+        "{backfill_help}"
+    );
+    assert!(
+        !backfill_help.contains("~/.tachi/projects/<name>/memory.db"),
+        "{backfill_help}"
+    );
+}

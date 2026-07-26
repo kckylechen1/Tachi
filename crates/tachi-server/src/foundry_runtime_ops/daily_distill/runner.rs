@@ -381,11 +381,12 @@ async fn apply_parsed_groups(
     }
 }
 
-/// Run the distill batch call via the provider executor. The run-directory
+/// Run the daily distill batch through the API recorder. The run-directory
 /// artifact contract (`prompt.md`/`result.md`/`status.json`) is preserved,
-/// since the path goes through `LlmCallRecorder::record_call`. #1261 step
-/// 2/3 removed the CLI fallback branch; step 3/3 renamed the recorder
-/// (formerly `ClaudePool::call_via_provider`) to its executor-agnostic name.
+/// since the path goes through `LlmCallRecorder::record_call`. The
+/// `call_claude_batch` name and `claude_cli` selector are retained for
+/// compatibility, but this path invokes `call_distill_llm` only and never a
+/// Claude subprocess.
 pub(crate) async fn call_claude_batch(
     server: &MemoryServer,
     label: &str,

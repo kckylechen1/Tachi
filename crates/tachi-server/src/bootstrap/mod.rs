@@ -101,16 +101,45 @@ pub(super) const SETUP_API_KEYS: [SetupApiKey; 6] = [
     },
     SetupApiKey {
         key: "MINIMAX_API_KEY",
-        label:
-            "MiniMax distill/summary — DEPRECATED (Phase 2: routed via Claude pool + SiliconFlow)",
+        label: "MiniMax distill/summary — DEPRECATED compatibility key",
         deprecated: true,
     },
     SetupApiKey {
         key: "REASONING_API_KEY",
-        label: "GLM-5.1 reasoning lane — DEPRECATED (Phase 2: skill-evolve uses Claude pool)",
-        deprecated: true,
+        label: "Reasoning API fallback (optional)",
+        deprecated: false,
     },
 ];
+
+#[cfg(test)]
+mod setup_api_key_tests {
+    use super::SETUP_API_KEYS;
+
+    #[test]
+    fn deprecated_compatibility_keys_do_not_claim_active_routing() {
+        let entry = SETUP_API_KEYS
+            .iter()
+            .find(|entry| entry.key == "MINIMAX_API_KEY")
+            .expect("deprecated setup key must remain listed");
+        assert!(entry.deprecated, "MINIMAX_API_KEY must remain deprecated");
+        assert!(
+            entry.label.contains("DEPRECATED compatibility key"),
+            "MINIMAX_API_KEY must be described only as a compatibility key: {}",
+            entry.label
+        );
+        assert!(!entry.label.contains("Claude pool"));
+    }
+
+    #[test]
+    fn live_reasoning_key_remains_available_to_setup() {
+        let entry = SETUP_API_KEYS
+            .iter()
+            .find(|entry| entry.key == "REASONING_API_KEY")
+            .expect("live reasoning key must remain listed");
+        assert!(!entry.deprecated, "live reasoning key must be prompted");
+        assert!(!entry.label.contains("DEPRECATED"));
+    }
+}
 
 pub(super) const DEFAULT_STANDARD_PROFILE_NOTICE: &str =
     "No profile specified; defaulting to 'standard'. Set TACHI_PROFILE=admin to restore legacy full surface (148 tools).";

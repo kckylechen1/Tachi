@@ -86,7 +86,7 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
             "keys": ["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
         },
         "distill": {
-            "provider": "raw_api default (FOUNDRY_DISTILL_BACKEND), claude_cli optional",
+            "provider": "openai-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector (no Claude subprocess)",
             "default_base_url_when_deepseek_key_selected": "https://api.deepseek.com/chat/completions",
             "default_model_when_deepseek_key_selected": "deepseek-chat",
             "keys": ["DISTILL_API_KEY", "DEEPSEEK_API_KEY", "REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],

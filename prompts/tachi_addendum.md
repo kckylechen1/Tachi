@@ -117,6 +117,6 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 - `VOYAGE_API_KEY` — 嵌入 / rerank
 - `SILICONFLOW_API_KEY` — 抽取、摘要、蒸馏（`Qwen/Qwen3.5-27B`）
 
-后台 skill / foundry 调用优先走 **Claude CLI pool**，失败时回退到 `SILICONFLOW_*`。`DISTILL_*` / `REASONING_*` 等旧 lane 仅作兼容保留，新部署不必再配。
+后台抽取 / 摘要 / 每日蒸馏调用直接走已配置的 OpenAI-compatible API lane；已配置的不同 provider 回退耗尽时才显式记录 `LANE_OUTAGE`。`FOUNDRY_DISTILL_BACKEND=claude_cli` 是兼容选择器，仍调用 `call_distill_llm`，不会启动 Claude 子进程。常规 reasoning/chat 先尝试 Claude CLI，再回退到配置好的 reasoning API；provider-only 调用刻意跳过 CLI。`DISTILL_*` / `REASONING_*` 仍是 resolver 消费的配置前缀，可按各自优先级覆盖。
 
 <!-- TACHI:END v1.6.2 -->
