@@ -22,7 +22,7 @@ fn provider_pool_status_reports_cooldown_without_secret_values() {
         client.provider_key_id_for_tests(&[KEY]).as_deref(),
         Some(first_key.as_str())
     );
-    client.mark_provider_key_rate_limited_for_tests(&first_key, Some(60));
+    client.mark_provider_key_rate_limited_for_tests(KEY, &first_key, Some(60));
 
     let statuses = client.provider_pool_statuses();
     let status = statuses
@@ -48,7 +48,7 @@ fn env_fallback_skips_rate_limited_key() {
         client.provider_secret_for_tests(&[KEY]),
         Some("env-secret".to_string())
     );
-    client.mark_provider_key_rate_limited_for_tests(KEY, Some(60));
+    client.mark_provider_key_rate_limited_for_tests(KEY, KEY, Some(60));
 
     assert!(
         client.provider_secret_for_tests(&[KEY]).is_none(),
@@ -74,8 +74,8 @@ fn all_pool_keys_rate_limited_returns_none_if_all_blocked() {
             },
         ],
     );
-    client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_1"), Some(60));
-    client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_2"), Some(60));
+    client.mark_provider_key_rate_limited_for_tests(KEY, &format!("{KEY}_1"), Some(60));
+    client.mark_provider_key_rate_limited_for_tests(KEY, &format!("{KEY}_2"), Some(60));
 
     assert!(
         client.provider_key_id_for_tests(&[KEY]).is_none(),
@@ -197,7 +197,7 @@ fn expired_cooldown_reinstates_pool_key() {
         }],
     );
     let key_id = format!("{KEY}_1");
-    client.mark_provider_key_rate_limited_for_tests(&key_id, Some(1));
+    client.mark_provider_key_rate_limited_for_tests(KEY, &key_id, Some(1));
     client.expire_provider_key_cooldown_for_tests(KEY, &key_id);
 
     assert_eq!(
@@ -229,7 +229,7 @@ fn cooldown_retry_ignores_permanently_failed_pool_members() {
         ],
     );
     client.mark_provider_key_auth_failed_for_tests(KEY, &format!("{KEY}_1"));
-    client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_2"), Some(30));
+    client.mark_provider_key_rate_limited_for_tests(KEY, &format!("{KEY}_2"), Some(30));
 
     let delay = client
         .selected_secret_retry_delay(&[KEY])

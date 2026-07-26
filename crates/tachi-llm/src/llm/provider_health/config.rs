@@ -473,6 +473,7 @@ impl super::super::LlmClient {
             rerank_config: config.rerank,
             vault_db_path,
             provider_state: Arc::new(RwLock::new(ProviderState::with_health(provider_health))),
+            provider_materialization_lock: Arc::new(std::sync::Mutex::new(())),
             provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),
             provider_health_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
             claude_cli_failure: Arc::new(RwLock::new(None)),

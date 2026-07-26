@@ -238,6 +238,11 @@ async fn assert_auto_embedding_transition(
 
     let (base_url, calls, provider_task) = spawn_mock_embedding_provider(outcomes).await;
     let _base = EnvRestore::set("VOYAGE_BASE_URL", &base_url);
+    // #1393 de-globalised the provider-key fixture that `ensure_test_env` used to
+    // export process-wide. These tests need an embedding key of their own, or the
+    // first search degrades to `lexical_only: Missing API key` and both
+    // degradation assertions below invert.
+    let _key = EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
     let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
     let _timeout = EnvRestore::set("TACHI_RECALL_PROVIDER_TIMEOUT_SECS", "2");
     let _embedding = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "0");

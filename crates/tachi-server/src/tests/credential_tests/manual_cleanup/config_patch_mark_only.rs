@@ -12,10 +12,10 @@ fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
         .expect("insert api key metadata");
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
-    let config_path = out_dir.path().join("opencode.json");
-    std::fs::write(&config_path, r#"{"provider":{"openai":{}}}"#).expect("write existing config");
+    let config_path = out_dir.path().join("router.json");
+    std::fs::write(&config_path, r#"{"provider":{"router":{}}}"#).expect("write existing config");
     let profile = crate::credential_profile::CredentialProfile {
-        provider: Some("opencode".to_string()),
+        provider: Some("router".to_string()),
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
@@ -27,7 +27,7 @@ fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
             target: config_path.to_string_lossy().to_string(),
             chmod: Some("0600".to_string()),
             template: Some(serde_json::json!({
-                "provider": {"openai": {"apiKey": "{{secret}}"}}
+                "provider": {"router": {"apiKey": "{{secret}}"}}
             })),
         }],
     };
@@ -35,9 +35,9 @@ fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
         .into_iter()
         .collect();
     crate::credential_profile::apply_credential_materialization(
-        "opencode_shared",
+        "router_shared",
         &profile,
-        "opencode",
+        "router",
         &store,
         &secret_values,
         &crate::credential_profile::CredentialApplyOptions {
@@ -51,8 +51,8 @@ fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
         &store,
         &crate::credential_profile::CredentialCleanupOptions {
             run_dir: None,
-            profile: Some("opencode_shared".to_string()),
-            consumer: Some("opencode".to_string()),
+            profile: Some("router_shared".to_string()),
+            consumer: Some("router".to_string()),
             dry_run: false,
             mark_only: false,
         },
@@ -69,8 +69,8 @@ fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
         &store,
         &crate::credential_profile::CredentialCleanupOptions {
             run_dir: None,
-            profile: Some("opencode_shared".to_string()),
-            consumer: Some("opencode".to_string()),
+            profile: Some("router_shared".to_string()),
+            consumer: Some("router".to_string()),
             dry_run: false,
             mark_only: true,
         },

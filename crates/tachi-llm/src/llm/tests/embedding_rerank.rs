@@ -373,7 +373,9 @@ async fn default_path_dispatches_to_voyage_arm() {
         "default construction must resolve voyage provider"
     );
     // Clear any vault-backed secrets that might exist on the host.
-    client.clear_provider_secrets();
+    client
+        .clear_provider_secrets()
+        .expect("clear provider secrets");
     let docs = vec!["a".to_string(), "b".to_string()];
     let err = client
         .rerank("q", &docs, 1)

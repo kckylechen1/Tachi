@@ -370,12 +370,13 @@ pub enum VaultAction {
         #[arg(long)]
         mark_only: bool,
     },
-    /// Diagnose a credential profile without decrypting or writing secrets.
+    /// Diagnose a credential profile or provider custody without writing.
     ///
-    /// With `--providers`, report OpenCode provider apiKey shapes against vault
-    /// metadata only (no profile/consumer required; no writes).
+    /// With `--providers`, report OpenCode provider apiKey shapes and Vault
+    /// metadata. Value comparison is opt-in through an explicit password
+    /// source; without one, comparison remains UNKNOWN.
     Doctor {
-        /// Report-only OpenCode providers view (apiKey shape / admitted / vault age).
+        /// Report-only OpenCode providers and daemon effective-source view.
         #[arg(long)]
         providers: bool,
         /// OpenCode config path. Defaults to ~/.config/opencode/opencode.json.
@@ -391,6 +392,31 @@ pub enum VaultAction {
         /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
+        /// Read Vault password from stdin for report-only value comparison.
+        #[arg(
+            long,
+            requires = "providers",
+            conflicts_with_all = ["keychain", "password_file"]
+        )]
+        stdin_password: bool,
+        /// Read Vault password from macOS Keychain for report-only value comparison.
+        #[arg(
+            long,
+            requires = "providers",
+            conflicts_with_all = ["stdin_password", "password_file"]
+        )]
+        keychain: bool,
+        /// Read Vault password from a local file for report-only value comparison.
+        #[arg(
+            long,
+            value_name = "PATH",
+            requires = "providers",
+            conflicts_with_all = ["stdin_password", "keychain"]
+        )]
+        password_file: Option<PathBuf>,
+        /// Allow a provider-doctor password file readable by group/other.
+        #[arg(long, requires = "password_file")]
+        insecure_password_file: bool,
     },
     /// Export encrypted Vault rows to a signed sync bundle.
     ///

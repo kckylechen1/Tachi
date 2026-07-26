@@ -1,5 +1,7 @@
-use super::handlers::{handle_vault_init, handle_vault_lock, handle_vault_unlock};
-use super::params::{VaultInitParams, VaultUnlockParams};
+use super::handlers::{
+    handle_vault_init, handle_vault_lock, handle_vault_set, handle_vault_unlock,
+};
+use super::params::{VaultInitParams, VaultSetParams, VaultUnlockParams};
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
@@ -75,6 +77,380 @@ async fn auto_lock_clears_key_but_preserves_provider_secrets() {
             .as_deref(),
         Some("cached"),
         "auto-lock must NOT clear provider secrets — they have a lifecycle independent of the vault master key"
+    );
+}
+
+// Holds `global_test_lock` across awaits on purpose: the guard serializes
+// process-wide provider/env state for the whole init -> set -> lock sequence
+// this race test stages, so releasing it at any await would let a sibling test
+// interleave and destroy the condition under test.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-prelock-materialization-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server =
+        std::sync::Arc::new(MemoryServer::new(db_path, None).expect("create isolated test server"));
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "test-only-password".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "OPENAI_API_KEY".to_string(),
+            value: "fixture-provider-secret".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "R9 race fixture".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect("vault set");
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("fixture-provider-secret")
+    );
+
+    let (resolved_tx, resolved_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let refresh_server = std::sync::Arc::clone(&server);
+    let refresh = std::thread::spawn(move || {
+        crate::provider_config::materialize_for_server_with_hook_for_tests(
+            &refresh_server,
+            move || {
+                resolved_tx.send(()).expect("announce resolved vault pools");
+                release_rx.recv().expect("release stale resolved pools");
+            },
+        )
+    });
+    resolved_rx
+        .recv()
+        .expect("refresh reached post-resolution window");
+
+    let refresh_holds_transaction = server.llm.provider_materialization_lock_is_held_for_tests();
+    let (lock_started_tx, lock_started_rx) = std::sync::mpsc::channel();
+    let (lock_done_tx, lock_done_rx) = std::sync::mpsc::channel();
+    let lock_server = std::sync::Arc::clone(&server);
+    let lock = std::thread::spawn(move || {
+        lock_started_tx.send(()).expect("announce explicit lock");
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("lock runtime")
+            .block_on(handle_vault_lock(&lock_server));
+        lock_done_tx.send(()).expect("announce lock completion");
+        result
+    });
+    lock_started_rx.recv().expect("explicit lock started");
+
+    if refresh_holds_transaction {
+        release_tx
+            .send(())
+            .expect("release transaction-held refresh before lock");
+        refresh
+            .join()
+            .expect("refresh thread")
+            .expect("refresh result");
+        lock_done_rx.recv().expect("explicit lock completed last");
+    } else {
+        lock_done_rx
+            .recv()
+            .expect("pre-fix explicit lock completed before stale refresh");
+        release_tx
+            .send(())
+            .expect("release stale pools after early lock");
+        refresh
+            .join()
+            .expect("refresh thread")
+            .expect("refresh result");
+    }
+    lock.join()
+        .expect("lock thread")
+        .expect("explicit lock result");
+
+    assert!(server.vault_read().key.is_none());
+    assert_eq!(
+        server.llm.provider_secret_count(),
+        0,
+        "explicit lock must finish after any refresh that resolved Vault pools before lock"
+    );
+}
+
+#[tokio::test]
+async fn explicit_vault_lock_reports_provider_transaction_poison() {
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-lock-poison-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create isolated test server");
+    let key = [7u8; 32];
+    {
+        let mut vault = server.vault_write();
+        vault.key = Some(crate::CachedVaultKey::copy_from(&key));
+        vault.unlock_time = Some(Instant::now());
+    }
+    assert!(server
+        .llm
+        .set_provider_secret("OPENAI_API_KEY", "fixture-cached-secret"));
+    server.llm.poison_provider_materialization_lock_for_tests();
+
+    let err = handle_vault_lock(&server)
+        .await
+        .expect_err("vault lock must not report success when provider clear is refused");
+
+    assert!(err.contains("transaction lock is poisoned"), "{err}");
+    assert!(
+        server.vault_read().key.is_some(),
+        "custody state must not partially lock before the shared transaction starts"
+    );
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("fixture-cached-secret")
+    );
+}
+
+fn fixture_vault_access_count(server: &MemoryServer, name: &str) -> i64 {
+    server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_entry(name)
+                .map_err(|e| e.to_string())
+                .map(|entry| entry.expect("fixture Vault entry exists").access_count)
+        })
+        .expect("read fixture Vault access count")
+}
+
+fn reset_fixture_vault_access_count(server: &MemoryServer, name: &str) {
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "UPDATE vault_entries SET access_count = 0, accessed_at = '' WHERE name = ?1",
+                    [name],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("reset fixture Vault access count");
+}
+
+#[test]
+fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _allow_auto_unlock = EnvRestore::set("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK", "1");
+    let _keychain_password = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", "r10-password");
+    let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-keychain-refresh-r10-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server =
+        std::sync::Arc::new(MemoryServer::new(db_path, None).expect("create isolated test server"));
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            handle_vault_init(
+                &server,
+                VaultInitParams {
+                    password: "r10-password".to_string(),
+                },
+            )
+            .await
+            .expect("vault init");
+            handle_vault_set(
+                &server,
+                VaultSetParams {
+                    name: "OPENAI_API_KEY".to_string(),
+                    value: "r10-fixture-provider-secret".to_string(),
+                    agent_id: None,
+                    secret_type: "api_key".to_string(),
+                    description: "R10 recursive auto-unlock fixture".to_string(),
+                    allowed_agents: None,
+                    enable_rotation: false,
+                    rotation_strategy: None,
+                },
+            )
+            .await
+            .expect("vault set");
+            handle_vault_lock(&server).await.expect("vault lock");
+        });
+    reset_fixture_vault_access_count(&server, "OPENAI_API_KEY");
+
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let refresh_server = std::sync::Arc::clone(&server);
+    let refresh = std::thread::spawn(move || {
+        let result = refresh_server.refresh_llm_provider_secrets_from_vault();
+        result_tx.send(result).expect("send refresh result");
+    });
+    // This remains a finite deadlock assertion, but allows the production
+    // Argon2 profile to contend with default-parallel Vault tests. A 2-second
+    // wall-clock bound was a scheduler/KDF benchmark, not a lock invariant.
+    let report = result_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("locked provider refresh must not deadlock during Keychain auto-unlock")
+        .expect("locked provider refresh must succeed");
+    refresh.join().expect("refresh thread");
+
+    assert!(server.vault_read().key.is_some());
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("r10-fixture-provider-secret")
+    );
+    assert_eq!(
+        report.from_vault, 1,
+        "the outer transaction must materialize the one Vault-backed fixture key once"
+    );
+    assert_eq!(
+        fixture_vault_access_count(&server, "OPENAI_API_KEY"),
+        1,
+        "one outer refresh must decrypt/touch each concrete key exactly once"
+    );
+}
+
+#[test]
+fn failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _allow_auto_unlock = EnvRestore::set("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK", "1");
+    let _keychain_password = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", "wrong-password");
+    let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-keychain-refresh-failure-r10-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create isolated test server");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            handle_vault_init(
+                &server,
+                VaultInitParams {
+                    password: "correct-password".to_string(),
+                },
+            )
+            .await
+            .expect("vault init");
+            handle_vault_set(
+                &server,
+                VaultSetParams {
+                    name: "OPENAI_API_KEY".to_string(),
+                    value: "r10-failed-unlock-fixture".to_string(),
+                    agent_id: None,
+                    secret_type: "api_key".to_string(),
+                    description: "R10 failed auto-unlock fixture".to_string(),
+                    allowed_agents: None,
+                    enable_rotation: false,
+                    rotation_strategy: None,
+                },
+            )
+            .await
+            .expect("vault set");
+            handle_vault_lock(&server).await.expect("vault lock");
+        });
+    reset_fixture_vault_access_count(&server, "OPENAI_API_KEY");
+
+    let err = server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect_err("wrong Keychain password must fail provider refresh loudly");
+
+    assert!(
+        err.contains("Failed to unlock Vault provider secrets"),
+        "{err}"
+    );
+    assert!(err.contains("Wrong password"), "{err}");
+    let vault = server.vault_read();
+    assert!(vault.key.is_none());
+    assert!(vault.unlock_time.is_none());
+    drop(vault);
+    assert_eq!(server.llm.provider_secret_count(), 0);
+    assert_eq!(fixture_vault_access_count(&server, "OPENAI_API_KEY"), 0);
+}
+
+#[test]
+fn bootstrap_auto_unlock_owns_one_provider_refresh() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _allow_auto_unlock = EnvRestore::set("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK", "1");
+    let _keychain_password =
+        EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", "r10-bootstrap-password");
+    let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-keychain-bootstrap-r10-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create isolated test server");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            handle_vault_init(
+                &server,
+                VaultInitParams {
+                    password: "r10-bootstrap-password".to_string(),
+                },
+            )
+            .await
+            .expect("vault init");
+            handle_vault_set(
+                &server,
+                VaultSetParams {
+                    name: "OPENAI_API_KEY".to_string(),
+                    value: "r10-bootstrap-provider-secret".to_string(),
+                    agent_id: None,
+                    secret_type: "api_key".to_string(),
+                    description: "R10 bootstrap refresh owner fixture".to_string(),
+                    allowed_agents: None,
+                    enable_rotation: false,
+                    rotation_strategy: None,
+                },
+            )
+            .await
+            .expect("vault set");
+            handle_vault_lock(&server).await.expect("vault lock");
+        });
+    reset_fixture_vault_access_count(&server, "OPENAI_API_KEY");
+
+    crate::provider_config::bootstrap_provider_runtime(&server);
+
+    assert!(server.vault_read().key.is_some());
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("r10-bootstrap-provider-secret")
+    );
+    assert_eq!(
+        fixture_vault_access_count(&server, "OPENAI_API_KEY"),
+        1,
+        "bootstrap key installation must be followed by exactly one provider refresh"
     );
 }
 

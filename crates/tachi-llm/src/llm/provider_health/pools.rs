@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 impl super::super::LlmClient {
     #[cfg(any(test, feature = "test-support"))]
@@ -51,7 +52,134 @@ impl super::super::LlmClient {
             .count()
     }
 
-    pub fn clear_provider_secrets(&self) {
+    /// Clone one logical provider pool under a read lock. Missing-alias recovery
+    /// calls this only for the affected key, avoiding a second full secret map.
+    pub(crate) fn provider_secret_pool_snapshot(
+        &self,
+        logical_name: &str,
+    ) -> Option<Vec<ProviderSecret>> {
+        self.provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .secrets
+            .get(logical_name)
+            .cloned()
+    }
+
+    /// Replace the complete provider-secret cache after validating every pool.
+    ///
+    /// Validation happens before the write lock is acquired. Under one write
+    /// lock, the final map replaces the old map while indices and member
+    /// cooldowns and composite logical/member health survive only for pools
+    /// explicitly marked retained. New, changed, and removed pools therefore
+    /// cannot inherit stale runtime state, and a refused refresh cannot expose
+    /// a partial cache.
+    pub(crate) fn replace_provider_secret_pools(
+        &self,
+        pools: HashMap<String, Vec<ProviderSecret>>,
+        retained_logical_names: &HashSet<String>,
+    ) -> Result<usize, String> {
+        let mut replacement = HashMap::with_capacity(pools.len());
+        for (name, entries) in pools {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(
+                    "Provider refresh refused because a provider key name is empty; prior provider cache left unchanged"
+                        .to_string(),
+                );
+            }
+            if entries.is_empty()
+                || entries
+                    .iter()
+                    .any(|entry| entry.key_id.trim().is_empty() || entry.value.trim().is_empty())
+            {
+                return Err(format!(
+                    "Provider refresh refused because key '{name}' has an invalid secret pool; prior provider cache left unchanged"
+                ));
+            }
+            replacement.insert(name.to_string(), entries);
+        }
+
+        let loaded = replacement.len();
+        let mut retained_members_by_logical = HashMap::new();
+        for logical_name in retained_logical_names {
+            let Some(entries) = replacement.get(logical_name) else {
+                continue;
+            };
+            let member_ids = entries
+                .iter()
+                .map(|entry| entry.key_id.clone())
+                .collect::<HashSet<_>>();
+            retained_members_by_logical.insert(logical_name.clone(), member_ids);
+        }
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.indices.retain(|logical_name, _index| {
+            retained_logical_names.contains(logical_name) && replacement.contains_key(logical_name)
+        });
+        state.cooldowns.retain(|logical_name, members| {
+            let Some(retained_members) = retained_members_by_logical.get(logical_name) else {
+                return false;
+            };
+            members.retain(|key_id, _until| retained_members.contains(key_id));
+            !members.is_empty()
+        });
+        state.health.retain(|logical_name, members| {
+            let Some(retained_members) = retained_members_by_logical.get(logical_name) else {
+                return false;
+            };
+            members.retain(|key_id, _health| retained_members.contains(key_id));
+            !members.is_empty()
+        });
+        state.health_snapshots.retain(|logical_name, members| {
+            let Some(retained_members) = retained_members_by_logical.get(logical_name) else {
+                return false;
+            };
+            members.retain(|key_id, _snapshot| retained_members.contains(key_id));
+            !members.is_empty()
+        });
+        state.secrets = replacement;
+        Ok(loaded)
+    }
+
+    pub fn clear_provider_secrets(&self) -> Result<(), String> {
+        self.clear_provider_secrets_inner(|| Ok(()), None)
+    }
+
+    /// Make a durable-custody state transition and clear the provider cache
+    /// under the same transaction boundary used by materialization.
+    ///
+    /// The closure runs only after the transaction lock is acquired and must
+    /// make the durable source unavailable without re-entering provider
+    /// materialization or cache-clear APIs. This ordering lets an explicit
+    /// Vault lock linearize before both custody state and cache are cleared.
+    pub fn clear_provider_secrets_with_custody<F>(&self, clear_custody: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        self.clear_provider_secrets_inner(clear_custody, None)
+    }
+
+    fn clear_provider_secrets_inner<F>(
+        &self,
+        clear_custody: F,
+        before_materialization_guard: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        // An explicit Vault lock must order after any materialization that
+        // already captured last-known-good state. Use the same transaction
+        // boundary as materialization, then clear under the normal short-lived
+        // provider-state write lock. No materialization path calls this method,
+        // so the non-reentrant mutex cannot be acquired recursively.
+        if let Some(hook) = before_materialization_guard {
+            hook();
+        }
+        let _materialization_guard = self.provider_materialization_guard()?;
+        clear_custody()?;
         let mut state = self
             .provider_state
             .write()
@@ -59,6 +187,15 @@ impl super::super::LlmClient {
         state.secrets.clear();
         state.cooldowns.clear();
         state.indices.clear();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_provider_secrets_with_hook_for_tests(
+        &self,
+        before_materialization_guard: impl FnOnce() + Send + 'static,
+    ) -> Result<(), String> {
+        self.clear_provider_secrets_inner(|| Ok(()), Some(Box::new(before_materialization_guard)))
     }
 
     pub fn provider_secret_count(&self) -> usize {
@@ -67,6 +204,46 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .secrets
             .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_provider_operational_state_for_tests(
+        &self,
+        logical_name: &str,
+        index: usize,
+        cooldown_key_id: &str,
+    ) {
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.indices.insert(logical_name.to_string(), index);
+        state.set_cooldown(
+            logical_name,
+            cooldown_key_id,
+            Instant::now() + Duration::from_secs(60),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_health_state_presence_for_tests(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+    ) -> (bool, bool) {
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let has_health = state
+            .health
+            .get(logical_name)
+            .is_some_and(|members| members.contains_key(key_id));
+        let has_snapshot = state
+            .health_snapshots
+            .get(logical_name)
+            .is_some_and(|members| members.contains_key(key_id));
+        (has_health, has_snapshot)
     }
 
     pub fn provider_pool_statuses(&self) -> Vec<ProviderPoolStatus> {
@@ -90,8 +267,7 @@ impl super::super::LlmClient {
                         now_utc,
                     );
                     let memory_blocked = state
-                        .cooldowns
-                        .get(&entry.key_id)
+                        .cooldown_until(logical_name, &entry.key_id)
                         .is_some_and(|until| *until > now);
 
                     let is_blocked = memory_blocked
@@ -107,8 +283,7 @@ impl super::super::LlmClient {
                     if is_blocked {
                         let remaining_seconds = if memory_blocked {
                             state
-                                .cooldowns
-                                .get(&entry.key_id)
+                                .cooldown_until(logical_name, &entry.key_id)
                                 .map(|until| {
                                     until.saturating_duration_since(now).as_secs().max(1) as i64
                                 })

@@ -1,8 +1,22 @@
 use super::*;
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes process-wide env across async vault setup + subprocess spawn
 async fn dispatch_env_injection_uses_logical_rotation_key_not_member_names() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let server = make_server();
+
+    // Child-env injection is caller-wins by default (#1393, see
+    // docs/engineering/architecture/vault-auth-broker.md): Vault supplies only
+    // names the caller does not already have. This test is about WHICH NAME the
+    // rotation is injected under — logical prefix, not member names — so the
+    // ambient value has to be out of the way, or the assertion below measures
+    // the developer's own exported TAVILY_API_KEY instead of the vault's.
+    let _ambient = crate::test_support::EnvRestore::remove("TAVILY_API_KEY");
+    let _ambient_1 = crate::test_support::EnvRestore::remove("TAVILY_API_KEY_1");
+    let _ambient_2 = crate::test_support::EnvRestore::remove("TAVILY_API_KEY_2");
 
     server
         .vault_init(Parameters(VaultInitParams {

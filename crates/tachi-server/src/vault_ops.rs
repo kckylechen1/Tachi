@@ -10,6 +10,7 @@ mod rotation;
 mod session;
 
 pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, VaultReadState};
+pub(crate) use rotation::collect_rotation_entries;
 
 pub(crate) use access::load_unlocked_api_key_secret_pools;
 pub(crate) use access::read_unlocked_vault_secret;

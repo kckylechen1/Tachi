@@ -16,8 +16,13 @@ pub use llm::{
     ProviderInvocationReceipt, ProviderSecret, ReasoningOutcome, RerankConfig, RerankProviderKind,
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
+/// Test-only entry: pre-resolved pools cannot report [`VaultSourceAvailability`],
+/// so production materialization must use the durable-source entry above.
+#[cfg(any(test, feature = "test-support"))]
+pub use provider_materialization::materialize_provider_secrets;
 pub use provider_materialization::{
-    group_api_key_values_by_configured_rotations, materialize_provider_secrets, MaterializeReport,
+    group_api_key_values_by_configured_rotations, materialize_provider_secrets_from_durable_source,
+    MaterializeReport, VaultSourceAvailability,
 };
 pub use provider_names::{
     is_vault_alias, parse_rotation_member_name, parse_vault_alias, vault_alias_line,

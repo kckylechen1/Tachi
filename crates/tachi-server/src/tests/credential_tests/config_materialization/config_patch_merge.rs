@@ -4,7 +4,7 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
-fn credential_config_patch_merges_json_without_retaining_old_secret_backup() {
+fn opencode_config_patch_merges_env_reference_without_retaining_plaintext_backup() {
     let db_path = crate::utils::test_fixture_path(format!(
         "credential-config-patch-test-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -37,7 +37,7 @@ fn credential_config_patch_merges_json_without_retaining_old_secret_backup() {
             template: Some(serde_json::json!({
                 "provider": {
                     "openai": {
-                        "apiKey": "{{secret}}"
+                        "apiKey": "{env:OPENAI_API_KEY}"
                     }
                 }
             })),
@@ -69,7 +69,7 @@ fn credential_config_patch_merges_json_without_retaining_old_secret_backup() {
     );
     assert_eq!(
         parsed["provider"]["openai"]["apiKey"],
-        serde_json::json!("sk-patch-secret")
+        serde_json::json!("{env:OPENAI_API_KEY}")
     );
     assert_eq!(parsed["keep"], serde_json::json!(true));
     #[cfg(unix)]
@@ -116,4 +116,10 @@ fn credential_config_patch_merges_json_without_retaining_old_secret_backup() {
     let raw = serde_json::to_string(&result.report).expect("serialize report");
     assert!(!raw.contains("sk-patch-secret"));
     assert!(raw.contains("config_patch"));
+    assert!(
+        !std::fs::read_to_string(&config_path)
+            .expect("read persisted config")
+            .contains("sk-patch-secret"),
+        "OpenCode config must retain the env reference, never the decrypted api key"
+    );
 }

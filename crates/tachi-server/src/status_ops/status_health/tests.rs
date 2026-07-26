@@ -334,8 +334,46 @@ fn skipped_alias_surfaces_as_a_probe_result_not_only_a_log_line() {
     assert_eq!(probe.name, "provider_secret_materialization");
     assert_eq!(probe.status, "degraded");
     let message = probe.message.expect("probe message present");
-    assert!(message.contains("OPENAI_API_KEY") || message.contains("MISSING_ALIAS"));
+    assert!(message.contains("OPENAI_API_KEY"));
+    assert!(message.contains("no last-known-good provider pool retained"));
+    assert!(!message.contains("MISSING_ALIAS"));
     assert!(message.contains("skipped during materialization"));
+}
+
+#[test]
+fn skipped_alias_probe_aggregate_distinguishes_retained_without_raw_reasons() {
+    let report = tachi_llm::MaterializeReport {
+        skipped_aliases: vec![
+            (
+                "VOYAGE_API_KEY".to_string(),
+                "RAW_ALIAS_TARGET_ONE VALUE_SENTINEL_ONE".to_string(),
+            ),
+            (
+                "OPENAI_API_KEY".to_string(),
+                "RAW_ALIAS_TARGET_TWO VALUE_SENTINEL_TWO".to_string(),
+            ),
+        ],
+        retained_from_last_known_good: vec!["VOYAGE_API_KEY".to_string()],
+        ..Default::default()
+    };
+
+    let probe = super::probes::skipped_alias_probe_result(&report)
+        .expect("skipped aliases must produce a degraded aggregate");
+    let message = probe.message.expect("probe message present");
+
+    assert!(message.contains("VOYAGE_API_KEY: retained last-known-good provider pool"));
+    assert!(message.contains("OPENAI_API_KEY: no last-known-good provider pool retained"));
+    for sentinel in [
+        "RAW_ALIAS_TARGET_ONE",
+        "VALUE_SENTINEL_ONE",
+        "RAW_ALIAS_TARGET_TWO",
+        "VALUE_SENTINEL_TWO",
+    ] {
+        assert!(
+            !message.contains(sentinel),
+            "aggregate leaked {sentinel}: {message}"
+        );
+    }
 }
 
 #[test]

@@ -116,7 +116,7 @@ fn provider_runtime_maps_share_one_state_lock() {
         client.provider_key_id_for_tests(&[KEY]).as_deref(),
         Some(key_id.as_str())
     );
-    client.mark_provider_key_rate_limited_for_tests(&key_id, Some(60));
+    client.mark_provider_key_rate_limited_for_tests(KEY, &key_id, Some(60));
 
     let state = client
         .provider_state
@@ -124,7 +124,7 @@ fn provider_runtime_maps_share_one_state_lock() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert!(state.secrets.contains_key(KEY));
     assert_eq!(state.indices.get(KEY), Some(&0));
-    assert!(state.cooldowns.contains_key(&key_id));
+    assert!(state.is_cooling_down(KEY, &key_id));
     assert_eq!(
         state
             .health

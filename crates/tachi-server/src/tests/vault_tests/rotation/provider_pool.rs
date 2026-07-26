@@ -56,9 +56,11 @@ async fn vault_rotation_materializes_provider_pool_under_logical_key() {
         "provider pools should rotate in-process between healthy concrete keys"
     );
 
-    server
-        .llm
-        .mark_provider_key_rate_limited_for_tests("VOYAGE_API_KEY_1", Some(60));
+    server.llm.mark_provider_key_rate_limited_for_tests(
+        "VOYAGE_API_KEY",
+        "VOYAGE_API_KEY_1",
+        Some(60),
+    );
 
     assert_eq!(
         server

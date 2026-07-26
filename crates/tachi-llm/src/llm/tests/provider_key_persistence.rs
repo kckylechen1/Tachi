@@ -205,7 +205,7 @@ async fn provider_key_health_reload_clears_local_cooldown_on_external_success() 
             },
         ],
     );
-    client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_1"), Some(300));
+    client.mark_provider_key_rate_limited_for_tests(KEY, &format!("{KEY}_1"), Some(300));
 
     let now = Utc::now() + chrono::Duration::seconds(1);
     let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");

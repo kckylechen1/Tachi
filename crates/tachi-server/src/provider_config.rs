@@ -7,12 +7,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::vault_ops::load_unlocked_api_key_secret_pools;
+use crate::vault_ops::{classify_vault_read_error, VaultReadState};
 use crate::MemoryServer;
 pub use tachi_llm::{
     group_api_key_values_by_configured_rotations, is_vault_alias, parse_rotation_member_name,
     parse_vault_alias, vault_alias_line, MaterializeReport, VAULT_ALIAS_PREFIX,
 };
-use tachi_llm::{LlmClient, ProviderSecret};
+use tachi_llm::{LlmClient, ProviderSecret, VaultSourceAvailability};
 
 pub(crate) fn provider_env_keys() -> HashSet<String> {
     crate::status_ops::status_health::provider_api_key_env_names()
@@ -44,25 +45,62 @@ pub fn vault_api_key_pools_from_keychain(
     group_api_key_values_by_configured_rotations(values, &rotation_prefixes)
 }
 
+/// Resolve the Vault-backed provider pools, and report whether the source was
+/// actually readable.
+///
+/// The availability half is load-bearing, not diagnostic: materialization uses
+/// it to decide whether a missing `vault:` alias target means "revoked" (drop
+/// the cached pool) or "cannot tell right now" (retain it). See
+/// [`tachi_llm::VaultSourceAvailability`].
 fn resolve_vault_pools(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
-) -> HashMap<String, Vec<ProviderSecret>> {
+) -> Result<
+    (
+        HashMap<String, Vec<ProviderSecret>>,
+        VaultSourceAvailability,
+    ),
+    String,
+> {
+    // Starts unavailable and is only promoted by a read that actually
+    // succeeded: an unproven source must never license retention.
+    let mut availability = VaultSourceAvailability::LockedOrUnavailable;
     if let Some(server) = server {
-        if let Ok(map) = vault_api_key_pools_from_server(server) {
-            if !map.is_empty() {
-                return map;
-            }
+        match vault_api_key_pools_from_server(server) {
+            Ok(map) if !map.is_empty() => return Ok((map, VaultSourceAvailability::Readable)),
+            // Unlocked and genuinely empty: the Vault answered, it just has
+            // nothing. That is a readable source.
+            Ok(_) => availability = VaultSourceAvailability::Readable,
+            // A benign locked miss may still use the standalone Keychain
+            // fallback below. Real auth/unknown failures must stay loud.
+            //
+            // Classification goes through the one shared classifier rather than
+            // a local string chain: `vault_ops::resolver`'s module doc records
+            // that per-host `starts_with("Vault is locked")` predicates already
+            // drifted once. An `==` chain here would drift the same way, and its
+            // fail direction is an outage — a reworded message would turn every
+            // locked start-up into a refused refresh with no Keychain fallback.
+            Err(err)
+                if matches!(
+                    classify_vault_read_error(&err),
+                    VaultReadState::Locked
+                        | VaultReadState::AutoLocked
+                        | VaultReadState::NotInitialized
+                ) => {}
+            Err(err) => return Err(format!("Failed to unlock Vault provider secrets: {err}")),
         }
     }
     let pools = vault_api_key_pools_from_keychain(global_db_path);
-    if !pools.is_empty() || vault_config_exists(global_db_path) {
-        return pools;
+    if !pools.is_empty() {
+        return Ok((pools, VaultSourceAvailability::Readable));
+    }
+    if vault_config_exists(global_db_path) {
+        return Ok((pools, availability));
     }
 
     let default_global = default_global_db_path();
     if paths_equal(global_db_path, &default_global) {
-        return pools;
+        return Ok((pools, availability));
     }
 
     let fallback = vault_api_key_pools_from_keychain(&default_global);
@@ -72,8 +110,9 @@ fn resolve_vault_pools(
             global_db_path.display(),
             default_global.display()
         );
+        return Ok((fallback, VaultSourceAvailability::Readable));
     }
-    fallback
+    Ok((fallback, availability))
 }
 
 pub(crate) fn default_global_db_path() -> std::path::PathBuf {
@@ -119,6 +158,7 @@ fn rotation_prefixes_from_global_db(global_db_path: &Path) -> HashSet<String> {
 }
 
 /// Apply Vault + config.env aliases into `LlmClient` without mutating process env.
+#[cfg(test)]
 pub fn materialize_provider_secrets(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
@@ -128,12 +168,20 @@ pub fn materialize_provider_secrets(
 }
 
 fn format_provider_materialization_error(err: String) -> String {
+    // Match the two unresolved-alias shapes by their semantic tails, not by one
+    // shared sentence: #1393 split that sentence into a revoked case and an
+    // unreadable case, and a matcher keyed on the old wording would silently
+    // stop attaching remediation to both.
+    let unresolved_alias = err.starts_with("Config key ")
+        && err.contains("references a Vault alias")
+        && (err.contains("absent from a readable Vault") || err.contains("could not be read"));
     if (err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
-        || (err.starts_with("Config key ") && err.contains("references Vault alias "))
+        || unresolved_alias
     {
         format!(
-            "{err}. The alias came from config.env or process env, but the referenced Vault secret is missing or Vault is locked. \
-             Run vault_unlock and vault_set, or store the key in Vault under the referenced secret name."
+            "{err} The alias came from config.env or process env. \
+             Run vault_unlock if the Vault is locked, or vault_set to store the key \
+             in Vault under the referenced secret name."
         )
     } else {
         err
@@ -152,6 +200,36 @@ pub fn format_skipped_alias_reason(reason: &str) -> String {
     format_provider_materialization_error(reason.to_string())
 }
 
+/// Render one skipped alias with its cache disposition. Inputs are metadata
+/// only: the logical key name and whether that key's prior pool was retained.
+/// The warning deliberately rebuilds a constant reason instead of forwarding
+/// report text, so even a contaminated caller cannot inject an alias target.
+pub fn format_skipped_alias_warning(
+    key: &str,
+    retained: bool,
+    availability: VaultSourceAvailability,
+) -> String {
+    let cache_disposition = if retained {
+        "retained last-known-good provider pool"
+    } else {
+        "no last-known-good provider pool retained"
+    };
+    // Derived from the same value materialization decided on, so the operator
+    // line cannot disagree with what actually happened to the cache.
+    let safe_reason = match availability {
+        VaultSourceAvailability::Readable => format!(
+            "Config key '{key}' references a Vault alias whose secret is absent from a readable Vault."
+        ),
+        VaultSourceAvailability::LockedOrUnavailable => format!(
+            "Config key '{key}' references a Vault alias, but the Vault could not be read."
+        ),
+    };
+    format!(
+        "[provider] skipped alias for '{key}'; {cache_disposition}: {}",
+        format_skipped_alias_reason(&safe_reason)
+    )
+}
+
 /// Render `MaterializeReport.skipped_aliases` into one operator-facing message
 /// with per-alias remediation. Used by fail-loud consumers (vault-op response,
 /// backfill fail-fast) that need a single string; the accessor refresh path logs
@@ -168,23 +246,75 @@ pub fn describe_skipped_aliases(skipped: &[(String, String)]) -> String {
     )
 }
 
+/// Metadata-only aggregate for health/probe output. Reconstruct each entry
+/// from the logical key and retained disposition; never forward raw reasons.
+pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
+    let details = report
+        .skipped_aliases
+        .iter()
+        .map(|(key, _reason)| {
+            let disposition = if report
+                .retained_from_last_known_good
+                .iter()
+                .any(|retained_key| retained_key == key)
+            {
+                "retained last-known-good provider pool"
+            } else {
+                "no last-known-good provider pool retained"
+            };
+            format!("{key}: {disposition}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "{} provider alias(es) skipped during materialization: {details}",
+        report.skipped_aliases.len()
+    )
+}
+
 pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport, String> {
+    materialize_for_server_inner(server, None)
+}
+
+fn materialize_for_server_inner(
+    server: &MemoryServer,
+    after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
-    let vault_pools = resolve_vault_pools(Some(server), &global);
-    materialize_provider_secrets(server.llm.as_ref(), &vault_pools)
+    tachi_llm::materialize_provider_secrets_from_durable_source(
+        server.llm.as_ref(),
+        provider_env_keys(),
+        || {
+            let resolved = resolve_vault_pools(Some(server), &global)?;
+            if let Some(hook) = after_vault_pools_resolved {
+                hook();
+            }
+            Ok(resolved)
+        },
+    )
+    .map_err(format_provider_materialization_error)
+}
+
+#[cfg(test)]
+pub(crate) fn materialize_for_server_with_hook_for_tests(
+    server: &MemoryServer,
+    after_vault_pools_resolved: impl FnOnce() + Send + 'static,
+) -> Result<MaterializeReport, String> {
+    materialize_for_server_inner(server, Some(Box::new(after_vault_pools_resolved)))
 }
 
 pub fn materialize_standalone(
     llm: &LlmClient,
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
-    let vault_pools = resolve_vault_pools(None, global_db_path);
-    materialize_provider_secrets(llm, &vault_pools)
+    tachi_llm::materialize_provider_secrets_from_durable_source(llm, provider_env_keys(), || {
+        resolve_vault_pools(None, global_db_path)
+    })
+    .map_err(format_provider_materialization_error)
 }
 
-/// Best-effort unlock from macOS Keychain (`tachi-vault` / `default`) and materialize
-/// provider secrets into the running process. Used at daemon/MCP startup and after vault
-/// auto-lock so background embed/search can keep working without a manual unlock.
+/// Check whether the macOS Keychain contains the background auto-unlock entry
+/// (`tachi-vault` / `default`) without reading its value.
 pub fn keychain_vault_password_entry_available() -> Result<bool, String> {
     if !cfg!(target_os = "macos") {
         return Ok(false);
@@ -203,7 +333,22 @@ pub fn keychain_vault_password_entry_available() -> Result<bool, String> {
     Ok(output.status.success())
 }
 
-pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, String> {
+fn read_background_keychain_password() -> Result<Option<String>, String> {
+    match crate::vault_crypto::read_password_from_macos_keychain() {
+        Ok(password) => Ok(Some(password)),
+        Err(err)
+            if err.starts_with("no vault password found in Keychain")
+                || err == "Keychain entry for tachi-vault/default is empty" =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(format!("keychain read failed: {err}")),
+    }
+}
+
+/// Install and validate the Vault key from Keychain without refreshing the
+/// provider cache. Callers must explicitly own the following refresh, if any.
+pub(crate) fn auto_unlock_vault_key_from_keychain(server: &MemoryServer) -> Result<bool, String> {
     if !cfg!(target_os = "macos") {
         return Ok(false);
     }
@@ -212,38 +357,24 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
         return Ok(false);
     }
 
-    let config = server
+    let Some(config) = server
         .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))?
-        .ok_or_else(|| "vault not initialized".to_string())?;
-
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "tachi-vault",
-            "-a",
-            "default",
-            "-w",
-        ])
-        .output()
-        .map_err(|e| format!("keychain read failed: {e}"))?;
-    if !output.status.success() {
+    else {
         return Ok(false);
-    }
+    };
 
-    let password = String::from_utf8(output.stdout)
-        .map_err(|e| format!("keychain password is not UTF-8: {e}"))?
-        .trim()
-        .to_string();
-    if password.is_empty() {
+    let Some(mut password) = read_background_keychain_password()? else {
         return Ok(false);
-    }
+    };
 
     // tachi#1080: derive+verify through the shared in-process seam so a stored
     // kdf_params failure stays loud and typed (never misread as "wrong
     // password", never silently unlocks with a compile-time-derived key).
-    let key = crate::vault_crypto::derive_verified_key_from_stored_config(&config, &password)
-        .map_err(|e| e.to_string())?;
+    let key_result =
+        crate::vault_crypto::derive_verified_key_from_stored_config(&config, &password)
+            .map_err(|e| e.to_string());
+    crate::vault_crypto::zero_string(&mut password);
+    let key = key_result?;
 
     {
         let mut v = server.vault_write();
@@ -251,6 +382,17 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
         v.unlock_time = Some(std::time::Instant::now());
     }
 
+    Ok(true)
+}
+
+/// Auto-unlock from Keychain and refresh provider secrets exactly once.
+///
+/// Use [`auto_unlock_vault_key_from_keychain`] instead when an outer provider
+/// materialization transaction already owns the refresh.
+pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, String> {
+    if !auto_unlock_vault_key_from_keychain(server)? {
+        return Ok(false);
+    }
     let loaded = server.refresh_llm_provider_secrets_from_vault()?.loaded;
     tracing::info!("[vault] auto-unlocked from Keychain ({loaded} provider key(s))");
     server.requeue_auth_failed_enrichment_retries("Keychain auto-unlock");
@@ -260,14 +402,27 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
 /// Keychain auto-unlock (best effort) + provider secret materialization for any
 /// short-lived server instance (CLI one-shots, MCP stdio, daemon startup).
 pub fn bootstrap_provider_runtime(server: &MemoryServer) {
-    match auto_unlock_vault_from_keychain(server) {
-        Ok(true) => tracing::info!("[vault] auto-unlocked from Keychain"),
-        Ok(false) => tracing::debug!(
-            "[vault] auto-unlock skipped (no keychain entry or vault not initialized)"
-        ),
-        Err(err) => tracing::warn!("[vault] auto-unlock skipped: {err}"),
+    let auto_unlocked = match auto_unlock_vault_key_from_keychain(server) {
+        Ok(true) => {
+            tracing::info!("[vault] auto-unlocked from Keychain");
+            true
+        }
+        Ok(false) => {
+            tracing::debug!(
+                "[vault] auto-unlock skipped (no keychain entry or vault not initialized)"
+            );
+            false
+        }
+        Err(err) => {
+            tracing::warn!("[vault] auto-unlock skipped: {err}");
+            false
+        }
+    };
+    let refresh = server.refresh_llm_provider_secrets_from_vault();
+    if auto_unlocked && refresh.is_ok() {
+        server.requeue_auth_failed_enrichment_retries("Keychain auto-unlock");
     }
-    match server.refresh_llm_provider_secrets_from_vault() {
+    match refresh {
         // #1279: name the specific bad aliases at the bootstrap surface instead of
         // the old generic "Vault locked or empty". The full per-alias remediation is
         // logged by `refresh_llm_provider_secrets_from_vault`; this summary lists the
@@ -496,7 +651,9 @@ mod tests {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvRestore::set("VOYAGE_API_KEY", "vault:MISSING_VOYAGE");
+        // Keep this provider-shaped key unique so the test remains independent
+        // of the VOYAGE_API_KEY alias cases under default parallel execution.
+        let _env = EnvRestore::set("ANTHROPIC_API_KEY", "vault:MISSING_ANTHROPIC");
         let llm = LlmClient::new().expect("llm client");
         let report = materialize_provider_secrets(&llm, &HashMap::new())
             .expect("missing alias must degrade to a skip, not abort the batch");
@@ -504,16 +661,52 @@ mod tests {
         let (key, reason) = report
             .skipped_aliases
             .iter()
-            .find(|(key, _reason)| key == "VOYAGE_API_KEY")
-            .expect("missing VOYAGE alias must be recorded in skipped_aliases");
-        assert_eq!(key, "VOYAGE_API_KEY");
+            .find(|(key, _reason)| key == "ANTHROPIC_API_KEY")
+            .expect("missing Anthropic alias must be recorded in skipped_aliases");
+        assert_eq!(key, "ANTHROPIC_API_KEY");
 
         let surfaced = format_skipped_alias_reason(reason);
-        assert!(surfaced
-            .contains("Config key 'VOYAGE_API_KEY' references Vault alias 'MISSING_VOYAGE'"));
-        assert!(surfaced.contains("secret is missing or Vault is locked"));
+        assert!(surfaced.contains("Config key 'ANTHROPIC_API_KEY' references a Vault alias"));
+        // The test-only pre-resolved entry reports LockedOrUnavailable, since a
+        // caller that hands over already-resolved pools cannot say whether the
+        // Vault was readable.
+        assert!(surfaced.contains("could not be read"), "{surfaced}");
         assert!(surfaced.contains("vault_unlock"));
         assert!(surfaced.contains("vault_set"));
-        assert!(!surfaced.contains("VOYAGE_API_KEY=vault:MISSING_VOYAGE"));
+        assert!(!surfaced.contains("ANTHROPIC_API_KEY=vault:MISSING_ANTHROPIC"));
+        assert!(!surfaced.contains("MISSING_ANTHROPIC"));
+    }
+
+    #[test]
+    fn skipped_alias_warning_distinguishes_retained_pool_from_no_cache() {
+        let alias_sentinel = "MISSING_VOYAGE_MUST_NOT_LEAK";
+        let value_sentinel = "VOYAGE_SECRET_MUST_NOT_LEAK";
+
+        let retained = format_skipped_alias_warning(
+            "VOYAGE_API_KEY",
+            true,
+            VaultSourceAvailability::LockedOrUnavailable,
+        );
+        let no_cache = format_skipped_alias_warning(
+            "VOYAGE_API_KEY",
+            false,
+            VaultSourceAvailability::Readable,
+        );
+
+        assert!(retained.contains("retained last-known-good provider pool"));
+        assert!(no_cache.contains("no last-known-good provider pool retained"));
+        // The wording must follow the source, not just the cache outcome.
+        assert!(retained.contains("could not be read"), "{retained}");
+        assert!(
+            no_cache.contains("absent from a readable Vault"),
+            "{no_cache}"
+        );
+        for warning in [&retained, &no_cache] {
+            assert!(warning.contains("VOYAGE_API_KEY"));
+            assert!(warning.contains("vault_unlock"));
+            assert!(warning.contains("vault_set"));
+            assert!(!warning.contains(alias_sentinel));
+            assert!(!warning.contains(value_sentinel));
+        }
     }
 }
