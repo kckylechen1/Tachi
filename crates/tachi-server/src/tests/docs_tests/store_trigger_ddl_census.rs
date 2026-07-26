@@ -480,7 +480,8 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
             Site {
-                symbol: "stamped_v23_with_missing_search_generation_trigger_is_refused_without_repair",
+                symbol:
+                    "stamped_v23_with_missing_search_generation_trigger_is_refused_without_repair",
                 trigger: "MEMORY_SEARCH_GENERATION_AFTER_UPDATE",
                 ddl: "d232a9fb5db0971e",
                 occurrences: 1,
@@ -787,14 +788,12 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), body NOT read 2026-07-26",
         },
-        sites: &[
-            Site {
-                symbol: "apply_rolls_back_memory_when_proposal_stamp_aborts",
-                trigger: "ABORT_LIFECYCLE_PROPOSAL_STAMP",
-                ddl: "38fc27464aa57215",
-                occurrences: 1,
-            },
-        ],
+        sites: &[Site {
+            symbol: "apply_rolls_back_memory_when_proposal_stamp_aborts",
+            trigger: "ABORT_LIFECYCLE_PROPOSAL_STAMP",
+            ddl: "38fc27464aa57215",
+            occurrences: 1,
+        }],
         reason: "apply_rolls_back_memory_when_proposal_stamp_aborts injects a \
                  rollback fault on memcore's raw second connection. Enclosing \
                  symbol extracted mechanically; body NOT read. The file also \
@@ -848,13 +847,15 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
             Site {
-                symbol: "read_only_existing_schema_compat_opens_stamped_older_without_write_authority",
+                symbol:
+                    "read_only_existing_schema_compat_opens_stamped_older_without_write_authority",
                 trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
                 ddl: "90d32439353dd888",
                 occurrences: 1,
             },
             Site {
-                symbol: "read_only_existing_schema_compat_opens_stamped_older_without_write_authority",
+                symbol:
+                    "read_only_existing_schema_compat_opens_stamped_older_without_write_authority",
                 trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
                 ddl: "dbf593b87f7b0e74",
                 occurrences: 1,
@@ -883,14 +884,12 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
     Exemption {
         path: "crates/memcore/src/store/vault.rs",
         basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
-        sites: &[
-            Site {
-                symbol: "vault_replace_api_key_pool_rolls_back_when_rotation_write_fails",
-                trigger: "FAIL_POOL_ROTATION",
-                ddl: "9ec39925504e73bc",
-                occurrences: 1,
-            },
-        ],
+        sites: &[Site {
+            symbol: "vault_replace_api_key_pool_rolls_back_when_rotation_write_fails",
+            trigger: "FAIL_POOL_ROTATION",
+            ddl: "9ec39925504e73bc",
+            occurrences: 1,
+        }],
         reason: "vault_replace_api_key_pool_rolls_back_when_rotation_write_fails \
                  — memcore's raw second-connection idiom, the shape #1443's \
                  doorway doc points fixture authors at. Re-derived: this file \
@@ -986,14 +985,12 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
     Exemption {
         path: "crates/tachi-server/src/repair/tests/quarantine_jobs_integrity.rs",
         basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
-        sites: &[
-            Site {
-                symbol: "quarantine_purge_uses_default_deny_v23_connection",
-                trigger: "QUARANTINE_PURGE_REQUIRES_DEFAULT_DENY_GUARD",
-                ddl: "9ecc2dee2bc20b47",
-                occurrences: 1,
-            },
-        ],
+        sites: &[Site {
+            symbol: "quarantine_purge_uses_default_deny_v23_connection",
+            trigger: "QUARANTINE_PURGE_REQUIRES_DEFAULT_DENY_GUARD",
+            ddl: "9ecc2dee2bc20b47",
+            occurrences: 1,
+        }],
         reason: "installs the quarantine default-deny guard on an unguarded \
                  fixture connection. Re-derived: this file names no store \
                  doorway. Body NOT read.",
@@ -1003,14 +1000,13 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), body read 2026-07-26",
         },
-        sites: &[
-            Site {
-                symbol: "missing_generation_trigger_bypasses_a_warm_cache_instead_of_serving_stale_rows",
-                trigger: "MEMORY_SEARCH_GENERATION_AFTER_INSERT",
-                ddl: "7866d9740159f9e6",
-                occurrences: 1,
-            },
-        ],
+        sites: &[Site {
+            symbol:
+                "missing_generation_trigger_bypasses_a_warm_cache_instead_of_serving_stale_rows",
+            trigger: "MEMORY_SEARCH_GENERATION_AFTER_INSERT",
+            ddl: "7866d9740159f9e6",
+            occurrences: 1,
+        }],
         reason: "missing_generation_trigger_bypasses_a_warm_cache_instead_of_serving_stale_rows \
                  drops the canonical insert trigger through \
                  with_unrestricted_fixture_connection to simulate drift; body \
@@ -1184,8 +1180,7 @@ fn workspace_members(manifest: &str) -> Vec<String> {
 /// [`EXCLUDED_WORKSPACE_MEMBERS`]. Derived, not hardcoded — tachi#1443's second
 /// gap was `root.join("crates")`, which silently skipped `tools/cleaner`.
 fn scan_roots(root: &Path) -> Vec<String> {
-    let manifest =
-        std::fs::read_to_string(root.join("Cargo.toml")).expect("read root Cargo.toml");
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read root Cargo.toml");
     let mut roots: Vec<String> = workspace_members(&manifest)
         .into_iter()
         .filter(|member| {
@@ -1675,7 +1670,9 @@ fn run_census(root: &Path) -> CensusReport {
         let entry = exemption(&relative);
         let findings = file_findings(&relative, &source, entry);
         if !findings.is_empty() {
-            report.remedies.push(remedy(&relative, &source, entry.is_some()));
+            report
+                .remedies
+                .push(remedy(&relative, &source, entry.is_some()));
             report.findings.extend(findings);
         }
     }
@@ -1934,7 +1931,8 @@ fn memcore_only_proof_is_unreachable_from_tachi_server() {
         "memcore must be able to claim the strongest proof"
     );
     assert!(
-        !MachineProof::MemcoreArmsTheMigrationToken.holds("crates/tachi-server/src/tests/x.rs", code),
+        !MachineProof::MemcoreArmsTheMigrationToken
+            .holds("crates/tachi-server/src/tests/x.rs", code),
         "the crate that produced every #1411/#1431 fixture must never reach the \
          migration-token proof"
     );
@@ -2209,7 +2207,9 @@ fn census_scan_roots_come_from_workspace_membership() {
         "the manifest parse lost crates/tachi-server: {roots:?}"
     );
     assert!(
-        roots.iter().any(|member| member.as_str() == "tools/cleaner"),
+        roots
+            .iter()
+            .any(|member| member.as_str() == "tools/cleaner"),
         "the walk must reach workspace members outside crates/: {roots:?}"
     );
     for member in &roots {
