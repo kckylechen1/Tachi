@@ -117,6 +117,6 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 - `VOYAGE_API_KEY` — 嵌入 / rerank
 - `SILICONFLOW_API_KEY` — 抽取、摘要、蒸馏（`Qwen/Qwen3.5-27B`）
 
-后台 skill / foundry 调用优先走 **Claude CLI pool**，失败时回退到 `SILICONFLOW_*`。`DISTILL_*` / `REASONING_*` 等旧 lane 仅作兼容保留，新部署不必再配。
+后台抽取 / 摘要 / 蒸馏调用直接走已配置的 API lane；主 provider 失败时按配置跨 provider 回退，全链路耗尽则显式记录 `LANE_OUTAGE`。旧 Claude CLI pool 已退役；`DISTILL_*` / `REASONING_*` 等旧 lane 仅作兼容保留，新部署不必再配。
 
 <!-- TACHI:END v1.6.2 -->
