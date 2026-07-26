@@ -4,6 +4,184 @@ use rusqlite::Connection;
 
 use crate::{db, db::DbOpenContext, error::MemoryError, path_router, MemoryEntry, MemoryStore};
 
+/// Dry-run operation whose read schema must be proven before a compatibility
+/// handle is returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOnlyBackfillOperation {
+    Vectors,
+    Summaries,
+    Metadata,
+    Fts,
+}
+
+impl ReadOnlyBackfillOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Vectors => "vector dry-run",
+            Self::Summaries => "summary dry-run",
+            Self::Metadata => "metadata dry-run",
+            Self::Fts => "FTS dry-run",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SchemaColumn {
+    name: String,
+    hidden: i64,
+}
+
+fn schema_object_kind(conn: &Connection, name: &str) -> Result<Option<String>, MemoryError> {
+    match conn.query_row(
+        "SELECT type
+         FROM pragma_table_list
+         WHERE schema = 'main' AND name = ?1",
+        [name],
+        |row| row.get(0),
+    ) {
+        Ok(kind) => Ok(Some(kind)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn schema_columns(conn: &Connection, table: &str) -> Result<Vec<SchemaColumn>, MemoryError> {
+    let mut statement = conn.prepare(
+        "SELECT name, hidden
+         FROM pragma_table_xinfo(?1)
+         ORDER BY cid",
+    )?;
+    let columns = statement
+        .query_map([table], |row| {
+            Ok(SchemaColumn {
+                name: row.get(0)?,
+                hidden: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(MemoryError::from)?;
+    Ok(columns)
+}
+
+fn require_schema_object_kind(
+    conn: &Connection,
+    operation: ReadOnlyBackfillOperation,
+    name: &str,
+    expected_kind: &str,
+    description: &str,
+) -> Result<(), MemoryError> {
+    let actual_kind = schema_object_kind(conn, name)?;
+    if actual_kind.as_deref() == Some(expected_kind) {
+        return Ok(());
+    }
+    let actual = actual_kind.as_deref().unwrap_or("missing");
+    Err(MemoryError::InvalidArg(format!(
+        "{} requires {description} '{name}'; found {actual}",
+        operation.label()
+    )))
+}
+
+fn require_shadow_objects(
+    conn: &Connection,
+    operation: ReadOnlyBackfillOperation,
+    shape: &str,
+    objects: &[(&str, &str)],
+) -> Result<(), MemoryError> {
+    for (name, expected_kind) in objects {
+        let actual_kind = schema_object_kind(conn, name)?;
+        if actual_kind.as_deref() != Some(*expected_kind) {
+            let actual = actual_kind.as_deref().unwrap_or("missing");
+            return Err(MemoryError::InvalidArg(format!(
+                "{} requires {shape}: object '{name}' must be {expected_kind}, found {actual}",
+                operation.label()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn require_vec0_backing_objects(
+    conn: &Connection,
+    operation: ReadOnlyBackfillOperation,
+) -> Result<(), MemoryError> {
+    for (name, expected_columns) in [
+        ("memories_vec_chunks", 4_i64),
+        ("memories_vec_info", 2),
+        ("memories_vec_rowids", 4),
+        ("memories_vec_vector_chunks00", 2),
+    ] {
+        let object = conn.query_row(
+            "SELECT type, ncol
+             FROM pragma_table_list
+             WHERE schema = 'main' AND name = ?1",
+            [name],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        );
+        let (kind, columns) = match object {
+            Ok(object) => object,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(MemoryError::InvalidArg(format!(
+                    "{} requires vec0 memories_vec shape: backing object '{name}' is missing",
+                    operation.label()
+                )))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !matches!(kind.as_str(), "shadow" | "table") || columns != expected_columns {
+            return Err(MemoryError::InvalidArg(format!(
+                "{} requires vec0 memories_vec shape: backing object '{name}' has type {kind} and {columns} columns",
+                operation.label()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn require_visible_columns(
+    conn: &Connection,
+    operation: ReadOnlyBackfillOperation,
+    table: &str,
+    required: &[&str],
+) -> Result<(), MemoryError> {
+    let columns = schema_columns(conn, table)?;
+    for required_name in required {
+        if !columns
+            .iter()
+            .any(|column| column.hidden == 0 && column.name == *required_name)
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "read-only backfill compatibility requires memories schema for {}: missing visible column '{required_name}'",
+                operation.label()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn require_exact_virtual_shape(
+    conn: &Connection,
+    operation: ReadOnlyBackfillOperation,
+    table: &str,
+    shape: &str,
+    expected: &[(&str, i64)],
+) -> Result<(), MemoryError> {
+    let columns = schema_columns(conn, table)?;
+    let expected: Vec<SchemaColumn> = expected
+        .iter()
+        .map(|(name, hidden)| SchemaColumn {
+            name: (*name).to_string(),
+            hidden: *hidden,
+        })
+        .collect();
+    if columns == expected {
+        return Ok(());
+    }
+    Err(MemoryError::InvalidArg(format!(
+        "{} requires {shape}: unexpected table_xinfo shape",
+        operation.label()
+    )))
+}
+
 /// Test/operator escape hatch: when set to a truthy value, the path-routing
 /// validation in `MemoryStore::upsert` is bypassed entirely. Useful for test
 /// fixtures that intentionally write across the canonical layout.
@@ -36,47 +214,97 @@ fn has_existing_application_schema(conn: &Connection) -> Result<bool, MemoryErro
     Ok(application_objects != 0)
 }
 
-/// Prove that the compatibility handle can serve every read-only backfill
-/// query before exposing it. This validates SQLite's parsed schema directly;
-/// it never interprets stored DDL text and never initializes missing objects.
-fn validate_read_only_backfill_compat_schema(conn: &Connection) -> Result<(), MemoryError> {
-    fn require_table(conn: &Connection, table: &str) -> Result<(), MemoryError> {
-        if db::table_exists(conn, table)? {
-            return Ok(());
-        }
-        Err(MemoryError::InvalidArg(format!(
-            "read-only backfill compatibility requires table '{table}'"
+/// Prove that the compatibility handle can serve the selected read-only
+/// backfill before exposing it. SQLite's table-list and extended-column
+/// metadata distinguish ordinary tables, views, virtual tables, and each
+/// module's hidden/shadow shape without interpreting stored DDL text.
+fn validate_read_only_backfill_compat_schema(
+    conn: &Connection,
+    operation: ReadOnlyBackfillOperation,
+) -> Result<(), MemoryError> {
+    match schema_object_kind(conn, "memories")?.as_deref() {
+        Some("table") => {}
+        None => {
+            return Err(MemoryError::InvalidArg(format!(
+            "read-only backfill compatibility requires table 'memories' for {}; object is missing",
+            operation.label()
         )))
+        }
+        Some(actual) => {
+            return Err(MemoryError::InvalidArg(format!(
+                "{} requires ordinary table 'memories'; found {actual}",
+                operation.label()
+            )))
+        }
     }
 
-    require_table(conn, "memories")?;
-    conn.prepare(
-        "SELECT id, path, source, topic, metadata, text, summary, revision,
-                keywords, scope, category, archived
-         FROM memories
-         WHERE 0",
-    )
-    .map_err(|error| {
-        MemoryError::InvalidArg(format!(
-            "read-only backfill compatibility requires memories schema: {error}"
-        ))
-    })?;
+    let memories_columns: &[&str] = match operation {
+        ReadOnlyBackfillOperation::Vectors => &["id", "path", "source", "topic", "metadata"],
+        ReadOnlyBackfillOperation::Summaries => &[
+            "id", "path", "text", "summary", "revision", "scope", "category", "archived",
+        ],
+        ReadOnlyBackfillOperation::Metadata => &["id", "text", "summary", "revision", "keywords"],
+        ReadOnlyBackfillOperation::Fts => &["id"],
+    };
+    require_visible_columns(conn, operation, "memories", memories_columns)?;
 
-    require_table(conn, "memories_vec")?;
-    conn.prepare("SELECT id FROM memories_vec WHERE 0")
-        .map_err(|error| {
-            MemoryError::InvalidArg(format!(
-                "read-only backfill compatibility requires memories_vec schema: {error}"
-            ))
-        })?;
-
-    require_table(conn, "memories_fts")?;
-    conn.prepare("SELECT id FROM memories_fts WHERE 0")
-        .map_err(|error| {
-            MemoryError::InvalidArg(format!(
-                "read-only backfill compatibility requires memories_fts schema: {error}"
-            ))
-        })?;
+    match operation {
+        ReadOnlyBackfillOperation::Vectors => {
+            require_schema_object_kind(
+                conn,
+                operation,
+                "memories_vec",
+                "virtual",
+                "virtual table",
+            )?;
+            require_exact_virtual_shape(
+                conn,
+                operation,
+                "memories_vec",
+                "vec0 memories_vec shape",
+                &[("id", 0), ("embedding", 0), ("distance", 1), ("k", 1)],
+            )?;
+            require_vec0_backing_objects(conn, operation)?;
+        }
+        ReadOnlyBackfillOperation::Fts => {
+            require_schema_object_kind(
+                conn,
+                operation,
+                "memories_fts",
+                "virtual",
+                "virtual table",
+            )?;
+            require_exact_virtual_shape(
+                conn,
+                operation,
+                "memories_fts",
+                "fts5 memories_fts shape",
+                &[
+                    ("id", 0),
+                    ("path", 0),
+                    ("summary", 0),
+                    ("text", 0),
+                    ("keywords", 0),
+                    ("entities", 0),
+                    ("memories_fts", 1),
+                    ("rank", 1),
+                ],
+            )?;
+            require_shadow_objects(
+                conn,
+                operation,
+                "fts5 memories_fts shape",
+                &[
+                    ("memories_fts_config", "shadow"),
+                    ("memories_fts_content", "shadow"),
+                    ("memories_fts_data", "shadow"),
+                    ("memories_fts_docsize", "shadow"),
+                    ("memories_fts_idx", "shadow"),
+                ],
+            )?;
+        }
+        ReadOnlyBackfillOperation::Summaries | ReadOnlyBackfillOperation::Metadata => {}
+    }
 
     Ok(())
 }
@@ -210,7 +438,7 @@ impl MemoryStore {
     /// for legacy/foreign/possibly-corrupt files, by design (see that
     /// module's doc comment).
     pub fn open_read_only(db_path: &str) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, false)
+        Self::open_read_only_inner(db_path, None)
     }
 
     /// Open an existing DB read-only while tolerating a stamped older schema.
@@ -220,14 +448,19 @@ impl MemoryStore {
     /// migration authority is granted, and a current-schema DB still requires
     /// the full canonical persistent-trigger inventory. It exists for dry-run
     /// operators that need to inspect a structurally valid pre-v23 DB without
-    /// mutating its stamp or requiring migration approval.
-    pub fn open_read_only_existing_schema_compat(db_path: &str) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, true)
+    /// mutating its stamp or requiring migration approval. `operation` names
+    /// the exact memories columns and optional virtual-table capability that
+    /// must exist; unrelated optional capabilities are not required.
+    pub fn open_read_only_existing_schema_compat(
+        db_path: &str,
+        operation: ReadOnlyBackfillOperation,
+    ) -> Result<Self, MemoryError> {
+        Self::open_read_only_inner(db_path, Some(operation))
     }
 
     fn open_read_only_inner(
         db_path: &str,
-        allow_stamped_older_schema: bool,
+        compat_operation: Option<ReadOnlyBackfillOperation>,
     ) -> Result<Self, MemoryError> {
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
@@ -248,15 +481,15 @@ impl MemoryStore {
             // only for an older stamp, never a way to accept a damaged v23 DB.
             db::validate_persistent_trigger_inventory(&conn, true)?;
         }
-        if !allow_stamped_older_schema || !is_stamped_older_schema {
+        if compat_operation.is_none() || !is_stamped_older_schema {
             db::migrations::check_db_open_context_gate(
                 &conn,
                 std::path::Path::new(db_path),
                 &DbOpenContext::open_existing_deny(),
             )?;
         }
-        if allow_stamped_older_schema {
-            validate_read_only_backfill_compat_schema(&conn)?;
+        if let Some(operation) = compat_operation {
+            validate_read_only_backfill_compat_schema(&conn, operation)?;
         }
         let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
         Ok(Self {
@@ -411,6 +644,25 @@ impl MemoryStore {
 mod exact_dedupe_open_tests {
     use super::*;
 
+    fn open_compat_summaries(db_path: &str) -> Result<MemoryStore, MemoryError> {
+        MemoryStore::open_read_only_existing_schema_compat(
+            db_path,
+            ReadOnlyBackfillOperation::Summaries,
+        )
+    }
+
+    fn stamp_v22_without_v23_guards(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
+             DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
+             DELETE FROM hard_state
+              WHERE namespace = 'migrations'
+                AND key = 'v23_reserved_reference_guards';
+             PRAGMA user_version = 22;",
+        )
+        .unwrap();
+    }
+
     fn test_memory_entry(id: &str) -> MemoryEntry {
         MemoryEntry {
             id: id.to_string(),
@@ -462,7 +714,7 @@ mod exact_dedupe_open_tests {
             .unwrap();
         drop(offline);
 
-        let mut store = MemoryStore::open_read_only_existing_schema_compat(&path.to_string_lossy())
+        let mut store = open_compat_summaries(&path.to_string_lossy())
             .expect("stamped older DB must be inspectable without migration authority");
         assert_eq!(
             db::migrations::read_schema_version(store.connection()).unwrap(),
@@ -494,11 +746,10 @@ mod exact_dedupe_open_tests {
         offline.execute_batch("PRAGMA user_version = 22;").unwrap();
         drop(offline);
 
-        let error =
-            match MemoryStore::open_read_only_existing_schema_compat(&path.to_string_lossy()) {
-                Ok(_) => panic!("version-only v22 DB was accepted as backfill-compatible"),
-                Err(error) => error,
-            };
+        let error = match open_compat_summaries(&path.to_string_lossy()) {
+            Ok(_) => panic!("version-only v22 DB was accepted as backfill-compatible"),
+            Err(error) => error,
+        };
         assert!(
             error
                 .to_string()
@@ -520,17 +771,177 @@ mod exact_dedupe_open_tests {
             .unwrap();
         drop(offline);
 
-        let error =
-            match MemoryStore::open_read_only_existing_schema_compat(&path.to_string_lossy()) {
-                Ok(_) => panic!("malformed v22 memories schema was accepted"),
-                Err(error) => error,
-            };
+        let error = match open_compat_summaries(&path.to_string_lossy()) {
+            Ok(_) => panic!("malformed v22 memories schema was accepted"),
+            Err(error) => error,
+        };
         assert!(
             error
                 .to_string()
                 .contains("read-only backfill compatibility requires memories schema"),
             "unexpected malformed v22 refusal: {error}"
         );
+    }
+
+    #[test]
+    fn read_only_compat_operations_treat_missing_vector_as_optional_only_when_unused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v22-without-vector.db");
+        drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+        let offline = Connection::open(&path).unwrap();
+        offline.execute("DROP TABLE memories_vec", []).unwrap();
+        stamp_v22_without_v23_guards(&offline);
+        drop(offline);
+
+        for operation in [
+            ReadOnlyBackfillOperation::Summaries,
+            ReadOnlyBackfillOperation::Metadata,
+        ] {
+            let store = MemoryStore::open_read_only_existing_schema_compat(
+                &path.to_string_lossy(),
+                operation,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{operation:?} must not require optional vector capability: {error}")
+            });
+            assert_eq!(
+                db::migrations::read_schema_version(store.connection()).unwrap(),
+                22
+            );
+        }
+
+        let error = match MemoryStore::open_read_only_existing_schema_compat(
+            &path.to_string_lossy(),
+            ReadOnlyBackfillOperation::Vectors,
+        ) {
+            Ok(_) => panic!("vector dry-run accepted a DB without memories_vec"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("vector dry-run requires virtual table 'memories_vec'"),
+            "unexpected missing-vector refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn read_only_compat_rejects_memories_view_with_required_column_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v22-memories-view.db");
+        drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+        let offline = Connection::open(&path).unwrap();
+        offline
+            .execute_batch(
+                "DROP TABLE memories;
+                 CREATE VIEW memories AS
+                 SELECT '' AS id, '' AS path, '' AS source, '' AS topic,
+                        '{}' AS metadata, '' AS text, '' AS summary,
+                        1 AS revision, '[]' AS keywords, '' AS scope,
+                        '' AS category, 0 AS archived
+                 WHERE 0;",
+            )
+            .unwrap();
+        stamp_v22_without_v23_guards(&offline);
+        drop(offline);
+
+        let error = match open_compat_summaries(&path.to_string_lossy()) {
+            Ok(_) => panic!("a view impersonated the memories table"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("summary dry-run requires ordinary table 'memories'"),
+            "unexpected memories-view refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn read_only_compat_rejects_ordinary_tables_impersonating_virtual_capabilities() {
+        for (table, replacement, operation, expected) in [
+            (
+                "memories_vec",
+                "CREATE TABLE memories_vec(id TEXT PRIMARY KEY, embedding BLOB);",
+                ReadOnlyBackfillOperation::Vectors,
+                "vector dry-run requires virtual table 'memories_vec'",
+            ),
+            (
+                "memories_fts",
+                "CREATE TABLE memories_fts(
+                    id TEXT, path TEXT, summary TEXT, text TEXT,
+                    keywords TEXT, entities TEXT
+                 );",
+                ReadOnlyBackfillOperation::Fts,
+                "FTS dry-run requires virtual table 'memories_fts'",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("ordinary-{table}.db"));
+            drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+            let offline = Connection::open(&path).unwrap();
+            offline
+                .execute_batch(&format!("DROP TABLE {table}; {replacement}"))
+                .unwrap();
+            stamp_v22_without_v23_guards(&offline);
+            drop(offline);
+
+            let error = match MemoryStore::open_read_only_existing_schema_compat(
+                &path.to_string_lossy(),
+                operation,
+            ) {
+                Ok(_) => panic!("ordinary table impersonated {table}"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected ordinary-{table} refusal: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_compat_rejects_wrong_virtual_modules_and_shapes() {
+        for (table, replacement, operation, expected) in [
+            (
+                "memories_vec",
+                "CREATE VIRTUAL TABLE memories_vec USING fts5(id, embedding);",
+                ReadOnlyBackfillOperation::Vectors,
+                "vector dry-run requires vec0 memories_vec shape",
+            ),
+            (
+                "memories_fts",
+                "CREATE VIRTUAL TABLE memories_fts USING fts5(id);",
+                ReadOnlyBackfillOperation::Fts,
+                "FTS dry-run requires fts5 memories_fts shape",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("wrong-virtual-{table}.db"));
+            drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+            let offline = Connection::open(&path).unwrap();
+            offline
+                .execute_batch(&format!("DROP TABLE {table}; {replacement}"))
+                .unwrap();
+            stamp_v22_without_v23_guards(&offline);
+            drop(offline);
+
+            let error = match MemoryStore::open_read_only_existing_schema_compat(
+                &path.to_string_lossy(),
+                operation,
+            ) {
+                Ok(_) => panic!("wrong virtual module/shape impersonated {table}"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected wrong-{table} refusal: {error}"
+            );
+        }
     }
 
     #[test]
@@ -565,10 +976,7 @@ mod exact_dedupe_open_tests {
         let openers: [(&str, StoreOpener); 3] = [
             ("ordinary", MemoryStore::open),
             ("maintenance", MemoryStore::open_existing_read_write),
-            (
-                "read-only-existing-schema-compat",
-                MemoryStore::open_read_only_existing_schema_compat,
-            ),
+            ("read-only-existing-schema-compat", open_compat_summaries),
         ];
 
         for (label, open) in openers {
@@ -739,10 +1147,7 @@ mod exact_dedupe_open_tests {
                     "ordinary",
                     MemoryStore::open as fn(&str) -> Result<MemoryStore, MemoryError>,
                 ),
-                (
-                    "read-only-existing-schema-compat",
-                    MemoryStore::open_read_only_existing_schema_compat,
-                ),
+                ("read-only-existing-schema-compat", open_compat_summaries),
             ] {
                 let error = match open(&path.to_string_lossy()) {
                     Ok(_) => panic!("persistent trigger {label} was exposed by {opener_label}"),

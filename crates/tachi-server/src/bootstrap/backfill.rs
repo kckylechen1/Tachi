@@ -4,6 +4,7 @@ use crate::vector_backfill::{
     VectorSweepStateUpdate,
 };
 use futures::{stream, StreamExt};
+use memcore::store::open::ReadOnlyBackfillOperation;
 use memcore::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, VectorBackfillScope};
 use std::error::Error;
 use std::fmt::Display;
@@ -88,7 +89,10 @@ pub(super) async fn run_backfill_vectors(
     let open_ctx = backfill_write_open_context(schema_migration);
 
     let store = if dry_run {
-        MemoryStore::open_read_only_existing_schema_compat(db_str)?
+        MemoryStore::open_read_only_existing_schema_compat(
+            db_str,
+            ReadOnlyBackfillOperation::Vectors,
+        )?
     } else {
         MemoryStore::open_with_context(db_str, &open_ctx)?
     };
@@ -222,7 +226,10 @@ pub(super) async fn run_backfill_summaries(
     // ... only show stats". Mirror run_backfill_vectors's pattern: read-only
     // when dry_run, migration-capable only for a real write.
     let store = if dry_run {
-        MemoryStore::open_read_only_existing_schema_compat(db_str)?
+        MemoryStore::open_read_only_existing_schema_compat(
+            db_str,
+            ReadOnlyBackfillOperation::Summaries,
+        )?
     } else {
         MemoryStore::open_with_context(db_str, &open_ctx)?
     };
@@ -331,7 +338,10 @@ pub(super) async fn run_backfill_metadata(
     // ... only show stats". Mirror run_backfill_vectors's pattern: read-only
     // when dry_run, migration-capable only for a real write.
     let store = if dry_run {
-        MemoryStore::open_read_only_existing_schema_compat(db_str)?
+        MemoryStore::open_read_only_existing_schema_compat(
+            db_str,
+            ReadOnlyBackfillOperation::Metadata,
+        )?
     } else {
         MemoryStore::open_with_context(db_str, &open_ctx)?
     };
@@ -534,7 +544,7 @@ pub(super) async fn run_backfill_fts(
     // stats, don't modify". Mirror run_backfill_vectors's pattern:
     // read-only when dry_run, migration-capable only for a real write.
     let store = if dry_run {
-        MemoryStore::open_read_only_existing_schema_compat(db_str)?
+        MemoryStore::open_read_only_existing_schema_compat(db_str, ReadOnlyBackfillOperation::Fts)?
     } else {
         MemoryStore::open_with_context(db_str, &open_ctx)?
     };
@@ -1221,6 +1231,57 @@ mod tests {
             read_user_version(&db_path),
             memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
             "dry-run must never mutate the schema stamp, even under Allow"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_operations_require_only_their_v22_optional_capabilities() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run-optional-vector.db");
+        let vault_path = dir.path().join("vault.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open fixture DB");
+        conn.execute("DROP TABLE memories_vec", [])
+            .expect("remove optional vector capability");
+        drop(conn);
+        let before = dry_run_db_snapshot(&db_path);
+
+        run_backfill_summaries(&db_path, &vault_path, true, &MigrationAuthority::Deny)
+            .await
+            .expect("summary dry-run must not require memories_vec");
+        run_backfill_metadata(&db_path, &vault_path, true, &MigrationAuthority::Deny)
+            .await
+            .expect("metadata dry-run must not require memories_vec");
+        run_backfill_fts(&db_path, false, true, &MigrationAuthority::Deny)
+            .await
+            .expect("FTS dry-run must require memories_fts, not memories_vec");
+        assert_eq!(
+            dry_run_db_snapshot(&db_path),
+            before,
+            "summary/metadata/FTS dry-runs must remain exactly read-only"
+        );
+
+        let error = run_backfill_vectors(
+            &db_path,
+            &vault_path,
+            16,
+            true,
+            false,
+            &MigrationAuthority::Deny,
+        )
+        .await
+        .expect_err("vector dry-run must refuse a DB without memories_vec at open");
+        assert!(
+            error
+                .to_string()
+                .contains("vector dry-run requires virtual table 'memories_vec'"),
+            "unexpected vector capability refusal: {error}"
+        );
+        assert_eq!(
+            dry_run_db_snapshot(&db_path),
+            before,
+            "refused vector dry-run must not mutate the older DB"
         );
     }
 
