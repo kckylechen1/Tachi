@@ -99,7 +99,7 @@ SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 ```
 
-Phase 2 之后，后台调用先走 Claude CLI pool，落败方回退 SiliconFlow。寻常部署只需 Voyage + SiliconFlow 二脉即可。
+Phase 2 之后，后台调用径走所配 API 脉；一脉枯竭则跨 provider 回退，并明记 `LANE_OUTAGE`（旧时 Claude CLI pool 已废）。寻常部署只需 Voyage + SiliconFlow 二脉即可。
 
 ---
 

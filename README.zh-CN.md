@@ -250,7 +250,7 @@ graph TD
 每条记忆自带自由文本 `domain` 字段（如 `"code-review"`、`"personal"`）。`save_memory` 和 `search_memory` 可按域过滤。不存在独立的域注册表——域只是记忆行上的临时标签，不是需要配置的资源。
 
 ### 5. 加密保险库（Vault）
-本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。项目内 Agent 可通过 `.tachi/vault.env` 别名解析 Vault 密钥。详见 [`docs/INSTALL.md`](docs/INSTALL.md)。
+本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。项目内 Agent 可通过 `.tachi/vault.env` 别名解析 Vault 密钥。`tachi vault exec --require NAME -- <cmd>` 可在子进程中注入 Vault 凭证运行命令（Vault 只补全调用方未设置的环境变量）；默认情况下，若 Vault 不可用则拒绝派生无凭证的子进程，`--allow-unauthenticated` 可显式选择回退为继承当前环境运行。详见 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ### 6. Tachi Hub 与技能包
 一次注册 MCP 服务器、技能和工作流，所有已连接 Agent 都能发现并调用。`pack_register` / `pack_project` 安装 curated 技能集合并投射到 Claude、Cursor、Codex、Gemini、OpenCode 等格式。`tachi_skill(action="discover"|"run"|"bundle")` 是 canonical 技能门面；独立 `run_skill`、`prepare_capability_bundle` 和面向技能发现的 `hub_discover` 仍作为旧客户端兼容入口保留。
@@ -299,7 +299,7 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 ## 模型栈
 
-Phase 2 已简化 Lane 模型。后台 skill 和 foundry 调用现在**优先走 Claude CLI pool**，出错时回退到 raw API lane。大多数部署只需：
+Phase 2 已简化 Lane 模型。后台抽取、摘要与蒸馏调用直接走配置好的 API lane，链路耗尽时跨 provider 回退并显式记录 `LANE_OUTAGE`（早期的 Claude CLI pool 回退已退役，#1261）。大多数部署只需：
 
 | 用途 | 是否必填 | 默认值 |
 |------|----------|--------|

@@ -264,7 +264,7 @@ Tachi requires at minimum one API key:
 | `VOYAGE_API_KEY` | **Yes** | [Voyage AI](https://dash.voyageai.com/) | Vector embeddings (Voyage-4) |
 | `SILICONFLOW_API_KEY` | Recommended | [SiliconFlow](https://siliconflow.cn/) | Fact extraction, summaries, foundry distillation (Qwen3.5-27B) |
 
-Phase 2 simplified the lane model. Background skill and foundry calls now prefer the **Claude CLI pool** and fall back to `SILICONFLOW_*` on error. For most deployments, only `VOYAGE_API_KEY` + `SILICONFLOW_API_KEY` are needed.
+Phase 2 simplified the lane model. Background extraction, summary, and distillation calls go directly through the configured API lanes, with cross-provider fallback and loud `LANE_OUTAGE` recording when a chain is exhausted (the earlier Claude CLI pool fallback was retired, #1261). For most deployments, only `VOYAGE_API_KEY` + `SILICONFLOW_API_KEY` are needed.
 
 ### Optional Per-Lane Overrides
 

@@ -290,7 +290,7 @@ The graph engine creates and traverses causal, temporal, and entity relationship
 Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"personal"`). `save_memory` and `search_memory` can filter by domain. There is no separate domain registry — domains are ad-hoc tags on memory rows, not a configured resource.
 
 ### 5. Encrypted Vault
-Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. See [`docs/INSTALL.md`](docs/INSTALL.md).
+Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. `tachi vault exec --require NAME -- <cmd>` runs a child process with Vault-delivered credentials (Vault only fills env names the caller did not already set); by default it refuses to spawn a credential-less child if the Vault is unavailable, and `--allow-unauthenticated` opts back into running with the inherited environment. See [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### 6. Tachi Hub & Skill Packs
 Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `tachi_skill(action="discover"|"run"|"bundle")` is the canonical skill facade; standalone `run_skill`, `prepare_capability_bundle`, and skill-focused `hub_discover` calls remain compatibility routes for older clients.
@@ -381,7 +381,7 @@ still reuse a compatible daemon unless stdio proxying is also disabled.
 
 ## Model Stack
 
-Phase 2 simplified the lane model. Background skill and foundry calls now go through the **Claude CLI pool first**, falling back to the raw API lane on error. For most deployments you only need:
+Phase 2 simplified the lane model. Background extraction, summary, and distillation calls go directly through the configured API lanes, with cross-provider fallback and loud `LANE_OUTAGE` recording when a chain is exhausted (the earlier Claude CLI pool fallback was retired, #1261). For most deployments you only need:
 
 | Purpose | Required | Default |
 |---------|----------|---------|
