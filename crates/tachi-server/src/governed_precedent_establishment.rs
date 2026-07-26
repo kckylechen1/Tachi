@@ -129,6 +129,12 @@ pub(crate) struct PendingPrecedentSubjectV1 {
 }
 
 impl PendingPrecedentSubjectV1 {
+    /// `#[allow(dead_code)]` until PR6 wires this mutation boundary to a tool
+    /// surface. The item IS exercised by this module's discrimination tests, so
+    /// `--all-targets` sees it as live and `#[expect(dead_code)]` would go red
+    /// there as an unfulfilled expectation; only the `--lib` gate (tests are not
+    /// roots) reports it. Delete these attributes in the PR that adds the caller.
+    #[allow(dead_code)]
     pub(crate) fn from_pending_candidate(
         entry: &MemoryEntry,
         binding: ImmutablePrecedentBindingV1,
@@ -165,6 +171,9 @@ impl PendingPrecedentSubjectV1 {
         })
     }
 
+    /// Unreached until PR6 wires the boundary; live under `--all-targets`
+    /// via this module's tests, so `allow` not `expect`. See the note above.
+    #[allow(dead_code)]
     pub(crate) fn direct_owner_ruling(
         binding: ImmutablePrecedentBindingV1,
     ) -> Result<Self, String> {
@@ -466,6 +475,9 @@ pub(crate) fn establish_precedent_with_receipt(
     persist_after_revalidation(server, input, receipt)
 }
 
+/// Unreached until PR6 wires the boundary; live under `--all-targets` via
+/// this module's tests, so `allow` not `expect`.
+#[allow(dead_code)]
 fn establish_precedent_with_receipt_and_probe<P: ApproverAuthorityProbe + ?Sized>(
     server: &MemoryServer,
     probe: &P,
@@ -503,6 +515,9 @@ pub(crate) fn authorize_and_establish_precedent(
 /// The same production mutation boundary with the existing #1382 probe trait
 /// injected for discrimination tests. This is not a second authority engine:
 /// both paths call the resolver/revalidator wrappers above.
+/// Unreached until PR6 wires the boundary; live under `--all-targets` via
+/// this module's tests, so `allow` not `expect`.
+#[allow(dead_code)]
 fn authorize_and_establish_precedent_with_probe<P: ApproverAuthorityProbe + ?Sized>(
     server: &MemoryServer,
     probe: &P,
