@@ -458,7 +458,11 @@ fn fold_from_checkpoint_equals_a_clean_fold_even_when_windows_overlap() {
     // Deliberately overlapping second window, the way a checkpoint replay
     // re-reads the tail of the previous page.
     incremental.ingest(&events[2..]);
-    let staged = incremental.project(AS_OF).unwrap().canonical_json().unwrap();
+    let staged = incremental
+        .project(AS_OF)
+        .unwrap()
+        .canonical_json()
+        .unwrap();
 
     assert_eq!(clean, staged);
     assert_eq!(incremental.len(), events.len());
@@ -961,7 +965,10 @@ fn created_at_is_the_source_instant_so_a_refetch_is_byte_identical() {
         "2026-07-21T10:30:00+01:00",
         "rev-b",
     );
-    assert_eq!(once, twice, "a re-fetch must produce a byte-identical event");
+    assert_eq!(
+        once, twice,
+        "a re-fetch must produce a byte-identical event"
+    );
     assert_eq!(once.created_at, "2026-07-21T09:30:00.000000000Z");
 }
 

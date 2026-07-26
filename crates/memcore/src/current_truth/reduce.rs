@@ -140,8 +140,8 @@ impl CurrentTruthFold {
     /// reducer that quietly widened its own window would manufacture the
     /// staleness this issue exists to kill.
     pub fn project(&self, as_of: &str) -> Result<CurrentTruthProjectionV1, CurrentTruthError> {
-        let as_of_ts =
-            parse_instant(as_of).ok_or_else(|| CurrentTruthError::InvalidAsOf(as_of.to_string()))?;
+        let as_of_ts = parse_instant(as_of)
+            .ok_or_else(|| CurrentTruthError::InvalidAsOf(as_of.to_string()))?;
         let as_of_norm = normalize_instant(as_of_ts);
 
         // ── Step 1: admission ────────────────────────────────────────────────

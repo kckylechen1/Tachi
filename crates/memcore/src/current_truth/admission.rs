@@ -196,7 +196,10 @@ pub fn truth_assertion_event_id(
     basis.insert("relation", relation.key_token());
     basis.insert("issuer", issuer_identity_token(issuer));
     let serialized = serde_json::to_string(&basis).unwrap_or_default();
-    format!("truth-assertion-{:x}", Sha256::digest(serialized.as_bytes()))
+    format!(
+        "truth-assertion-{:x}",
+        Sha256::digest(serialized.as_bytes())
+    )
 }
 
 /// Stable identity of an issuer, for the append-if-absent key only.
@@ -208,7 +211,11 @@ fn issuer_identity_token(issuer: &TruthIssuerV1) -> String {
         TruthIssuerV1::SourceSnapshot {
             system,
             snapshot_digest,
-        } => format!("source_snapshot:{}:{}", system.trim(), snapshot_digest.trim()),
+        } => format!(
+            "source_snapshot:{}:{}",
+            system.trim(),
+            snapshot_digest.trim()
+        ),
         TruthIssuerV1::OwnerDecision { owner_login } => {
             format!("owner_decision:{}", owner_login.trim())
         }
