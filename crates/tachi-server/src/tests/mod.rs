@@ -114,7 +114,6 @@ impl Drop for TempHomeGuard {
 pub(crate) struct TestServer {
     server: Option<MemoryServer>,
     fixture_root: std::path::PathBuf,
-    project_db_path: std::path::PathBuf,
 }
 
 impl TestServer {
@@ -224,7 +223,7 @@ fn copy_template_db(dest: &std::path::Path) {
     std::fs::copy(template_db_path(), dest).expect("seed test db from template fixture");
 }
 
-pub(crate) fn make_server() -> TestServer {
+fn make_test_server(project_name: Option<&str>) -> (TestServer, Option<std::path::PathBuf>) {
     ensure_test_env();
     let fixture_root =
         crate::utils::test_fixture_path(format!("memory-server-test-{}", uuid::Uuid::new_v4()));
@@ -232,22 +231,21 @@ pub(crate) fn make_server() -> TestServer {
     let db_path = fixture_root
         .join("global")
         .join(memcore::MEMORY_DB_FILENAME);
-    let project_db_path = fixture_root
-        .join("project")
-        .join(".tachi")
-        .join(memcore::MEMORY_DB_FILENAME);
     std::fs::create_dir_all(db_path.parent().expect("global test db parent"))
         .expect("create global test db parent");
-    std::fs::create_dir_all(project_db_path.parent().expect("project test db parent"))
-        .expect("create project test db parent");
     std::fs::create_dir_all(&fixture_home).expect("create fixture Tachi home");
     copy_template_db(&db_path);
-    copy_template_db(&project_db_path);
 
-    let mut manifest = crate::manifest::Manifest::empty();
-    if let Some(project_name) = crate::utils::find_project_git_root()
-        .and_then(|root| crate::path_utils::plan_c_dir_name_from_root(&root))
-    {
+    let project_db_path = project_name.map(|project_name| {
+        let project_db_path = fixture_root
+            .join("project")
+            .join(".tachi")
+            .join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(project_db_path.parent().expect("project test db parent"))
+            .expect("create project test db parent");
+        copy_template_db(&project_db_path);
+
+        let mut manifest = crate::manifest::Manifest::empty();
         manifest.dbs.push(crate::manifest::DbEntry {
             path: project_db_path.display().to_string(),
             role: crate::manifest::DbRole::Project,
@@ -260,18 +258,33 @@ pub(crate) fn make_server() -> TestServer {
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),
         });
-    }
-    manifest
-        .save(&fixture_home.join("manifest.json"))
-        .expect("save fixture manifest");
+        manifest
+            .save(&fixture_home.join("manifest.json"))
+            .expect("save fixture manifest");
+        project_db_path
+    });
     let server =
-        MemoryServer::new_with_home_for_test(db_path, Some(project_db_path.clone()), fixture_home)
+        MemoryServer::new_with_home_for_test(db_path, project_db_path.clone(), fixture_home)
             .expect("failed to create test server");
-    TestServer {
-        server: Some(server),
-        fixture_root,
+    (
+        TestServer {
+            server: Some(server),
+            fixture_root,
+        },
         project_db_path,
-    }
+    )
+}
+
+pub(crate) fn make_server() -> TestServer {
+    make_test_server(None).0
+}
+
+fn make_server_with_project_fixture(project_name: &str) -> (TestServer, std::path::PathBuf) {
+    let (server, project_db_path) = make_test_server(Some(project_name));
+    (
+        server,
+        project_db_path.expect("explicit project fixture must create a project database"),
+    )
 }
 
 #[test]
@@ -315,10 +328,10 @@ fn make_server_keeps_named_project_resolution_inside_its_fixture_home() {
         .save(&ambient_home.path().join("manifest.json"))
         .expect("save ambient manifest");
 
-    let server = make_server();
+    let (server, fixture_project_db) = make_server_with_project_fixture(&project_name);
     let mut fixture_entry = make_entry(entry_id);
     fixture_entry.text = "fixture manifest entry".to_string();
-    MemoryStore::open(server.project_db_path.to_str().expect("utf8 fixture db"))
+    MemoryStore::open(fixture_project_db.to_str().expect("utf8 fixture db"))
         .expect("open fixture project db")
         .upsert(&fixture_entry)
         .expect("seed fixture project db");
@@ -357,6 +370,10 @@ fn make_server_preserves_explicit_home_and_run_root() {
         Some(explicit_run_root.as_os_str())
     );
     assert_ne!(server.tachi_home_dir(), explicit_home.path());
+    assert!(
+        server.project_db_path_buf().is_none(),
+        "make_server must retain its legacy global-only topology"
+    );
 }
 
 pub(crate) fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {

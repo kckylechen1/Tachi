@@ -6,7 +6,7 @@ async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
     let (server, _temp_home) = make_server_with_temp_home();
     let tmp = tempfile::tempdir().expect("temp dispatch cwd");
     let flow_id = "flow_20260608T000008Z_dispatch_card_test";
-    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let run_dir = crate::dispatch_ops::runs_dir_for_server(&server).join(flow_id);
     std::fs::create_dir_all(&run_dir).expect("create flow run dir");
     std::fs::write(
         run_dir.join("status.json"),
@@ -83,11 +83,11 @@ async fn tachi_task_board_filters_to_flow_dispatch_ids() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // #1096: the server freezes its home identity at construction, so the
-    // TACHI_HOME override must be in place BEFORE make_server() runs.
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let server = make_server();
+    let runs_root = crate::dispatch_ops::runs_dir_for_server(&server);
+    // `mark_task_dispatch` is a pre-server lifecycle helper, so align its
+    // ambient root with the already-captured server home for this fixture.
+    let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", &runs_root);
     let flow_id = "flow_20260609T000005Z_board_flow_filter";
     let dispatch_id = "20260609T000005Z-codex-flow";
     let other_dispatch_id = "20260609T000006Z-codex-other";
@@ -106,7 +106,7 @@ async fn tachi_task_board_filters_to_flow_dispatch_ids() {
         (dispatch_id, "flow task"),
         (other_dispatch_id, "other task"),
     ] {
-        let run_dir = temp_home.path().join("runs").join(id);
+        let run_dir = runs_root.join(id);
         std::fs::create_dir_all(&run_dir).expect("create run dir");
         if id == dispatch_id {
             std::fs::write(run_dir.join("result.md"), "worker completed").expect("result");
