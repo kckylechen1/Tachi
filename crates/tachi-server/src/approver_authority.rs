@@ -723,7 +723,15 @@ pub fn build_policy(
 /// caller, not yet built. Same shape as
 /// `lesson_forge_ops::storage::persist_pending_lesson_candidate`. Flagged
 /// here rather than silently suppressed at the module level.
-#[allow(dead_code)]
+pub(crate) fn authorize_governed_mutation_with_probe<P: ApproverAuthorityProbe + ?Sized>(
+    probe: &P,
+    policy: &ApproverAuthorizationPolicyV1,
+    target: &ApprovalTargetV1,
+    caller_asserted: &CallerAssertedContextV1,
+) -> Result<ApprovalReceiptV1, AuthorityDenialV1> {
+    resolve_verified_approver(probe, policy, target, caller_asserted, chrono::Utc::now())
+}
+
 pub(crate) fn authorize_governed_mutation(
     server: &MemoryServer,
     policy: &ApproverAuthorizationPolicyV1,
@@ -731,7 +739,7 @@ pub(crate) fn authorize_governed_mutation(
     caller_asserted: &CallerAssertedContextV1,
 ) -> Result<ApprovalReceiptV1, AuthorityDenialV1> {
     let probe = GhApproverAuthorityProbe::new(server);
-    resolve_verified_approver(&probe, policy, target, caller_asserted, chrono::Utc::now())
+    authorize_governed_mutation_with_probe(&probe, policy, target, caller_asserted)
 }
 
 /// Revalidate an approval immediately before a governed mutation writes.
@@ -747,7 +755,15 @@ pub(crate) fn authorize_governed_mutation(
 ///
 /// `#[allow(dead_code)]`: the other of the two genuinely uncalled
 /// choke-point entry points — see [`authorize_governed_mutation`]'s note.
-#[allow(dead_code)]
+pub(crate) fn revalidate_governed_mutation_with_probe<P: ApproverAuthorityProbe + ?Sized>(
+    probe: &P,
+    policy: &ApproverAuthorizationPolicyV1,
+    receipt: &ApprovalReceiptV1,
+    current: &CurrentApprovalContextV1,
+) -> Result<(), AuthorityDenialV1> {
+    revalidate_approval(probe, policy, receipt, current, chrono::Utc::now())
+}
+
 pub(crate) fn revalidate_governed_mutation(
     server: &MemoryServer,
     policy: &ApproverAuthorizationPolicyV1,
@@ -755,7 +771,7 @@ pub(crate) fn revalidate_governed_mutation(
     current: &CurrentApprovalContextV1,
 ) -> Result<(), AuthorityDenialV1> {
     let probe = GhApproverAuthorityProbe::new(server);
-    revalidate_approval(&probe, policy, receipt, current, chrono::Utc::now())
+    revalidate_governed_mutation_with_probe(&probe, policy, receipt, current)
 }
 
 #[cfg(test)]

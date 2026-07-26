@@ -14,7 +14,7 @@ mod pipeline;
 mod projection;
 mod promotion;
 mod read_models;
-mod storage;
+pub(crate) mod storage;
 
 pub(crate) use self::context::{build_a2a_context, build_continuity_context, list_active_patterns};
 pub(crate) use self::emit::{
