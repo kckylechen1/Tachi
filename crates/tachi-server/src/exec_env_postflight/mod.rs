@@ -711,10 +711,10 @@ impl PostflightGate {
     /// 2. then load the parent-held pre-image (which carries the **pinned** walk
     ///    roots);
     /// 3. then re-scan **those roots** and compare;
-    /// 3b. then check the pre-image's **capture-time clock barrier** — an image
-    ///    whose timestamps cannot out-resolve the run window cannot prove a
+    /// 4. then check the pre-image's **capture-time clock barrier** — an image
+    ///    whose timestamps cannot out-resolve the run window cannot prove that a
     ///    match means "unchanged";
-    /// 4. then apply the contract.
+    /// 5. then apply the contract.
     ///
     /// Step 3 never re-derives a walk root from the workspace: the worker has had
     /// write access to `.git`, so re-reading its `gitdir:` line here would let the
