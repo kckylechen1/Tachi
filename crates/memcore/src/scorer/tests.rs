@@ -352,6 +352,88 @@ fn use_provenance_recency_moves_the_age_reference_off_last_access() {
     );
 }
 
+/// tachi#1446 **lever 3** — the surprise score's `overlooked` component, whose
+/// polarity is the inverse of every other lever: exposure does not earn this
+/// bonus, it permanently *revokes* it.
+///
+/// `access_count == 0 && importance > 0.7` awards `0.20 * 0.3 = 0.06` of the
+/// composite. Nothing ever decrements `access_count`, so the first search that
+/// returns a high-importance memory takes it from 0 to 1 and the memory stops
+/// counting as overlooked forever — on the strength of the system having
+/// looked at it once.
+///
+/// With the knob on the predicate is `last_use_at IS NULL`, which needs no new
+/// column: nothing but `db::record_memory_use` writes that column, so an
+/// exposed-but-never-used memory keeps the bonus and a genuinely used one
+/// loses it.
+#[test]
+fn use_provenance_recency_moves_the_overlooked_bonus_off_exposure() {
+    let off = RecallConfig::default();
+    let on = RecallConfig {
+        use_provenance_recency: true,
+        ..RecallConfig::default()
+    };
+
+    // Same everything except the two provenance columns. `importance = 0.8`
+    // clears the `> 0.7` gate; `avg_importance = 0.8` zeroes component 1, and
+    // a `total_same_topic` of 2 fixes component 3, so the ONLY term that can
+    // differ between these calls is `overlooked`.
+    let never_touched = {
+        let mut e = test_entry("overlooked-never-touched");
+        e.importance = 0.8;
+        e
+    };
+    let exposed_only = {
+        let mut e = never_touched.clone();
+        e.id = "overlooked-exposed".into();
+        e.access_count = 12;
+        e.last_access = Some(Utc::now().to_rfc3339());
+        e
+    };
+    let genuinely_used = {
+        let mut e = exposed_only.clone();
+        e.id = "overlooked-used".into();
+        e.last_use_at = Some(Utc::now().to_rfc3339());
+        e
+    };
+
+    let score = |entry: &crate::types::MemoryEntry, config: &RecallConfig| {
+        surprise_score_with_config(entry, 0.8, 0, 2, config)
+    };
+
+    let baseline = score(&never_touched, &off);
+    // 0.20 * 0.3 = 0.06 is the whole magnitude of this lever.
+    assert!(
+        (baseline - score(&exposed_only, &off) - 0.06).abs() < 1e-12,
+        "control: at default config, exposure alone must cost exactly the 0.06 overlooked \
+         component ({baseline} vs {})",
+        score(&exposed_only, &off)
+    );
+
+    assert!(
+        (score(&exposed_only, &on) - baseline).abs() < 1e-12,
+        "with the knob on, an exposed-but-never-used memory must keep the overlooked bonus: \
+         {} != {baseline}",
+        score(&exposed_only, &on)
+    );
+    assert!(
+        (baseline - score(&genuinely_used, &on) - 0.06).abs() < 1e-12,
+        "with the knob on, a genuinely used memory must lose it — otherwise the lever is \
+         deleted, not switched: {} vs {baseline}",
+        score(&genuinely_used, &on)
+    );
+
+    // The default path is indifferent to the new column, in both directions.
+    assert!(
+        (score(&genuinely_used, &off) - score(&exposed_only, &off)).abs() < 1e-12,
+        "writing last_use_at must not change what default config computes"
+    );
+    assert!(
+        (surprise_score(&never_touched, 0.8, 0, 2) - baseline).abs() < 1e-12,
+        "the config-free entry point must keep returning the default-config number"
+    );
+}
+
 struct FakeTradingStyleDecay;
 
 impl DecayPolicy for FakeTradingStyleDecay {

@@ -120,7 +120,7 @@ pub fn decay_score(entry: &MemoryEntry) -> f64 {
 }
 
 pub fn decay_score_with_config(entry: &MemoryEntry, recall_config: &RecallConfig) -> f64 {
-    default_decay_score_with_config(entry, recall_config)
+    default_decay_score_with_config(entry, recall_config, None)
 }
 
 pub fn decay_score_with_policy(
@@ -131,7 +131,18 @@ pub fn decay_score_with_policy(
     policy.score_decay(entry, recall_config, None)
 }
 
-fn default_decay_score_with_config(entry: &MemoryEntry, recall_config: &RecallConfig) -> f64 {
+/// `use_access_ages` is the candidate's `event_kind = 'use'` access ages, as
+/// already fetched for the ACT-R floor when
+/// `RecallConfig::use_provenance_recency` is on (`db::get_use_access_times`).
+/// It is `None` on every knob-off path and on the public
+/// [`decay_score_with_config`] entry point, which has no access history to
+/// offer — see the `frequency` term below for what it is used for and why
+/// `None` is the honest input rather than a fallback to `access_count`.
+fn default_decay_score_with_config(
+    entry: &MemoryEntry,
+    recall_config: &RecallConfig,
+    use_access_ages: Option<&[f64]>,
+) -> f64 {
     let now = Utc::now();
     // tachi#1446 lever 1. The stored timestamp this reads is the whole of the
     // exposure loop's dominant channel: `last_access` is written for every row
@@ -169,7 +180,25 @@ fn default_decay_score_with_config(entry: &MemoryEntry, recall_config: &RecallCo
 
     let half_life = tier_half_life_with_config(&entry.tier, recall_config);
     let recency = (-0.693 * age_days / half_life).exp();
-    let frequency = (1.0 + entry.access_count as f64).log10();
+    // tachi#1446 lever 2. `access_count` is incremented for every row a search
+    // RETURNS (`db/memory_crud/access.rs`'s `record_access_with_updates`), so
+    // with the knob off this frequency term is the second channel through
+    // which being displayed pays: one exposure multiplies the recency term by
+    // `1 + 0.2*log10(2) = 1.060` for every returned row at once.
+    //
+    // With `use_provenance_recency` ON the count comes from the same use-event
+    // rows the ACT-R floor is already reading, so it costs no extra query and
+    // no maintained column (a `use_count` column would be a second write-side
+    // drift surface for a number `access_history` already holds). `None` and
+    // the empty slice both mean "no recorded use", i.e. `frequency = 0` —
+    // deliberately NOT a fallback to `access_count`, which would re-admit the
+    // exposure channel through the back door.
+    let frequency_count = if recall_config.use_provenance_recency {
+        use_access_ages.map_or(0, <[f64]>::len) as f64
+    } else {
+        entry.access_count as f64
+    };
+    let frequency = (1.0 + frequency_count).log10();
     let importance_floor = entry.importance * 0.3;
 
     (recency * (1.0 + 0.2 * frequency)).max(importance_floor)
@@ -252,6 +281,16 @@ fn default_decay_score_actr_with_config(
     recall_config: &RecallConfig,
 ) -> f64 {
     let d = tier_actr_d(&entry.tier);
+    // tachi#1446 lever 5 note: with `use_provenance_recency` on, `access_ages`
+    // arrives from `db::get_use_access_times` and therefore holds use events
+    // only; with it off it arrives from `db::get_access_times` and holds
+    // display events only, exactly as before. Which read ran is the caller's
+    // decision (`search/ranking.rs`), so this function passes the ages it was
+    // given straight through to lever 2's frequency count under the same knob.
+    let use_access_ages = recall_config
+        .use_provenance_recency
+        .then_some(access_ages)
+        .flatten();
     match access_ages {
         Some(ages) if !ages.is_empty() => {
             let bla = base_level_activation(ages, d);
@@ -259,10 +298,14 @@ fn default_decay_score_actr_with_config(
             let normalized = (bla + 5.0) / 10.0;
             normalized
                 .clamp(0.0, 1.0)
-                .max(default_decay_score_with_config(entry, recall_config))
+                .max(default_decay_score_with_config(
+                    entry,
+                    recall_config,
+                    use_access_ages,
+                ))
                 .max(entry.importance * 0.3)
         }
-        _ => default_decay_score_with_config(entry, recall_config),
+        _ => default_decay_score_with_config(entry, recall_config, use_access_ages),
     }
 }
 
@@ -279,6 +322,27 @@ pub fn surprise_score(
     avg_importance: f64,
     contradiction_count: u32,
     total_same_topic: u32,
+) -> f64 {
+    surprise_score_with_config(
+        entry,
+        avg_importance,
+        contradiction_count,
+        total_same_topic,
+        RecallConfig::get(),
+    )
+}
+
+/// [`surprise_score`] with an explicit [`RecallConfig`] — tachi#1446 lever 3.
+///
+/// The knob only reaches component 4 (`overlooked`); every other component is
+/// config-independent, so with `use_provenance_recency` off this is the same
+/// number `surprise_score` has always returned.
+pub fn surprise_score_with_config(
+    entry: &MemoryEntry,
+    avg_importance: f64,
+    contradiction_count: u32,
+    total_same_topic: u32,
+    recall_config: &RecallConfig,
 ) -> f64 {
     // Component 1: Importance surprise — normalized to [0, 1] via clamping
     let importance_surprise = (entry.importance - avg_importance).abs().clamp(0.0, 1.0);
@@ -297,8 +361,25 @@ pub fn surprise_score(
         1.0 / (total_same_topic as f64)
     };
 
-    // Component 4: Low-access high-importance = overlooked valuable memory
-    let overlooked = if entry.access_count == 0 && entry.importance > 0.7 {
+    // Component 4: Low-access high-importance = overlooked valuable memory.
+    //
+    // tachi#1446 lever 3, and the polarity here is inverted relative to the
+    // other levers: exposure does not *earn* this component, it permanently
+    // *revokes* it. One search that returns the row takes `access_count` from
+    // 0 to 1 forever (nothing decrements it), so a memory stops counting as
+    // "overlooked" the first time the system looks at it — which is precisely
+    // the state of being overlooked-but-displayed.
+    //
+    // `last_use_at IS NULL` already means "never used" (nothing else writes
+    // that column — `db::record_memory_use` is its only writer), so this lever
+    // needs no new column and no count: the knob just swaps which
+    // never-touched predicate is read.
+    let never_used = if recall_config.use_provenance_recency {
+        entry.last_use_at.is_none()
+    } else {
+        entry.access_count == 0
+    };
+    let overlooked = if never_used && entry.importance > 0.7 {
         0.3
     } else {
         0.0

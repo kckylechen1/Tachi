@@ -6,7 +6,9 @@ use crate::memory_ops::{
     handle_archive_memory, handle_get_memory, handle_list_memories, handle_memory_stats,
     handle_runtime_info,
 };
-use crate::memory_search_ops::{handle_find_similar_memory, handle_remember, handle_save_memory};
+use crate::memory_search_ops::{
+    handle_find_similar_memory, handle_remember, handle_save_memory_from_caller,
+};
 use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::tool_params::{
     ArchiveMemoryParams, FindSimilarMemoryParams, GetMemoryParams, InitProjectDbParams,
@@ -28,7 +30,10 @@ impl MemoryServer {
         {
             return Ok(body);
         }
-        handle_save_memory(self, params).await
+        // tachi#1446: the agent-facing arm — a `params.id` here came from
+        // outside the process, so a save that names an existing memory marks
+        // it used. In-process writers keep calling `handle_save_memory`.
+        handle_save_memory_from_caller(self, params).await
     }
 
     #[tool(

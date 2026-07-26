@@ -235,19 +235,31 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             PRIMARY KEY (namespace, key)
         );
 
-        -- Access history for ACT-R base-level activation
+        -- Access history for ACT-R base-level activation.
+        --
+        -- tachi#1446 lever 5: `event_kind` is the provenance discriminator.
+        -- `display` = the recall pipeline recorded that it SHOWED this row
+        -- (`record_access_with_updates`, the sole production writer before
+        -- this column existed, so `DEFAULT 'display'` is the honest value for
+        -- every legacy row). `use` = a caller-initiated save cited this memory
+        -- (`record_memory_use`). `get_use_access_times` reads only the latter,
+        -- which is what keeps the system's own display action out of the
+        -- ACT-R base-level-activation floor at `scorer.rs`'s
+        -- `default_decay_score_actr_with_config`.
         CREATE TABLE IF NOT EXISTS access_history (
             memory_id  TEXT NOT NULL,
             accessed_at TEXT NOT NULL,
-            query_hash  TEXT NOT NULL DEFAULT ''
+            query_hash  TEXT NOT NULL DEFAULT '',
+            event_kind  TEXT NOT NULL DEFAULT 'display'
         );
         CREATE INDEX IF NOT EXISTS idx_access_hist_mem ON access_history(memory_id);
         CREATE INDEX IF NOT EXISTS idx_access_hist_time ON access_history(accessed_at DESC);
         CREATE INDEX IF NOT EXISTS idx_access_hist_mem_time ON access_history(memory_id, accessed_at DESC);
-        -- idx_access_hist_hash references the evolutionary `query_hash` column and
-        -- is created in MIGRATED_INDEXES_SQL, AFTER `ensure_column` adds query_hash
-        -- to legacy access_history tables (#1289). Creating it here would `no such
-        -- column: query_hash`-crash init_schema_inner on a pre-query_hash DB.
+        -- idx_access_hist_hash and idx_access_hist_mem_kind_time reference the
+        -- evolutionary `query_hash` / `event_kind` columns and are created in
+        -- MIGRATED_INDEXES_SQL, AFTER `ensure_column` adds them to legacy
+        -- access_history tables (#1289). Creating them here would `no such
+        -- column`-crash init_schema_inner on a DB that predates either column.
 
         -- Derived items (causal extractions, distilled rules, etc.)
         CREATE TABLE IF NOT EXISTS derived_items (
@@ -970,6 +982,12 @@ pub(super) const MIGRATED_INDEXES_SQL: &str = r#"
         -- ran (#1289). The matching `ensure_column` for each column runs above.
         CREATE INDEX IF NOT EXISTS idx_access_hist_hash
             ON access_history(memory_id, query_hash) WHERE query_hash != '';
+        -- tachi#1446 lever 5. `get_use_access_times` and the per-kind GC quota
+        -- both partition by (memory_id, event_kind) and order by accessed_at
+        -- DESC; without this they fall back to idx_access_hist_mem_time and
+        -- re-filter every display row to find the rare use rows.
+        CREATE INDEX IF NOT EXISTS idx_access_hist_mem_kind_time
+            ON access_history(memory_id, event_kind, accessed_at DESC);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_claim ON exec_envs(claim_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_session_claims_identity_active
             ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))

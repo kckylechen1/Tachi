@@ -288,19 +288,20 @@ pub struct MemoryEntry {
 
     /// Last genuine *use* time (ISO 8601), None if never used — tachi#1446.
     ///
-    /// The provenance-separated sibling of [`Self::last_access`]. Nothing
-    /// writes this column yet (commit 1 of #1446 lands the column, the knob
-    /// and the proof; the write path for real use events is a later commit),
-    /// so it is NULL on every row in every database today.
+    /// The provenance-separated sibling of [`Self::last_access`]. Its only
+    /// writer is `db::record_memory_use`, reached only when a caller-initiated
+    /// save named an existing memory's id (tachi#1446 signal D) — never by the
+    /// recall pipeline, so no amount of searching can set it.
     ///
     /// Read by `scorer::default_decay_score_with_config` as the recency age
     /// reference **only** when `RecallConfig::use_provenance_recency` is on
     /// (default off). With it off, decay reads `last_access` exactly as
-    /// before.
+    /// before. `scorer::surprise_score_with_config` reads its NULL-ness as
+    /// "never used" under the same knob.
     ///
-    /// `skip_serializing_if` keeps the serialized shape of every existing
-    /// client payload byte-identical while the column is uniformly NULL; when
-    /// a write path lands, that attribute is the thing to reconsider.
+    /// `skip_serializing_if` is kept now that a write path exists: a row that
+    /// was never cited by a save still serializes byte-identically to before,
+    /// and a row that was gains the field, which is the new fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_use_at: Option<String>,
 

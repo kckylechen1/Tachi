@@ -59,6 +59,60 @@ pub(in crate::memory_search_ops::save_memory) fn lookup_existing_entry(
     }
 }
 
+/// Mark `id` as **used** — tachi#1446 signal D's only production call site.
+///
+/// # What counts as "a save references a memory id"
+///
+/// Exactly one thing, on today's code: **a caller-initiated save whose `id`
+/// resolved to an existing memory row**. The caller had to already hold that
+/// id and chose to write to that specific memory; that is a caller consuming
+/// a memory, not the system touching its own row.
+///
+/// The alternatives were checked and rejected against what the save path
+/// actually supports:
+/// * `TachiSaveParams::references` / the `evidence_refs_v1` + `source_refs`
+///   channels carry **external** targets only — `wiki_ops::references`'
+///   `validate_reference_format` accepts a URL, an absolute/`docs/` path or a
+///   GitHub shorthand, and rejects a bare memory id, so no memory id can
+///   arrive that way.
+/// * Edge writes (`memcore::db::add_edge`) that name two memory ids are
+///   produced by `auto_link` / contradiction detection / foundry distillation
+///   — the system linking its own rows, which is the defect under repair, not
+///   evidence of use.
+/// * Free text is deliberately never scanned for id-shaped substrings.
+///
+/// # Why the initiator flag, not just "an id was supplied"
+///
+/// `handle_save_memory` is reached both from the MCP tool wrapper and from
+/// in-process writers that pass a deterministic id (`dispatch_ops::
+/// kanban_helpers` re-saving a kanban row, `dispatch_ops::dispatch::execution`
+/// re-saving an eval by `eval_id`). Those are the system rewriting its own
+/// bookkeeping. [`super::handler::SaveInitiator`] separates them, and its
+/// default is `System` so a new call site under-records rather than
+/// re-manufacturing the exposure loop.
+///
+/// Failure is non-fatal by design: the row is already saved, and losing a
+/// provenance mark must not turn a successful save into an error response.
+/// The failure is returned so the caller can decide (today: a `warn!`).
+pub(in crate::memory_search_ops::save_memory) fn mark_save_target_used(
+    server: &MemoryServer,
+    id: &str,
+    target_db: DbScope,
+    named_project: Option<&str>,
+) -> Result<usize, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let ids = [id.to_string()];
+    let mark = |store: &mut MemoryStore| {
+        memcore::db::record_memory_use(store.connection(), &ids, &now)
+            .map_err(|e| format_save_error(server, target_db, named_project, &e))
+    };
+    if let Some(project_name) = named_project {
+        server.with_named_project_store(project_name, mark)
+    } else {
+        server.with_store_for_scope(target_db, mark)
+    }
+}
+
 pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
     server: &MemoryServer,
     entry: &mut MemoryEntry,

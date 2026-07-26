@@ -132,12 +132,16 @@
 //!
 //! # How to run (Oz)
 //!     cargo nextest run -p memcore measure_l1 measure_l2 measure_l3
-//!     cargo nextest run -p memcore use_provenance_recency_keeps_exposure_out_of_rank  # EXPECTED GREEN
+//!     cargo nextest run -p memcore use_provenance          # EXPECTED GREEN (all)
 //!     cargo nextest run -p memcore exposure_alone_must_not_change_rank \
 //!         --run-ignored only          # EXPECTED RED — see that test's doc
 //!
 //! Note the second and third commands must be run separately: an unfiltered
 //! `--run-ignored only` name filter matches both tests by prefix.
+//!
+//! The `use_provenance` filter above covers commit 1's pair-half plus commit
+//! 2's per-lever tests at the bottom of this file; the overlooked-bonus lever
+//! lives in `scorer/tests.rs` and is caught by the same filter.
 
 use super::*;
 
@@ -632,6 +636,77 @@ fn read_promotion_counters(conn: &Connection, id: &str) -> (i64, i64) {
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .expect("read promotion counters")
+}
+
+/// Insert `count` `access_history` rows of one provenance, all aged
+/// `days_ago`, without touching any `memories` column — tachi#1446 commits 2+.
+///
+/// Written straight to SQL rather than through `record_access_with_updates` /
+/// `record_memory_use` on purpose: those two also move `access_count` /
+/// `last_use_at`, and every test below needs exactly one channel to move at a
+/// time. `days_ago` is the knob that decides whether the ACT-R base-level
+/// activation these rows produce clears the importance floor — see
+/// [`USE_EVENT_AGE_DAYS`].
+fn seed_access_events(conn: &Connection, id: &str, kind: &str, count: usize, days_ago: i64) {
+    let at = (Utc::now() - chrono::Duration::days(days_ago)).to_rfc3339();
+    for _ in 0..count {
+        conn.execute(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash, event_kind)
+             VALUES (?1, ?2, '', ?3)",
+            rusqlite::params![id, at, kind],
+        )
+        .expect("seed access_history row");
+    }
+}
+
+/// Age for seeded **use** events in the lever-2/4 tests, chosen so the ACT-R
+/// base-level activation those rows produce stays *below* the importance
+/// floor, exactly as [`measure_l2_access_feedback_multiplier`] keeps the decay
+/// frequency term below it.
+///
+/// `base_level_activation` sums `(age_days)^-d` with `d = 0.5` for a `raw`
+/// tier, and the normalisation is `(ln(sum) + 5) / 10`. At 3000 days two rows
+/// give `2 * 3000^-0.5 = 0.0365`, `ln = -3.31`, normalised `0.169` — under the
+/// `0.7 * 0.3 = 0.21` floor, so the floor still wins and the decay channel
+/// does not move. Fresh use events would lift decay to ~0.73 and the
+/// multiplier assertion would then be measuring two levers at once.
+const USE_EVENT_AGE_DAYS: i64 = 3000;
+
+/// [`rank_all`] with an explicit [`RecallConfig`] — the knob-on arm.
+fn rank_all_with_config(conn: &Connection, profile: Profile, config: RecallConfig) -> Vec<SearchResult> {
+    let opts = search_options_with_recall_config(profile, SEEDS.len(), false, config);
+    let ranked = hybrid_search(conn, QUERY, &opts).expect("hybrid_search");
+    assert_eq!(
+        ranked.len(),
+        SEEDS.len(),
+        "every seed must survive candidate retrieval and filtering, else a \
+         'rank delta' would be confounded with a candidate-set change; got:\n{}",
+        table(&ranked)
+    );
+    ranked
+}
+
+/// The freshest candidate whose decay is **not** pinned to the importance
+/// floor, i.e. the one candidate in this corpus on which the decay frequency
+/// term `log10(1 + n)` is observable rather than absorbed.
+///
+/// Selected by observation for the same reason
+/// [`floored_subject_behind_a_floored_peer`] is: a BM25/RRF recalibration must
+/// change which seed this is, not whether the test is measuring the right
+/// thing.
+fn unfloored_subject(ranked: &[SearchResult]) -> String {
+    ranked
+        .iter()
+        .find(|r| !is_decay_floored(r))
+        .map(|r| r.entry.id.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "this fixture no longer ranks any unfloored candidate, so the decay frequency \
+                 term is absorbed by the importance floor for every seed and lever 2 cannot be \
+                 measured at all. Restore the fresh end of SEEDS.\n{}",
+                table(ranked)
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,14 +1257,16 @@ fn exposure_alone_must_not_change_rank() {
 /// unexposed row is in. The final assertion pins that: if the column were
 /// silently being written, this test would still be green for the wrong reason.
 ///
-/// **What this does NOT claim.** `access_count` is still bumped by exposure and
-/// still multiplies the decay formula's frequency term (`scorer.rs:151`), and
-/// `access_history` rows still raise the ACT-R base-level activation floor
-/// (`scorer.rs:236-244`) for exposed rows. Both remain live after this commit —
-/// they are the out-of-scope levers in #1446's blast-radius map. Scores
-/// therefore *do* move between the two calls here; the frozen claim is that the
-/// ordering does not, and that the decay channel keeps a range instead of
-/// collapsing onto one value.
+/// **What this test claims, and what its siblings claim.** `access_count` is
+/// still bumped by exposure; what the knob changes is who reads it. Commit 1
+/// switched only the age reference, so this test's frozen claim is narrow: the
+/// ordering does not move, and the decay channel keeps a range instead of
+/// collapsing onto one value. The remaining read points — the decay frequency
+/// term, the access-feedback multiplier, the ACT-R base-level-activation floor
+/// and the overlooked bonus — get one test each in the section at the bottom of
+/// this file (and, for the overlooked bonus, in `scorer/tests.rs`), because
+/// each has to be shown *switched* rather than deleted, which needs a knob-off
+/// control this test does not carry.
 #[test]
 fn use_provenance_recency_keeps_exposure_out_of_rank() {
     let conn = seeded_connection();
@@ -1239,14 +1316,260 @@ fn use_provenance_recency_keeps_exposure_out_of_rank() {
     );
 
     // Falsifier for the green above: it must come from the read swap, not from
-    // some other path having quietly started writing the new column.
+    // some other path having quietly started writing the new column. The write
+    // path that now exists (`db::record_memory_use`) is reachable only from a
+    // caller-initiated save, and nothing here saves — so a non-NULL value in a
+    // search-only test still means this test is green for a reason it does not
+    // state.
     for r in second.iter().chain(first.iter()) {
         assert!(
             r.entry.last_use_at.is_none(),
-            "{} carries last_use_at={:?}; nothing in tachi#1446 commit 1 writes that column, so \
-             a non-NULL value here means this test is passing for a reason it does not state",
+            "{} carries last_use_at={:?}; no search path may write that column, so a non-NULL \
+             value here means this test is passing for a reason it does not state",
             r.entry.id,
             r.entry.last_use_at
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The remaining levers, one test each — tachi#1446 commit 2
+//
+// Every test in this section has the same shape, and the shape is the point:
+//   * knob ON, mutate the exposure-side channel  => the score must NOT move;
+//   * knob OFF, the same mutation                => the score MUST move.
+// The second half is not a formality. A lever that was accidentally deleted
+// rather than switched would pass the first assertion, and only the knob-off
+// control tells the two apart.
+// ---------------------------------------------------------------------------
+
+/// **Lever 5 — the ACT-R base-level-activation floor.**
+///
+/// `get_access_times` (`search/ranking.rs`'s `read_access_times`) feeds
+/// `default_decay_score_actr_with_config`'s `Some(ages)` arm, whose normalised
+/// BLA overrides the importance floor. Every row it read was written by the
+/// search path about its own results, so being displayed five times lifted a
+/// candidate's decay from the `0.21` floor to ~`0.82`.
+///
+/// With the knob on, that read is `get_use_access_times` and display rows are
+/// invisible to it: the same five rows must move nothing.
+#[test]
+fn use_provenance_recency_keeps_display_events_out_of_the_actr_floor() {
+    let conn = seeded_connection();
+    let config = use_provenance_recency_config();
+
+    let base_on = rank_all_with_config(&conn, Profile::Default, config.clone());
+    let (_, subject) = floored_subject_behind_a_floored_peer(&base_on);
+    let base_decay = decay_of(&base_on, &subject);
+    assert!(
+        (base_decay - importance_floor()).abs() < 1e-12,
+        "the subject must start on the importance floor, else a BLA lift is not observable \
+         against it; got {base_decay}"
+    );
+
+    // Five *recent* display events: BLA = ln(5 * (1/24)^-0.5) = 3.198,
+    // normalised (3.198 + 5)/10 = 0.820, four times the floor.
+    seed_access_events(&conn, &subject, "display", 5, 0);
+
+    let after_on = rank_all_with_config(&conn, Profile::Default, config);
+    assert!(
+        (decay_of(&after_on, &subject) - base_decay).abs() < CLOCK_TOLERANCE,
+        "with use_provenance_recency ON the ACT-R floor must not see display events: decay \
+         moved {} -> {}\n{}",
+        base_decay,
+        decay_of(&after_on, &subject),
+        table(&after_on)
+    );
+
+    // Control: the very same rows, read at default config, are exactly the
+    // defect — so this fixture is not merely inert.
+    let after_off = rank_all(&conn, Profile::Default);
+    let off_decay = decay_of(&after_off, &subject);
+    assert!(
+        off_decay > base_decay + 0.5,
+        "control failed: at default config five display events must lift the ACT-R floor far \
+         above the importance floor ({base_decay} -> {off_decay}). If this stops holding the \
+         knob-on assertion above proves nothing.\n{}",
+        table(&after_off)
+    );
+}
+
+/// **Lever 2 — the decay frequency term.**
+///
+/// `let frequency = (1.0 + entry.access_count as f64).log10();` multiplies
+/// `recency` by `1 + 0.2 * frequency`, and `access_count` is incremented for
+/// every row a search returns. Measured on the one candidate class where the
+/// term is observable at all: an *unfloored* one (a floored candidate's
+/// frequency term is absorbed by `importance * 0.3`, which is exactly why
+/// [`measure_l2_access_feedback_multiplier`] selects a floored subject).
+///
+/// With the knob on the count comes from `event_kind = 'use'` rows, of which
+/// this fixture has none, so `access_count = 100` must move nothing.
+#[test]
+fn use_provenance_recency_moves_the_decay_frequency_term_off_exposure() {
+    let conn = seeded_connection();
+    let config = use_provenance_recency_config();
+
+    let base_on = rank_all_with_config(&conn, Profile::Default, config.clone());
+    let subject = unfloored_subject(&base_on);
+    let base_decay = decay_of(&base_on, &subject);
+
+    // An untouched fixture must score identically under both arms: with no
+    // `last_use_at` and no `last_access`, both recency anchors fall through to
+    // the same content `timestamp`. This is the knob's byte-identity property
+    // stated as an assertion rather than as a claim in a comment.
+    let base_off = rank_all(&conn, Profile::Default);
+    assert!(
+        (decay_of(&base_off, &subject) - base_decay).abs() < CLOCK_TOLERANCE,
+        "on an untouched corpus both knob arms must produce the same decay — off {}, on {}",
+        decay_of(&base_off, &subject),
+        base_decay
+    );
+
+    set_access_count(&conn, &subject, 100);
+    assert!(
+        read_last_access(&conn, &subject).is_none(),
+        "this test must move access_count ONLY, or it is measuring lever 1 as well"
+    );
+
+    let after_on = rank_all_with_config(&conn, Profile::Default, config);
+    assert!(
+        (decay_of(&after_on, &subject) - base_decay).abs() < CLOCK_TOLERANCE,
+        "with use_provenance_recency ON, access_count must not reach the decay frequency term: \
+         {base_decay} -> {}\n{}",
+        decay_of(&after_on, &subject),
+        table(&after_on)
+    );
+
+    // Control: at default config the same counter multiplies decay by exactly
+    // `1 + 0.2*log10(101) = 1.400862`.
+    let after_off = rank_all(&conn, Profile::Default);
+    let observed_ratio = decay_of(&after_off, &subject) / base_decay;
+    let expected_ratio = 1.0 + 0.2 * 101.0_f64.log10();
+    assert!(
+        (observed_ratio - expected_ratio).abs() < 1e-6,
+        "control failed: at default config access_count=100 must multiply this unfloored \
+         candidate's decay by exactly {expected_ratio}, measured {observed_ratio}\n{}",
+        table(&after_off)
+    );
+}
+
+/// **Lever 4 — the access-feedback multiplier.**
+///
+/// `apply_access_feedback` multiplies the *final* score, so unlike levers 1-3
+/// it is not scaled by `weights.decay` — on a `/guide` profile it is the
+/// dominant exposure channel, which is why this test runs both profiles.
+///
+/// Two halves:
+/// 1. knob on + `access_count = 100` (exposure) => the multiplier must not fire;
+/// 2. knob on + two real `use` events           => it must fire again, with
+///    exactly the multiplier [`measure_l2_access_feedback_multiplier`]
+///    committed for `n = 2`, `1.03295837`.
+///
+/// The second half is what makes this a *switch* rather than a deletion, and
+/// it is why the use events are aged [`USE_EVENT_AGE_DAYS`]: recent ones would
+/// lift the ACT-R floor and the measured ratio would be two levers, not one.
+#[test]
+fn use_provenance_recency_moves_the_access_feedback_multiplier_off_exposure() {
+    for profile in [Profile::Default, Profile::Guide] {
+        let conn = seeded_connection();
+        let config = use_provenance_recency_config();
+
+        let base = rank_all_with_config(&conn, profile, config.clone());
+        let (_, subject) = floored_subject_behind_a_floored_peer(&base);
+        let base_final = final_of(&base, &subject);
+        let base_decay = decay_of(&base, &subject);
+        assert!(
+            (base_decay - importance_floor()).abs() < 1e-12,
+            "{profile:?}: the subject must sit on the importance floor so the decay channel is \
+             inert and the whole ratio below is attributable to apply_access_feedback; got \
+             {base_decay}"
+        );
+
+        set_access_count(&conn, &subject, 100);
+        let exposed = rank_all_with_config(&conn, profile, config.clone());
+        assert!(
+            (final_of(&exposed, &subject) / base_final - 1.0).abs() < CLOCK_TOLERANCE,
+            "{profile:?}: with use_provenance_recency ON, access_count must not reach \
+             apply_access_feedback — final score moved {base_final} -> {}\n{}",
+            final_of(&exposed, &subject),
+            table(&exposed)
+        );
+
+        // Half 2: two genuine use events, old enough to leave the decay
+        // channel on the floor.
+        seed_access_events(&conn, &subject, "use", 2, USE_EVENT_AGE_DAYS);
+        let used = rank_all_with_config(&conn, profile, config);
+        let used_decay = decay_of(&used, &subject);
+        assert!(
+            (used_decay - base_decay).abs() < CLOCK_TOLERANCE,
+            "{profile:?}: {USE_EVENT_AGE_DAYS}-day-old use events must leave the decay channel \
+             on the importance floor ({base_decay} -> {used_decay}), or the ratio below is \
+             measuring the ACT-R floor as well as the multiplier"
+        );
+        let expected_multiplier = 1.0 + 2.0_f64.ln_1p() * 0.03;
+        let observed_multiplier = final_of(&used, &subject) / base_final;
+        assert!(
+            (observed_multiplier - expected_multiplier).abs() < IDENTITY_TOLERANCE,
+            "{profile:?}: two USE events must buy exactly the multiplier two exposures used to \
+             buy, min(1 + ln1p(2)*0.03, 1.25) = {expected_multiplier}; measured \
+             {observed_multiplier}\n{}",
+            table(&used)
+        );
+        assert!(
+            (expected_multiplier - 1.032_958_37).abs() < 1e-6,
+            "the committed decimal expansion moved; this is the same number \
+             measure_l2_access_feedback_multiplier pins for n=2"
+        );
+    }
+}
+
+/// **Knob OFF is unchanged — the redline, as an assertion.**
+///
+/// Everything tachi#1446's write path adds (`event_kind = 'use'` rows and a
+/// non-NULL `last_use_at`) must be invisible at default config. If it were
+/// not, the new signal would be feeding the very channel this issue exists to
+/// cut, on every deployment that never turns the knob on — and every golden in
+/// the repo would move.
+///
+/// The mutations here are deliberately the *loudest* the write path can
+/// produce: a `last_use_at` of now (maximum lever-1 leverage on a floored
+/// candidate) and five recent use events (maximum ACT-R leverage).
+#[test]
+fn use_provenance_writes_are_invisible_at_default_config() {
+    let conn = seeded_connection();
+
+    let before = rank_all(&conn, Profile::Default);
+    let (_, subject) = floored_subject_behind_a_floored_peer(&before);
+
+    conn.execute(
+        "UPDATE memories SET last_use_at = ?1 WHERE id = ?2",
+        rusqlite::params![Utc::now().to_rfc3339(), subject],
+    )
+    .expect("set last_use_at");
+    seed_access_events(&conn, &subject, "use", 5, 0);
+
+    let after = rank_all(&conn, Profile::Default);
+
+    assert_eq!(
+        before.iter().map(|r| r.entry.id.as_str()).collect::<Vec<_>>(),
+        after.iter().map(|r| r.entry.id.as_str()).collect::<Vec<_>>(),
+        "default-config ordering moved after a use-provenance write\nbefore:\n{}\nafter:\n{}",
+        table(&before),
+        table(&after)
+    );
+    for r in &before {
+        let moved = (final_of(&after, &r.entry.id) - r.score.final_score).abs();
+        assert!(
+            moved < CLOCK_TOLERANCE,
+            "{} moved by {moved} at default config after a use-provenance write — the display \
+             read (`get_access_times`) is letting `event_kind = 'use'` rows through, or a \
+             default-config lever is reading `last_use_at`",
+            r.entry.id
+        );
+    }
+    assert!(
+        (decay_of(&after, &subject) - decay_of(&before, &subject)).abs() < CLOCK_TOLERANCE,
+        "the subject's decay channel moved at default config"
+    );
 }

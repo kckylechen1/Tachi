@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::{
-    db::{get_access_times, get_superseded_ids},
+    db::{get_access_times, get_superseded_ids, get_use_access_times},
     error::MemoryError,
     scorer::{cosine_similarity, is_id_like_exact_query, DecayPolicyContext},
     types::{HybridScore, MemoryEntry, SearchResult},
@@ -112,7 +112,7 @@ pub(super) fn rank_candidate_entries(
     // Per #1097 D3: `get_access_times` (ranking.rs:82) is the second DB I/O.
     let access_start = sample.then(Instant::now);
     let access_candidate_count = candidate_ids_vec.len();
-    let access_times = get_access_times(conn, &candidate_ids_vec)?;
+    let access_times = read_access_times(conn, opts, &candidate_ids_vec)?;
     let access_elapsed = access_start.map(|s| s.elapsed());
     let weights = resolve_weights(opts);
     let mut scores = merge_pre_boost_scores(
@@ -130,7 +130,7 @@ pub(super) fn rank_candidate_entries(
 
     apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
     apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
-    apply_access_feedback(&entries_ref, &mut scores);
+    apply_access_feedback(&entries_ref, &access_times, recall_config(opts), &mut scores);
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
     apply_decision_boost(query, &entries_ref, &mut scores);
@@ -604,13 +604,52 @@ fn char_ngrams(text: &str, n: usize) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// tachi#1446 lever 5 — the single decision of *which provenance* the ACT-R
+/// base-level-activation floor is allowed to see, for both the production
+/// ranker and its `#[cfg(test)]` attribution twin.
+///
+/// Off (default): `access_history` rows written by the search path itself,
+/// i.e. the pre-#1446 behaviour, byte-identical because every row that
+/// predates the `event_kind` column carries `display`.
+/// On: rows written by `db::record_memory_use` only, so the system's own act
+/// of displaying a result can no longer be read back as evidence about the
+/// memory — at the floor (`scorer::default_decay_score_actr_with_config`), at
+/// the decay frequency term (lever 2) and at [`apply_access_feedback`]
+/// (lever 4), all three of which consume this one map.
+fn read_access_times(
+    conn: &Connection,
+    opts: &SearchOptions,
+    candidate_ids: &[String],
+) -> Result<HashMap<String, Vec<f64>>, MemoryError> {
+    if recall_config(opts).use_provenance_recency {
+        get_use_access_times(conn, candidate_ids)
+    } else {
+        get_access_times(conn, candidate_ids)
+    }
+}
+
 fn apply_access_feedback(
     entries_ref: &HashMap<String, &MemoryEntry>,
+    access_times: &HashMap<String, Vec<f64>>,
+    recall_config: &crate::recall_config::RecallConfig,
     scores: &mut HashMap<String, HybridScore>,
 ) {
     for (id, entry) in entries_ref {
-        if entry.access_count >= 2 {
-            let boost = 1.0 + (entry.access_count as f64).ln_1p() * 0.03;
+        // tachi#1446 lever 4. This multiplies the FINAL score, so unlike
+        // levers 1-3 it is not scaled by `weights.decay` — on a `/guide` or
+        // `/wiki` profile (decay 0.02) it is the dominant exposure channel.
+        //
+        // Knob on: the count is the number of `event_kind = 'use'` rows
+        // `read_access_times` already fetched for this candidate — no extra
+        // query, no maintained column. Knob off: `entry.access_count`,
+        // incremented once per row per search, exactly as before.
+        let count = if recall_config.use_provenance_recency {
+            access_times.get(id).map_or(0, Vec::len) as i64
+        } else {
+            entry.access_count
+        };
+        if count >= 2 {
+            let boost = 1.0 + (count as f64).ln_1p() * 0.03;
             if let Some(score) = scores.get_mut(id) {
                 score.final_score *= boost.min(1.25);
             }
@@ -857,7 +896,7 @@ pub(super) mod attribution {
         }
 
         let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
-        let access_times = get_access_times(conn, &candidate_ids_vec)?;
+        let access_times = read_access_times(conn, opts, &candidate_ids_vec)?;
         let weights = resolve_weights(opts);
         let mut scores = merge_pre_boost_scores(
             opts,
@@ -898,7 +937,7 @@ pub(super) mod attribution {
         });
 
         let before = snapshot(&scores);
-        apply_access_feedback(&entries_ref, &mut scores);
+        apply_access_feedback(&entries_ref, &access_times, recall_config(opts), &mut scores);
         steps.push(BoostStep {
             label: "access_feedback",
             before,
