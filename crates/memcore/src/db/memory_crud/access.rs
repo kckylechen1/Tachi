@@ -17,7 +17,7 @@ pub(crate) struct AccessUpdate {
 /// Provenance of one `access_history` row — tachi#1446 lever 5.
 ///
 /// The whole defect this discriminates is that one write path
-/// ([`record_access_with_updates`]) records *the system showing a row* and
+/// (`record_access_with_updates`) records *the system showing a row* and
 /// another read path (`get_access_times` → the ACT-R base-level-activation
 /// floor in `scorer.rs`) treats those rows as evidence about the memory. The
 /// two are only separable if the row says which it is.
@@ -46,7 +46,7 @@ impl AccessEventKind {
     /// this kind. A `&'static str` chosen from a closed enum rather than a
     /// bound parameter: the value is never caller-supplied, and inlining it
     /// keeps the numbered-placeholder indices of the surrounding queries
-    /// unchanged, so the two arms of [`get_access_times_of_kind`] differ in
+    /// unchanged, so the two arms of `get_access_times_of_kind` differ in
     /// exactly one literal and cannot drift apart in placeholder arithmetic.
     ///
     /// **There is deliberately no unfiltered variant.** Before tachi#1446
@@ -327,7 +327,7 @@ pub(crate) fn record_access_with_updates(
 /// `save_memory::persist::mark_save_target_used` in `tachi-server`, reached
 /// only when an MCP-tool save named an existing memory's id (see that
 /// function's doc for the channel inventory and why nothing else qualifies).
-/// It is the complement of [`record_access_with_updates`], which records the
+/// It is the complement of `record_access_with_updates`, which records the
 /// system *showing* a row.
 ///
 /// What this writes:
@@ -356,7 +356,7 @@ pub(crate) fn record_access_with_updates(
 /// production caller runs inside the save's own `BEGIN IMMEDIATE`, and
 /// `rusqlite::Transaction` derefs to `Connection`, so `&tx` is accepted
 /// directly. Ids with no row in `memories` are skipped (same
-/// existence-filtered contract as [`record_access_with_updates`]); the return
+/// existence-filtered contract as `record_access_with_updates`); the return
 /// value is the number of ids that actually existed and were marked.
 pub fn record_memory_use(
     conn: &Connection,
@@ -547,7 +547,7 @@ fn get_access_times_of_kind(
 ///
 /// `since` is an inclusive ISO-8601 UTC lower bound compared as a string,
 /// which is sound here and only here because every `accessed_at` this table
-/// holds is written by [`record_access_with_updates`] or
+/// holds is written by `record_access_with_updates` or
 /// [`record_memory_use`] from `now_utc_iso()` / an RFC-3339 UTC instant — one
 /// fixed-width, zero-padded, UTC-normalised format, so lexicographic order is
 /// chronological order. Do not copy this comparison to a column that mixes

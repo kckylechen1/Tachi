@@ -93,7 +93,11 @@ pub(in crate::memory_search_ops::save_memory) fn lookup_existing_entry(
 ///
 /// Failure is non-fatal by design: the row is already saved, and losing a
 /// provenance mark must not turn a successful save into an error response.
-/// The failure is returned so the caller can decide (today: a `warn!`).
+/// The failure is returned so the caller can decide (today: a warning on
+/// stderr). That is also why this write is not wrapped in
+/// `db::retry_memory_locked` the way `MemoryStore::upsert` is — under lock
+/// contention the honest outcome is one dropped use event, not a retry loop
+/// held open after the save the caller was waiting for already committed.
 pub(in crate::memory_search_ops::save_memory) fn mark_save_target_used(
     server: &MemoryServer,
     id: &str,
