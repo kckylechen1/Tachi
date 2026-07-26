@@ -81,8 +81,42 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
         json!("skill:superpowers-writing-plans")
     );
 
-    for proposal in [weakness_proposal, demotion_proposal] {
-        let proposal_id = proposal["proposal_id"].as_str().expect("proposal id");
+    // #1431 binds each proposal to the profile/card overlay revision it was minted
+    // against and refuses on drift, so applying the first of these two moves the
+    // overlay and legitimately staleness-refuses the second. Re-mint per
+    // iteration by the proposal's semantic identity — the same thing an operator
+    // has to do — instead of reusing ids from the single pre-loop `proposals`
+    // call.
+    for (operation, key_field, key_value) in [
+        ("add_card_weakness", "weakness_id", "plan_request"),
+        (
+            "mark_skill_demotion_target",
+            "skill_id",
+            "skill:superpowers-writing-plans",
+        ),
+    ] {
+        let mut remint = task_params("proposals");
+        remint.limit = Some(50);
+        let remint_raw = server
+            .tachi_task(Parameters(remint))
+            .await
+            .expect("re-mint proposals should succeed");
+        let reminted: serde_json::Value =
+            serde_json::from_str(&remint_raw).expect("re-mint proposals JSON");
+        let proposal_id = reminted["proposals"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find(|proposal| {
+                    proposal["kind"] == json!("loadout_evolution")
+                        && proposal["profile"] == json!("claude_plan")
+                        && proposal["operation"] == json!(operation)
+                        && proposal[key_field] == json!(key_value)
+                })
+            })
+            .and_then(|proposal| proposal["proposal_id"].as_str())
+            .unwrap_or_else(|| panic!("re-minted {operation} proposal must exist"))
+            .to_string();
+        let proposal_id = proposal_id.as_str();
         let mut review = task_params("review_proposal");
         review.proposal_id = Some(proposal_id.to_string());
         review.review_status = Some("approved".to_string());
