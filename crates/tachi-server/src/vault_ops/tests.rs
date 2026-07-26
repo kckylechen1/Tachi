@@ -80,6 +80,11 @@ async fn auto_lock_clears_key_but_preserves_provider_secrets() {
     );
 }
 
+// Holds `global_test_lock` across awaits on purpose: the guard serializes
+// process-wide provider/env state for the whole init -> set -> lock sequence
+// this race test stages, so releasing it at any await would let a sibling test
+// interleave and destroy the condition under test.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools() {
     let _lock = crate::utils::global_test_lock()
