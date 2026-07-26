@@ -3,12 +3,13 @@ use super::simulation::{route_simulation_caveats, simulate_route_policy};
 use sha2::{Digest, Sha256};
 use tachi_dispatch::policy::{
     build_loadout_evolution_proposals, build_route_policy_proposals, canonical_json,
-    canonical_json_eq, loadout_evolution_v3_apply_payload, route_policy_v3_identity_payload,
-    LoadoutEvalEntry, ProfileCardRiskInputs, ProfilePositiveEvolutionInputs,
-    LOADOUT_EVOLUTION_PROPOSAL_KIND, LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION,
-    LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION, LOADOUT_EVOLUTION_PROPOSAL_TARGET,
-    ROUTE_POLICY_PROPOSAL_KIND, ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
-    ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION, ROUTE_POLICY_PROPOSAL_TARGET,
+    canonical_json_eq, loadout_evolution_v3_apply_payload, loadout_evolution_v3_identity_payload,
+    route_policy_v3_identity_payload, LoadoutEvalEntry, ProfileCardRiskInputs,
+    ProfilePositiveEvolutionInputs, LOADOUT_EVOLUTION_PROPOSAL_KIND,
+    LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION, LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION,
+    LOADOUT_EVOLUTION_PROPOSAL_TARGET, ROUTE_POLICY_PROPOSAL_KIND,
+    ROUTE_POLICY_PROPOSAL_POLICY_VERSION, ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION,
+    ROUTE_POLICY_PROPOSAL_TARGET,
 };
 
 /// SHA-256 hex of the canonical identity payload. Used as the content-addressed
@@ -126,6 +127,32 @@ pub(super) fn route_policy_source_revision(rows: &[memcore::db::StateRow]) -> St
         .collect::<Vec<_>>();
     snapshot.sort_by(|left, right| left["key"].as_str().cmp(&right["key"].as_str()));
     content_digest_hex(&Value::Array(snapshot))
+}
+
+/// Canonical revision of the complete effective source a loadout proposal is
+/// reviewed against: the built-in profile definition plus the exact durable
+/// overlay row content and version (or an explicit absent-row sentinel).
+pub(super) fn loadout_evolution_source_revision(
+    profile: &DispatchProfileDef,
+    overlay: Option<&(String, u32)>,
+) -> String {
+    let overlay = match overlay {
+        Some((raw, version)) => {
+            let value = serde_json::from_str::<Value>(raw)
+                .map(|value| canonical_json(&value))
+                .unwrap_or_else(|_| Value::String(raw.clone()));
+            json!({
+                "state": "present",
+                "version": version,
+                "value": value,
+            })
+        }
+        None => json!({ "state": "absent" }),
+    };
+    content_digest_hex(&json!({
+        "built_in_profile": canonical_json(&profile_json(profile)),
+        "overlay": overlay,
+    }))
 }
 
 /// Reject rows that are internally self-consistent but no longer represent
@@ -254,6 +281,7 @@ pub(super) fn loadout_evolution_display_drift(
 pub(super) fn validate_loadout_evolution_proposal(
     proposal_id: &str,
     value: &Value,
+    live_source_revision: Option<&str>,
 ) -> Result<Value, String> {
     if !is_v3_loadout_evolution_proposal(value) {
         return Err(format!(
@@ -294,6 +322,19 @@ pub(super) fn validate_loadout_evolution_proposal(
             "current_policy_mismatch: loadout_evolution proposal {proposal_id} identity payload does not bind the current kind, policy version, and target"
         ));
     }
+    let bound_source_revision = identity_payload
+        .get("source_revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "legacy_unbound_proposal: loadout_evolution proposal {proposal_id} has no bound profile/overlay source revision; regenerate a fresh pending proposal"
+            )
+        })?;
+    if value.get("source_revision").and_then(Value::as_str) != Some(bound_source_revision) {
+        return Err(format!(
+            "source_revision_mismatch: loadout_evolution proposal {proposal_id} display revision does not match its bound source revision"
+        ));
+    }
     let stored_digest = value
         .get("content_digest")
         .and_then(Value::as_str)
@@ -311,6 +352,13 @@ pub(super) fn validate_loadout_evolution_proposal(
         return Err(format!(
             "proposal_id_mismatch: loadout_evolution proposal {proposal_id} does not match digest-bound id {expected_id}; regenerate before review or apply"
         ));
+    }
+    if let Some(live_source_revision) = live_source_revision {
+        if live_source_revision != bound_source_revision {
+            return Err(format!(
+                "source_state_drift: loadout_evolution proposal {proposal_id} was generated against profile/overlay source revision {bound_source_revision}, but the effective source is now {live_source_revision}; regenerate and re-review"
+            ));
+        }
     }
     if let Some(field) = loadout_evolution_display_drift(value, &identity_payload) {
         return Err(format!(
@@ -423,6 +471,7 @@ pub(crate) fn handle_route_policy_proposals(
                 .ok_or_else(|| "dispatch policy proposal missing id".to_string())?
                 .to_string();
             let kind = proposal.get("kind").and_then(Value::as_str);
+            let mut next = proposal.clone();
             let identity_payload = match kind {
                 Some("route_policy") => match proposal.get("identity_payload") {
                     Some(value) => value.clone(),
@@ -442,12 +491,40 @@ pub(crate) fn handle_route_policy_proposals(
                         )
                     }
                 },
-                Some("loadout_evolution") => proposal
-                    .get("identity_payload")
-                    .cloned()
-                    .ok_or_else(|| {
-                        "loadout_evolution proposal missing v3 identity payload".to_string()
-                    })?,
+                Some("loadout_evolution") => {
+                    let profile_name = proposal
+                        .get("profile")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            "loadout_evolution proposal missing profile for source binding"
+                                .to_string()
+                        })?;
+                    let profile = resolve_dispatch_profile(profile_name).ok_or_else(|| {
+                        format!(
+                            "loadout_evolution proposal references unknown profile: {profile_name}"
+                        )
+                    })?;
+                    let overlay = store
+                        .get_state_kv(PROFILE_CARD_OVERLAY_NS, profile.name)
+                        .map_err(|e| format!("load profile/card overlay for proposal mint: {e}"))?;
+                    let source_revision =
+                        loadout_evolution_source_revision(profile, overlay.as_ref());
+                    let apply_payload = loadout_evolution_v3_apply_payload(&proposal);
+                    let evidence_review =
+                        proposal.get("evidence").cloned().unwrap_or(json!({}));
+                    next["schema_version"] =
+                        json!(LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION);
+                    next["policy_version"] = json!(LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION);
+                    next["target"] = json!(LOADOUT_EVOLUTION_PROPOSAL_TARGET);
+                    next["source_revision"] = json!(source_revision.clone());
+                    loadout_evolution_v3_identity_payload(
+                        &apply_payload,
+                        &evidence_review,
+                        LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION,
+                        LOADOUT_EVOLUTION_PROPOSAL_TARGET,
+                        &source_revision,
+                    )
+                }
                 _ => Value::Null,
             };
             let content_digest = content_digest_hex(&identity_payload);
@@ -457,7 +534,9 @@ pub(crate) fn handle_route_policy_proposals(
                 _ => legacy_id.clone(),
             };
 
-            let mut next = proposal.clone();
+            if kind == Some("loadout_evolution") {
+                next["identity_payload"] = identity_payload.clone();
+            }
             next["proposal_id"] = json!(id);
             next["legacy_proposal_id"] = json!(legacy_id);
             if matches!(kind, Some("route_policy" | "loadout_evolution")) {
@@ -639,7 +718,31 @@ pub(crate) fn handle_route_policy_review(
             let live_source_revision = route_policy_source_revision(&source_rows);
             validate_route_policy_proposal(proposal_id, &value, Some(&live_source_revision))?;
         } else if kind == "loadout_evolution" {
-            validate_loadout_evolution_proposal(proposal_id, &value)?;
+            let identity_payload =
+                validate_loadout_evolution_proposal(proposal_id, &value, None)?;
+            let profile_name = identity_payload
+                .get("apply_payload")
+                .and_then(|payload| payload.get("profile"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "invalid_loadout_payload: loadout_evolution proposal {proposal_id} has no bound profile"
+                    )
+                })?;
+            let profile = resolve_dispatch_profile(profile_name).ok_or_else(|| {
+                format!(
+                    "unknown_profile: loadout_evolution proposal {proposal_id} references {profile_name}"
+                )
+            })?;
+            let overlay = memcore::db::get_state(&tx, PROFILE_CARD_OVERLAY_NS, profile.name)
+                .map_err(|e| format!("load profile/card overlay for review: {e}"))?;
+            let live_source_revision =
+                loadout_evolution_source_revision(profile, overlay.as_ref());
+            validate_loadout_evolution_proposal(
+                proposal_id,
+                &value,
+                Some(&live_source_revision),
+            )?;
         }
         // Review only permits pending -> approved | rejected. A terminal
         // (rejected/applied) row cannot be resurrected, and an already-approved
