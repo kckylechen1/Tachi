@@ -170,10 +170,6 @@ pub(crate) fn inspect_plan_c_alias_for_local_db_in_home(
     inspect_plan_c_alias_in_home(local_db, &project_root, tachi_home)
 }
 
-pub(crate) fn inspect_plan_c_alias(local_db: &Path, project_root: &Path) -> PlanCAliasInspection {
-    inspect_plan_c_alias_in_home(local_db, project_root, &tachi_home())
-}
-
 pub(crate) fn inspect_plan_c_alias_in_home(
     local_db: &Path,
     project_root: &Path,

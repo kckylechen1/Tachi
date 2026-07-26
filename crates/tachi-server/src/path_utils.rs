@@ -10,8 +10,8 @@ mod tests;
 #[cfg(test)]
 pub(crate) use alias::validate_project_db_relpath;
 pub(crate) use alias::{
-    canonical_db_leaf_exists_without_symlink, plan_c_alias_db_for_root,
-    plan_c_alias_db_for_root_in_home, plan_c_dir_name_from_root,
+    canonical_db_leaf_exists_without_symlink, plan_c_alias_db_for_root_in_home,
+    plan_c_dir_name_from_root,
     plan_c_existing_alias_db_for_root_in_home, plan_c_existing_named_alias_db_in_home,
     plan_c_global_db_path, plan_c_global_db_path_existing, plan_c_global_db_path_existing_in_home,
     plan_c_global_db_path_in_home, plan_c_legacy_dir_name_from_root,
@@ -63,11 +63,11 @@ pub(crate) fn manifest_db_leaf_exists(entry: &crate::manifest::DbEntry) -> Resul
 pub(crate) use home::tachi_home;
 pub(crate) use named::{
     list_named_projects, list_named_projects_in_home, named_project_for_db_path,
-    named_project_for_db_path_in_home, named_project_from_path, named_project_from_path_in_home,
+    named_project_for_db_path_in_home, named_project_from_path_in_home,
 };
 pub(crate) use symlink::{
-    ensure_plan_c_symlink, ensure_plan_c_symlink_in_home, inspect_plan_c_alias,
-    inspect_plan_c_alias_for_local_db, inspect_plan_c_alias_for_local_db_in_home,
+    ensure_plan_c_symlink, ensure_plan_c_symlink_in_home, inspect_plan_c_alias_for_local_db,
+    inspect_plan_c_alias_for_local_db_in_home,
     inspect_plan_c_alias_in_home,
 };
 #[cfg(all(test, unix))]

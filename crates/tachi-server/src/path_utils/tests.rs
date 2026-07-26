@@ -164,20 +164,19 @@ fn tachi_home_detects_workspace_data_tachi_layout() {
 
 #[test]
 fn named_project_from_path_accepts_canonical_layout() {
-    with_env_lock(|| {
-        let _tachi_home = EnvRestore::set("TACHI_HOME", "/tmp/tachi-test-home");
-        let path = PathBuf::from("/tmp/tachi-test-home/projects/sigil/memory.db");
-        assert_eq!(named_project_from_path(&path).as_deref(), Some("sigil"));
-    });
+    let home = Path::new("/tmp/tachi-test-home");
+    let path = home.join("projects/sigil/memory.db");
+    assert_eq!(named_project_from_path_in_home(&path, home).as_deref(), Some("sigil"));
 }
 
 #[test]
 fn named_project_from_path_honors_custom_tachi_home() {
-    with_env_lock(|| {
-        let _tachi_home = EnvRestore::set("TACHI_HOME", "/tmp/custom-tachi-root");
-        let path = PathBuf::from("/tmp/custom-tachi-root/projects/my_app/memory.db");
-        assert_eq!(named_project_from_path(&path).as_deref(), Some("my_app"));
-    });
+    let home = Path::new("/tmp/custom-tachi-root");
+    let path = home.join("projects/my_app/memory.db");
+    assert_eq!(
+        named_project_from_path_in_home(&path, home).as_deref(),
+        Some("my_app")
+    );
 }
 
 #[test]
@@ -201,7 +200,7 @@ fn list_named_projects_finds_dirs_with_memory_db() {
 #[test]
 fn named_project_from_path_rejects_external_projects_dir() {
     let path = PathBuf::from("/data/tachi/projects/hyperion/memory.db");
-    assert!(named_project_from_path(&path).is_none());
+    assert!(named_project_from_path_in_home(&path, Path::new("/tmp/tachi-home")).is_none());
 }
 
 #[test]
@@ -319,7 +318,7 @@ fn plan_c_matching_symlink_remains_valid() {
         std::os::unix::fs::symlink(&local_db, &alias_db).expect("matching alias symlink");
 
         assert!(matches!(
-            inspect_plan_c_alias(&local_db, &repo),
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
             PlanCAliasInspection::MatchingSymlink
         ));
         assert!(matches!(
@@ -429,7 +428,7 @@ fn plan_c_dangling_alias_is_a_typed_integrity_failure() {
             .expect("dangling alias symlink");
 
         assert!(matches!(
-            inspect_plan_c_alias(&local_db, &repo),
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
             PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
         ));
         assert!(matches!(
@@ -458,7 +457,7 @@ fn plan_c_looped_alias_is_a_typed_integrity_failure() {
         std::os::unix::fs::symlink(&alias_db, &alias_db).expect("looped alias symlink");
 
         assert!(matches!(
-            inspect_plan_c_alias(&local_db, &repo),
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
             PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
         ));
         assert!(matches!(
@@ -489,7 +488,7 @@ fn plan_c_alias_resolution_rejects_divergent_compatibility_candidates() {
             std::fs::write(db, bytes).expect("alias DB");
         }
 
-        let error = plan_c_alias_db_for_root(&repo)
+        let error = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
             .expect_err("divergent current and compatibility aliases must fail closed");
         assert!(
             error.contains("ambiguous across divergent aliases"),
@@ -662,7 +661,8 @@ fn plan_c_gen2_raw_canonical_alias_is_recognized_not_orphaned() {
         std::fs::create_dir_all(gen2_db.parent().unwrap()).expect("gen-2 alias parent");
         std::fs::write(&gen2_db, b"gen-2 data").expect("gen-2 alias DB");
 
-        let resolved = plan_c_alias_db_for_root(&repo).expect("gen-2 alias must resolve, not fail");
+        let resolved = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
+            .expect("gen-2 alias must resolve, not fail");
         assert_eq!(
             std::fs::canonicalize(&resolved).unwrap(),
             std::fs::canonicalize(&gen2_db).unwrap(),
@@ -684,10 +684,11 @@ fn plan_c_genuinely_absent_project_resolves_to_fresh_gen4_path() {
         std::fs::create_dir(&repo).expect("repo");
 
         let gen4 = plan_c_dir_name_from_root(&repo).expect("gen-4 identity");
-        let resolved = plan_c_alias_db_for_root(&repo).expect("fresh registration path");
+        let resolved = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
+            .expect("fresh registration path");
         assert_eq!(resolved, plan_c_global_db_path(&gen4));
         assert!(matches!(
-            inspect_plan_c_alias(&repo.join(".tachi/tachi-memory.db"), &repo),
+            inspect_plan_c_alias_in_home(&repo.join(".tachi/tachi-memory.db"), &repo, &tachi_home),
             PlanCAliasInspection::Absent
         ));
     });
@@ -720,14 +721,14 @@ fn plan_c_split_brain_defers_to_routing_gate_on_ambiguous_identity() {
         }
 
         // The routing gate fails closed on the ambiguity...
-        let gate = plan_c_alias_db_for_root(&repo);
+        let gate = plan_c_alias_db_for_root_in_home(&repo, &tachi_home);
         assert!(
             gate.is_err(),
             "ambiguous identity must fail closed at the gate"
         );
         // ...and the diagnostic surface returns the typed integrity failure.
         assert!(matches!(
-            inspect_plan_c_alias(&local_db, &repo),
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
             PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
         ));
     });

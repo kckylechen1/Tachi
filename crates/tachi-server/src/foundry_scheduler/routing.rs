@@ -2,23 +2,8 @@ use super::*;
 
 /// Decide how to route jobs found in `db_path`. The daemon's own global +
 /// project DBs route via the existing `with_store_for_scope` path; any DB
-/// under `~/.tachi/projects/<name>/memory.db` routes as a named project;
+/// under `tachi_home/projects/<name>/memory.db` routes as a named project;
 /// everything else is currently treated as orphan.
-pub(super) fn classify_route(
-    entry: &crate::manifest::DbEntry,
-    db_path: &Path,
-    own_global: &Path,
-    own_project: Option<&Path>,
-) -> Route {
-    classify_route_in_home(
-        entry,
-        db_path,
-        own_global,
-        own_project,
-        &crate::path_utils::tachi_home(),
-    )
-}
-
 pub(super) fn classify_route_in_home(
     entry: &crate::manifest::DbEntry,
     db_path: &Path,

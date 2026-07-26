@@ -4,16 +4,16 @@
 //! Extracted from `status_ops::mod` (no behavior change).
 
 use super::{
-    latest_failed_job, latest_foundry_job, latest_foundry_job_with_statuses, paths_equal,
-    EnrichmentFailureSummary, LatestFailedJob, LatestFoundryJob, NamespaceHealth, RelationCount,
-    EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
+    EXPECTED_EMBEDDING_DIM, EnrichmentFailureSummary, LatestFailedJob, LatestFoundryJob,
+    NamespaceHealth, RelationCount, STUCK_THRESHOLD_SECS, latest_failed_job, latest_foundry_job,
+    latest_foundry_job_with_statuses, paths_equal,
 };
 use crate::manifest::DbRole;
 use chrono::{DateTime, Utc};
 pub(crate) use memcore::RECALL_CACHE_SQL_WHERE as RECALL_CACHE_WHERE;
 use memcore::{
-    job_status_histogram, vector_backfill::vector_backfill_eligible_where, ContinuityMetrics,
-    JobStatusHistogram, MemoryStore, VectorBackfillScope,
+    ContinuityMetrics, JobStatusHistogram, MemoryStore, VectorBackfillScope, job_status_histogram,
+    vector_backfill::vector_backfill_eligible_where,
 };
 use rusqlite::OptionalExtension;
 use serde_json::json;
@@ -405,21 +405,6 @@ fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlit
             Err(other)
         }
     })
-}
-
-pub(crate) fn is_orphan_entry(
-    entry: &crate::manifest::DbEntry,
-    db_path: &Path,
-    global_db_path: &Path,
-    project_db_path: Option<&Path>,
-) -> bool {
-    is_orphan_entry_in_home(
-        entry,
-        db_path,
-        global_db_path,
-        project_db_path,
-        &crate::path_utils::tachi_home(),
-    )
 }
 
 pub(crate) fn is_orphan_entry_in_home(

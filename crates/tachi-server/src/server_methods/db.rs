@@ -220,20 +220,6 @@ impl MemoryServer {
         Ok(())
     }
 
-    /// Resolve a caller alias to both its physical DB and the project identity
-    /// persisted for the session. The current gen-4 canonical name and the
-    /// human-meaningful gen-1 legacy bare-basename alias are stable first-class
-    /// identities and are kept verbatim as the session label (#1061 immutable
-    /// binding). Only the deprecated machine-generated hash schemes (gen-3
-    /// case-folded / gen-2 raw-canonical FNV-8) normalize to the gen-4
-    /// canonical. Standalone exact ASCII named stores retain their registered
-    /// alias.
-    pub(crate) fn resolve_named_project_binding(
-        project_name: &str,
-    ) -> Result<(String, PathBuf), String> {
-        Self::resolve_named_project_binding_in_home(project_name, &crate::path_utils::tachi_home())
-    }
-
     pub(crate) fn resolve_server_named_project_binding(
         &self,
         project_name: &str,
@@ -654,7 +640,7 @@ mod resolve_named_project_tests {
             let previous = crate::path_utils::plan_c_previous_dir_name_from_root(&repo)
                 .expect("pre-#1228 identity");
             let (canonical_name, previous_resolved) =
-                MemoryServer::resolve_named_project_binding(&previous)
+                MemoryServer::resolve_named_project_binding_in_home(&previous, &tachi_home)
                     .expect("pre-#1228 identity remains a compatibility alias");
             assert_eq!(previous_resolved, local_db);
             assert_eq!(canonical_name, name);
@@ -679,8 +665,9 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(previous_alias.parent().unwrap()).expect("alias parent");
             std::os::unix::fs::symlink(&local_db, &previous_alias).expect("legacy alias");
 
-            let (canonical, resolved) = MemoryServer::resolve_named_project_binding(&previous)
-                .expect("legacy binding migration");
+            let (canonical, resolved) =
+                MemoryServer::resolve_named_project_binding_in_home(&previous, &tachi_home)
+                    .expect("legacy binding migration");
             assert_ne!(canonical, previous);
             assert_eq!(
                 std::fs::canonicalize(resolved).unwrap(),
@@ -714,8 +701,9 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(previous_alias.parent().unwrap()).expect("alias parent");
             std::os::unix::fs::symlink(&custom_db, &previous_alias).expect("legacy alias");
 
-            let (canonical, resolved) = MemoryServer::resolve_named_project_binding(&previous)
-                .expect("custom legacy path migration");
+            let (canonical, resolved) =
+                MemoryServer::resolve_named_project_binding_in_home(&previous, &tachi_home)
+                    .expect("custom legacy path migration");
             assert_ne!(canonical, previous);
             assert_eq!(
                 std::fs::canonicalize(resolved).unwrap(),
@@ -779,7 +767,7 @@ mod resolve_named_project_tests {
             let before = serde_json::to_vec_pretty(&manifest).unwrap();
             std::fs::write(&manifest_path, &before).expect("manifest");
 
-            let error = MemoryServer::resolve_named_project_binding(&previous)
+            let error = MemoryServer::resolve_named_project_binding_in_home(&previous, &tachi_home)
                 .expect_err("canonical identity conflict must block migration");
             assert!(error.contains("unrelated DB"), "{error}");
             assert_eq!(
@@ -802,8 +790,9 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(db.parent().unwrap()).expect("named store parent");
             std::fs::write(&db, b"standalone").expect("named store");
 
-            let (identity, resolved) = MemoryServer::resolve_named_project_binding("wiki")
-                .expect("standalone store binding");
+            let (identity, resolved) =
+                MemoryServer::resolve_named_project_binding_in_home("wiki", &tachi_home)
+                    .expect("standalone store binding");
             assert_eq!(identity, "wiki");
             assert_eq!(
                 std::fs::canonicalize(resolved).unwrap(),
@@ -882,8 +871,9 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(db.parent().unwrap()).expect("named store parent");
             std::fs::write(&db, b"standalone").expect("named store");
 
-            let (identity, resolved) = MemoryServer::resolve_named_project_binding("Hyperion")
-                .expect("root-named standalone store binding");
+            let (identity, resolved) =
+                MemoryServer::resolve_named_project_binding_in_home("Hyperion", &tachi_home)
+                    .expect("root-named standalone store binding");
             assert_eq!(identity, "Hyperion");
             assert_eq!(
                 std::fs::canonicalize(resolved).unwrap(),

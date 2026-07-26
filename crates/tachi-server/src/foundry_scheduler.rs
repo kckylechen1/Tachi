@@ -31,25 +31,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::time::{interval, Instant, MissedTickBehavior};
+use tokio::time::{Instant, MissedTickBehavior, interval};
 
-use memcore::{load_pending_foundry_jobs, MemoryStore, PersistedFoundryJob};
+use memcore::{MemoryStore, PersistedFoundryJob, load_pending_foundry_jobs};
 
+use crate::DbScope;
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
 use crate::manifest::{DbRole, Manifest};
-use crate::DbScope;
 
 mod routing;
 mod scheduler;
 mod types;
 mod worker;
 
-#[cfg(test)]
-use routing::classify_route;
 use routing::{classify_route_in_home, manifest_label_for, path_hash};
 pub use scheduler::FoundryScheduler;
+pub use types::{MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL, WorkerMetrics};
 use types::{Route, WorkerHandle};
-pub use types::{WorkerMetrics, MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
 use worker::run_db_worker;
 
 #[cfg(test)]
@@ -75,7 +73,13 @@ mod tests {
     #[test]
     fn classify_route_routes_own_global() {
         let global = PathBuf::from("/tmp/sched-test/global.db");
-        let r = classify_route(&entry(DbRole::Global, "global"), &global, &global, None);
+        let r = classify_route_in_home(
+            &entry(DbRole::Global, "global"),
+            &global,
+            &global,
+            None,
+            Path::new("/tmp/sched-tachi-home"),
+        );
         assert!(matches!(r, Route::Global));
     }
 
@@ -83,33 +87,30 @@ mod tests {
     fn classify_route_routes_own_project() {
         let global = PathBuf::from("/tmp/sched-test/global.db");
         let project = PathBuf::from("/tmp/sched-test/proj.db");
-        let r = classify_route(
+        let r = classify_route_in_home(
             &entry(DbRole::Project, "project"),
             &project,
             &global,
             Some(&project),
+            Path::new("/tmp/sched-tachi-home"),
         );
         assert!(matches!(r, Route::Project));
     }
 
     #[test]
     fn classify_route_recognizes_named_project() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var_os("TACHI_HOME");
-        std::env::set_var("TACHI_HOME", "/tmp/sched-tachi-home");
         let global = PathBuf::from("/tmp/sched-test/global.db");
         let np = PathBuf::from("/tmp/sched-tachi-home/projects/sigil/memory.db");
-        let r = classify_route(&entry(DbRole::Project, ""), &np, &global, None);
+        let r = classify_route_in_home(
+            &entry(DbRole::Project, ""),
+            &np,
+            &global,
+            None,
+            Path::new("/tmp/sched-tachi-home"),
+        );
         match r {
             Route::NamedProject(n) => assert_eq!(n, "sigil"),
             other => panic!("expected NamedProject(sigil), got {other:?}"),
-        }
-        if let Some(v) = saved {
-            std::env::set_var("TACHI_HOME", v);
-        } else {
-            std::env::remove_var("TACHI_HOME");
         }
     }
 
@@ -120,7 +121,8 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let saved = std::env::var_os("TACHI_HOME");
-        std::env::set_var("TACHI_HOME", tmp.path().join("home"));
+        let tachi_home = tmp.path().join("home");
+        std::env::set_var("TACHI_HOME", &tachi_home);
 
         let repo = tmp.path().join("Quant Analyzer");
         let local_db = repo.join(".tachi/memory.db");
@@ -129,11 +131,12 @@ mod tests {
         crate::path_utils::ensure_plan_c_symlink(&local_db, &repo);
 
         let global = tmp.path().join("global/memory.db");
-        let r = classify_route(
+        let r = classify_route_in_home(
             &entry(DbRole::Project, "project:Quant_Analyzer"),
             &local_db,
             &global,
             None,
+            &tachi_home,
         );
         // The alias dir name now carries a stable-hash suffix; the route must
         // carry that exact name (so resolve_named_project_db_path can find the
@@ -156,7 +159,13 @@ mod tests {
     fn classify_route_path_for_agent_db() {
         let global = PathBuf::from("/tmp/sched-test/global.db");
         let agent = PathBuf::from("/home/u/.tachi/agents/main/memory.db");
-        let r = classify_route(&entry(DbRole::Agent, "agent"), &agent, &global, None);
+        let r = classify_route_in_home(
+            &entry(DbRole::Agent, "agent"),
+            &agent,
+            &global,
+            None,
+            Path::new("/tmp/sched-tachi-home"),
+        );
         assert!(matches!(r, Route::Path));
     }
 
@@ -166,7 +175,13 @@ mod tests {
         let weird = PathBuf::from("/somewhere/else/x.db");
         let mut e = entry(DbRole::Unknown, "");
         e.allow_write = false;
-        let r = classify_route(&e, &weird, &global, None);
+        let r = classify_route_in_home(
+            &e,
+            &weird,
+            &global,
+            None,
+            Path::new("/tmp/sched-tachi-home"),
+        );
         match r {
             Route::Orphan(reason) => assert_eq!(reason, "unscoped"),
             other => panic!("expected Orphan(unscoped), got {other:?}"),
@@ -187,32 +202,31 @@ mod tests {
 
     #[test]
     fn named_project_extracted_from_canonical_layout() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var_os("TACHI_HOME");
-        std::env::set_var("TACHI_HOME", "/tmp/sched-tachi-home");
-        let p = PathBuf::from("/tmp/sched-tachi-home/projects/myproj/memory.db");
+        let tachi_home = Path::new("/tmp/sched-tachi-home");
+        let p = tachi_home.join("projects/myproj/memory.db");
         assert_eq!(
-            crate::path_utils::named_project_from_path(&p).as_deref(),
+            crate::path_utils::named_project_from_path_in_home(&p, tachi_home).as_deref(),
             Some("myproj")
         );
-        if let Some(v) = saved {
-            std::env::set_var("TACHI_HOME", v);
-        } else {
-            std::env::remove_var("TACHI_HOME");
-        }
     }
 
     #[test]
     fn named_project_rejects_non_canonical_layout() {
         let p = PathBuf::from("/x/y/notprojects/foo/memory.db");
-        assert!(crate::path_utils::named_project_from_path(&p).is_none());
+        assert!(crate::path_utils::named_project_from_path_in_home(
+            &p,
+            Path::new("/tmp/sched-tachi-home")
+        )
+        .is_none());
     }
 
     #[test]
     fn named_project_rejects_external_projects_dir() {
         let p = PathBuf::from("/home/u/work/data/tachi/projects/hyperion/memory.db");
-        assert!(crate::path_utils::named_project_from_path(&p).is_none());
+        assert!(crate::path_utils::named_project_from_path_in_home(
+            &p,
+            Path::new("/tmp/sched-tachi-home")
+        )
+        .is_none());
     }
 }

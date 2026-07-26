@@ -1,7 +1,7 @@
-use super::{load_manifest_targets, DailyStageReport, ManifestDbTarget, TruthMaintenanceRoute};
+use super::{DailyStageReport, ManifestDbTarget, TruthMaintenanceRoute, load_manifest_targets};
 use crate::server_state::{DbScope, MemoryServer};
 use memcore::MemoryStore;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 struct TruthMaintenanceScope {
     runnable: Vec<ManifestDbTarget>,
@@ -173,20 +173,7 @@ pub(crate) fn resolve_truth_maintenance_route(
     )
 }
 
-pub(crate) fn resolve_truth_maintenance_route_for_paths(
-    global_db_path: &std::path::Path,
-    project_db_path: Option<&std::path::Path>,
-    target: &ManifestDbTarget,
-) -> TruthMaintenanceRoute {
-    resolve_truth_maintenance_route_for_paths_in_home(
-        &crate::path_utils::tachi_home(),
-        global_db_path,
-        project_db_path,
-        target,
-    )
-}
-
-fn resolve_truth_maintenance_route_for_paths_in_home(
+pub(crate) fn resolve_truth_maintenance_route_for_paths_in_home(
     tachi_home: &std::path::Path,
     global_db_path: &std::path::Path,
     project_db_path: Option<&std::path::Path>,

@@ -18,8 +18,7 @@ use schedule::shanghai_today;
 #[cfg(test)]
 use health::collect_database_stats_for_targets;
 #[cfg(test)]
-use maintenance::resolve_truth_maintenance_route_for_paths;
-
+use maintenance::resolve_truth_maintenance_route_for_paths_in_home;
 pub(crate) use report::{parse_json_or_raw, parse_llm_json};
 pub(crate) use schedule::{next_daily_run_time, next_weekly_rem_run_time};
 pub(crate) use types::{

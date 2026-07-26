@@ -182,32 +182,6 @@ impl MemoryServer {
     }
 }
 
-/// Register a just-created repo-local `<git_root>/.tachi/tachi-memory.db` in the
-/// manifest so [`MemoryServer::resolve_named_project_db_path`] can find it by
-/// name independent of the (Unix-only, best-effort) Plan C symlink — see
-/// `server_methods/db.rs::resolve_named_project_db_path`'s doc comment: the
-/// manifest-recorded repo-local path is the addressing scheme's PRIMARY
-/// resolution path, the symlink is a legacy/secondary fallback.
-///
-/// Mirrors the single-entry registration shape
-/// `bootstrap/tidy/migration.rs::update_manifest_after_migration` writes for
-/// its own callers; unlike that helper this never removes or rewrites any
-/// entry but the one it is registering, and refuses to silently fabricate a
-/// fresh empty manifest over a manifest file that exists but fails to parse
-/// (an unreadable/corrupt manifest is an error here, not "no entries yet" —
-/// overwriting it via `load_or_empty` would silently drop every other
-/// registered project's entry).
-pub(crate) fn register_repo_local_manifest_entry(
-    db_path: &std::path::Path,
-    project_name: &str,
-) -> Result<(), String> {
-    register_repo_local_manifest_entry_in_home(
-        db_path,
-        project_name,
-        &crate::path_utils::tachi_home(),
-    )
-}
-
 pub(crate) fn register_repo_local_manifest_entry_in_home(
     db_path: &std::path::Path,
     project_name: &str,
@@ -220,19 +194,6 @@ pub(crate) fn register_repo_local_manifest_entry_in_home(
     with_manifest_registration_file_lock(&manifest_path, || {
         register_repo_local_manifest_entry_locked(db_path, project_name, &manifest_path)
     })
-}
-
-fn register_repo_local_manifest_entry_then<T>(
-    db_path: &std::path::Path,
-    project_name: &str,
-    after_registration: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    register_repo_local_manifest_entry_then_in_home(
-        db_path,
-        project_name,
-        &crate::path_utils::tachi_home(),
-        after_registration,
-    )
 }
 
 pub(crate) fn register_repo_local_manifest_entry_then_in_home<T>(
@@ -1454,20 +1415,25 @@ mod resolve_or_register_workspace_root_tests {
             let db_path = root.join("Manifest-Race-Repo/.tachi/tachi-memory.db");
             std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
             std::fs::write(&db_path, b"reserved DB").expect("DB");
-            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let manifest = root.join("manifest.json");
             crate::manifest::Manifest::empty()
                 .save(&manifest)
                 .expect("seed manifest preimage");
             let preimage = std::fs::read(&manifest).expect("manifest preimage");
             let mut foreign_identity = None;
 
-            let error = register_repo_local_manifest_entry_then(&db_path, "ManifestRace", || {
-                foreign_identity = Some(replace_file_atomically(
-                    &manifest,
-                    b"foreign manifest replacement",
-                ));
-                Err::<(), _>("injected post-registration failure".to_string())
-            })
+            let error = register_repo_local_manifest_entry_then_in_home(
+                &db_path,
+                "ManifestRace",
+                root,
+                || {
+                    foreign_identity = Some(replace_file_atomically(
+                        &manifest,
+                        b"foreign manifest replacement",
+                    ));
+                    Err::<(), _>("injected post-registration failure".to_string())
+                },
+            )
             .expect_err("foreign manifest replacement must make rollback loud");
 
             assert!(error.contains("manifest rollback"), "{error}");
@@ -1490,18 +1456,22 @@ mod resolve_or_register_workspace_root_tests {
             let db_path = root.join("New-Manifest-Race-Repo/.tachi/tachi-memory.db");
             std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");
             std::fs::write(&db_path, b"reserved DB").expect("DB");
-            let manifest = crate::path_utils::tachi_home().join("manifest.json");
+            let manifest = root.join("manifest.json");
             let mut foreign_identity = None;
 
-            let error =
-                register_repo_local_manifest_entry_then(&db_path, "NewManifestRace", || {
+            let error = register_repo_local_manifest_entry_then_in_home(
+                &db_path,
+                "NewManifestRace",
+                root,
+                || {
                     foreign_identity = Some(replace_file_atomically(
                         &manifest,
                         b"foreign manifest replacement",
                     ));
                     Err::<(), _>("injected post-registration failure".to_string())
-                })
-                .expect_err("foreign manifest replacement must make rollback loud");
+                },
+            )
+            .expect_err("foreign manifest replacement must make rollback loud");
 
             assert!(error.contains("manifest rollback"), "{error}");
             assert_eq!(
@@ -1673,13 +1643,15 @@ mod resolve_or_register_workspace_root_tests {
                 std::fs::write(db, b"db").expect("DB");
             }
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let home = root.to_path_buf();
             let handles = [(alpha, "Alpha"), (beta, "Beta")]
                 .into_iter()
                 .map(|(db, project)| {
                     let barrier = std::sync::Arc::clone(&barrier);
+                    let home = home.clone();
                     std::thread::spawn(move || {
                         barrier.wait();
-                        register_repo_local_manifest_entry(&db, project)
+                        register_repo_local_manifest_entry_in_home(&db, project, &home)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1692,7 +1664,7 @@ mod resolve_or_register_workspace_root_tests {
             }
 
             let manifest = crate::manifest::Manifest::load(
-                &crate::path_utils::tachi_home().join("manifest.json"),
+                &root.join("manifest.json"),
             )
             .expect("manifest");
             let mut scopes = manifest
@@ -1986,7 +1958,7 @@ mod resolve_or_register_workspace_root_tests {
     /// Review finding [2] (#1207): auto-registration must not return a
     /// project name that later becomes unreachable once the Plan C symlink
     /// (Unix-only, best-effort) is gone — e.g. it was never created at all on
-    /// a non-Unix host. The manifest entry `register_repo_local_manifest_entry`
+    /// a non-Unix host. The manifest entry `register_repo_local_manifest_entry_in_home`
     /// writes is the primary, symlink-independent addressing path.
     #[test]
     fn project_remains_resolvable_after_the_plan_c_symlink_is_broken() {

@@ -30,7 +30,7 @@ const PROJECT_ID_HASH_HEX_LEN: usize = 24;
 /// from colliding on a single alias directory (which previously produced a
 /// split-brain warning only). For repos that already have a legacy un-hashed alias
 /// dir on disk, resolution falls back to it via
-/// [`plan_c_existing_alias_db_for_root`] so existing data is never orphaned.
+/// [`plan_c_existing_alias_db_for_root_in_home`] so existing data is never orphaned.
 pub(crate) fn plan_c_dir_name_from_root(project_root: &Path) -> Option<String> {
     let canonical_root = std::fs::canonicalize(project_root).ok()?;
     let raw = canonical_root.file_name()?.to_str()?;
@@ -144,12 +144,6 @@ pub(crate) fn plan_c_legacy_dir_name_from_root(project_root: &Path) -> Option<St
 /// dir when the hashed one does not yet exist. Used when creating/resolving the
 /// alias so repos that predate the hash suffix keep addressing their old data.
 ///
-/// Returns an error when the root cannot produce a stable identity or when
-/// compatibility aliases disagree about the physical DB.
-pub(crate) fn plan_c_alias_db_for_root(project_root: &Path) -> Result<PathBuf, String> {
-    plan_c_alias_db_for_root_in_home(project_root, &tachi_home())
-}
-
 pub(crate) fn plan_c_alias_db_for_root_in_home(
     project_root: &Path,
     tachi_home: &Path,
@@ -165,14 +159,6 @@ pub(crate) fn plan_c_alias_db_for_root_in_home(
         return Ok(existing);
     }
     Ok(plan_c_global_db_path_in_home(tachi_home, &current))
-}
-
-/// Like [`plan_c_alias_db_for_root`] but only returns a path when an alias DB
-/// (hashed or legacy) actually exists on disk. Used by reverse lookups.
-pub(crate) fn plan_c_existing_alias_db_for_root(
-    project_root: &Path,
-) -> Result<Option<PathBuf>, String> {
-    plan_c_existing_alias_db_for_root_in_home(project_root, &tachi_home())
 }
 
 pub(crate) fn plan_c_existing_alias_db_for_root_in_home(

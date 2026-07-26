@@ -1,7 +1,7 @@
 use crate::DbScope;
 use memcore::MemoryEntry;
-use serde_json::{json, Value};
-use std::collections::{hash_map::Entry, HashMap};
+use serde_json::{Value, json};
+use std::collections::{HashMap, hash_map::Entry};
 
 pub(crate) fn normalize_search_relevance(results: &mut [(memcore::SearchResult, DbScope)]) {
     let max_score = results
@@ -247,10 +247,6 @@ pub(crate) fn named_project_db_exists(server: &crate::MemoryServer, name: &str) 
         .resolve_server_named_project_db_path(name)
         .map(|path| path.exists())
         .unwrap_or(false)
-}
-
-pub(crate) fn named_project_from_db_path(path: &std::path::Path) -> Option<String> {
-    named_project_from_db_path_in_home(path, &crate::path_utils::tachi_home())
 }
 
 pub(crate) fn named_project_from_db_path_in_home(
