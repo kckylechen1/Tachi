@@ -175,3 +175,65 @@ fn gc_tables_reconciles_query_diversity_after_prune() {
         "query_diversity should match distinct query hashes kept after GC"
     );
 }
+
+/// tachi#1446: the access-history quota is per `(memory_id, event_kind)`.
+///
+/// Display events outnumber use events by construction, so a quota that
+/// partitioned by `memory_id` alone would spend the entire budget on display
+/// rows and delete the rare use rows first — silently, since the summary
+/// counter reports the same "pruned N" either way. The fixture is built so a
+/// single-partition quota provably fails it: with a budget of 2 and 10 display
+/// rows all NEWER than the 2 use rows, a `PARTITION BY memory_id` quota keeps
+/// two display rows and deletes BOTH use rows.
+#[test]
+fn gc_tables_gives_each_event_kind_its_own_quota() {
+    let mut conn = make_conn();
+    let e = make_entry("gc-kinds", "per-kind quota target");
+    upsert(&mut conn, &e, false).unwrap();
+
+    // Use events first, so they are the OLDEST rows: under a single partition
+    // ordered by accessed_at DESC they are exactly the rows that get cut.
+    for i in 0..2 {
+        conn.execute(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash, event_kind)
+             VALUES (?1, ?2, '', 'use')",
+            params!["gc-kinds", format!("2026-01-01T00:00:0{i}Z")],
+        )
+        .unwrap();
+    }
+    for i in 0..10 {
+        conn.execute(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash, event_kind)
+             VALUES (?1, ?2, '', 'display')",
+            params!["gc-kinds", format!("2026-06-01T00:00:{i:02}Z")],
+        )
+        .unwrap();
+    }
+
+    let cfg = GcConfig {
+        access_history_keep_per_memory: 2,
+        ..GcConfig::default()
+    };
+    gc_tables(&mut conn, &cfg).unwrap();
+
+    let count_kind = |kind: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM access_history WHERE memory_id = 'gc-kinds' AND event_kind = ?1",
+            params![kind],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        count_kind("use"),
+        2,
+        "both use events must survive a prune that removes display events — they are the \
+         scarce provenance the ranking knob depends on"
+    );
+    assert_eq!(
+        count_kind("display"),
+        2,
+        "display events must still be capped at the configured quota"
+    );
+}

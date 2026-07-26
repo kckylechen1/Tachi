@@ -27,6 +27,7 @@ pub(crate) use rerank::{
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;
+pub(crate) use save_memory::handle_save_memory_from_caller;
 pub(crate) use save_memory::handle_save_memory_with_references;
 pub(crate) use save_memory::save_eval_memory;
 pub(crate) use save_memory::{

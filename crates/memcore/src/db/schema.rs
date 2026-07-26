@@ -208,6 +208,20 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // full path — a sentinel migration alone would leave path (b) short.
     ensure_column(conn, "memories", "last_use_at", "TEXT")?;
     ensure_column(conn, "access_history", "query_hash", "TEXT")?;
+    // tachi#1446 lever 5. Provenance discriminator on the access ledger.
+    // `'display'` is the correct default for every pre-existing row: before
+    // this column, `record_access_with_updates` (reached only from
+    // `search.rs`'s `hybrid_search`) was the single production writer of this
+    // table, so every legacy row is by construction a record of the pipeline
+    // showing a result. NOT NULL + DEFAULT keeps the column total, so
+    // `get_use_access_times`' `event_kind = 'use'` predicate can never be
+    // confused by a NULL.
+    ensure_column(
+        conn,
+        "access_history",
+        "event_kind",
+        "TEXT NOT NULL DEFAULT 'display'",
+    )?;
 
     // Temporal edge columns for memory_edges
     ensure_column(

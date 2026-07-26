@@ -12,14 +12,27 @@ use crate::types::GcConfig;
 pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Value, MemoryError> {
     let tx = conn.transaction()?;
 
-    // 1. access_history: retain latest N entries per memory_id, delete rest
+    // 1. access_history: retain latest N entries per (memory_id, event_kind),
+    //    delete rest.
+    //
+    //    tachi#1446: the partition includes `event_kind` deliberately. Display
+    //    events outnumber use events by construction — one display row per
+    //    returned row per search, versus one use row only when a caller-
+    //    initiated save named a memory's id — so a quota partitioned by
+    //    `memory_id` alone would spend the whole budget on display rows and
+    //    delete the rare use rows first. That failure is silent: the counters
+    //    keep reporting rows pruned, and the signal the ranking knob depends on
+    //    erodes with no error anywhere. Per-kind quotas make the retained
+    //    budget for each provenance independent of the other's volume, and
+    //    match the per-kind read cap in `memory_crud::access`'s
+    //    `ACCESS_TIMES_MAX_PER_MEMORY`.
     let ah_sql = format!(
         "DELETE FROM access_history
          WHERE rowid IN (
              SELECT rowid FROM (
                  SELECT rowid,
                         ROW_NUMBER() OVER (
-                            PARTITION BY memory_id
+                            PARTITION BY memory_id, event_kind
                             ORDER BY accessed_at DESC
                         ) AS rn
                  FROM access_history

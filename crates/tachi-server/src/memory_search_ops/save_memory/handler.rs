@@ -1,8 +1,9 @@
 use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
-    find_exact_path_text_duplicate, lookup_existing_entry, spawn_save_contradiction_detection,
-    upsert_idless_save_entry, upsert_save_entry, AtomicReferenceWrite,
+    find_exact_path_text_duplicate, lookup_existing_entry, mark_save_target_used,
+    spawn_save_contradiction_detection, upsert_idless_save_entry, upsert_save_entry,
+    AtomicReferenceWrite,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
@@ -21,6 +22,27 @@ pub(super) struct AuthorizedReferenceMutations(Vec<memcore::db::ValidatedReferen
 enum SaveMetadataAuthority {
     Public,
     ServerVerified,
+}
+
+/// Who asked for this save — tachi#1446 signal D.
+///
+/// Orthogonal to [`SaveMetadataAuthority`], which answers "may this payload
+/// write reserved reference metadata"; this answers "was there a caller on the
+/// other end". They do not coincide: `dispatch_ops::kanban_helpers` re-saves a
+/// kanban row through the `Public` metadata authority and is still the system
+/// writing its own bookkeeping.
+///
+/// Only [`SaveInitiator::Caller`] can mark a save's target memory used, so the
+/// polarity is chosen to fail safe: a call site that forgets to classify itself
+/// gets `System` and under-records the signal, rather than feeding the exposure
+/// loop this issue exists to cut.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SaveInitiator {
+    /// An agent-facing tool call (`tachi_save`, `tachi_memory action=save`,
+    /// `save_memory`) — the id in `params.id` came from outside the process.
+    Caller,
+    /// An in-process writer re-saving a row it owns.
+    System,
 }
 
 impl AuthorizedReferenceMutations {
@@ -276,6 +298,11 @@ fn domain_affinity_note_json(note: &AffinityNote) -> serde_json::Value {
     }
 }
 
+/// In-process save. tachi#1446: [`SaveInitiator::System`], because most call
+/// sites of this entry point are in-process writers (`kanban_helpers`,
+/// `flow_link`, `complete_ops::lessons`, dispatch eval persistence). The one
+/// agent-facing caller — the `save_memory` tool wrapper — uses
+/// [`handle_save_memory_from_caller`] instead.
 pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
     params: SaveMemoryParams,
@@ -285,17 +312,45 @@ pub(crate) async fn handle_save_memory(
         params,
         AuthorizedReferenceMutations::empty(),
         SaveMetadataAuthority::Public,
+        SaveInitiator::System,
     )
     .await
 }
 
+/// [`handle_save_memory`] for the agent-facing `save_memory` tool: identical
+/// except that a `params.id` naming an existing memory marks that memory used
+/// (tachi#1446 signal D — see `persist::mark_save_target_used`).
+pub(crate) async fn handle_save_memory_from_caller(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+) -> Result<String, String> {
+    handle_save_memory_impl(
+        server,
+        params,
+        AuthorizedReferenceMutations::empty(),
+        SaveMetadataAuthority::Public,
+        SaveInitiator::Caller,
+    )
+    .await
+}
+
+/// The `tachi_save` facade's memory arm — always a caller-initiated save
+/// (`facade_save_ops::handle_tachi_save` is reached only from the `tachi_save`
+/// tool, `tachi_memory action=save`, and `tachi_memory action=checkpoint`).
 pub(crate) async fn handle_save_memory_with_references(
     server: &MemoryServer,
     params: SaveMemoryParams,
     references: Vec<String>,
 ) -> Result<String, String> {
     let evidence_refs = AuthorizedReferenceMutations::validate(&references)?;
-    handle_save_memory_impl(server, params, evidence_refs, SaveMetadataAuthority::Public).await
+    handle_save_memory_impl(
+        server,
+        params,
+        evidence_refs,
+        SaveMetadataAuthority::Public,
+        SaveInitiator::Caller,
+    )
+    .await
 }
 
 pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
@@ -308,6 +363,7 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
         params,
         AuthorizedReferenceMutations::from_authorized(mutations),
         SaveMetadataAuthority::ServerVerified,
+        SaveInitiator::System,
     )
     .await
 }
@@ -317,6 +373,7 @@ async fn handle_save_memory_impl(
     mut params: SaveMemoryParams,
     evidence_refs: AuthorizedReferenceMutations,
     metadata_authority: SaveMetadataAuthority,
+    initiator: SaveInitiator,
 ) -> Result<String, String> {
     strip_reserved_reference_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
@@ -567,6 +624,24 @@ async fn handle_save_memory_impl(
             named_project.as_deref(),
             &evidence_write,
         )?;
+    }
+
+    // tachi#1446 signal D. The save has committed; if a caller named an
+    // existing memory's id, that memory was used. Deliberately AFTER the
+    // upsert (a save that failed is not a use) and deliberately outside it (a
+    // use event must never be able to fail a save — see
+    // `mark_save_target_used`). `idless_identity` is `Some` only when the
+    // caller supplied no id at all, so that branch can never qualify.
+    if initiator == SaveInitiator::Caller && requested_id.is_some() && existing_entry.is_some() {
+        if let Err(error) =
+            mark_save_target_used(server, &entry.id, target_db, named_project.as_deref())
+        {
+            eprintln!(
+                "warning: tachi#1446 use-provenance mark failed for memory {} (save itself \
+                 succeeded): {error}",
+                entry.id
+            );
+        }
     }
 
     // #1435 slice 3 / #2059: write-side recall-cache bust, shared with the

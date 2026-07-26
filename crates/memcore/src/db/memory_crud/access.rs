@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection};
-use std::collections::{HashMap, HashSet};
+use serde::Serialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::error::MemoryError;
 
@@ -11,6 +12,80 @@ use super::{now_utc_iso, IN_BATCH_SIZE};
 pub(crate) struct AccessUpdate {
     pub access_count: i64,
     pub last_access: Option<String>,
+}
+
+/// Provenance of one `access_history` row — tachi#1446 lever 5.
+///
+/// The whole defect this discriminates is that one write path
+/// (`record_access_with_updates`) records *the system showing a row* and
+/// another read path (`get_access_times` → the ACT-R base-level-activation
+/// floor in `scorer.rs`) treats those rows as evidence about the memory. The
+/// two are only separable if the row says which it is.
+///
+/// [`AccessEventKind::Display`] is the default for stored rows and for every
+/// row written before the column existed — see the `event_kind` `ensure_column`
+/// in `db/schema.rs` for why that default is the honest one rather than a
+/// convenience.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessEventKind {
+    /// The recall pipeline returned this memory in a result set.
+    Display,
+    /// A caller-initiated save cited this memory (tachi#1446 signal D).
+    Use,
+}
+
+impl AccessEventKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Display => "display",
+            Self::Use => "use",
+        }
+    }
+
+    /// The SQL fragment appended to an `access_history` scan to restrict it to
+    /// this kind. A `&'static str` chosen from a closed enum rather than a
+    /// bound parameter: the value is never caller-supplied, and inlining it
+    /// keeps the numbered-placeholder indices of the surrounding queries
+    /// unchanged, so the two arms of `get_access_times_of_kind` differ in
+    /// exactly one literal and cannot drift apart in placeholder arithmetic.
+    ///
+    /// **There is deliberately no unfiltered variant.** Before tachi#1446
+    /// every row in `access_history` was a display record, so the `Display`
+    /// arm returns exactly the row set the pre-#1446 unfiltered query returned
+    /// — which is what makes the knob-OFF path byte-identical — while making
+    /// it impossible for a `use` row to reach the default scorer by omission.
+    const fn sql_predicate(self) -> &'static str {
+        match self {
+            Self::Display => " AND event_kind = 'display'",
+            Self::Use => " AND event_kind = 'use'",
+        }
+    }
+
+    /// Every variant, for instrumentation that reports one number per kind.
+    pub const ALL: [Self; 2] = [Self::Display, Self::Use];
+}
+
+/// Answer to "is signal D dense enough, or is an explicit by-id fetch (signal
+/// C) required?" — tachi#1446.
+///
+/// D marks a memory used only when a save explicitly cites it. Whether that is
+/// a usable ranking signal or a column that stays NULL forever is an empirical
+/// question about a deployment, not something that can be argued from the
+/// code, so this is the instrument that answers it. See
+/// [`access_event_density`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccessEventDensity {
+    /// Inclusive lower bound (ISO-8601 UTC) the counts were taken over.
+    pub since: String,
+    /// `access_history` rows per `event_kind` at or after `since`.
+    pub events_by_kind: BTreeMap<String, i64>,
+    /// Distinct `memory_id`s per `event_kind` at or after `since`.
+    pub memories_by_kind: BTreeMap<String, i64>,
+    /// Memories carrying a non-NULL `last_use_at` (all time, not windowed —
+    /// the column is last-write-wins, so a window would be meaningless).
+    pub memories_with_last_use_at: i64,
+    /// Total rows in `memories`, as the denominator for the line above.
+    pub memories_total: i64,
 }
 
 /// FNV-1a 32-bit hash of a query string for query_diversity tracking.
@@ -121,6 +196,15 @@ pub(crate) fn record_access_with_updates(
         tx.execute(&sql, params_from_iter(values.iter()))?;
     }
 
+    // tachi#1446 lever 5: this INSERT deliberately does NOT name `event_kind`.
+    // The column's `NOT NULL DEFAULT 'display'` supplies it, which keeps this
+    // statement — the hot path's third write per search — byte-for-byte what it
+    // was, including its `IN_BATCH_SIZE / 3` chunking (sized for three bound
+    // parameters per row). Naming the column would mean four parameters per
+    // row and a re-derived chunk size for a value the schema already pins.
+    // `display` is the only correct value here by construction: the sole
+    // production caller of this function is `search.rs`'s `hybrid_search`,
+    // recording the rows it just returned.
     for batch in existing_ids.chunks(IN_BATCH_SIZE / 3) {
         let sql = format!(
             "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES {}",
@@ -236,6 +320,111 @@ pub(crate) fn record_access_with_updates(
     Ok(updates)
 }
 
+/// Record that `ids` were **used** — tachi#1446 signal D.
+///
+/// "Used" here is deliberately narrow, and this function does not decide it:
+/// the caller decides, and the only production caller that does is
+/// `save_memory::persist::mark_save_target_used` in `tachi-server`, reached
+/// only when an MCP-tool save named an existing memory's id (see that
+/// function's doc for the channel inventory and why nothing else qualifies).
+/// It is the complement of `record_access_with_updates`, which records the
+/// system *showing* a row.
+///
+/// What this writes:
+/// * `memories.last_use_at = at` — the recency anchor `scorer.rs` reads when
+///   `RecallConfig::use_provenance_recency` is on;
+/// * one `access_history` row per id with `event_kind = 'use'` — the ACT-R
+///   base-level-activation evidence [`get_use_access_times`] reads, and the
+///   per-candidate use count levers 2 and 4 derive from (`search/ranking.rs`
+///   counts the rows that same read already returned, so the counts cost no
+///   extra query).
+///
+/// **Unconditional on `RecallConfig::use_provenance_recency`.** The knob
+/// governs *reads*, not this write: a deployment has to be able to accumulate
+/// use provenance and measure its density ([`access_event_density`]) before
+/// deciding to switch ranking onto it, and a knob-gated writer would make the
+/// first day after the flip look identical to the defect it repairs. Nothing
+/// written here can reach the default scorer — [`get_access_times`] filters to
+/// `display`, so with the knob off these rows are invisible to ranking.
+///
+/// What it deliberately does NOT write: `access_count`, `last_access`,
+/// `recall_count`, `query_diversity`, or the tier promotion gate. Those are
+/// the display-side counters; a use event must not be able to reach them or
+/// the two provenances re-merge and the whole discriminator is decorative.
+///
+/// **No transaction is opened here.** The caller owns atomicity — every
+/// production caller runs inside the save's own `BEGIN IMMEDIATE`, and
+/// `rusqlite::Transaction` derefs to `Connection`, so `&tx` is accepted
+/// directly. Ids with no row in `memories` are skipped (same
+/// existence-filtered contract as `record_access_with_updates`); the return
+/// value is the number of ids that actually existed and were marked.
+pub fn record_memory_use(
+    conn: &Connection,
+    ids: &[String],
+    at: &str,
+) -> Result<usize, MemoryError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let unique_ids = unique_id_order(ids);
+    let mut existing_set = HashSet::with_capacity(unique_ids.len());
+    for batch in unique_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(1, batch.len());
+        let sql = format!("SELECT id FROM memories WHERE id IN ({placeholders})");
+        let values = batch
+            .iter()
+            .map(|id| Value::Text((*id).to_string()))
+            .collect::<Vec<_>>();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
+        for row in rows {
+            existing_set.insert(row?);
+        }
+    }
+    let existing_ids = unique_ids
+        .into_iter()
+        .filter(|id| existing_set.contains(*id))
+        .collect::<Vec<_>>();
+    if existing_ids.is_empty() {
+        return Ok(0);
+    }
+
+    for batch in existing_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(2, batch.len());
+        let sql = format!("UPDATE memories SET last_use_at = ?1 WHERE id IN ({placeholders})");
+        let mut values = Vec::with_capacity(batch.len() + 1);
+        values.push(Value::Text(at.to_string()));
+        values.extend(batch.iter().map(|id| Value::Text((*id).to_string())));
+        conn.execute(&sql, params_from_iter(values.iter()))?;
+    }
+
+    // Four bound parameters per row, so the chunk divisor is 4 (the display
+    // writer above uses 3 because it lets `event_kind` default).
+    for batch in existing_ids.chunks(IN_BATCH_SIZE / 4) {
+        let sql = format!(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash, event_kind) VALUES {}",
+            values_clause(1, batch.len(), 4)
+        );
+        let mut values = Vec::with_capacity(batch.len() * 4);
+        for id in batch {
+            values.push(Value::Text((*id).to_string()));
+            values.push(Value::Text(at.to_string()));
+            // Empty query hash on purpose: a use event has no query behind it,
+            // and `query_diversity` counts distinct NON-empty hashes
+            // (`stats_gc.rs`'s reconciliation excludes `query_hash = ''`), so
+            // this cannot inflate the promotion gate.
+            values.push(Value::Text(String::new()));
+            values.push(Value::Text(AccessEventKind::Use.as_str().to_string()));
+        }
+        conn.execute(&sql, params_from_iter(values.iter()))?;
+    }
+
+    Ok(existing_ids.len())
+}
+
 /// Per-`memory_id` cap on rows `get_access_times` will read from
 /// `access_history`. ACT-R base-level activation (`base_level_activation` in
 /// `scorer.rs`) sums `t_j^(-d)` over every returned access age — a plain sum,
@@ -248,17 +437,59 @@ pub(crate) fn record_access_with_updates(
 /// (e.g. between GC runs) — access_history is the fastest-growing table
 /// (15.6k rows observed on a single live DB) and this query was previously
 /// unbounded per id.
+///
+/// tachi#1446: the cap is applied *after* the `event_kind` filter, so each
+/// kind gets its own window of this size. That is deliberately the same shape
+/// as the GC quota, which now partitions by `(memory_id, event_kind)` — a cap
+/// applied before the filter would let 256 display rows starve the read of the
+/// rare use rows exactly as an un-partitioned GC would starve their storage.
 const ACCESS_TIMES_MAX_PER_MEMORY: i64 = 256;
 
-/// Fetch access timestamps for a set of memory IDs (for ACT-R base-level activation).
+/// Fetch **display** access timestamps for a set of memory IDs (for ACT-R
+/// base-level activation).
 /// Returns a map from memory_id -> sorted list of seconds-since-epoch (age in seconds).
 /// Handles batching internally to stay under SQLite's 999 parameter limit.
 /// Caps each memory_id to its [`ACCESS_TIMES_MAX_PER_MEMORY`] most recent
 /// accesses (see that constant's doc comment for why this preserves ACT-R
 /// semantics).
+///
+/// tachi#1446 lever 5: this is the `RecallConfig::use_provenance_recency` =
+/// **off** arm, and it is byte-identical in result to the pre-#1446 unfiltered
+/// query — every row that existed before the `event_kind` column carries
+/// `display` by migration default, and the only writer of any other value is
+/// [`record_memory_use`], which did not exist. The filter is what keeps that
+/// true *going forward*: without it, a use event would silently raise the ACT-R
+/// floor at default config, i.e. the new signal would leak into the exact
+/// channel #1446 is repairing. The on arm is [`get_use_access_times`].
 pub fn get_access_times(
     conn: &Connection,
     ids: &[String],
+) -> Result<HashMap<String, Vec<f64>>, MemoryError> {
+    get_access_times_of_kind(conn, ids, AccessEventKind::Display)
+}
+
+/// Fetch **use** access timestamps for a set of memory IDs — tachi#1446
+/// lever 5, the `use_provenance_recency` = on arm of [`get_access_times`].
+///
+/// Same shape, same cap, same batching; only `event_kind` differs. What the
+/// ACT-R base-level-activation floor (`scorer::default_decay_score_actr_with_config`)
+/// sums over is then evidence that callers *used* these memories, never
+/// evidence that the recall pipeline displayed them.
+///
+/// `search/ranking.rs` also takes the per-candidate **use count** from the
+/// length of these vectors (levers 2 and 4), so a candidate's use count is
+/// capped by [`ACCESS_TIMES_MAX_PER_MEMORY`] exactly like its ages are.
+pub fn get_use_access_times(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, Vec<f64>>, MemoryError> {
+    get_access_times_of_kind(conn, ids, AccessEventKind::Use)
+}
+
+fn get_access_times_of_kind(
+    conn: &Connection,
+    ids: &[String],
+    kind: AccessEventKind,
 ) -> Result<HashMap<String, Vec<f64>>, MemoryError> {
     if ids.is_empty() {
         return Ok(HashMap::new());
@@ -266,6 +497,7 @@ pub fn get_access_times(
 
     let now = Utc::now();
     let mut result: HashMap<String, Vec<f64>> = HashMap::new();
+    let kind_predicate = kind.sql_predicate();
 
     for batch in ids.chunks(IN_BATCH_SIZE) {
         let placeholders: Vec<String> = batch
@@ -282,7 +514,7 @@ pub fn get_access_times(
                             ORDER BY accessed_at DESC
                         ) AS rn
                  FROM access_history
-                 WHERE memory_id IN ({})
+                 WHERE memory_id IN ({}){kind_predicate}
              ) ranked
              WHERE rn <= ?{hash_idx}
              ORDER BY accessed_at DESC",
@@ -308,6 +540,67 @@ pub fn get_access_times(
     }
 
     Ok(result)
+}
+
+/// Measure how dense the tachi#1446 signal-D use provenance actually is —
+/// the instrument [`AccessEventDensity`] documents.
+///
+/// `since` is an inclusive ISO-8601 UTC lower bound compared as a string,
+/// which is sound here and only here because every `accessed_at` this table
+/// holds is written by `record_access_with_updates` or
+/// [`record_memory_use`] from `now_utc_iso()` / an RFC-3339 UTC instant — one
+/// fixed-width, zero-padded, UTC-normalised format, so lexicographic order is
+/// chronological order. Do not copy this comparison to a column that mixes
+/// offsets.
+///
+/// Every kind in [`AccessEventKind::ALL`] is present in both maps, zero
+/// included: "no use events at all" is the single most important answer this
+/// instrument can give, and a missing key would report it as a gap in the
+/// instrument rather than as the measurement it is.
+pub fn access_event_density(
+    conn: &Connection,
+    since: &str,
+) -> Result<AccessEventDensity, MemoryError> {
+    let mut events_by_kind: BTreeMap<String, i64> = AccessEventKind::ALL
+        .iter()
+        .map(|kind| (kind.as_str().to_string(), 0))
+        .collect();
+    let mut memories_by_kind = events_by_kind.clone();
+
+    let mut stmt = conn.prepare(
+        "SELECT event_kind, COUNT(*), COUNT(DISTINCT memory_id)
+           FROM access_history
+          WHERE accessed_at >= ?1
+          GROUP BY event_kind",
+    )?;
+    let rows = stmt.query_map([since], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (kind, events, memories) = row?;
+        events_by_kind.insert(kind.clone(), events);
+        memories_by_kind.insert(kind, memories);
+    }
+
+    let memories_with_last_use_at: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE last_use_at IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    let memories_total: i64 =
+        conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+
+    Ok(AccessEventDensity {
+        since: since.to_string(),
+        events_by_kind,
+        memories_by_kind,
+        memories_with_last_use_at,
+        memories_total,
+    })
 }
 
 #[cfg(test)]
@@ -402,5 +695,133 @@ mod get_access_times_tests {
 
         let times = get_access_times(conn, &["quiet".to_string()]).expect("get_access_times");
         assert_eq!(times.get("quiet").map(Vec::len), Some(3));
+    }
+
+    /// tachi#1446 signal D + lever 5, in one assertion set: the use write
+    /// lands, and the two reads are genuinely separated in both directions.
+    ///
+    /// The negative half is the load-bearing one. If `get_access_times` did
+    /// not filter, the use row would raise the ACT-R base-level-activation
+    /// floor at **default** config — the new signal leaking straight back into
+    /// the channel #1446 exists to repair, and invisible to any test that only
+    /// checked the knob-on path.
+    #[test]
+    fn record_memory_use_writes_use_provenance_the_display_read_cannot_see() {
+        let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+        seed_memory(&mut store, "cited");
+        seed_memory(&mut store, "shown");
+        let conn = store.connection();
+        seed_access_history(conn, "shown", 2);
+        seed_access_history(conn, "cited", 1);
+
+        let marked = record_memory_use(
+            conn,
+            &[
+                "cited".to_string(),
+                "cited".to_string(),
+                "ghost".to_string(),
+            ],
+            "2026-07-26T00:00:00Z",
+        )
+        .expect("record_memory_use");
+        assert_eq!(
+            marked, 1,
+            "duplicate ids collapse and an id with no memories row is skipped"
+        );
+
+        let ids = vec!["cited".to_string(), "shown".to_string()];
+        let display = get_access_times(conn, &ids).expect("display read");
+        assert_eq!(
+            display.get("cited").map(Vec::len),
+            Some(1),
+            "the display read must still see the display row, and ONLY it — a use event must \
+             not reach the ACT-R floor at default config"
+        );
+        assert_eq!(display.get("shown").map(Vec::len), Some(2));
+
+        let uses = get_use_access_times(conn, &ids).expect("use read");
+        assert_eq!(
+            uses.get("cited").map(Vec::len),
+            Some(1),
+            "the use read must see the recorded use event"
+        );
+        assert!(
+            !uses.contains_key("shown"),
+            "a row that was only ever displayed has no use history — the use read must omit \
+             the id entirely, not return an empty vector for it"
+        );
+
+        let last_use_at: Option<String> = conn
+            .query_row(
+                "SELECT last_use_at FROM memories WHERE id = 'cited'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read last_use_at");
+        assert_eq!(last_use_at.as_deref(), Some("2026-07-26T00:00:00Z"));
+
+        let shown_last_use_at: Option<String> = conn
+            .query_row(
+                "SELECT last_use_at FROM memories WHERE id = 'shown'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read last_use_at");
+        assert_eq!(
+            shown_last_use_at, None,
+            "being displayed must never set the use timestamp"
+        );
+
+        let display_counters: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT access_count, last_access FROM memories WHERE id = 'cited'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read display counters");
+        assert_eq!(
+            display_counters,
+            (0, None),
+            "a use event must not touch the display-side counters, or the two provenances \
+             re-merge and the discriminator is decorative"
+        );
+    }
+
+    /// tachi#1446: the density instrument returns a number on a fixture,
+    /// including the number that matters most — zero use events.
+    #[test]
+    fn access_event_density_reports_a_number_for_every_kind() {
+        let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+        seed_memory(&mut store, "a");
+        seed_memory(&mut store, "b");
+        let conn = store.connection();
+
+        let empty = access_event_density(conn, "1970-01-01T00:00:00Z").expect("density");
+        assert_eq!(empty.events_by_kind.get("use"), Some(&0));
+        assert_eq!(empty.events_by_kind.get("display"), Some(&0));
+        assert_eq!(empty.memories_with_last_use_at, 0);
+        assert_eq!(empty.memories_total, 2);
+
+        seed_access_history(conn, "a", 3);
+        seed_access_history(conn, "b", 1);
+        record_memory_use(conn, &["a".to_string()], "2026-07-26T00:00:00Z").expect("mark used");
+
+        let density = access_event_density(conn, "1970-01-01T00:00:00Z").expect("density");
+        assert_eq!(density.events_by_kind.get("display"), Some(&4));
+        assert_eq!(density.memories_by_kind.get("display"), Some(&2));
+        assert_eq!(density.events_by_kind.get("use"), Some(&1));
+        assert_eq!(density.memories_by_kind.get("use"), Some(&1));
+        assert_eq!(density.memories_with_last_use_at, 1);
+        assert_eq!(density.memories_total, 2);
+
+        // A window that starts after every seeded row still answers with
+        // numbers, not with missing keys.
+        let future = access_event_density(conn, "2099-01-01T00:00:00Z").expect("density");
+        assert_eq!(future.events_by_kind.get("display"), Some(&0));
+        assert_eq!(future.events_by_kind.get("use"), Some(&0));
+        assert_eq!(
+            future.memories_with_last_use_at, 1,
+            "the last_use_at coverage counter is all-time by contract, not windowed"
+        );
     }
 }

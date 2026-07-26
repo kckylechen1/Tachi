@@ -172,8 +172,8 @@ pub use noise::{is_noise_text, should_skip_query};
 pub use recall_config::RecallConfig;
 pub use relation_ontology::ComponentGovernanceRelation;
 pub use scorer::{
-    generic_precision_multiplier, surprise_score, DecayPolicy, DecayPolicyContext,
-    DefaultDecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY,
+    generic_precision_multiplier, surprise_score, surprise_score_with_config, DecayPolicy,
+    DecayPolicyContext, DefaultDecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY,
 };
 pub use search::{
     apply_blend_relevance, hybrid_search, hybrid_search_with_receipt,
