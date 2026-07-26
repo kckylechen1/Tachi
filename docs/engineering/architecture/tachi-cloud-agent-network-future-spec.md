@@ -23,6 +23,17 @@ extension, or implementation.
 - [`memory-soul-architecture.md`](memory-soul-architecture.md) defines the
   AgentIdentity boundary.
 
+### Non-authorizing router guidance
+
+Any future leaf must obey the native parent law in
+[`AGENTS.md`](../../../AGENTS.md): choose exactly one native primary parent,
+attach beneath the nearest coherent child umbrella or router, and use
+`Related to #...` for secondary domains. Federation and staffing work would
+likely route primarily through #749; credential, authority, data-partitioning,
+or egress work would likely route primarily through #1316. This guidance
+creates no issue, authorizes no leaf, and does not pre-ratify a primary parent
+or design.
+
 ---
 
 ## Part A - Tachi Cloud sync space
@@ -33,8 +44,12 @@ hold, or whether it is paid.
 
 ### A.1 Memory sync (potentially opt-in per library)
 
-- A future design could use state-portability bundles rather than live WAL
-  files, but the sync unit and its representation remain open.
+- The ratified state-portability invariant remains controlling: live state
+  stays local; only immutable state-portability bundles cross machines.
+- A future sync service consumes that same bundle format, including its
+  existing `vault.enc` member. This preserves the ratified transport boundary;
+  it does not decide encryption or server readability, device enrollment,
+  revocation or recovery, or provider and product behavior.
 - Conflict handling, merge behavior, generation tracking, machine identity,
   and whether projections are rebuilt or merged all require a separate,
   ratified decision.
@@ -52,10 +67,10 @@ hold, or whether it is paid.
 ### A.3 Credential sync ("放一次，处处可用")
 
 The owner direction may be recorded, but it authorizes no credential-sync
-design. No credential behavior, encryption scheme, device enrollment,
-revocation, recovery, server-access claim, or secret-delivery path is ratified
-by this draft. Whether credentials are ever in scope must be decided alongside
-the recovery, abuse, payment, authority, and protocol questions below.
+product or behavior beyond the already-ratified bundle transport. No encryption
+scheme, server-readability claim, device enrollment, revocation, recovery,
+provider behavior, or secret-delivery path is ratified by this draft. Those
+questions remain open alongside abuse, payment, authority, and protocol.
 
 ### A.4 Monetization
 
@@ -119,9 +134,10 @@ security, interoperability, or a competitive outcome.
 
 ## Open decisions (required before any proposal can become canon)
 
-1. **Credential scope and security:** whether credentials are ever synced;
-   encryption, key ownership, service access, enrollment, revocation, and
-   secret delivery if they are.
+1. **Credential security and product behavior:** treatment of the existing
+   `vault.enc` bundle member; encryption and server readability, key ownership,
+   service access, enrollment, revocation, provider behavior, and secret
+   delivery.
 2. **Recovery:** what happens when all enrolled devices or recovery material
    are lost, including whether accepted data loss is the only safe outcome.
 3. **Memory and settings semantics:** sync units, consent boundaries, conflict
