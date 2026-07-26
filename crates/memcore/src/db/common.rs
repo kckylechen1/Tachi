@@ -99,6 +99,10 @@ pub fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
         archived: row.get("archived")?,
         access_count: row.get("access_count")?,
         last_access,
+        // tachi#1446. Same tolerant read as `last_access` above: a SELECT that
+        // does not project the column (or a DB opened before `ensure_column`
+        // ran) yields None rather than failing the whole row.
+        last_use_at: row.get("last_use_at").unwrap_or(None),
         revision: row.get("revision").unwrap_or(1),
         retention_policy: row.get("retention_policy").unwrap_or(None),
         domain: row.get("domain").unwrap_or(None),

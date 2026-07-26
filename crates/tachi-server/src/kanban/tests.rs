@@ -28,6 +28,7 @@ fn dispatch_card_entry(id: &str, a2a_state: &str, timestamp: String) -> MemoryEn
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         vector: None,
         metadata: json!({

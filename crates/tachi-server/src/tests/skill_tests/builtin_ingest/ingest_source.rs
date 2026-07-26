@@ -52,6 +52,7 @@ async fn ingest_source_chunks_content_and_builds_graph_edges() {
                 archived: false,
                 access_count: 0,
                 last_access: None,
+                last_use_at: None,
                 revision: 1,
                 metadata: json!({}),
                 vector: None,

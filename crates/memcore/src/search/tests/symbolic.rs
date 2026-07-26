@@ -312,6 +312,11 @@ fn symbolic_pre_cap_legacy_null_json_columns_fall_back_to_empty_arrays() {
             superseded_by TEXT,
             access_count INTEGER NOT NULL,
             last_access TEXT,
+            -- tachi#1446. Present in the CREATE TABLE but deliberately absent
+            -- from the INSERT below: NULL is exactly the state this column is in
+            -- on every row of every database today, so leaving it unset is the
+            -- honest fixture, not an omission.
+            last_use_at TEXT,
             revision INTEGER,
             metadata TEXT NOT NULL,
             retention_policy TEXT,
@@ -334,6 +339,19 @@ fn symbolic_pre_cap_legacy_null_json_columns_fall_back_to_empty_arrays() {
         "#,
     )
     .expect("create legacy row with NULL JSON columns");
+
+    // This fixture is hand-built on purpose: it needs NULL `keywords`/`entities`,
+    // which the current DDL forbids and which the CHECK-constraint rebuild would
+    // reject (`memories_new.keywords` is `TEXT NOT NULL`), so `init_schema` is
+    // not an option here. The cost of hand-building is that the table silently
+    // falls behind `MEMORY_SELECT_COLUMNS` every time a column is added — which
+    // is what happened when tachi#1446 added `last_use_at`, surfacing as a bare
+    // `no such column` from inside `search_symbolic_candidates`. This assertion
+    // converts that into a named failure that says which columns to add.
+    crate::db::assert_memories_fixture_matches_select_columns(
+        &conn,
+        "symbolic_pre_cap_legacy_null_json_columns_fall_back_to_empty_arrays",
+    );
 
     let candidates = crate::db::search_symbolic_candidates(
         &conn,

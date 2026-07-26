@@ -210,6 +210,7 @@ pub(crate) fn build_ingest_entry(
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata,
         vector: None,

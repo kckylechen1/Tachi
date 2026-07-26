@@ -20,6 +20,7 @@ fn distill_source_entry(id: &str, text: &str, category: &str) -> MemoryEntry {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: json!({
             "file_path": "crates/tachi-server/src/tools.rs"
@@ -115,6 +116,7 @@ fn distill_edges_include_causal_guide_relations() {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: json!({
             "guide": true,

@@ -129,6 +129,10 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             updated_at   TEXT NOT NULL DEFAULT '',
                 access_count    INTEGER NOT NULL DEFAULT 0,
                 last_access     TEXT,
+                -- tachi#1446: exposure-free recency reference. Nothing writes
+                -- it yet; `last_access` above is written for every row a search
+                -- returns, which is why ranking needs a separate column to read.
+                last_use_at     TEXT,
                 revision        INTEGER NOT NULL DEFAULT 1,
                 metadata        TEXT NOT NULL DEFAULT '{}',
                 superseded_by   TEXT,

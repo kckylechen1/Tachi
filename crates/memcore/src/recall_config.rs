@@ -22,6 +22,12 @@ const DEFAULT_RRF_K: f64 = 20.0;
 // dropped from the vector channel only (FTS/symbolic unaffected). Calibrated
 // below typical good-hit band (~0.41–0.48) to cut clearly-weak raw matches.
 const DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR: f64 = 0.35;
+// tachi#1446 lever 1. OFF ships the pre-#1446 behavior byte-for-byte: the
+// decay channel's age reference stays `last_access`, which the recall pipeline
+// writes for every row it returns. ON moves that reference to `last_use_at`.
+// Default off until a write path for genuine use events exists — with the
+// column uniformly NULL, ON means "recency is content-derived only".
+const DEFAULT_USE_PROVENANCE_RECENCY: bool = false;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallConfig {
@@ -41,6 +47,17 @@ pub struct RecallConfig {
     pub rrf_k: f64,
     /// Minimum vector similarity for raw-tier rows in the vector channel (provisional).
     pub raw_vector_similarity_floor: f64,
+    /// tachi#1446: derive the decay channel's `recency` age from
+    /// `MemoryEntry::last_use_at` instead of `MemoryEntry::last_access`.
+    ///
+    /// `last_access` is written by the search path for every row it returns
+    /// (`db/memory_crud/access.rs:112-117`), so with this off the act of
+    /// displaying a result set resets every displayed row's age to zero at
+    /// once — measured effect is not inflation but range collapse: the decay
+    /// channel stops discriminating between candidates (see
+    /// `search/tests/exposure_loop.rs`). Off by default; #1446 commit 1 lands
+    /// the mechanism and the proof, not a ranking-semantics change.
+    pub use_provenance_recency: bool,
 }
 
 impl Default for RecallConfig {
@@ -78,6 +95,7 @@ impl Default for RecallConfig {
             or_fallback_fts_max_terms: DEFAULT_OR_FALLBACK_FTS_MAX_TERMS,
             rrf_k: DEFAULT_RRF_K,
             raw_vector_similarity_floor: DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
+            use_provenance_recency: DEFAULT_USE_PROVENANCE_RECENCY,
         }
     }
 }
@@ -189,6 +207,11 @@ impl RecallConfig {
             "TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR",
             &mut self.raw_vector_similarity_floor,
         );
+        apply_bool(
+            values,
+            "TACHI_RECALL_USE_PROVENANCE_RECENCY",
+            &mut self.use_provenance_recency,
+        );
     }
 
     pub fn sanitized(mut self) -> Self {
@@ -233,6 +256,11 @@ impl RecallConfig {
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
         )
         .clamp(0.0, 1.0);
+        // `use_provenance_recency` is deliberately absent here. The numeric
+        // knobs need a clamp because a config file can name an out-of-range or
+        // NaN value; `apply_bool` has no such failure mode — it leaves the
+        // field untouched on any string it does not recognize, so every bool
+        // that reaches this point is already one of the two valid values.
         self
     }
 }
@@ -466,6 +494,32 @@ mod tests {
         assert_eq!(
             config.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
+        );
+    }
+
+    /// tachi#1446. The knob must be inert unless a config source explicitly
+    /// turns it on, and an unrecognized value must land on OFF rather than on
+    /// "whatever `parse` did" — this is the switch that changes what ranking
+    /// reads, so its fail direction is the shipped behavior.
+    #[test]
+    fn use_provenance_recency_defaults_off_and_is_opt_in() {
+        assert!(!RecallConfig::default().use_provenance_recency);
+        assert!(
+            !DEFAULT_USE_PROVENANCE_RECENCY,
+            "flipping this const is a ranking-semantics change, not a config tweak"
+        );
+
+        let on = RecallConfig::from_config_env_source("TACHI_RECALL_USE_PROVENANCE_RECENCY=true\n");
+        assert!(on.use_provenance_recency);
+
+        let off = RecallConfig::from_config_env_source("TACHI_RECALL_USE_PROVENANCE_RECENCY=off\n");
+        assert!(!off.use_provenance_recency);
+
+        let junk =
+            RecallConfig::from_config_env_source("TACHI_RECALL_USE_PROVENANCE_RECENCY=maybe\n");
+        assert!(
+            !junk.use_provenance_recency,
+            "an unparseable value must leave the default in place"
         );
     }
 

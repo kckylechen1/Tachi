@@ -28,6 +28,7 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: json!({"wiki_log": true}),
         vector: None,
