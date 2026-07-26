@@ -119,6 +119,7 @@ fn entry_for_record(record: &Value) -> MemoryEntry {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: Value::Object(metadata),
         vector: None,

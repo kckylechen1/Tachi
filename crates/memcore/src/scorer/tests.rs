@@ -22,6 +22,7 @@ fn test_entry(id: &str) -> crate::types::MemoryEntry {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: serde_json::json!({}),
         retention_policy: None,
@@ -152,6 +153,7 @@ fn precision_multiplier_for_id_like_exact_probe() {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: serde_json::json!({}),
         retention_policy: None,
@@ -192,6 +194,7 @@ fn decay_never_accessed() {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: serde_json::Value::Object(Default::default()),
         vector: None,
@@ -250,6 +253,7 @@ fn actr_access_history_uses_day_scale() {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: serde_json::Value::Object(Default::default()),
         vector: None,
@@ -289,6 +293,62 @@ fn default_decay_policy_preserves_existing_decay_entry_points() {
             RecallConfig::get(),
             &DEFAULT_DECAY_POLICY,
         )
+    );
+}
+
+/// tachi#1446 lever 1, at the single line that reads the timestamp rather than
+/// through the whole search stack: which column `recency` ages against, and
+/// that the default is unchanged.
+///
+/// `importance = 0.0` removes the `importance * 0.3` floor so the raw `recency`
+/// term is observable, and `text` is empty so `leading_event_datetime` cannot
+/// supply a reference. The subject is 240 days stale (eight raw half-lives,
+/// `recency ~ 0.004`) but was "accessed" a moment ago — i.e. exactly the shape
+/// the exposure loop manufactures.
+#[test]
+fn use_provenance_recency_moves_the_age_reference_off_last_access() {
+    let mut entry = test_entry("provenance-recency");
+    entry.importance = 0.0;
+    entry.timestamp = (Utc::now() - chrono::Duration::days(240)).to_rfc3339();
+    entry.last_access = Some(Utc::now().to_rfc3339());
+
+    let off = RecallConfig::default();
+    let on = RecallConfig {
+        use_provenance_recency: true,
+        ..RecallConfig::default()
+    };
+
+    let with_knob_off = decay_score_with_config(&entry, &off);
+    assert!(
+        with_knob_off > 0.99,
+        "default config must keep reading last_access: a row touched a moment ago has \
+         age_days ~ 0, so recency ~ 1.0; got {with_knob_off}"
+    );
+
+    let with_knob_on = decay_score_with_config(&entry, &on);
+    assert!(
+        with_knob_on < 0.01,
+        "with the knob on, a NULL last_use_at must fall through to the content timestamp — \
+         240 days at a 30-day half-life is recency ~ 0.004, not {with_knob_on}"
+    );
+
+    // And the new column is genuinely read, not merely ignored: populate it and
+    // the knob-on path tracks it.
+    entry.last_use_at = Some(Utc::now().to_rfc3339());
+    let with_use_recorded = decay_score_with_config(&entry, &on);
+    assert!(
+        with_use_recorded > 0.99,
+        "a populated last_use_at must drive recency when the knob is on; got {with_use_recorded}"
+    );
+
+    // The off path is indifferent to the new column in both states. Asserted as
+    // a band, not an equality: `default_decay_score_with_config` re-reads
+    // `Utc::now()` on every call, so two calls that straddle a second boundary
+    // legitimately differ in the last decimals.
+    let off_after_write = decay_score_with_config(&entry, &off);
+    assert!(
+        off_after_write > 0.99,
+        "writing last_use_at must not change what default config reads; got {off_after_write}"
     );
 }
 

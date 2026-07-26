@@ -206,6 +206,7 @@ pub(in crate::foundry_runtime_ops) async fn process_recall_rerank_cache_job(
             archived: false,
             access_count: 0,
             last_access: None,
+            last_use_at: None,
             revision: 1,
             metadata,
             vector: None,

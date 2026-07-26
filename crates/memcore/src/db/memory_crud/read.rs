@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use crate::error::MemoryError;
 use crate::types::MemoryEntry;
 
-use super::{row_to_entry, IN_BATCH_SIZE, MEMORY_SELECT_COLUMNS, MEMORY_SELECT_COLUMNS_QUALIFIED};
+use super::{
+    row_to_entry, IN_BATCH_SIZE, MEMORY_EMBEDDING_COLUMN_INDEX, MEMORY_SELECT_COLUMNS,
+    MEMORY_SELECT_COLUMNS_QUALIFIED,
+};
 
 /// Fetch multiple entries by their IDs in one query.
 /// Also hydrates vectors from memories_vec if available.
@@ -60,11 +63,11 @@ pub fn fetch_by_ids(
         let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
             let mut entry = row_to_entry(row)?;
             if has_vector_table {
-                let blob: Option<Vec<u8>> = row.get(26)?;
+                let blob: Option<Vec<u8>> = row.get(MEMORY_EMBEDDING_COLUMN_INDEX)?;
                 if let Some(blob) = blob {
                     if blob.len() % 4 != 0 {
                         return Err(rusqlite::Error::FromSqlConversionFailure(
-                            26,
+                            MEMORY_EMBEDDING_COLUMN_INDEX,
                             rusqlite::types::Type::Blob,
                             format!(
                                 "invalid vector blob length for '{}': {}",

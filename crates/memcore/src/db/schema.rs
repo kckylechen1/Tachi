@@ -201,6 +201,12 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(conn, "memories", "tier", "TEXT NOT NULL DEFAULT 'raw'")?;
+    // tachi#1446: exposure-free recency reference, nullable and never written
+    // by this commit. Added here (not only in `ddl.rs`) because
+    // `init_paths_converge_to_the_same_schema` (schema/migration_tests.rs)
+    // requires the `init_schema`-only path to reach the same column set as the
+    // full path — a sentinel migration alone would leave path (b) short.
+    ensure_column(conn, "memories", "last_use_at", "TEXT")?;
     ensure_column(conn, "access_history", "query_hash", "TEXT")?;
 
     // Temporal edge columns for memory_edges
@@ -789,6 +795,19 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
     } else {
         "NULL"
     };
+    // tachi#1446. This rebuild runs on EVERY fresh DB (BASE_SCHEMA_SQL creates
+    // `memories` without the CHECK constraints, so `migrate_enum_constraints`'
+    // shape probe misses and calls through to here), and it is a DROP + CREATE
+    // of the whole table from this literal column list. A column that exists
+    // only in `ddl.rs` + `ensure_column` would therefore be added at
+    // `init_schema_inner` and then dropped again a few statements later, before
+    // the connection is ever used. Same guarded-expression shape as
+    // `idless_identity` above, for the same reason.
+    let last_use_at_expr = if has_column(conn, "memories", "last_use_at")? {
+        "last_use_at"
+    } else {
+        "NULL"
+    };
     let rebuild_sql = r#"
         CREATE TABLE memories_new (
             id           TEXT PRIMARY KEY,
@@ -810,6 +829,7 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
             updated_at   TEXT NOT NULL DEFAULT '',
             access_count INTEGER NOT NULL DEFAULT 0,
             last_access  TEXT,
+            last_use_at  TEXT,
             revision     INTEGER NOT NULL DEFAULT 1,
              metadata     TEXT NOT NULL DEFAULT '{}',
              retention_policy TEXT,
@@ -831,14 +851,14 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
         INSERT INTO memories_new
             (id, path, summary, text, importance, timestamp, valid_from, valid_until,
              category, topic, keywords, entities, source, scope, archived,
-             created_at, updated_at, access_count, last_access, revision,
+             created_at, updated_at, access_count, last_access, last_use_at, revision,
              metadata, retention_policy, domain, superseded_by, idless_identity,
              recall_count, query_diversity, tier)
         SELECT
              id, path, summary, text, importance, timestamp,
              COALESCE(NULLIF(valid_from, ''), timestamp), NULLIF(valid_until, ''),
              category, topic, keywords, entities, source, scope, archived,
-             created_at, updated_at, access_count, last_access, revision,
+             created_at, updated_at, access_count, last_access, __LAST_USE_AT_EXPR__, revision,
              metadata, retention_policy, domain, superseded_by, __IDLESS_IDENTITY_EXPR__,
              __RECALL_COUNT_EXPR__, __QUERY_DIVERSITY_EXPR__, __TIER_EXPR__
         FROM memories;
@@ -866,7 +886,8 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
         .replace("__RECALL_COUNT_EXPR__", recall_count_expr)
         .replace("__QUERY_DIVERSITY_EXPR__", query_diversity_expr)
         .replace("__TIER_EXPR__", tier_expr)
-        .replace("__IDLESS_IDENTITY_EXPR__", idless_identity_expr);
+        .replace("__IDLESS_IDENTITY_EXPR__", idless_identity_expr)
+        .replace("__LAST_USE_AT_EXPR__", last_use_at_expr);
     conn.execute_batch(&rebuild_sql)?;
     Ok(())
 }

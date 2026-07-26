@@ -62,6 +62,7 @@ mod tests {
             archived: false,
             access_count: 0,
             last_access: None,
+            last_use_at: None,
             revision: 1,
             vector: None,
             retention_policy: None,

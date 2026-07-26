@@ -133,9 +133,30 @@ pub fn decay_score_with_policy(
 
 fn default_decay_score_with_config(entry: &MemoryEntry, recall_config: &RecallConfig) -> f64 {
     let now = Utc::now();
-    let reference = entry
-        .last_access
-        .as_ref()
+    // tachi#1446 lever 1. The stored timestamp this reads is the whole of the
+    // exposure loop's dominant channel: `last_access` is written for every row
+    // a search RETURNS (`db/memory_crud/access.rs:112-117`), so reading it here
+    // makes the system's own act of display the age reference. One exposure
+    // sets `age_days = 0` for every returned row simultaneously, which does not
+    // merely inflate them — it collapses this channel's dynamic range to a
+    // constant, so decay stops discriminating between candidates at all
+    // (measured in `search/tests/exposure_loop.rs`).
+    //
+    // With `use_provenance_recency` ON the reference is `last_use_at`, which no
+    // write path touches as of this commit. An entry therefore falls through to
+    // exactly the same content-derived references an unexposed entry uses
+    // today — the leading `[YYYY-MM-DD]` event date, then `timestamp` — which
+    // is the point: what a search displayed can no longer be read back as
+    // evidence about the memory.
+    //
+    // OFF is byte-identical to the pre-#1446 chain; only the first link of the
+    // `or_else` fallthrough differs between the two arms.
+    let recency_anchor = if recall_config.use_provenance_recency {
+        entry.last_use_at.as_ref()
+    } else {
+        entry.last_access.as_ref()
+    };
+    let reference = recency_anchor
         .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
         .or_else(|| leading_event_datetime(&entry.text))
         .unwrap_or_else(|| {

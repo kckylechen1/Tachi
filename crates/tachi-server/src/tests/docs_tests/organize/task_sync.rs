@@ -27,6 +27,7 @@ async fn test_docs_organization_and_task_sync() {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         vector: None,
         metadata: json!({
@@ -59,6 +60,7 @@ async fn test_docs_organization_and_task_sync() {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         vector: None,
         metadata: json!({

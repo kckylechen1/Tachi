@@ -118,6 +118,12 @@ pub use memory_crud::{
     MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
+/// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
+/// function's own doc for when a hand-built fixture is legitimate.
+#[cfg(test)]
+pub(crate) use memory_crud::{
+    assert_memories_fixture_matches_select_columns, memory_select_required_columns,
+};
 /// Caller-transaction upsert seam for lifecycle-apply: runs the full upsert
 /// body (main row + FTS + vectors + idless semantics) inside a caller-owned
 /// `BEGIN IMMEDIATE` transaction. See `memory_crud::upsert_within_tx`.

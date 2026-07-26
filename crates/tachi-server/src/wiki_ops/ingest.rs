@@ -453,6 +453,7 @@ pub(crate) async fn handle_wiki_ingest(
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: json!({
             "wiki": true,
@@ -658,6 +659,7 @@ mod immutable_supersession_tests {
             archived: false,
             access_count: 0,
             last_access: None,
+            last_use_at: None,
             revision: 1,
             metadata: serde_json::json!({"wiki": true}),
             vector: None,

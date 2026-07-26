@@ -98,6 +98,7 @@ pub(crate) async fn handle_post_card(
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         vector: None,
         metadata: metadata.clone(),

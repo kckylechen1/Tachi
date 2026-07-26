@@ -42,6 +42,7 @@ fn test_entry(memo: &StickyMemo) -> memcore::MemoryEntry {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: serde_json::json!({
             "sticky_id": memo.id,

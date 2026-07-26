@@ -154,6 +154,7 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata,
         vector: params.vector,

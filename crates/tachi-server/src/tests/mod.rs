@@ -540,6 +540,7 @@ pub(crate) fn make_entry(id: &str) -> MemoryEntry {
         archived: false,
         access_count: 0,
         last_access: None,
+        last_use_at: None,
         revision: 1,
         metadata: json!({}),
         vector: None,

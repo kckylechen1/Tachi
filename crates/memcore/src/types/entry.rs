@@ -277,9 +277,32 @@ pub struct MemoryEntry {
     #[serde(default)]
     pub access_count: i64,
 
-    /// Last retrieval time (ISO 8601), None if never retrieved
+    /// Last retrieval time (ISO 8601), None if never retrieved.
+    ///
+    /// Written by the recall pipeline for **every row a search returns**
+    /// (`db/memory_crud/access.rs:112-117`), so this is an *exposure*
+    /// timestamp: it records that the system displayed the memory, not that
+    /// anything used it. See [`Self::last_use_at`].
     #[serde(default)]
     pub last_access: Option<String>,
+
+    /// Last genuine *use* time (ISO 8601), None if never used — tachi#1446.
+    ///
+    /// The provenance-separated sibling of [`Self::last_access`]. Nothing
+    /// writes this column yet (commit 1 of #1446 lands the column, the knob
+    /// and the proof; the write path for real use events is a later commit),
+    /// so it is NULL on every row in every database today.
+    ///
+    /// Read by `scorer::default_decay_score_with_config` as the recency age
+    /// reference **only** when `RecallConfig::use_provenance_recency` is on
+    /// (default off). With it off, decay reads `last_access` exactly as
+    /// before.
+    ///
+    /// `skip_serializing_if` keeps the serialized shape of every existing
+    /// client payload byte-identical while the column is uniformly NULL; when
+    /// a write path lands, that attribute is the thing to reconsider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_use_at: Option<String>,
 
     /// Monotonic revision for optimistic locking.
     #[serde(default = "default_revision")]
