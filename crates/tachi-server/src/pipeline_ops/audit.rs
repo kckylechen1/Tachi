@@ -1002,6 +1002,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    // The process-global TACHI_HOME override must remain serialized through
+    // the awaited heartbeat lifecycle.
+    #[allow(clippy::await_holding_lock)]
     async fn async_heartbeat_uses_server_home_after_environment_drift() {
         let _guard = crate::utils::global_test_lock()
             .lock()

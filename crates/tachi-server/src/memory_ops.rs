@@ -574,6 +574,9 @@ mod env_drift_tests {
     use crate::test_support::EnvRestore;
 
     #[tokio::test]
+    // The process-global TACHI_HOME override must remain serialized through
+    // the awaited runtime-info operation.
+    #[allow(clippy::await_holding_lock)]
     async fn runtime_info_alias_health_stays_bound_after_environment_drift() {
         let _lock = crate::utils::global_test_lock()
             .lock()

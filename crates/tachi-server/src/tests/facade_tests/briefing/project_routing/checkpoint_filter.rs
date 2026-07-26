@@ -65,6 +65,9 @@ async fn tachi_memory_briefing_filters_recent_checkpoints_to_bound_project() {
 }
 
 #[tokio::test]
+// The process-global TACHI_HOME override must remain serialized through
+// the awaited briefing request.
+#[allow(clippy::await_holding_lock)]
 async fn briefing_checkpoints_use_server_home_after_environment_drift() {
     let _guard = crate::utils::global_test_lock()
         .lock()
