@@ -174,7 +174,11 @@ pub(super) fn skipped_alias_probe_result(
             .any(|retained_key| retained_key == key);
         tracing::warn!(
             "{}",
-            crate::provider_config::format_skipped_alias_warning(key, retained)
+            crate::provider_config::format_skipped_alias_warning(
+                    key,
+                    retained,
+                    report.source_availability,
+            )
         );
     }
     Some(ProviderProbeResult {

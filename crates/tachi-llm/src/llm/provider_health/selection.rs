@@ -119,8 +119,7 @@ impl super::super::LlmClient {
             (0..entries.len()).find_map(|offset| {
                 let entry = &entries[(start + offset) % entries.len()];
                 let in_active_cooldown = state
-                    .cooldowns
-                    .get(&entry.key_id)
+                    .cooldown_until(key, &entry.key_id)
                     .is_some_and(|until| *until > now);
                 let (availability, remaining_seconds) =
                     Self::key_health_blocked_in_state(&state, key, &entry.key_id, now_utc);
@@ -137,8 +136,10 @@ impl super::super::LlmClient {
 
         vault_value.or_else(|| {
             keys.iter().find_map(|key| {
-                let in_active_cooldown =
-                    state.cooldowns.get(*key).is_some_and(|until| *until > now);
+                // Env-fallback path: the logical key IS its own member id.
+                let in_active_cooldown = state
+                    .cooldown_until(key, key)
+                    .is_some_and(|until| *until > now);
                 let (availability, remaining_seconds) =
                     Self::key_health_blocked_in_state(&state, key, key, now_utc);
                 if in_active_cooldown

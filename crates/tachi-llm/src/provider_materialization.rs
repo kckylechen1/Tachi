@@ -18,6 +18,10 @@ pub struct MaterializeReport {
     /// Logical config key names whose missing/locked alias kept an existing
     /// provider pool. Names only; retained pools are included in `loaded`.
     pub retained_from_last_known_good: Vec<String>,
+    /// Whether the durable source backing this refresh was readable. Operator
+    /// output derives its wording from this instead of re-deriving intent from
+    /// a message string.
+    pub source_availability: VaultSourceAvailability,
 }
 
 fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {
@@ -60,12 +64,49 @@ pub fn group_api_key_values_by_configured_rotations(
         })
 }
 
+/// Whether the durable Vault source could actually be read for this refresh.
+///
+/// The missing-alias branch cannot tell "the aliased secret was deleted" from
+/// "the Vault is locked" on its own — both arrive as the same lookup miss. Only
+/// the caller that opened the source knows which, and the two must NOT degrade
+/// the same way:
+///
+/// * a locked Vault is transient, and dropping the pool would take providers
+///   down until the next unlock, so the last-known-good pool is retained;
+/// * a deleted secret is a revocation, and retaining it would keep serving a
+///   credential the operator removed — for as long as the process lives.
+///
+/// tachi#1393 originally retained on both. Retaining on `Readable` silently
+/// reverses main's `c90143881` ("Remove stale pools when Vault aliases are
+/// absent"), which neither side's tests catch, because their fixtures start
+/// with an empty provider cache and so never reach the retention path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VaultSourceAvailability {
+    /// The Vault secret set was read. A missing alias target means the secret
+    /// is genuinely absent: drop the pool.
+    Readable,
+    /// The Vault could not be read (locked, auto-locked, uninitialized). A
+    /// missing alias target proves nothing about the secret: retain LKG.
+    ///
+    /// Also the `Default`: an unproven source must never license retention by
+    /// omission, and every constructor that forgets to set this lands here.
+    #[default]
+    LockedOrUnavailable,
+}
+
 /// Apply caller-owned, already-resolved pools plus config.env aliases into
 /// `LlmClient` without mutating process env.
 ///
 /// Durable Vault/Keychain readers must use
 /// [`materialize_provider_secrets_from_durable_source`] so source loading is
 /// covered by the same transaction as cache replacement.
+///
+/// Pre-resolved pools carry no [`VaultSourceAvailability`] signal, so this entry
+/// assumes [`VaultSourceAvailability::LockedOrUnavailable`] and retains
+/// last-known-good pools. That assumption is only safe for callers that are not
+/// deciding revocation, so the entry is compiled for tests only — production
+/// must go through the durable-source entry and pass the real availability.
+#[cfg(any(test, feature = "test-support"))]
 pub fn materialize_provider_secrets<I, S>(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
@@ -75,7 +116,13 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    materialize_provider_secrets_inner(llm, vault_pools, provider_keys, None)
+    materialize_provider_secrets_inner(
+        llm,
+        vault_pools,
+        provider_keys,
+        VaultSourceAvailability::LockedOrUnavailable,
+        None,
+    )
 }
 
 /// Materialize provider secrets while holding one transaction boundary across
@@ -93,17 +140,18 @@ pub fn materialize_provider_secrets_from_durable_source<I, S, F>(
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
-    F: FnOnce() -> Result<HashMap<String, Vec<ProviderSecret>>, String>,
+    F: FnOnce() -> Result<(HashMap<String, Vec<ProviderSecret>>, VaultSourceAvailability), String>,
 {
     let _materialization_guard = llm.provider_materialization_guard()?;
-    let vault_pools = load_vault_pools()?;
-    materialize_provider_secrets_under_guard(llm, &vault_pools, provider_keys, None)
+    let (vault_pools, availability) = load_vault_pools()?;
+    materialize_provider_secrets_under_guard(llm, &vault_pools, provider_keys, availability, None)
 }
 
 fn materialize_provider_secrets_inner<I, S>(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
     provider_keys: I,
+    availability: VaultSourceAvailability,
     after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String>
 where
@@ -118,6 +166,7 @@ where
         llm,
         vault_pools,
         provider_keys,
+        availability,
         after_missing_alias_snapshot,
     )
 }
@@ -126,6 +175,7 @@ fn materialize_provider_secrets_under_guard<I, S>(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
     provider_keys: I,
+    availability: VaultSourceAvailability,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String>
 where
@@ -136,6 +186,7 @@ where
     let mut resolved_pools: HashMap<String, Vec<ProviderSecret>> = vault_pools.clone();
     let mut report = MaterializeReport {
         from_vault: vault_pools.len(),
+        source_availability: availability,
         ..Default::default()
     };
 
@@ -178,11 +229,25 @@ where
                 resolved_pools.remove(&key);
                 report.skipped_aliases.push((
                     key.clone(),
-                    format!(
-                        "Config key '{key}' references a Vault alias, but the secret is missing or Vault is locked."
-                    ),
+                    match availability {
+                        VaultSourceAvailability::Readable => format!(
+                            "Config key '{key}' references a Vault alias whose secret is absent from a readable Vault."
+                        ),
+                        VaultSourceAvailability::LockedOrUnavailable => format!(
+                            "Config key '{key}' references a Vault alias, but the Vault could not be read."
+                        ),
+                    },
                 ));
-                let retained_pool = llm.provider_secret_pool_snapshot(&key);
+                // Retention is a statement about the SOURCE, not about the key.
+                // A readable Vault that does not contain the alias target has
+                // answered the question: the secret is gone, and continuing to
+                // serve the cached copy would defeat its revocation.
+                let retained_pool = match availability {
+                    VaultSourceAvailability::LockedOrUnavailable => {
+                        llm.provider_secret_pool_snapshot(&key)
+                    }
+                    VaultSourceAvailability::Readable => None,
+                };
                 if let Some(hook) = after_missing_alias_snapshot.take() {
                     hook();
                 }
@@ -1216,5 +1281,94 @@ mod tests {
             Some("replacement-new-secret"),
             "replacement credential must be selectable after stale health is removed"
         );
+    }
+
+    /// Discrimination pair for the retention rule. Same key, same env alias,
+    /// same empty Vault result, same populated cache — only the SOURCE
+    /// availability differs, and the outcomes must be opposite. Flip either
+    /// arm of the `match` in the missing-alias branch and exactly one of these
+    /// two goes red.
+    #[test]
+    fn readable_vault_drops_the_cached_pool_when_the_alias_target_is_gone() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let key = "TACHI_TEST_REVOKED_ALIAS_API_KEY";
+        let _env = EnvGuard::set(key, "vault:TACHI_TEST_REVOKED_TARGET");
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret(key, "revoked-but-still-cached"));
+
+        let report = materialize_provider_secrets_from_durable_source(&llm, [key], || {
+            Ok((HashMap::new(), VaultSourceAvailability::Readable))
+        })
+        .expect("a missing alias stays a tolerable skip, not a hard error");
+
+        assert_eq!(report.skipped_aliases.len(), 1);
+        assert!(
+            report.retained_from_last_known_good.is_empty(),
+            "a readable Vault that lacks the alias target has answered: the \
+             secret is revoked, so nothing may be retained: {report:?}"
+        );
+        assert!(
+            llm.provider_secret_for_tests(&[key]).is_none(),
+            "a revoked credential must stop being served"
+        );
+    }
+
+    #[test]
+    fn locked_vault_retains_the_cached_pool_for_the_same_missing_alias() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let key = "TACHI_TEST_LOCKED_ALIAS_API_KEY";
+        let _env = EnvGuard::set(key, "vault:TACHI_TEST_LOCKED_TARGET");
+        let llm = LlmClient::new().expect("llm client");
+        assert!(llm.set_provider_secret(key, "last-known-good"));
+
+        let report = materialize_provider_secrets_from_durable_source(&llm, [key], || {
+            Ok((HashMap::new(), VaultSourceAvailability::LockedOrUnavailable))
+        })
+        .expect("a locked Vault stays a tolerable skip");
+
+        assert_eq!(report.skipped_aliases.len(), 1);
+        assert_eq!(report.retained_from_last_known_good, vec![key.to_string()]);
+        assert_eq!(
+            llm.provider_secret_for_tests(&[key]).as_deref(),
+            Some("last-known-good"),
+            "a lock says nothing about the secret, so the pool survives it"
+        );
+    }
+
+    /// The two skip reasons must be distinguishable in operator output, or the
+    /// distinction above is invisible to whoever reads the daemon log.
+    #[test]
+    fn skip_reason_names_which_of_the_two_conditions_occurred() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let key = "TACHI_TEST_SKIP_REASON_API_KEY";
+        let _env = EnvGuard::set(key, "vault:TACHI_TEST_SKIP_REASON_TARGET");
+        let llm = LlmClient::new().expect("llm client");
+
+        let readable = materialize_provider_secrets_from_durable_source(&llm, [key], || {
+            Ok((HashMap::new(), VaultSourceAvailability::Readable))
+        })
+        .expect("skip");
+        let locked = materialize_provider_secrets_from_durable_source(&llm, [key], || {
+            Ok((HashMap::new(), VaultSourceAvailability::LockedOrUnavailable))
+        })
+        .expect("skip");
+
+        assert!(
+            readable.skipped_aliases[0].1.contains("absent from a readable Vault"),
+            "{:?}",
+            readable.skipped_aliases
+        );
+        assert!(
+            locked.skipped_aliases[0].1.contains("could not be read"),
+            "{:?}",
+            locked.skipped_aliases
+        );
+        for report in [&readable, &locked] {
+            assert!(
+                !report.skipped_aliases[0].1.contains("TACHI_TEST_SKIP_REASON_TARGET"),
+                "the skip reason must not echo the alias target: {:?}",
+                report.skipped_aliases
+            );
+        }
     }
 }
