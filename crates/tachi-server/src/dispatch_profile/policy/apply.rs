@@ -112,7 +112,19 @@ pub(crate) fn handle_route_policy_apply(
                     .map_err(|e| format!("commit route policy apply tx: {e}"))?;
             }
             "loadout_evolution" => {
-                let profile_name = value
+                let identity_payload = super::handlers::validate_loadout_evolution_proposal(
+                    proposal_id,
+                    &value,
+                )?;
+                let apply_payload = identity_payload
+                    .get("apply_payload")
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "loadout_evolution proposal {proposal_id} missing digest-bound apply payload"
+                        )
+                    })?;
+                let profile_name = apply_payload
                     .get("profile")
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
@@ -123,7 +135,7 @@ pub(crate) fn handle_route_policy_apply(
                         "loadout_evolution proposal {proposal_id} references unknown profile {profile_name}"
                     )
                 })?;
-                let operation = value
+                let operation = apply_payload
                     .get("operation")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
@@ -173,7 +185,7 @@ pub(crate) fn handle_route_policy_apply(
                 let mut added_demotion_targets = Vec::new();
                 let already_projected = match operation {
                     "promote_observed_skill_to_signature" => {
-                        let skill_id = value
+                        let skill_id = apply_payload
                             .get("skill_id")
                             .and_then(Value::as_str)
                             .map(str::trim)
@@ -207,14 +219,14 @@ pub(crate) fn handle_route_policy_apply(
                         already_projected
                     }
                     "add_evidence_backed_passive_trait" => {
-                        let trait_id = value
+                        let trait_id = apply_payload
                             .get("trait_id")
                             .and_then(Value::as_str)
                             .map(str::trim)
                             .filter(|trait_id| !trait_id.is_empty())
                             .map(str::to_string)
                             .or_else(|| {
-                                value
+                                apply_payload
                                     .get("proposed_patch")
                                     .and_then(|patch| patch.get("add_passive_traits"))
                                     .and_then(Value::as_array)
@@ -244,14 +256,14 @@ pub(crate) fn handle_route_policy_apply(
                         already_projected
                     }
                     "add_evidence_contract_required" => {
-                        let evidence_id = value
+                        let evidence_id = apply_payload
                             .get("evidence_id")
                             .and_then(Value::as_str)
                             .map(str::trim)
                             .filter(|evidence_id| !evidence_id.is_empty())
                             .map(str::to_string)
                             .or_else(|| {
-                                value
+                                apply_payload
                                     .get("proposed_patch")
                                     .and_then(|patch| patch.get("add_evidence_required"))
                                     .and_then(Value::as_array)
@@ -282,14 +294,14 @@ pub(crate) fn handle_route_policy_apply(
                         already_projected
                     }
                     "add_card_weakness" => {
-                        let weakness_id = value
+                        let weakness_id = apply_payload
                             .get("weakness_id")
                             .and_then(Value::as_str)
                             .map(str::trim)
                             .filter(|weakness_id| !weakness_id.is_empty())
                             .map(str::to_string)
                             .or_else(|| {
-                                value
+                                apply_payload
                                     .get("proposed_patch")
                                     .and_then(|patch| patch.get("add_weak_against"))
                                     .and_then(Value::as_array)
@@ -319,14 +331,14 @@ pub(crate) fn handle_route_policy_apply(
                         already_projected
                     }
                     "mark_skill_demotion_target" => {
-                        let skill_id = value
+                        let skill_id = apply_payload
                             .get("skill_id")
                             .and_then(Value::as_str)
                             .map(str::trim)
                             .filter(|skill_id| !skill_id.is_empty())
                             .map(str::to_string)
                             .or_else(|| {
-                                value
+                                apply_payload
                                     .get("proposed_patch")
                                     .and_then(|patch| patch.get("demotion_targets"))
                                     .and_then(Value::as_array)
@@ -391,9 +403,6 @@ pub(crate) fn handle_route_policy_apply(
                 overlay["last_applied_proposal_id"] = json!(proposal_id);
                 let overlay_raw = serde_json::to_string(&overlay)
                     .map_err(|e| format!("serialize profile/card overlay: {e}"))?;
-                store
-                    .set_state(PROFILE_CARD_OVERLAY_NS, profile.name, &overlay_raw)
-                    .map_err(|e| format!("persist profile/card overlay: {e}"))?;
 
                 value["status"] = json!("applied");
                 value["applied_at"] = json!(applied_at);
@@ -411,9 +420,31 @@ pub(crate) fn handle_route_policy_apply(
                 });
                 let next = serde_json::to_string(&value)
                     .map_err(|e| format!("serialize applied loadout proposal: {e}"))?;
-                store
-                    .set_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next)
-                    .map_err(|e| format!("persist applied loadout proposal: {e}"))?;
+                // The overlay write and the approved -> applied lifecycle
+                // transition are one transaction. The explicit proposal-row
+                // CAS remains correct if the coarse store lock is narrowed:
+                // on a stale row, the overlay write is rolled back as well.
+                let tx = store
+                    .connection_mut()
+                    .transaction()
+                    .map_err(|e| format!("open loadout evolution apply tx: {e}"))?;
+                let cas_ok = memcore::db::set_state_if_version(
+                    &tx,
+                    DISPATCH_POLICY_PROPOSAL_NS,
+                    proposal_id,
+                    &next,
+                    version,
+                )
+                .map_err(|e| format!("CAS applied loadout evolution proposal: {e}"))?;
+                if !cas_ok {
+                    return Err(format!(
+                        "stale_state_version: loadout_evolution proposal {proposal_id} changed before apply; reload and retry"
+                    ));
+                }
+                memcore::db::set_state(&tx, PROFILE_CARD_OVERLAY_NS, profile.name, &overlay_raw)
+                    .map_err(|e| format!("persist profile/card overlay: {e}"))?;
+                tx.commit()
+                    .map_err(|e| format!("commit loadout evolution apply tx: {e}"))?;
             }
             other => {
                 return Err(format!(
