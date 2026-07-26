@@ -130,7 +130,12 @@ pub(super) fn rank_candidate_entries(
 
     apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
     apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
-    apply_access_feedback(&entries_ref, &access_times, recall_config(opts), &mut scores);
+    apply_access_feedback(
+        &entries_ref,
+        &access_times,
+        recall_config(opts),
+        &mut scores,
+    );
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
     apply_decision_boost(query, &entries_ref, &mut scores);
@@ -937,7 +942,12 @@ pub(super) mod attribution {
         });
 
         let before = snapshot(&scores);
-        apply_access_feedback(&entries_ref, &access_times, recall_config(opts), &mut scores);
+        apply_access_feedback(
+            &entries_ref,
+            &access_times,
+            recall_config(opts),
+            &mut scores,
+        );
         steps.push(BoostStep {
             label: "access_feedback",
             before,

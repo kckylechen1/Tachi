@@ -673,7 +673,11 @@ fn seed_access_events(conn: &Connection, id: &str, kind: &str, count: usize, day
 const USE_EVENT_AGE_DAYS: i64 = 3000;
 
 /// [`rank_all`] with an explicit [`RecallConfig`] — the knob-on arm.
-fn rank_all_with_config(conn: &Connection, profile: Profile, config: RecallConfig) -> Vec<SearchResult> {
+fn rank_all_with_config(
+    conn: &Connection,
+    profile: Profile,
+    config: RecallConfig,
+) -> Vec<SearchResult> {
     let opts = search_options_with_recall_config(profile, SEEDS.len(), false, config);
     let ranked = hybrid_search(conn, QUERY, &opts).expect("hybrid_search");
     assert_eq!(
@@ -1552,8 +1556,14 @@ fn use_provenance_writes_are_invisible_at_default_config() {
     let after = rank_all(&conn, Profile::Default);
 
     assert_eq!(
-        before.iter().map(|r| r.entry.id.as_str()).collect::<Vec<_>>(),
-        after.iter().map(|r| r.entry.id.as_str()).collect::<Vec<_>>(),
+        before
+            .iter()
+            .map(|r| r.entry.id.as_str())
+            .collect::<Vec<_>>(),
+        after
+            .iter()
+            .map(|r| r.entry.id.as_str())
+            .collect::<Vec<_>>(),
         "default-config ordering moved after a use-provenance write\nbefore:\n{}\nafter:\n{}",
         table(&before),
         table(&after)

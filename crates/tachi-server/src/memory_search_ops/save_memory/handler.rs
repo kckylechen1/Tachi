@@ -633,12 +633,9 @@ async fn handle_save_memory_impl(
     // `mark_save_target_used`). `idless_identity` is `Some` only when the
     // caller supplied no id at all, so that branch can never qualify.
     if initiator == SaveInitiator::Caller && requested_id.is_some() && existing_entry.is_some() {
-        if let Err(error) = mark_save_target_used(
-            server,
-            &entry.id,
-            target_db,
-            named_project.as_deref(),
-        ) {
+        if let Err(error) =
+            mark_save_target_used(server, &entry.id, target_db, named_project.as_deref())
+        {
             eprintln!(
                 "warning: tachi#1446 use-provenance mark failed for memory {} (save itself \
                  succeeded): {error}",

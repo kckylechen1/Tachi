@@ -716,7 +716,11 @@ mod get_access_times_tests {
 
         let marked = record_memory_use(
             conn,
-            &["cited".to_string(), "cited".to_string(), "ghost".to_string()],
+            &[
+                "cited".to_string(),
+                "cited".to_string(),
+                "ghost".to_string(),
+            ],
             "2026-07-26T00:00:00Z",
         )
         .expect("record_memory_use");
