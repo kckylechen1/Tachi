@@ -6,6 +6,45 @@ use std::path::{Path, PathBuf};
 /// correctly rejects arbitrary schema mutation. Do not use it for `memories`
 /// row writes or authority-column updates; those must go through typed store
 /// APIs so the v23 authorization boundary remains exercised.
+///
+/// # This is the sanctioned in-transaction fault-injection seam (tachi#1443)
+///
+/// A store connection denies *all* DDL — see
+/// [`memcore::MemoryStore::connection`] for the exact rule — so a fixture
+/// that installs a failure trigger through `store.connection()` dies on
+/// SQLite's generic `not authorized` before it ever reaches the code under
+/// test. Four fixtures written that way in two PRs in one day asserted
+/// nothing; that is what this helper exists to prevent.
+///
+/// To make a store write fail mid-transaction, install a `RAISE(ABORT, …)`
+/// trigger here, on the same database file, then drive the code under test
+/// through the store. `tests/skill_tests/builtin_ingest/ingest_source.rs`'s
+/// `source_success_audit_failure_is_loud_retryable_and_idempotent` is the
+/// worked example.
+///
+/// Two constraints, both of which bite loudly if ignored:
+///
+/// 1. **The store must be file-backed.** `MemoryStore::open_in_memory()` has
+///    no path for this helper to open — use a `tempfile`-backed store, or a
+///    `MemoryServer` fixture and its `global_db_path_buf()`.
+/// 2. **Drop the trigger before anything reopens the file.** A temp trigger
+///    would die with this connection, so an injected trigger has to be
+///    persistent — and `memcore`'s `validate_persistent_trigger_inventory`
+///    refuses to open a database carrying a non-canonical persistent trigger,
+///    surfacing far from the fixture that leaked it. Either drop it in a
+///    second call to this helper (as `ingest_source.rs` does) or keep the
+///    database file disposable.
+///
+/// When the failure does not have to be *injected*, prefer a deterministic
+/// no-DDL failure — a missing row or a violated constraint — over a trigger.
+/// `memcore`'s
+/// `vault_touch_entries_atomic_rolls_back_every_touch_when_one_name_is_missing`
+/// is that shape.
+///
+/// `tests::docs_tests::store_trigger_ddl_census` fails the suite when a source
+/// file mixes trigger DDL with `.connection()`/`.connection_mut()` and has no
+/// unguarded route, so the wrong shape lands as a named RED rather than as a
+/// mystery `not authorized`.
 pub(crate) fn with_unrestricted_fixture_connection<T>(
     path: &Path,
     operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,

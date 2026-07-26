@@ -1,3 +1,45 @@
+//! Connection open path, retry/backoff policy, and the SQLite authorizer that
+//! guards every [`crate::MemoryStore`] connection.
+//!
+//! # The authorizer is an allowlist, not a blocklist
+//!
+//! `reserved_reference_authorizer` denies **all** schema mutation — every
+//! CREATE/DROP of table, index, view, trigger and virtual table, TEMP variants
+//! included, plus ALTER TABLE / ANALYZE / REINDEX (see `schema_mutation`).
+//! The only DDL it ever returns `SQLITE_OK` for is two byte-exact internal
+//! shapes:
+//!
+//! 1. the canonical `memories_reserved_refs_{insert,update}_guard` and
+//!    search-generation triggers on `main`, while a scoped schema-migration
+//!    token is armed (`authorize_schema_migration`);
+//! 2. the `ingest_stable_owner_fence` temp trigger and its
+//!    `ingest_owner_fence_context` temp table, while the owner-fence token is
+//!    armed (`is_exact_ingest_owner_fence_temp_ddl`).
+//!
+//! Note the ordering consequence: the trigger branch runs *before* the blanket
+//! `schema_migration` allow, so even an armed migration token cannot create an
+//! arbitrarily named trigger. There is no name, table or temp-ness a caller
+//! can pick that lands inside the allowlist.
+//!
+//! # Consequence for tests (tachi#1443)
+//!
+//! A fixture cannot inject a mid-transaction failure by creating a trigger on
+//! a store connection. It fails at prepare time with SQLite's generic
+//! `not authorized`, before reaching the code under test — four fixtures in
+//! two PRs in one day were written that way and asserted nothing. The
+//! sanctioned route is a second, unguarded `rusqlite::Connection` opened
+//! directly on the store's database file; the full rule, its two constraints,
+//! and the per-crate helpers are documented on
+//! [`crate::MemoryStore::connection`], which is the doorway every one of those
+//! fixtures went through. `tachi-server`'s
+//! `tests::docs_tests::store_trigger_ddl_census` fails the suite when a source
+//! file mixes trigger DDL with `.connection()` and no unguarded route.
+//!
+//! A second, independent fence backs this up:
+//! `validate_persistent_trigger_inventory` rejects any non-canonical
+//! persistent trigger at open time, so a leaked fixture trigger makes the
+//! database unopenable far from its cause.
+
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags};
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -955,5 +997,110 @@ mod ingest_owner_fence_authorizer_tests {
             })
             .expect("second fenced operation after action panic");
         assert_eq!(temp_owner_fence_object_count(&store), 0);
+    }
+}
+
+/// Executable statement of the DDL wall that tachi#1443 was opened for.
+///
+/// The rule is written for humans on `MemoryStore::connection` and in this
+/// module's header. These two tests are what stop that prose from drifting:
+/// relax the authorizer under `cfg(test)` and the first goes RED; break the
+/// alternative the doc sends fixture authors to and the second goes RED.
+#[cfg(test)]
+mod store_connection_ddl_wall_tests {
+    use super::*;
+
+    const FAULT_TRIGGER_TEMP: &str = "CREATE TEMP TRIGGER wf1443_fault_probe \
+         BEFORE UPDATE ON memories \
+         BEGIN SELECT RAISE(ABORT, 'injected fixture failure'); END;";
+    const FAULT_TRIGGER_PERSISTENT: &str = "CREATE TRIGGER wf1443_fault_probe \
+         BEFORE UPDATE ON memories \
+         BEGIN SELECT RAISE(ABORT, 'injected fixture failure'); END;";
+
+    /// Accept either shape a denial can take: rusqlite reports a prepare-time
+    /// authorizer refusal as `SqliteFailure` on some versions and wraps it in
+    /// `SqlInputError` on others. Both render the `not authorized` text a
+    /// fixture author actually sees, which is why the message is checked too.
+    fn assert_not_authorized(result: rusqlite::Result<()>, operation: &str) {
+        let error = result.expect_err(operation);
+        let is_auth_code = matches!(
+            &error,
+            rusqlite::Error::SqliteFailure(failure, _)
+                if failure.extended_code == rusqlite::ffi::SQLITE_AUTH
+        );
+        assert!(
+            is_auth_code || error.to_string().contains("not authorized"),
+            "{operation} failed with {error:?} instead of an authorizer denial"
+        );
+    }
+
+    /// A test cannot buy its way past the trigger allowlist. Note in
+    /// particular the armed-token half: `authorize_schema_migration` is the
+    /// strongest authority any in-crate caller can hold, and it still does not
+    /// admit an arbitrarily named trigger, because the trigger branch runs
+    /// before the blanket schema-migration allow.
+    #[test]
+    fn arbitrary_trigger_ddl_is_denied_on_a_store_connection() {
+        let store = MemoryStore::open_in_memory().expect("open guarded store");
+
+        assert_not_authorized(
+            store.connection().execute_batch(FAULT_TRIGGER_TEMP),
+            "unarmed arbitrary temp trigger",
+        );
+        assert_not_authorized(
+            store.connection().execute_batch(FAULT_TRIGGER_PERSISTENT),
+            "unarmed arbitrary persistent trigger",
+        );
+
+        let migration = authorize_schema_migration(&store.reserved_reference_write)
+            .expect("arm the schema-migration token");
+        assert_not_authorized(
+            store.connection().execute_batch(FAULT_TRIGGER_TEMP),
+            "armed arbitrary temp trigger",
+        );
+        assert_not_authorized(
+            store.connection().execute_batch(FAULT_TRIGGER_PERSISTENT),
+            "armed arbitrary persistent trigger",
+        );
+        drop(migration);
+    }
+
+    /// The sanctioned alternative, proven rather than asserted in prose: a
+    /// second connection opened directly on the store's file carries no
+    /// authorizer, so a `RAISE(ABORT, …)` trigger installed there does reach
+    /// and fail a real store write. This is the route
+    /// `MemoryStore::connection`'s doc sends fixture authors to, and
+    /// `tachi-server`'s `test_support::with_unrestricted_fixture_connection`
+    /// is the same thing behind a name.
+    #[test]
+    fn an_unguarded_second_connection_can_fail_a_real_store_write() {
+        let dir = tempfile::tempdir().expect("fault-injection fixture dir");
+        let path = dir.path().join("memory.db");
+        let store = MemoryStore::open(&path.to_string_lossy()).expect("open guarded store");
+
+        let offline = rusqlite::Connection::open(&path).expect("open unguarded fixture connection");
+        offline
+            .execute_batch(
+                "CREATE TRIGGER wf1443_fail_state_write \
+                 BEFORE INSERT ON hard_state \
+                 WHEN NEW.namespace = 'wf1443/fault' \
+                 BEGIN SELECT RAISE(ABORT, 'injected mid-transaction failure'); END;",
+            )
+            .expect(
+                "the unguarded connection must accept fixture DDL the store connection refuses",
+            );
+        drop(offline);
+
+        let error = crate::db::set_state(store.connection(), "wf1443/fault", "key", "{}")
+            .expect_err("the injected trigger must abort the store write");
+        assert!(
+            error
+                .to_string()
+                .contains("injected mid-transaction failure"),
+            "store write failed with an unrelated error: {error}"
+        );
+
+        crate::db::set_state(store.connection(), "wf1443/unfenced", "key", "{}")
+            .expect("the injected trigger must only fire on its own namespace");
     }
 }

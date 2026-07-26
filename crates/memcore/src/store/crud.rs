@@ -68,11 +68,62 @@ impl MemoryStore {
 
     /// Compatibility access for diagnostics and typed helpers that operate on
     /// non-memory tables. `rusqlite::Connection` is inherently write-capable
-    /// even through `&Connection`, so a connection authorizer denies raw
-    /// memory inserts, authority-bearing classifier/lifecycle writes,
-    /// protected guard DDL, attached schemas, and writable-schema mode. Fixed
-    /// typed store operations use a private scoped token; auxiliary tables and
-    /// non-protected content columns remain available through this seam.
+    /// even through `&Connection`, so a connection authorizer
+    /// (`db::open::install_reserved_reference_authorizer`) sits on every store
+    /// connection. Auxiliary-table DML and non-protected `memories` content
+    /// columns remain available through this seam; fixed typed store
+    /// operations arm a private scoped token for the rest.
+    ///
+    /// # What is denied, stated without euphemism
+    ///
+    /// * **Every schema mutation.** CREATE/DROP of table, index, view,
+    ///   trigger and virtual table — including all TEMP variants — plus ALTER
+    ///   TABLE, ANALYZE and REINDEX. Not "protected DDL": *all* DDL. The
+    ///   authorizer's allowlist is two byte-exact internal shapes (the
+    ///   canonical `memories_reserved_refs_*`/search-generation triggers under
+    ///   an armed schema-migration token, and the `ingest_stable_owner_fence`
+    ///   temp pair under an armed owner-fence token). No name, table or
+    ///   temp-ness a caller can choose lands inside it.
+    /// * Raw `memories` INSERTs and UPDATEs of authority-bearing columns.
+    /// * `ATTACH`/`DETACH` and `PRAGMA writable_schema`.
+    ///
+    /// Denied statements fail at prepare time with SQLite's generic
+    /// `not authorized`, which names neither the rule nor the alternative —
+    /// hence this comment.
+    ///
+    /// # Injecting a mid-transaction store-write failure in a test
+    ///
+    /// Do **not** reach for `CREATE TEMP TRIGGER` through this seam. It is
+    /// denied, so the fixture dies on `not authorized` before it ever reaches
+    /// the code under test, and the test asserts nothing (tachi#1443 — four
+    /// such fixtures in two PRs in one day).
+    ///
+    /// The sanctioned route is a **second, unguarded connection to the same
+    /// database file**, which carries no authorizer. Install the failing
+    /// trigger there, then drive the code under test through the store:
+    ///
+    /// * from `tachi-server`:
+    ///   `crate::test_support::with_unrestricted_fixture_connection(path, op)`
+    ///   (see `tests/skill_tests/builtin_ingest/ingest_source.rs`);
+    /// * from `memcore`: `rusqlite::Connection::open(&path)` against the
+    ///   store's own file (see `store/vault.rs`'s
+    ///   `vault_replace_api_key_pool_rolls_back_when_rotation_write_fails`).
+    ///
+    /// Two constraints come with it, both fail-closed if ignored:
+    ///
+    /// 1. The store must be **file-backed**. An `open_in_memory()` store has
+    ///    no path for a second connection to open, so a fixture that needs
+    ///    injected failure must use a `tempfile`-backed store instead.
+    /// 2. A temp trigger dies with the connection that created it, so the
+    ///    injected trigger must be **persistent** — and a persistent
+    ///    non-canonical trigger left behind makes the database refuse to open
+    ///    (`db::open::validate_persistent_trigger_inventory`). Drop it before
+    ///    anything reopens the file, or keep the file disposable.
+    ///
+    /// When no injected failure is needed at all, prefer a deterministic
+    /// no-DDL failure (a missing row, a violated constraint): see
+    /// `store/vault.rs`'s
+    /// `vault_touch_entries_atomic_rolls_back_every_touch_when_one_name_is_missing`.
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -80,7 +131,10 @@ impl MemoryStore {
     /// Compatibility access for typed helpers that need a transaction on
     /// non-memory tables (`Connection::transaction` requires `&mut`), notably
     /// exec-env/resource/claim and recall-proposal operations. It carries the
-    /// same connection-level restrictions as [`Self::connection`].
+    /// same connection-level restrictions as [`Self::connection`] — including
+    /// the blanket DDL denial and the fault-injection guidance documented
+    /// there, which is what a test wanting to break one of these transactions
+    /// needs to read first.
     pub fn connection_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }

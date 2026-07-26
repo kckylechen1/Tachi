@@ -18,3 +18,4 @@ mod organize;
 mod portable_kernel_split;
 mod release_distribution;
 mod safety;
+mod store_trigger_ddl_census;
