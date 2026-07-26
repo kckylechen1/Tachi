@@ -87,7 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Recursive-dispatch depth gate v1 against accidental runaway dispatch, and bounded untrusted dispatch prompt inputs (#1260).
+- Recursive-dispatch depth gate v1 against accidental runaway dispatch, and bounded untrusted dispatch prompt inputs (#1251).
 
 ## [1.9.0] - 2026-07-11
 
