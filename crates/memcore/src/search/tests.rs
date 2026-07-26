@@ -13,6 +13,7 @@ mod baseline;
 mod config;
 mod decay_policy;
 mod expansion;
+mod exposure_loop;
 mod golden_corpus;
 mod graph;
 mod noise;
