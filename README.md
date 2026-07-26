@@ -381,7 +381,7 @@ still reuse a compatible daemon unless stdio proxying is also disabled.
 
 ## Model Stack
 
-Phase 2 simplified the lane model. Background extraction, summary, and distillation calls go directly through the configured API lanes, with cross-provider fallback and loud `LANE_OUTAGE` recording when a chain is exhausted (the earlier Claude CLI pool fallback was retired, #1261). For most deployments you only need:
+Phase 2 simplified the background lanes. Extraction, summary, and daily distillation go through configured OpenAI-compatible API lanes; a distinct configured provider fallback is tried before loud `LANE_OUTAGE` recording when a chain is exhausted. `FOUNDRY_DISTILL_BACKEND=claude_cli` remains a legacy selector but still calls the API distill lane, not a Claude subprocess. Ordinary reasoning/chat is separate: it tries Claude CLI first, then the configured API fallback; provider-only callers intentionally omit CLI. For most deployments you only need:
 
 | Purpose | Required | Default |
 |---------|----------|---------|

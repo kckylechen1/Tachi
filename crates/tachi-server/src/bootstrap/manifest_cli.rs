@@ -15,12 +15,14 @@ fn default_scan_roots(home: &Path, app_home: &Path, git_root: Option<&PathBuf>) 
     roots
 }
 
-fn model_lane_lines() -> [&'static str; 4] {
+fn model_lane_lines() -> [&'static str; 6] {
     [
         "embedding: voyage-4 (1024d), key=VOYAGE_API_KEY",
         "rerank: rerank-2.5, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY",
-        "extract/summary: Qwen/Qwen3.5-27B via SiliconFlow-compatible chat",
-        "distill/reasoning: configured API/provider lanes with cross-provider fallback; full-chain exhaustion records LANE_OUTAGE",
+        "extract/summary: OpenAI-compatible API lanes with configured provider fallback",
+        "daily distill: OpenAI-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector, not a Claude subprocess",
+        "reasoning/chat: Claude CLI first, then configured OpenAI-compatible API fallback",
+        "security scan: historical ClaudeCli selector runs two provider-only votes fail-closed; raw_api uses one API vote; disabled skips LLM",
     ]
 }
 
@@ -251,12 +253,18 @@ mod tests {
     }
 
     #[test]
-    fn model_lane_lines_describe_configured_provider_routing() {
-        let rendered = model_lane_lines().join("\n");
-        assert!(rendered.contains("configured API/provider lanes"));
-        assert!(rendered.contains("cross-provider fallback"));
-        assert!(rendered.contains("LANE_OUTAGE"));
-        assert!(!rendered.contains("Claude CLI first"));
+    fn model_lane_lines_describe_current_routing() {
+        assert_eq!(
+            model_lane_lines(),
+            [
+                "embedding: voyage-4 (1024d), key=VOYAGE_API_KEY",
+                "rerank: rerank-2.5, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY",
+                "extract/summary: OpenAI-compatible API lanes with configured provider fallback",
+                "daily distill: OpenAI-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector, not a Claude subprocess",
+                "reasoning/chat: Claude CLI first, then configured OpenAI-compatible API fallback",
+                "security scan: historical ClaudeCli selector runs two provider-only votes fail-closed; raw_api uses one API vote; disabled skips LLM",
+            ]
+        );
     }
 
     fn test_hub_capability(id: &str, cap_type: &str, definition: &str) -> memcore::HubCapability {

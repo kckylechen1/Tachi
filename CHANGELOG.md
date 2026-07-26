@@ -76,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Save-to-retrievability contract**: recall-cache invalidation choke point and epoch-fenced write-through, so a fresh save is immediately recallable.
+- **Save-to-retrievability contract**: recall-cache invalidation choke point and epoch-fenced write-through, so a fresh save is immediately recallable (#2059, PR #1361).
 - **Project identity repair**: fail-closed gen-2 recovery with resolver/manifest invariants (#1356).
 - **Vault**: auto-lock clears only the vault key (unified `0=never` sentinel, #400); stored `kdf_params` are enforced at every key-derivation site with a fail-closed algorithm check; honest no-TTY errors and a Keychain path for MCP `vault_unlock`.
 - **Recall**: vector KNN over-fetches past the archived post-JOIN filter (#1245); pure-Han FTS fallback candidates recovered; atomic dedup for id-less memory saves.

@@ -299,7 +299,7 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 ## 模型栈
 
-Phase 2 已简化 Lane 模型。后台抽取、摘要与蒸馏调用直接走配置好的 API lane，链路耗尽时跨 provider 回退并显式记录 `LANE_OUTAGE`（早期的 Claude CLI pool 回退已退役，#1261）。大多数部署只需：
+Phase 2 已简化后台 Lane。抽取、摘要和每日蒸馏走配置好的 OpenAI-compatible API lane；已配置的不同 provider 回退耗尽后才显式记录 `LANE_OUTAGE`。`FOUNDRY_DISTILL_BACKEND=claude_cli` 仍是兼容选择器，但实际仍调用 API distill lane，不会启动 Claude 子进程。常规 reasoning/chat 则先尝试 Claude CLI，再回退到配置好的 API；provider-only 调用会刻意跳过 CLI。大多数部署只需：
 
 | 用途 | 是否必填 | 默认值 |
 |------|----------|--------|

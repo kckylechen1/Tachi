@@ -21,11 +21,11 @@ pub(in crate::hub_ops) async fn scan_skill_definition_with_llm(
         return None;
     }
 
-    // Phase 2: SKILL_SECURITY_SCAN_BACKEND chooses how the LLM portion is
-    // executed. `claude_cli` is the default — call the pool first and fall
-    // back to the raw_api lane on Err. `raw_api` bypasses the pool entirely.
-    // `disabled` skips the LLM portion (callers still receive the static
-    // heuristic scan via merge_skill_scans).
+    // SKILL_SECURITY_SCAN_BACKEND selects the LLM policy. The historical
+    // `claude_cli` name runs the two-vote, provider-only, fail-closed path;
+    // `raw_api` makes one provider-only vote; `disabled` skips the LLM
+    // portion (callers still receive the static heuristic scan via
+    // merge_skill_scans). No selector launches a Claude subprocess here.
     let backend = resolve_security_scan_backend();
     if backend == SecurityScanBackend::Disabled {
         return None;

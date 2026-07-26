@@ -64,7 +64,7 @@ pub enum Commands {
         /// Skip per-DB interactive confirmation prompts (requires --execute)
         #[arg(long)]
         yes: bool,
-        /// Override the migration target DB (defaults to ~/.tachi/global/memory.db)
+        /// Override the migration target DB (defaults to ~/.tachi/global/tachi-memory.db)
         #[arg(long, value_name = "PATH")]
         target_db: Option<PathBuf>,
     },

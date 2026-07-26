@@ -435,6 +435,22 @@ fn model_lanes_reports_configured_local_rerank_provider() {
 }
 
 #[test]
+fn model_lanes_distinguish_api_only_distill_from_cli_first_reasoning() {
+    let lanes = model_lanes_json();
+
+    assert_eq!(
+        lanes["distill"]["provider"],
+        json!(
+            "openai-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector (no Claude subprocess)"
+        )
+    );
+    assert_eq!(
+        lanes["reasoning"]["provider"],
+        json!("claude-cli-first, openai-compatible fallback")
+    );
+}
+
+#[test]
 fn xai_and_zai_are_recognized_provider_env_names() {
     // #1355: the grok/xai opencode lane provider uses `{env:XAI_API_KEY}`
     // substitution in opencode.json so vault "收权" can never blank it (no
