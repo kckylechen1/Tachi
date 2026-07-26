@@ -342,7 +342,7 @@ pub(super) fn persist_capture_entry(
     }
 
     if let Some(project_name) = named_project {
-        let dest_path = MemoryServer::resolve_named_project_db_path(project_name)?;
+        let dest_path = server.resolve_server_named_project_db_path(project_name)?;
         let mut entry = entry.clone();
         entry.metadata = crate::provenance::restamp_provenance_for_destination(
             entry.metadata,

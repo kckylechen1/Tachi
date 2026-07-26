@@ -249,7 +249,7 @@ fn search_database_targets(
     let named = |name: &str| -> Result<SearchDatabaseTarget, String> {
         Ok(SearchDatabaseTarget::NamedProject {
             name: name.to_string(),
-            path: MemoryServer::resolve_named_project_db_path(name)?,
+            path: server.resolve_server_named_project_db_path(name)?,
         })
     };
 
@@ -259,7 +259,7 @@ fn search_database_targets(
         .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
     let mut searched_named = false;
     if let Some(project_name) = params.project.as_deref() {
-        if named_project_db_exists(project_name) {
+        if named_project_db_exists(server, project_name) {
             targets.push(named(project_name)?);
             searched_named = true;
             if !project_only {
@@ -273,7 +273,7 @@ fn search_database_targets(
     }
 
     let mut searched_default_wiki = false;
-    if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
+    if params.project.is_none() && wiki_path_prefix && named_project_db_exists(server, "wiki") {
         targets.push(named("wiki")?);
         searched_default_wiki = true;
     }
@@ -282,7 +282,7 @@ fn search_database_targets(
         if project_only {
             let named_project = resolve_workspace_named_project();
             if let Some(project_name) = named_project.as_deref() {
-                if named_project_db_exists(project_name)
+                if named_project_db_exists(server, project_name)
                     && (project_name != "wiki" || !searched_default_wiki)
                 {
                     let named_target = named(project_name)?;

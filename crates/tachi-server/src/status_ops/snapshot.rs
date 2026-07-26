@@ -110,8 +110,9 @@ fn collect_snapshot_inner(
     let mut dbs: Vec<DbStatus> = Vec::with_capacity(scoped_entries.len());
     for entry in scoped_entries {
         let path = PathBuf::from(&entry.path);
-        let label = db_status_label(entry, &path);
-        let orphan = is_orphan_entry(entry, &path, global_db_path, project_db_path);
+        let label = db_status_label(entry, &path, app_home);
+        let orphan =
+            is_orphan_entry_in_home(entry, &path, global_db_path, project_db_path, app_home);
         let leaf_exists = match crate::path_utils::manifest_db_leaf_exists(entry) {
             Ok(exists) => exists,
             Err(error) => {
@@ -218,12 +219,20 @@ fn collect_snapshot_inner(
         .map(|warning| warning.message)
         .collect();
     let (plan_c_split_brain, plan_c_alias_integrity) = match project_db_path {
-        Some(path) => match crate::path_utils::inspect_plan_c_alias_for_local_db(path) {
-            crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => (vec![issue], Vec::new()),
-            crate::path_utils::PlanCAliasInspection::Integrity(issue) => (Vec::new(), vec![issue]),
-            crate::path_utils::PlanCAliasInspection::Absent
-            | crate::path_utils::PlanCAliasInspection::MatchingSymlink => (Vec::new(), Vec::new()),
-        },
+        Some(path) => {
+            match crate::path_utils::inspect_plan_c_alias_for_local_db_in_home(path, app_home) {
+                crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
+                    (vec![issue], Vec::new())
+                }
+                crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
+                    (Vec::new(), vec![issue])
+                }
+                crate::path_utils::PlanCAliasInspection::Absent
+                | crate::path_utils::PlanCAliasInspection::MatchingSymlink => {
+                    (Vec::new(), Vec::new())
+                }
+            }
+        }
         None => (Vec::new(), Vec::new()),
     };
     let health_deductions = status_health::calculate_health_deductions(
@@ -265,10 +274,11 @@ pub(crate) fn list_recent_checkpoint_entries(
 }
 
 pub(crate) fn list_recent_checkpoint_entries_for_project(
+    server: &crate::MemoryServer,
     project_name: &str,
     limit: usize,
 ) -> Vec<serde_json::Value> {
-    let Ok(db_path) = crate::MemoryServer::resolve_named_project_db_path(project_name) else {
+    let Ok(db_path) = server.resolve_server_named_project_db_path(project_name) else {
         return Vec::new();
     };
     let mut rows = Vec::new();
@@ -364,7 +374,7 @@ pub(super) fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn db_status_label(entry: &DbEntry, path: &Path) -> String {
+fn db_status_label(entry: &DbEntry, path: &Path, app_home: &Path) -> String {
     if matches!(entry.role, DbRole::Global) {
         return "global".to_string();
     }
@@ -375,7 +385,7 @@ fn db_status_label(entry: &DbEntry, path: &Path) -> String {
     if let Some(label) = label_for_tachi_run_db(path) {
         return label;
     }
-    if let Some(name) = crate::path_utils::named_project_for_db_path(path) {
+    if let Some(name) = crate::path_utils::named_project_for_db_path_in_home(path, app_home) {
         return format!("project:{name}");
     }
     if matches!(entry.role, DbRole::Project) {
@@ -428,5 +438,32 @@ fn label_for_tachi_run_db(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 pub(crate) fn db_status_label_for_tests(entry: &DbEntry, path: &Path) -> String {
-    db_status_label(entry, path)
+    db_status_label(entry, path, &crate::path_utils::tachi_home())
+}
+
+#[cfg(test)]
+mod env_drift_tests {
+    use super::*;
+    use crate::test_support::EnvRestore;
+
+    #[test]
+    fn snapshot_alias_health_stays_bound_after_environment_drift() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let server = crate::tests::make_server();
+        let app_home = server.tachi_home_dir();
+        let global_db = server.global_db_path_buf();
+        let project_db = server
+            .project_db_path_buf()
+            .expect("test server project DB");
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        crate::tests::create_split_brain_alias(ambient_home.path(), &project_db);
+        let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        let snapshot = collect_snapshot(&app_home, &global_db, Some(&project_db));
+
+        assert!(snapshot.plan_c_split_brain.is_empty());
+        assert!(snapshot.plan_c_alias_integrity.is_empty());
+    }
 }

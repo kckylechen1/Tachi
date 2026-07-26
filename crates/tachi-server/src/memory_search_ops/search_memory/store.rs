@@ -107,7 +107,7 @@ fn named_project_is_bound_project(server: &MemoryServer, project_name: &str) -> 
     let Some(bound_project_db) = server.project_db_path_buf() else {
         return false;
     };
-    let Ok(named_project_db) = MemoryServer::resolve_named_project_db_path(project_name) else {
+    let Ok(named_project_db) = server.resolve_server_named_project_db_path(project_name) else {
         return false;
     };
 

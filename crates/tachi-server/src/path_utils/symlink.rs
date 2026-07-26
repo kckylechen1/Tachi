@@ -1,5 +1,5 @@
 use super::alias::{
-    plan_c_alias_db_for_root, plan_c_dir_name_from_root, plan_c_project_root_from_local_db,
+    plan_c_alias_db_for_root_in_home, plan_c_dir_name_from_root, plan_c_project_root_from_local_db,
 };
 use super::home::tachi_home;
 use super::types::{
@@ -11,7 +11,16 @@ use std::path::Path;
 /// Global Plan C symlink for a repo-local project DB (Unix only).
 #[cfg(unix)]
 pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> PlanCLinkOutcome {
-    ensure_plan_c_symlink_with_hook(local_db, project_root, |_path| {
+    ensure_plan_c_symlink_in_home(local_db, project_root, &tachi_home())
+}
+
+#[cfg(unix)]
+pub(crate) fn ensure_plan_c_symlink_in_home(
+    local_db: &Path,
+    project_root: &Path,
+    tachi_home: &Path,
+) -> PlanCLinkOutcome {
+    ensure_plan_c_symlink_with_hook(local_db, project_root, tachi_home, |_path| {
         #[cfg(test)]
         run_plan_c_symlink_hook_for_test(_path)?;
         Ok(())
@@ -22,27 +31,32 @@ pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> Pla
 fn ensure_plan_c_symlink_with_hook(
     local_db: &Path,
     project_root: &Path,
+    tachi_home: &Path,
     before_symlink: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> PlanCLinkOutcome {
-    let projects_root = tachi_home().join("projects");
+    let projects_root = tachi_home.join("projects");
     if local_db.starts_with(&projects_root) {
         return PlanCLinkOutcome::Skipped("local db is already under the Plan C projects root");
     }
-    let global_link = match inspect_plan_c_alias(local_db, project_root) {
+    let global_link = match inspect_plan_c_alias_in_home(local_db, project_root, tachi_home) {
         PlanCAliasInspection::MatchingSymlink => return PlanCLinkOutcome::AlreadyLinked,
         PlanCAliasInspection::SplitBrain(issue) => return PlanCLinkOutcome::SplitBrain(issue),
         PlanCAliasInspection::Integrity(issue) => {
             return PlanCLinkOutcome::AliasIntegrity(issue);
         }
-        PlanCAliasInspection::Absent => match plan_c_alias_db_for_root(project_root) {
-            Ok(path) => path,
-            Err(error) => {
-                return PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::IdentityUnresolved {
-                    project_root: project_root.to_path_buf(),
-                    error,
-                });
+        PlanCAliasInspection::Absent => {
+            match plan_c_alias_db_for_root_in_home(project_root, tachi_home) {
+                Ok(path) => path,
+                Err(error) => {
+                    return PlanCLinkOutcome::AliasIntegrity(
+                        PlanCAliasIntegrity::IdentityUnresolved {
+                            project_root: project_root.to_path_buf(),
+                            error,
+                        },
+                    );
+                }
             }
-        },
+        }
     };
     let Some(global_project_dir) = global_link.parent().map(Path::to_path_buf) else {
         return PlanCLinkOutcome::Skipped("project root has no directory name");
@@ -57,7 +71,7 @@ fn ensure_plan_c_symlink_with_hook(
         .and_then(|()| std::os::unix::fs::symlink(local_db, &global_link));
     if let Err(error) = symlink_result {
         tracing::warn!(error = %error, path = %global_link.display(), "Failed to create Plan C symlink; re-inspecting alias state");
-        return match inspect_plan_c_alias(local_db, project_root) {
+        return match inspect_plan_c_alias_in_home(local_db, project_root, tachi_home) {
             PlanCAliasInspection::MatchingSymlink => PlanCLinkOutcome::AlreadyLinked,
             PlanCAliasInspection::SplitBrain(issue) => PlanCLinkOutcome::SplitBrain(issue),
             PlanCAliasInspection::Integrity(issue) => PlanCLinkOutcome::AliasIntegrity(issue),
@@ -78,7 +92,7 @@ pub(super) fn ensure_plan_c_symlink_with_test_hook(
     project_root: &Path,
     before_symlink: impl FnOnce(&Path),
 ) -> PlanCLinkOutcome {
-    ensure_plan_c_symlink_with_hook(local_db, project_root, |path| {
+    ensure_plan_c_symlink_with_hook(local_db, project_root, &tachi_home(), |path| {
         before_symlink(path);
         Ok(())
     })
@@ -133,19 +147,43 @@ pub(crate) fn ensure_plan_c_symlink(_local_db: &Path, _project_root: &Path) -> P
     PlanCLinkOutcome::Skipped("Plan C symlink unsupported on non-Unix hosts")
 }
 
+#[cfg(not(unix))]
+pub(crate) fn ensure_plan_c_symlink_in_home(
+    _local_db: &Path,
+    _project_root: &Path,
+    _tachi_home: &Path,
+) -> PlanCLinkOutcome {
+    PlanCLinkOutcome::Skipped("Plan C symlink unsupported on non-Unix hosts")
+}
+
 pub(crate) fn inspect_plan_c_alias_for_local_db(local_db: &Path) -> PlanCAliasInspection {
+    inspect_plan_c_alias_for_local_db_in_home(local_db, &tachi_home())
+}
+
+pub(crate) fn inspect_plan_c_alias_for_local_db_in_home(
+    local_db: &Path,
+    tachi_home: &Path,
+) -> PlanCAliasInspection {
     let Some(project_root) = plan_c_project_root_from_local_db(local_db) else {
         return PlanCAliasInspection::Absent;
     };
-    inspect_plan_c_alias(local_db, &project_root)
+    inspect_plan_c_alias_in_home(local_db, &project_root, tachi_home)
 }
 
 pub(crate) fn inspect_plan_c_alias(local_db: &Path, project_root: &Path) -> PlanCAliasInspection {
-    let projects_root = tachi_home().join("projects");
+    inspect_plan_c_alias_in_home(local_db, project_root, &tachi_home())
+}
+
+pub(crate) fn inspect_plan_c_alias_in_home(
+    local_db: &Path,
+    project_root: &Path,
+    tachi_home: &Path,
+) -> PlanCAliasInspection {
+    let projects_root = tachi_home.join("projects");
     if local_db.starts_with(&projects_root) {
         return PlanCAliasInspection::Absent;
     }
-    let alias_db = match plan_c_alias_db_for_root(project_root) {
+    let alias_db = match plan_c_alias_db_for_root_in_home(project_root, tachi_home) {
         Ok(alias_db) => alias_db,
         Err(error) => {
             return PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved {

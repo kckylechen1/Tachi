@@ -413,6 +413,22 @@ pub(crate) fn is_orphan_entry(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> bool {
+    is_orphan_entry_in_home(
+        entry,
+        db_path,
+        global_db_path,
+        project_db_path,
+        &crate::path_utils::tachi_home(),
+    )
+}
+
+pub(crate) fn is_orphan_entry_in_home(
+    entry: &crate::manifest::DbEntry,
+    db_path: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+    tachi_home: &Path,
+) -> bool {
     if paths_equal(db_path, global_db_path) {
         return false;
     }
@@ -421,7 +437,7 @@ pub(crate) fn is_orphan_entry(
             return false;
         }
     }
-    if crate::path_utils::named_project_for_db_path(db_path).is_some() {
+    if crate::path_utils::named_project_for_db_path_in_home(db_path, tachi_home).is_some() {
         return false;
     }
     !(entry.allow_write

@@ -524,8 +524,9 @@ impl MemoryServer {
             .transpose()?;
         let project = match project_binding_source(&identity) {
             ProjectBindingSource::Named(project) => {
-                let (canonical_project, _) =
-                    Self::resolve_named_project_binding(project).map_err(|err| {
+                let (canonical_project, _) = self
+                    .resolve_server_named_project_binding(project)
+                    .map_err(|err| {
                         rmcp::ErrorData::invalid_params(
                             format!("invalid HTTP direct-connect project binding: {err}"),
                             None,
@@ -863,7 +864,8 @@ impl ServerHandler for MemoryServer {
 
             let bound_project = self.session_project();
             if let Some(project) = bound_project.as_deref() {
-                crate::session_identity::enforce_session_project(
+                crate::session_identity::enforce_server_session_project(
+                    self,
                     name,
                     &mut params.arguments,
                     project,

@@ -103,17 +103,18 @@ impl Drop for TempHomeGuard {
     }
 }
 
-/// Test-only wrapper that deletes the temporary SQLite database (and its
-/// `-wal`/`-shm` sidecars) when the test scope ends. Historically `make_server`
-/// handed back a bare `MemoryServer` and the temp file was never removed, so
-/// every test run leaked a `memory-server-test-*.sqlite` into the system temp
-/// dir (25k+ files / ~23 GB observed on a dev machine). Deref lets the ~250
-/// existing `server.method()` call sites keep working unchanged; the inner
+/// Test-only wrapper that deletes the temporary global/project SQLite fixture
+/// directory (including sidecars) when the test scope ends. Historically
+/// `make_server` handed back a bare `MemoryServer` and the temp file was never
+/// removed, so every test run leaked a `memory-server-test-*.sqlite` into the
+/// system temp dir (25k+ files / ~23 GB observed on a dev machine). Deref lets
+/// the ~250 existing `server.method()` call sites keep working unchanged; the inner
 /// server is held in an `Option` so consumers that need ownership (e.g.
 /// `call_tool_via_server`) can `take()` it while cleanup still runs on drop.
 pub(crate) struct TestServer {
     server: Option<MemoryServer>,
-    db_path: std::path::PathBuf,
+    fixture_root: std::path::PathBuf,
+    project_db_path: std::path::PathBuf,
 }
 
 impl TestServer {
@@ -139,12 +140,7 @@ impl Drop for TestServer {
         // Drop the server first so the SQLite connection closes before we
         // remove the files (otherwise an open handle can recreate the WAL).
         let _ = self.server.take();
-        let _ = std::fs::remove_file(&self.db_path);
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = self.db_path.clone().into_os_string();
-            sidecar.push(suffix);
-            let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
-        }
+        let _ = std::fs::remove_dir_all(&self.fixture_root);
     }
 }
 
@@ -230,16 +226,137 @@ fn copy_template_db(dest: &std::path::Path) {
 
 pub(crate) fn make_server() -> TestServer {
     ensure_test_env();
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-test-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let fixture_root =
+        crate::utils::test_fixture_path(format!("memory-server-test-{}", uuid::Uuid::new_v4()));
+    let fixture_home = fixture_root.join("home");
+    let db_path = fixture_root
+        .join("global")
+        .join(memcore::MEMORY_DB_FILENAME);
+    let project_db_path = fixture_root
+        .join("project")
+        .join(".tachi")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(db_path.parent().expect("global test db parent"))
+        .expect("create global test db parent");
+    std::fs::create_dir_all(project_db_path.parent().expect("project test db parent"))
+        .expect("create project test db parent");
+    std::fs::create_dir_all(&fixture_home).expect("create fixture Tachi home");
     copy_template_db(&db_path);
-    let server = MemoryServer::new(db_path.clone(), None).expect("failed to create test server");
+    copy_template_db(&project_db_path);
+
+    let mut manifest = crate::manifest::Manifest::empty();
+    if let Some(project_name) = crate::utils::find_project_git_root()
+        .and_then(|root| crate::path_utils::plan_c_dir_name_from_root(&root))
+    {
+        manifest.dbs.push(crate::manifest::DbEntry {
+            path: project_db_path.display().to_string(),
+            role: crate::manifest::DbRole::Project,
+            owner: "test".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: format!("project:{project_name}"),
+            notes: String::new(),
+        });
+    }
+    manifest
+        .save(&fixture_home.join("manifest.json"))
+        .expect("save fixture manifest");
+    let server =
+        MemoryServer::new_with_home_for_test(db_path, Some(project_db_path.clone()), fixture_home)
+            .expect("failed to create test server");
     TestServer {
         server: Some(server),
-        db_path,
+        fixture_root,
+        project_db_path,
     }
+}
+
+#[test]
+fn make_server_keeps_named_project_resolution_inside_its_fixture_home() {
+    ensure_test_env();
+    let _lock = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let project_root = crate::utils::find_project_git_root().expect("test project root");
+    let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+        .expect("derive current repository project name");
+    let entry_id = "make-server-named-project-isolation";
+
+    let ambient_home = tempfile::tempdir().expect("ambient test home");
+    let _ambient_tachi_home =
+        crate::test_support::EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+    let ambient_db = ambient_home.path().join("ambient-project.db");
+    copy_template_db(&ambient_db);
+    let mut ambient_entry = make_entry(entry_id);
+    ambient_entry.text = "ambient manifest entry".to_string();
+    MemoryStore::open(ambient_db.to_str().expect("utf8 ambient db"))
+        .expect("open ambient project db")
+        .upsert(&ambient_entry)
+        .expect("seed ambient project db");
+    let ambient_manifest = crate::manifest::Manifest {
+        schema_version: 1,
+        generated_at: Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![crate::manifest::DbEntry {
+            path: ambient_db.display().to_string(),
+            role: crate::manifest::DbRole::Project,
+            owner: "test".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: format!("project:{project_name}"),
+            notes: String::new(),
+        }],
+    };
+    ambient_manifest
+        .save(&ambient_home.path().join("manifest.json"))
+        .expect("save ambient manifest");
+
+    let server = make_server();
+    let mut fixture_entry = make_entry(entry_id);
+    fixture_entry.text = "fixture manifest entry".to_string();
+    MemoryStore::open(server.project_db_path.to_str().expect("utf8 fixture db"))
+        .expect("open fixture project db")
+        .upsert(&fixture_entry)
+        .expect("seed fixture project db");
+
+    assert_eq!(
+        std::env::var_os("TACHI_HOME").as_deref(),
+        Some(ambient_home.path().as_os_str())
+    );
+    assert_ne!(server.tachi_home_dir(), ambient_home.path());
+    let entry = server
+        .with_named_project_store_read(&project_name, |store| {
+            store.get(entry_id).map_err(|error| error.to_string())
+        })
+        .expect("named-project read through fixture manifest")
+        .expect("fixture manifest entry exists");
+    assert_eq!(entry.text, "fixture manifest entry");
+}
+
+#[test]
+fn make_server_preserves_explicit_home_and_run_root() {
+    ensure_test_env();
+    let _lock = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let explicit_home = tempfile::tempdir().expect("explicit Tachi home");
+    let explicit_run_root = explicit_home.path().join("caller-runs");
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", explicit_home.path());
+    let _run_root = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &explicit_run_root);
+
+    let server = make_server();
+
+    assert_eq!(
+        std::env::var_os("TACHI_HOME").as_deref(),
+        Some(explicit_home.path().as_os_str())
+    );
+    assert_eq!(
+        std::env::var_os("TACHI_RUN_ROOT").as_deref(),
+        Some(explicit_run_root.as_os_str())
+    );
+    assert_ne!(server.tachi_home_dir(), explicit_home.path());
 }
 
 pub(crate) fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
@@ -298,7 +415,7 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
     (server, temp_home)
 }
 
-fn make_entry(id: &str) -> MemoryEntry {
+pub(crate) fn make_entry(id: &str) -> MemoryEntry {
     MemoryEntry {
         id: id.to_string(),
         path: "/".to_string(),
@@ -328,6 +445,31 @@ fn make_entry(id: &str) -> MemoryEntry {
         query_diversity: 0,
         tier: "raw".to_string(),
     }
+}
+
+pub(crate) fn create_named_project_db(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let db_path = home
+        .join("projects")
+        .join(name)
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(db_path.parent().expect("named-project DB parent"))
+        .expect("create named-project DB parent");
+    drop(
+        MemoryStore::open(db_path.to_str().expect("utf8 named-project DB"))
+            .expect("create named-project DB"),
+    );
+    db_path
+}
+
+pub(crate) fn create_split_brain_alias(
+    home: &std::path::Path,
+    local_db: &std::path::Path,
+) -> std::path::PathBuf {
+    let project_root = crate::path_utils::plan_c_project_root_from_local_db(local_db)
+        .expect("repo-local project DB");
+    let project_name =
+        crate::path_utils::plan_c_dir_name_from_root(&project_root).expect("project identity");
+    create_named_project_db(home, &project_name)
 }
 
 fn make_test_tool(name: &str) -> rmcp::model::Tool {

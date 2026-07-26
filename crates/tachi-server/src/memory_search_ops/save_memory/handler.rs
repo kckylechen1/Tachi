@@ -505,7 +505,7 @@ async fn handle_save_memory_impl(
     // broader pre-#1041 bug instead of closing it) — the invariant is
     // `provenance.db_path` always matches where the row actually landed.
     if let Some(project_name) = named_project.as_deref() {
-        if let Ok(named_project_path) = MemoryServer::resolve_named_project_db_path(project_name) {
+        if let Ok(named_project_path) = server.resolve_server_named_project_db_path(project_name) {
             entry.metadata = crate::provenance::correct_provenance_db_path_for_named_project(
                 entry.metadata,
                 &named_project_path,

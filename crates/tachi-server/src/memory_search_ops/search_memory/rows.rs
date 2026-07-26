@@ -145,8 +145,10 @@ pub(super) fn auto_query_embedding_would_run(
         .path_prefix
         .as_deref()
         .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
-    let default_wiki_vec_available =
-        params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") && {
+    let default_wiki_vec_available = params.project.is_none()
+        && wiki_path_prefix
+        && named_project_db_exists(server, "wiki")
+        && {
             server
                 .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
                 .unwrap_or(false)
@@ -222,7 +224,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
 
     let mut searched_named = false;
     if let Some(ref project_name) = params.project {
-        if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name) {
+        if crate::memory_search_ops::search_helpers::named_project_db_exists(server, project_name) {
             let project_results = with_named_project_search(
                 server,
                 project_name,
@@ -246,14 +248,15 @@ pub(crate) async fn search_memory_rows_with_recall_config(
         } else if !project_only {
             return Err(format!(
                 "Project '{project_name}' not found (expected DB at {})",
-                crate::MemoryServer::resolve_named_project_db_path(project_name)
+                server
+                    .resolve_server_named_project_db_path(project_name)
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|e| e)
             ));
         }
     }
 
-    if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
+    if params.project.is_none() && wiki_path_prefix && named_project_db_exists(server, "wiki") {
         match with_named_project_search(
             server,
             "wiki",
@@ -277,12 +280,15 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             let named_project =
                 crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
             if let Some(ref project_name) = named_project {
-                if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name)
-                    && (project_name != "wiki" || !searched_default_wiki)
+                if crate::memory_search_ops::search_helpers::named_project_db_exists(
+                    server,
+                    project_name,
+                ) && (project_name != "wiki" || !searched_default_wiki)
                 {
                     let workspace_path = server.project_db_path_buf();
-                    let named_path =
-                        crate::MemoryServer::resolve_named_project_db_path(project_name).ok();
+                    let named_path = server
+                        .resolve_server_named_project_db_path(project_name)
+                        .ok();
                     let skip_workspace = workspace_path
                         .as_deref()
                         .zip(named_path.as_deref())
@@ -343,7 +349,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             );
             let inferred_db_path = inferred_project
                 .as_deref()
-                .and_then(|name| crate::MemoryServer::resolve_named_project_db_path(name).ok());
+                .and_then(|name| server.resolve_server_named_project_db_path(name).ok());
             let workspace_db_path = server.project_db_path_buf();
             let skip_workspace = inferred_db_path.is_some()
                 && workspace_db_path.as_ref() == inferred_db_path.as_ref();

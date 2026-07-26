@@ -41,9 +41,9 @@ pub async fn run_daily_batch_distill_with_options(
 ) -> Result<DistillBatchReport, String> {
     let mut report = DistillBatchReport::default();
 
-    let bound_name = server
-        .project_db_path_buf()
-        .and_then(|p| crate::path_utils::named_project_for_db_path(&p));
+    let bound_name = server.project_db_path_buf().and_then(|p| {
+        crate::path_utils::named_project_for_db_path_in_home(&p, &server.tachi_home_dir())
+    });
 
     // 1. The daemon's bound project DB (existing behavior).
     if server.has_project_db() {
@@ -59,7 +59,7 @@ pub async fn run_daily_batch_distill_with_options(
     }
 
     // 2. Every other named-project DB in the manifest.
-    for name in crate::path_utils::list_named_projects() {
+    for name in crate::path_utils::list_named_projects_in_home(&server.tachi_home_dir()) {
         if name.eq_ignore_ascii_case("wiki") {
             continue; // wiki has its own curation path
         }
@@ -494,4 +494,29 @@ fn derive_project_label(server: &MemoryServer) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "project".to_string())
+}
+
+#[cfg(test)]
+mod env_drift_tests {
+    use super::*;
+    use crate::test_support::EnvRestore;
+
+    #[tokio::test]
+    async fn daily_distill_enumerates_server_home_after_environment_drift() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let server = crate::tests::make_server();
+        crate::tests::create_named_project_db(&server.tachi_home_dir(), "fixture-distill");
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        crate::tests::create_named_project_db(ambient_home.path(), "ambient-distill");
+        let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        let report = run_daily_batch_distill_with_options(&server, false)
+            .await
+            .expect("daily distill after environment drift");
+
+        assert_eq!(report.projects_scanned, 2);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
 }

@@ -321,6 +321,7 @@ pub(crate) async fn handle_memory_briefing(
         async {
             if let Some(project_name) = named_project.as_deref() {
                 crate::status_ops::list_recent_checkpoint_entries_for_project(
+                    server,
                     project_name,
                     checkpoint_cap,
                 )

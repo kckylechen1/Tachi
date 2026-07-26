@@ -147,16 +147,24 @@ pub(crate) fn plan_c_legacy_dir_name_from_root(project_root: &Path) -> Option<St
 /// Returns an error when the root cannot produce a stable identity or when
 /// compatibility aliases disagree about the physical DB.
 pub(crate) fn plan_c_alias_db_for_root(project_root: &Path) -> Result<PathBuf, String> {
+    plan_c_alias_db_for_root_in_home(project_root, &tachi_home())
+}
+
+pub(crate) fn plan_c_alias_db_for_root_in_home(
+    project_root: &Path,
+    tachi_home: &Path,
+) -> Result<PathBuf, String> {
     let current = plan_c_dir_name_from_root(project_root).ok_or_else(|| {
         format!(
             "project root '{}' cannot be canonicalized into a stable identity",
             project_root.display()
         )
     })?;
-    if let Some(existing) = existing_compatible_alias_for_root(project_root, &current)? {
+    if let Some(existing) = existing_compatible_alias_for_root(project_root, &current, tachi_home)?
+    {
         return Ok(existing);
     }
-    Ok(plan_c_global_db_path(&current))
+    Ok(plan_c_global_db_path_in_home(tachi_home, &current))
 }
 
 /// Like [`plan_c_alias_db_for_root`] but only returns a path when an alias DB
@@ -164,18 +172,26 @@ pub(crate) fn plan_c_alias_db_for_root(project_root: &Path) -> Result<PathBuf, S
 pub(crate) fn plan_c_existing_alias_db_for_root(
     project_root: &Path,
 ) -> Result<Option<PathBuf>, String> {
+    plan_c_existing_alias_db_for_root_in_home(project_root, &tachi_home())
+}
+
+pub(crate) fn plan_c_existing_alias_db_for_root_in_home(
+    project_root: &Path,
+    tachi_home: &Path,
+) -> Result<Option<PathBuf>, String> {
     let current = plan_c_dir_name_from_root(project_root).ok_or_else(|| {
         format!(
             "project root '{}' cannot be canonicalized into a stable identity",
             project_root.display()
         )
     })?;
-    existing_compatible_alias_for_root(project_root, &current)
+    existing_compatible_alias_for_root(project_root, &current, tachi_home)
 }
 
 fn existing_compatible_alias_for_root(
     project_root: &Path,
     current: &str,
+    tachi_home: &Path,
 ) -> Result<Option<PathBuf>, String> {
     // Reconcile every historical naming generation as one candidate set so no
     // pre-#1228 alias data is ever orphaned into a fresh empty DB:
@@ -199,7 +215,7 @@ fn existing_compatible_alias_for_root(
 
     let mut paths = Vec::new();
     for name in names {
-        let dir = tachi_home().join("projects").join(name);
+        let dir = tachi_home.join("projects").join(name);
         for filename in [
             memcore::MEMORY_DB_FILENAME,
             memcore::LEGACY_MEMORY_DB_FILENAME,
@@ -210,10 +226,11 @@ fn existing_compatible_alias_for_root(
     resolve_existing_alias_paths(paths)
 }
 
-pub(crate) fn plan_c_existing_named_alias_db(
+pub(crate) fn plan_c_existing_named_alias_db_in_home(
+    tachi_home: &Path,
     project_name: &str,
 ) -> Result<Option<PathBuf>, String> {
-    let dir = tachi_home().join("projects").join(project_name);
+    let dir = tachi_home.join("projects").join(project_name);
     resolve_existing_alias_paths([
         dir.join(memcore::MEMORY_DB_FILENAME),
         dir.join(memcore::LEGACY_MEMORY_DB_FILENAME),
@@ -265,7 +282,11 @@ fn resolve_existing_alias_paths(
 }
 
 pub(crate) fn plan_c_global_db_path(project_dir_name: &str) -> PathBuf {
-    tachi_home()
+    plan_c_global_db_path_in_home(&tachi_home(), project_dir_name)
+}
+
+pub(crate) fn plan_c_global_db_path_in_home(tachi_home: &Path, project_dir_name: &str) -> PathBuf {
+    tachi_home
         .join("projects")
         .join(project_dir_name)
         .join(memcore::MEMORY_DB_FILENAME)
@@ -279,11 +300,18 @@ pub(crate) fn plan_c_global_db_path(project_dir_name: &str) -> PathBuf {
 /// resolving instead of reporting "not found" against a name that was never
 /// created on disk.
 pub(crate) fn plan_c_global_db_path_existing(project_dir_name: &str) -> PathBuf {
-    let canonical = plan_c_global_db_path(project_dir_name);
+    plan_c_global_db_path_existing_in_home(&tachi_home(), project_dir_name)
+}
+
+pub(crate) fn plan_c_global_db_path_existing_in_home(
+    tachi_home: &Path,
+    project_dir_name: &str,
+) -> PathBuf {
+    let canonical = plan_c_global_db_path_in_home(tachi_home, project_dir_name);
     if canonical.exists() {
         return canonical;
     }
-    let legacy = tachi_home()
+    let legacy = tachi_home
         .join("projects")
         .join(project_dir_name)
         .join(memcore::LEGACY_MEMORY_DB_FILENAME);

@@ -10,6 +10,22 @@ pub(super) fn classify_route(
     own_global: &Path,
     own_project: Option<&Path>,
 ) -> Route {
+    classify_route_in_home(
+        entry,
+        db_path,
+        own_global,
+        own_project,
+        &crate::path_utils::tachi_home(),
+    )
+}
+
+pub(super) fn classify_route_in_home(
+    entry: &crate::manifest::DbEntry,
+    db_path: &Path,
+    own_global: &Path,
+    own_project: Option<&Path>,
+    tachi_home: &Path,
+) -> Route {
     if paths_equal(db_path, own_global) {
         return Route::Global;
     }
@@ -18,7 +34,7 @@ pub(super) fn classify_route(
             return Route::Project;
         }
     }
-    if let Some(name) = crate::path_utils::named_project_for_db_path(db_path) {
+    if let Some(name) = crate::path_utils::named_project_for_db_path_in_home(db_path, tachi_home) {
         return Route::NamedProject(name);
     }
     if entry.allow_write

@@ -590,7 +590,7 @@ async fn run_startup_hygiene(
     );
     if refresh_plan_c_symlink {
         if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
-            match crate::path_utils::inspect_plan_c_alias(db_path, root) {
+            match crate::path_utils::inspect_plan_c_alias_in_home(db_path, root, &ctx.app_home) {
                 crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
                     return Err(issue.warning_message().into());
                 }
@@ -735,7 +735,7 @@ async fn start_stdio_proxy_transport(
     let client_project_name = project_db_path.and_then(|p| {
         crate::memory_search_ops::client_project_precedence(
             crate::memory_search_ops::explicit_workspace_project(),
-            crate::memory_search_ops::named_project_from_db_path(p),
+            crate::memory_search_ops::named_project_from_db_path_in_home(p, &ctx.app_home),
             crate::memory_search_ops::resolve_workspace_named_project(),
         )
     });
@@ -751,6 +751,7 @@ async fn start_stdio_proxy_transport(
         {
             if stdio::proxy_can_preserve_project_context(
                 &info,
+                &ctx.app_home,
                 global_db_path,
                 project_db_path.map(|path| path.as_path()),
                 client_project_name.as_deref(),

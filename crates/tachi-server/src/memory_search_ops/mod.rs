@@ -37,7 +37,7 @@ pub(crate) use search_helpers::client_project_precedence;
 pub(crate) use search_helpers::explicit_workspace_project;
 pub(crate) use search_helpers::list_available_named_projects;
 pub(crate) use search_helpers::named_project_db_exists;
-pub(crate) use search_helpers::named_project_from_db_path;
+pub(crate) use search_helpers::{named_project_from_db_path, named_project_from_db_path_in_home};
 pub(crate) use search_helpers::normalize_json_relevance;
 pub(crate) use search_helpers::resolve_effective_named_project;
 pub(crate) use search_helpers::resolve_workspace_named_project;

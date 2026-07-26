@@ -154,6 +154,7 @@ fn manifest_worker_targets(
             return BTreeMap::new();
         }
     };
+    let tachi_home = manifest_path.parent().unwrap_or_else(|| Path::new("."));
 
     let mut by_path: BTreeMap<PathBuf, (String, Route)> = BTreeMap::new();
     for entry in &manifest.dbs {
@@ -172,7 +173,7 @@ fn manifest_worker_targets(
             }
         }
         let label = manifest_label_for(&path, &entry.scope_hint);
-        let route = classify_route(entry, &path, own_global, own_project);
+        let route = classify_route_in_home(entry, &path, own_global, own_project, tachi_home);
         by_path.insert(path, (label, route));
     }
     by_path

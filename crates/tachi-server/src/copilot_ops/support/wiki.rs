@@ -137,7 +137,7 @@ pub(in crate::copilot_ops) fn default_named_project_available(
     server: &MemoryServer,
     project_name: &str,
 ) -> bool {
-    let Ok(db_path) = MemoryServer::resolve_named_project_db_path(project_name) else {
+    let Ok(db_path) = server.resolve_server_named_project_db_path(project_name) else {
         return false;
     };
     let Some(app_home) = db_path
@@ -147,7 +147,10 @@ pub(in crate::copilot_ops) fn default_named_project_available(
     else {
         return false;
     };
-    server.global_db_path_buf().starts_with(app_home)
+    let app_home = std::fs::canonicalize(app_home).unwrap_or_else(|_| app_home.to_path_buf());
+    let server_home =
+        std::fs::canonicalize(server.tachi_home_dir()).unwrap_or_else(|_| server.tachi_home_dir());
+    server.global_db_path_buf().starts_with(&app_home) || server_home == app_home
 }
 
 /// Identify and supersede wiki entries that duplicate the newly written entry.

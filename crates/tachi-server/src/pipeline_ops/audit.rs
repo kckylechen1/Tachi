@@ -619,7 +619,8 @@ fn ingest_claim_db_path(
     project: Option<&str>,
 ) -> Result<PathBuf, String> {
     if let Some(project_name) = project {
-        return MemoryServer::resolve_named_project_db_path(project_name)
+        return server
+            .resolve_server_named_project_db_path(project_name)
             .map_err(|error| format!("resolve ingest heartbeat project database: {error}"));
     }
     match target_db {
@@ -998,6 +999,81 @@ mod tests {
             )
             .await;
         assert_eq!(error, "cleanup");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn async_heartbeat_uses_server_home_after_environment_drift() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let server = crate::tests::make_server();
+        let project_root = crate::utils::find_project_git_root().expect("test project root");
+        let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+            .expect("test project identity");
+        let event_hash = "heartbeat-environment-drift";
+        let audit_key = ingest_audit_key(
+            "ingest_source",
+            DbScope::Project,
+            Some(&project_name),
+            event_hash,
+        );
+        let claim = claim_retryable_ingest_event(
+            &server,
+            DbScope::Project,
+            Some(&project_name),
+            "ingest_source",
+            &audit_key,
+            "ingest_source",
+            event_hash,
+            "owner-a",
+        )
+        .expect("claim fixture project")
+        .expect("fixture claim acquired");
+
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        let ambient_db = ambient_home.path().join("ambient-project.db");
+        MemoryStore::open(ambient_db.to_str().expect("utf8 ambient DB")).expect("ambient DB");
+        crate::manifest::Manifest {
+            schema_version: 1,
+            generated_at: Utc::now().to_rfc3339(),
+            comment: String::new(),
+            dbs: vec![crate::manifest::DbEntry {
+                path: ambient_db.display().to_string(),
+                role: crate::manifest::DbRole::Project,
+                owner: "test".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: true,
+                allow_write: true,
+                last_doctor_at: Utc::now().to_rfc3339(),
+                last_classification: "healthy".to_string(),
+                scope_hint: format!("project:{project_name}"),
+                notes: String::new(),
+            }],
+        }
+        .save(&ambient_home.path().join("manifest.json"))
+        .expect("ambient manifest");
+        let _ambient = crate::test_support::EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        let (lease, _joined, _refresh_started, refresh_completed) =
+            RetryableIngestLease::start_with_heartbeat_receipts(
+                &server,
+                DbScope::Project,
+                Some(&project_name),
+                "ingest_source",
+                event_hash,
+                claim,
+                std::time::Duration::from_secs(1),
+            );
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        refresh_completed
+            .await
+            .expect("heartbeat refresh completes");
+        lease
+            .ensure_owned()
+            .await
+            .expect("heartbeat remains bound to fixture project");
+        lease.finish().await.expect("stop heartbeat");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

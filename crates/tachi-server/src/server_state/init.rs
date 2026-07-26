@@ -119,6 +119,20 @@ impl MemoryServer {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_home_for_test(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        home_dir: PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_migration_authority_and_home(
+            global_db_path,
+            project_db_path,
+            MigrationAuthority::Deny,
+            home_dir,
+        )
+    }
+
     /// #1119: construct with an explicit schema-migration authority threaded
     /// down to every write-open point (global store, the initial project
     /// store, and the [`DbRuntime`] that owns *dynamic* project opens). Callers
@@ -129,6 +143,20 @@ impl MemoryServer {
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,
         schema_migration: MigrationAuthority,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_migration_authority_and_home(
+            global_db_path,
+            project_db_path,
+            schema_migration,
+            crate::path_utils::tachi_home(),
+        )
+    }
+
+    fn new_with_migration_authority_and_home(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        schema_migration: MigrationAuthority,
+        home_dir: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         ensure_db_parent(&global_db_path)?;
         if let Some(project_db_path) = project_db_path.as_ref() {
@@ -171,7 +199,7 @@ impl MemoryServer {
         // server's own `home_dir` field and the recorder bind to the SAME
         // resolution instead of each independently re-reading
         // TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME (#1096 leaf-2a).
-        let home_dir = Arc::new(crate::path_utils::tachi_home());
+        let home_dir = Arc::new(home_dir);
         let routing_config = Arc::new(RoutingConfigProvider::new((*home_dir).clone()));
         // #1261: `CLAUDE_POOL_MAX_CONCURRENT` env name is kept for back-compat
         // (existing deployments pin it); it now controls the LLM-call

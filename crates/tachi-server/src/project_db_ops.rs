@@ -102,13 +102,15 @@ impl MemoryServer {
         // DB; ambiguity, manifest failure, or a same-name standalone store is
         // an error, never a reason to create/open another DB.
         let mut precommit = ProjectDbPrecommit::new(db_path.clone());
-        let already_resolved = preflight_project_identity(&db_path, &git_root, &project_name)?;
+        let already_resolved =
+            preflight_project_identity(&db_path, &git_root, &project_name, &self.tachi_home_dir())?;
         if !already_resolved {
             if let Err(error) = precommit.reserve_db() {
                 return Err(precommit.abort(error));
             }
         }
-        if let Err(error) = precommit.ensure_alias(&git_root, &project_name) {
+        if let Err(error) = precommit.ensure_alias(&git_root, &project_name, &self.tachi_home_dir())
+        {
             return Err(precommit.abort(error));
         }
         if already_resolved {
@@ -137,18 +139,25 @@ impl MemoryServer {
         // finding [2], #1207: `ensure_plan_c_symlink` is a no-op `Skipped` on
         // non-Unix hosts, so a project registered only via the symlink could
         // never be reopened there).
-        let registration = register_repo_local_manifest_entry_then(&db_path, &project_name, || {
-            precommit.assert_owned_db_artifacts_unchanged()?;
-            let resolved = Self::resolve_named_project_db_path(&project_name).map_err(|err| {
-                format!(
+        let registration = register_repo_local_manifest_entry_then_in_home(
+            &db_path,
+            &project_name,
+            &self.tachi_home_dir(),
+            || {
+                precommit.assert_owned_db_artifacts_unchanged()?;
+                let resolved = self
+                    .resolve_server_named_project_db_path(&project_name)
+                    .map_err(|err| {
+                        format!(
                     "project db was created at {} but is not resolvable by its derived name \
                          '{project_name}': {err}",
                     db_path.display()
                 )
-            })?;
-            precommit.assert_owned_db_artifacts_unchanged()?;
-            Ok(resolved)
-        });
+                    })?;
+                precommit.assert_owned_db_artifacts_unchanged()?;
+                Ok(resolved)
+            },
+        );
         if let Err(error) = registration {
             return Err(precommit.abort(error));
         }
@@ -192,7 +201,19 @@ pub(crate) fn register_repo_local_manifest_entry(
     db_path: &std::path::Path,
     project_name: &str,
 ) -> Result<(), String> {
-    let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
+    register_repo_local_manifest_entry_in_home(
+        db_path,
+        project_name,
+        &crate::path_utils::tachi_home(),
+    )
+}
+
+pub(crate) fn register_repo_local_manifest_entry_in_home(
+    db_path: &std::path::Path,
+    project_name: &str,
+    tachi_home: &std::path::Path,
+) -> Result<(), String> {
+    let manifest_path = tachi_home.join("manifest.json");
     let _process_guard = manifest_registration_mutex()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -206,7 +227,21 @@ fn register_repo_local_manifest_entry_then<T>(
     project_name: &str,
     after_registration: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
+    register_repo_local_manifest_entry_then_in_home(
+        db_path,
+        project_name,
+        &crate::path_utils::tachi_home(),
+        after_registration,
+    )
+}
+
+pub(crate) fn register_repo_local_manifest_entry_then_in_home<T>(
+    db_path: &std::path::Path,
+    project_name: &str,
+    tachi_home: &std::path::Path,
+    after_registration: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let manifest_path = tachi_home.join("manifest.json");
     let _process_guard = manifest_registration_mutex()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -422,11 +457,15 @@ impl ProjectDbPrecommit {
         &mut self,
         project_root: &std::path::Path,
         project_name: &str,
+        tachi_home: &std::path::Path,
     ) -> Result<(), String> {
         #[cfg(unix)]
         {
-            let alias = crate::path_utils::plan_c_alias_db_for_root(project_root)
-                .map_err(|error| format!("resolve Plan C alias for '{project_name}': {error}"))?;
+            let alias =
+                crate::path_utils::plan_c_alias_db_for_root_in_home(project_root, tachi_home)
+                    .map_err(|error| {
+                        format!("resolve Plan C alias for '{project_name}': {error}")
+                    })?;
             let parent = alias.parent().ok_or_else(|| {
                 format!("Plan C alias {} has no parent directory", alias.display())
             })?;
@@ -438,7 +477,11 @@ impl ProjectDbPrecommit {
             })?;
         }
 
-        match crate::path_utils::ensure_plan_c_symlink(&self.db_path, project_root) {
+        match crate::path_utils::ensure_plan_c_symlink_in_home(
+            &self.db_path,
+            project_root,
+            tachi_home,
+        ) {
             crate::path_utils::PlanCLinkOutcome::Created(path) => {
                 self.created_alias = Some(OwnedSymlink::snapshot(path)?);
                 Ok(())
@@ -1038,19 +1081,22 @@ fn preflight_project_identity(
     db_path: &std::path::Path,
     project_root: &std::path::Path,
     project_name: &str,
+    tachi_home: &std::path::Path,
 ) -> Result<bool, String> {
-    let resolved = MemoryServer::resolve_existing_named_project_db_path(project_name)?;
+    let resolved =
+        MemoryServer::resolve_existing_named_project_db_path_in_home(project_name, tachi_home)?;
     let already_resolved = resolved.is_some();
-    let alias_exists = match crate::path_utils::inspect_plan_c_alias(db_path, project_root) {
-        crate::path_utils::PlanCAliasInspection::Absent => false,
-        crate::path_utils::PlanCAliasInspection::MatchingSymlink => true,
-        crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
-            return Err(issue.warning_message());
-        }
-        crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
-            return Err(issue.warning_message());
-        }
-    };
+    let alias_exists =
+        match crate::path_utils::inspect_plan_c_alias_in_home(db_path, project_root, tachi_home) {
+            crate::path_utils::PlanCAliasInspection::Absent => false,
+            crate::path_utils::PlanCAliasInspection::MatchingSymlink => true,
+            crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
+                return Err(issue.warning_message());
+            }
+            crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
+                return Err(issue.warning_message());
+            }
+        };
     let has_existing_evidence = resolved.is_some() || alias_exists;
     if !has_existing_evidence {
         return Ok(false);
@@ -1131,25 +1177,37 @@ pub(crate) async fn handle_tachi_init_project_db(
     let db_path = crate::path_utils::resolve_project_db_path(&project_root, &rel)?;
     let existed = crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
     let mut precommit = ProjectDbPrecommit::new(db_path.clone());
-    preflight_project_identity(&db_path, &project_root, &project_name)?;
+    preflight_project_identity(
+        &db_path,
+        &project_root,
+        &project_name,
+        &server.tachi_home_dir(),
+    )?;
     if let Err(error) = precommit.reserve_db() {
         return Err(precommit.abort(error));
     }
-    if let Err(error) = precommit.ensure_alias(&project_root, &project_name) {
+    if let Err(error) =
+        precommit.ensure_alias(&project_root, &project_name, &server.tachi_home_dir())
+    {
         return Err(precommit.abort(error));
     }
     // Manifest registration remains rollback-capable until hot activation
     // succeeds. Activation is the final project-state mutation.
-    let activation = register_repo_local_manifest_entry_then(&db_path, &project_name, || {
-        crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
-        precommit.assert_owned_db_artifacts_unchanged()?;
-        let activation = server.activate_project_db(db_path.clone());
-        if precommit.created_db() {
-            precommit.finish_open_attempt(activation)
-        } else {
-            activation
-        }
-    });
+    let activation = register_repo_local_manifest_entry_then_in_home(
+        &db_path,
+        &project_name,
+        &server.tachi_home_dir(),
+        || {
+            crate::path_utils::canonical_db_leaf_exists_without_symlink(&db_path)?;
+            precommit.assert_owned_db_artifacts_unchanged()?;
+            let activation = server.activate_project_db(db_path.clone());
+            if precommit.created_db() {
+                precommit.finish_open_attempt(activation)
+            } else {
+                activation
+            }
+        },
+    );
     let was_new_activation = match activation {
         Ok(value) => value,
         Err(error) => return Err(precommit.abort(error)),
@@ -1159,7 +1217,11 @@ pub(crate) async fn handle_tachi_init_project_db(
     let plan_c_note = if cfg!(unix) {
         Some(format!(
             "Global symlink: {} -> {}",
-            crate::path_utils::plan_c_global_db_path(&project_name).display(),
+            crate::path_utils::plan_c_global_db_path_in_home(
+                &server.tachi_home_dir(),
+                &project_name,
+            )
+            .display(),
             db_path.display()
         ))
     } else {
@@ -1176,8 +1238,11 @@ pub(crate) async fn handle_tachi_init_project_db(
         None => activation_note.to_string(),
     };
 
-    let plan_c_split_brain = match crate::path_utils::inspect_plan_c_alias(&db_path, &project_root)
-    {
+    let plan_c_split_brain = match crate::path_utils::inspect_plan_c_alias_in_home(
+        &db_path,
+        &project_root,
+        &server.tachi_home_dir(),
+    ) {
         crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => Some(issue),
         crate::path_utils::PlanCAliasInspection::Absent
         | crate::path_utils::PlanCAliasInspection::MatchingSymlink
@@ -1264,8 +1329,13 @@ mod resolve_or_register_workspace_root_tests {
             let mut precommit = ProjectDbPrecommit::new(db_path.clone());
 
             assert!(
-                !preflight_project_identity(&db_path, &repo, &project)
-                    .expect("preflight genuine absence"),
+                !preflight_project_identity(
+                    &db_path,
+                    &repo,
+                    &project,
+                    &crate::path_utils::tachi_home(),
+                )
+                .expect("preflight genuine absence"),
                 "fixture must reach the post-preflight reservation race"
             );
             std::fs::create_dir_all(db_path.parent().expect("DB parent")).expect("DB parent");

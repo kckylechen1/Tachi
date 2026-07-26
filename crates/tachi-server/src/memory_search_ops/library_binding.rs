@@ -118,7 +118,8 @@ pub(crate) fn library_binding_receipt(
     }
 
     let resolved_named_path = effective_named_project.as_ref().and_then(|name| {
-        crate::MemoryServer::resolve_named_project_db_path(name)
+        server
+            .resolve_server_named_project_db_path(name)
             .ok()
             .map(|path| path.display().to_string())
     });

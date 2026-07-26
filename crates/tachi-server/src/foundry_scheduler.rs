@@ -44,7 +44,9 @@ mod scheduler;
 mod types;
 mod worker;
 
-use routing::{classify_route, manifest_label_for, path_hash};
+#[cfg(test)]
+use routing::classify_route;
+use routing::{classify_route_in_home, manifest_label_for, path_hash};
 pub use scheduler::FoundryScheduler;
 use types::{Route, WorkerHandle};
 pub use types::{WorkerMetrics, MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
