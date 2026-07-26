@@ -309,8 +309,7 @@ fn tachi_shared_target_env_is_protected_too() {
     let shared = make_target_dir(&root, "managed-shared-target");
 
     assert!(
-        protected_paths(&resolved_sources().with_shared_cargo_target_dir(&shared))
-            .covers(&shared),
+        protected_paths(&resolved_sources().with_shared_cargo_target_dir(&shared)).covers(&shared),
         "both target-dir variables are read, not just one"
     );
 
@@ -567,8 +566,7 @@ fn scan_selects_stale_named_dirs_and_ignores_the_rest() {
     std::fs::create_dir_all(&cargo_home).unwrap();
 
     let candidates =
-        scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7)
-            .candidates;
+        scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7).candidates;
     let paths: Vec<_> = candidates.iter().map(|c| c.path.clone()).collect();
 
     assert!(paths.contains(&dead), "stale *-target must be a candidate");
@@ -599,8 +597,7 @@ fn the_scan_neither_measures_nor_probes() {
     make_target_dir(&root, "some-target");
 
     let candidates =
-        scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7)
-            .candidates;
+        scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7).candidates;
 
     assert_eq!(candidates.len(), 1);
     assert!(
@@ -1581,9 +1578,10 @@ fn a_directory_replaced_between_the_deleters_own_probe_and_unlink_is_refused() {
     assert_eq!(report.candidates.len(), 1, "{report:?}");
     assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
     assert!(
-        report.warnings.iter().any(|warning| warning
-            .contains("(dev, ino) identity changed again")
-            && warning.contains("a second time")),
+        report.warnings.iter().any(
+            |warning| warning.contains("(dev, ino) identity changed again")
+                && warning.contains("a second time")
+        ),
         "the refusal must name the SECOND recheck's own language (\"changed again\" / \
          \"a second time\"), proving checkpoint 2's own recheck fired — not the first \
          recheck's \"replaced between judgement and delete\" wording: {report:?}"
@@ -2484,8 +2482,7 @@ mod kill_tests {
                 RegisterOutcome::Registered { resource_id } => resource_id,
                 other => panic!("expected a fresh registration: {other:?}"),
             };
-            memcore::bind_resource(store.connection_mut(), "kt-env-live", &resource_id)
-                .unwrap();
+            memcore::bind_resource(store.connection_mut(), "kt-env-live", &resource_id).unwrap();
 
             let report = reap_uncertified(
                 store.connection_mut(),
@@ -2614,7 +2611,9 @@ mod kill_tests {
         // the receipt is a human act, not something this test does to itself.
         println!("\n─── #1062 orphan reaper kill-test receipt (S2d shape) ───");
         println!("kill_test = \"crates/tachi-server/src/exec_env_reaper/tests.rs\"");
-        println!("kill_test_fn = \"exec_env_reaper::tests::kill_tests::orphan_reaper_kill_test_matrix\"");
+        println!(
+            "kill_test_fn = \"exec_env_reaper::tests::kill_tests::orphan_reaper_kill_test_matrix\""
+        );
         println!("binary = \"tachi-server\"");
         println!("binary_version = \"{}\"", env!("CARGO_PKG_VERSION"));
         println!("host_os = \"{}\"", std::env::consts::OS);
