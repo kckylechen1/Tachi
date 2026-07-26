@@ -472,8 +472,11 @@ const SEEDS: &[Seed] = &[
     },
 ];
 
+/// `pub(super)`: reused by `search/tests/rank_attribution.rs` (tachi#1344
+/// boost-attribution harness) so it seeds the byte-identical corpus rather
+/// than inventing a parallel one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DefectClass {
+pub(super) enum DefectClass {
     /// Recent project decision buried under older roadmap/review noise.
     RankDilution,
     /// Labeled research note (Memory surface) must land RANK 1 in its surface,
@@ -486,20 +489,20 @@ enum DefectClass {
     GovernanceMiss,
 }
 
-struct CaseSpec {
-    class: DefectClass,
-    name: &'static str,
-    query: &'static str,
-    expected: &'static str,
+pub(super) struct CaseSpec {
+    pub(super) class: DefectClass,
+    pub(super) name: &'static str,
+    pub(super) query: &'static str,
+    pub(super) expected: &'static str,
     /// Retrieval surface to scope the query to. `None` = today's fused pool
     /// (unchanged behavior). The `hindsight-research-wiki` case runs under
     /// `Some(Surface::Memory)` so the Docs architecture wikis are excluded and
     /// the research note wins on relevance within Memory (Phase 2 dissolution
     /// of the research-path boost).
-    surface: Option<Surface>,
+    pub(super) surface: Option<Surface>,
 }
 
-const CASES: &[CaseSpec] = &[
+pub(super) const CASES: &[CaseSpec] = &[
     CaseSpec {
         class: DefectClass::RankDilution,
         name: "open-issue-priority-decision",
@@ -545,9 +548,10 @@ fn seed_entry(s: &Seed) -> MemoryEntry {
     e
 }
 
-// `pub(super)` so the P3 Step-0 probe (`p3_probe.rs`) reuses the EXACT same
-// corpus + search options as this ratchet — the probe must measure the real
-// post-P2 ranking on the identical fixture, not a divergent copy. Test-only
+// `pub(super)` so the P3 Step-0 probe (`p3_probe.rs`) and the #1344 boost
+// attribution harness (`rank_attribution.rs`) reuse the EXACT same corpus +
+// search options as this ratchet — a probe must measure the real post-P2
+// ranking on the identical fixture, not a divergent copy. Test-only
 // visibility; no runtime behavior changes.
 pub(super) fn seed_corpus(conn: &mut Connection) {
     for s in SEEDS {
