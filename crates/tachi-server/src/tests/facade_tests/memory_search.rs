@@ -124,14 +124,12 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
 #[tokio::test]
 async fn tachi_memory_search_json_failure_keeps_rows_an_array_and_exposes_typed_error() {
     let server = make_server();
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute_batch("DROP TABLE memories")
-                .map_err(|err| format!("force deterministic search failure: {err}"))
-        })
-        .expect("drop only this test server's memory table");
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| connection.execute_batch("DROP TABLE memories"),
+    )
+    .map_err(|err| format!("force deterministic search failure: {err}"))
+    .expect("drop only this test server's memory table");
 
     let mut params = tachi_memory_params("search");
     params.format = None;
