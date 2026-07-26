@@ -42,6 +42,20 @@
 //! [`manifest`], which fingerprints content (BLAKE2s-256), symlink targets,
 //! xattrs, mode/size/nlink, inode, mtime **and ctime**.
 //!
+//! Two of those classes (mutate-then-restore; a same-size overwrite under an
+//! unhashed root) have **no witness except a timestamp**, so the pre-image is
+//! additionally **sealed with an observed capture-time clock barrier** before a
+//! worker is spawned, and [`PostflightGate::run`] refuses any pre-image that
+//! does not carry one. Without that, a write landing inside the capture's own
+//! clock tick leaves every field equal and the gate certifies a mutated tree as
+//! clean — see the `manifest` module docs and #1440.
+//!
+//! That barrier has preconditions (a POSIX ctime witness; one filesystem per
+//! walk root), each of which is a **refusal** rather than a downgrade, and each
+//! run reports what it actually established in
+//! [`GateOutcome::clock_barrier`] — a run that verified nothing must not read
+//! like a run that verified something.
+//!
 //! # Composition (what this module does NOT decide)
 //!
 //! *Which* contract a dispatch runs under is the job of the effective-authority
@@ -56,12 +70,15 @@ pub mod manifest;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
 pub use liveness::{DescendantLiveness, ProcessGroupLiveness};
-pub use manifest::{CaptureSpec, DeltaKind, WorkspaceDelta, WorkspaceManifest};
+pub use manifest::{
+    CaptureSpec, CtimeWitness, DeltaKind, FsTime, WorkspaceDelta, WorkspaceManifest,
+};
 
 /// The vocabulary this gate is allowed (and forbidden) to describe itself with.
 pub mod naming {
@@ -256,6 +273,87 @@ pub enum GateVerdict {
     Blocked { reason: BlockReason, detail: String },
 }
 
+/// What THIS RUN established about the capture-time clock — not what is true of
+/// `ctime` in general.
+///
+/// The distinction is the whole point of the type. A receipt that says "ctime
+/// cannot be restored by an unprivileged worker" is stating a property of POSIX
+/// and passing it off as a finding; a receipt has to say what was measured, so
+/// that a run which measured nothing reads differently from a run which measured
+/// something. Anything else is the confident-claim shape #1440 exists to stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClockBarrierEvidence {
+    /// This run read a pre-image carrying these per-walk-root barriers and
+    /// re-verified that each strictly exceeds every `ctime` recorded for its
+    /// root, and that both images used a real ctime witness on a single
+    /// filesystem per root.
+    Verified(BTreeMap<String, FsTime>),
+    /// Nothing was established: the gate did not reach the barrier check
+    /// (blocked, unreadable image), or the check failed. The pessimistic value,
+    /// and the one every early return uses.
+    NotEstablished,
+}
+
+impl ClockBarrierEvidence {
+    /// `Verified` with an EMPTY map reports `not_established`, deliberately: it
+    /// means the image had no entries for any barrier to cover, and a status
+    /// field that reads "verified" over nothing is the same overclaim in a
+    /// smaller font. Status, prose and JSON all key off the same predicate so
+    /// they cannot drift apart.
+    pub fn status(&self) -> &'static str {
+        match self {
+            ClockBarrierEvidence::Verified(roots) if !roots.is_empty() => "verified",
+            _ => "not_established",
+        }
+    }
+
+    /// One sentence naming what was observed. Never a general guarantee.
+    pub fn describe(&self) -> String {
+        match self {
+            ClockBarrierEvidence::Verified(roots) if !roots.is_empty() => {
+                let listed = roots
+                    .iter()
+                    .map(|(label, at)| format!("{label} at {at}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "This run verified a capture-time clock barrier per walk root ({listed}), each \
+                     observed by the parent on that root's own filesystem after the walk and \
+                     strictly greater than every ctime that root recorded, so an inode change made \
+                     after the capture carries a ctime strictly past the recorded one. That is \
+                     what this run measured; it is not a claim about ctime beyond these roots, \
+                     this filesystem, or a worker holding privileges this gate does not model."
+                )
+            }
+            // `Verified` with no roots means the image had no entries to vouch
+            // for. Reported as absent rather than dressed up as a pass.
+            _ => "This run did NOT establish a capture-time clock barrier, so a write that landed \
+                  inside the capture's own clock tick could carry the recorded stamp and is not \
+                  excluded."
+                .to_string(),
+        }
+    }
+
+    /// Receipt shape. One construction, so `status`, `roots` and the prose can
+    /// never disagree about the same run.
+    pub fn to_json(&self) -> Value {
+        let roots = match self {
+            ClockBarrierEvidence::Verified(roots) if !roots.is_empty() => Value::Object(
+                roots
+                    .iter()
+                    .map(|(label, at)| (label.clone(), Value::String(at.to_string())))
+                    .collect::<serde_json::Map<String, Value>>(),
+            ),
+            _ => Value::Null,
+        };
+        json!({
+            "status": self.status(),
+            "roots": roots,
+            "established": self.describe(),
+        })
+    }
+}
+
 /// A gate run: the verdict plus everything a receipt needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateOutcome {
@@ -269,6 +367,11 @@ pub struct GateOutcome {
     /// opted in. Carried on EVERY surface, including a clean one: "I did not
     /// hash it" must never be silently read as "it did not change".
     pub content_unhashed_paths: Vec<String>,
+    /// What this run established about the capture-time clock. Carried on EVERY
+    /// surface for the same reason `content_unhashed_paths` is: the receipt must
+    /// distinguish "I verified a barrier" from "I never got one", and a run that
+    /// never got one must not read like a run that did.
+    pub clock_barrier: ClockBarrierEvidence,
     pub verdict: GateVerdict,
     pub checked_at: String,
 }
@@ -276,21 +379,30 @@ pub struct GateOutcome {
 impl GateOutcome {
     /// The honest caveat for a run with unhashed subtrees (`None` when the whole
     /// image was hashed).
+    ///
+    /// It reports **what this run established**, not what is generally true of a
+    /// timestamp. The previous wording asserted that ctime "cannot be restored
+    /// by an unprivileged worker" and that "the pre-image is sealed with an
+    /// observed capture-time clock barrier" as flat guarantees — on every run,
+    /// including runs where no barrier was ever verified, from a struct that did
+    /// not carry the answer. That is the confident-claim shape this issue exists
+    /// to remove, so the barrier sentence now comes from
+    /// [`ClockBarrierEvidence`], which is set from the data of the run in hand.
     pub fn unhashed_caveat(&self) -> Option<String> {
         if self.content_unhashed_paths.is_empty() {
             return None;
         }
         Some(format!(
-            "content under {} was NOT hashed by this run: {}. Changes there are still detected \
-             via size/inode/nlink/mode/xattr/mtime/ctime (ctime cannot be restored by an \
-             unprivileged worker), but the proof for those paths is metadata-only and no content \
-             digest exists for them.",
+            "content under {} was NOT hashed by this run: {}. For those paths this run compared \
+             metadata only (kind/size/mode/inode/nlink/xattr/mtime/ctime); no content digest \
+             exists for them. {}",
             if self.content_unhashed_paths.len() == 1 {
                 "1 path".to_string()
             } else {
                 format!("{} paths", self.content_unhashed_paths.len())
             },
-            self.content_unhashed_paths.join(", ")
+            self.content_unhashed_paths.join(", "),
+            self.clock_barrier.describe(),
         ))
     }
     /// May the run's patch / result be handed on? ONLY on a clean verdict.
@@ -427,6 +539,10 @@ impl GateOutcome {
             "entries_checked": entries_checked,
             "content_unhashed_paths": self.content_unhashed_paths,
             "content_unhashed_note": self.unhashed_caveat(),
+            // On EVERY receipt, not only the ones with unhashed paths: whether
+            // this run resolved its capture window is a property of the run, and
+            // a reader must not have to infer it from the absence of a caveat.
+            "clock_barrier": self.clock_barrier.to_json(),
             "artifacts": artifacts,
             "lease_action": lease_action,
             "prohibited_deltas": self.deltas(),
@@ -473,9 +589,14 @@ pub struct PostflightGate {
     /// hold a multi-GB build cache (an in-tree Rust `target/`), where hashing
     /// every artifact would dominate the capture. Detection is *not* dropped for
     /// those paths — size, inode, nlink, mode, xattrs, mtime and ctime are still
-    /// fingerprinted, and ctime cannot be restored by an unprivileged worker —
-    /// but the proof there is metadata-only, and every receipt says so by name
-    /// (`content_unhashed_paths`).
+    /// fingerprinted, and POSIX offers no call that sets ctime (`utimensat`,
+    /// which restores mtime, bumps it) — but the proof there is metadata-only,
+    /// and every receipt says so by name (`content_unhashed_paths`), alongside
+    /// what that run actually established about the clock
+    /// (`clock_barrier`). That metadata-only proof is exactly why the
+    /// pre-image is sealed with a capture-time clock barrier: with no content
+    /// digest to fall back on, a same-size overwrite has nothing but the
+    /// timestamps to testify with.
     pub unhashed_dir_names: Vec<String>,
 }
 
@@ -539,7 +660,7 @@ impl PostflightGate {
             &self.worker_writable_roots(gitdir.as_deref()),
             &self.preimage_path,
         )?;
-        let manifest = manifest::capture(&CaptureSpec {
+        let mut manifest = manifest::capture(&CaptureSpec {
             workspace_root: &self.workspace_root,
             gitdir_root: gitdir.as_deref(),
             unhashed_dir_names: &self.unhashed_dir_names,
@@ -559,6 +680,22 @@ impl PostflightGate {
                 manifest.errors.join("\n  - ")
             ));
         }
+        // A complete image is still not a *provable* one. Two mutation classes —
+        // mutate-then-restore, and a same-size overwrite under an unhashed root —
+        // have no witness except a timestamp, so the image proves nothing until
+        // the parent has OBSERVED the filesystem clock move strictly past every
+        // ctime it just recorded. Sealing does that; failing to seal refuses the
+        // dispatch rather than starting one whose postflight could not convict
+        // (#1440 — an unobserved clock made the gate certify a mutated tree).
+        manifest.seal_with_clock_barrier().map_err(|e| {
+            format!(
+                "pre-image of {} cannot be sealed against the filesystem clock, so a later \
+                 postflight comparison could not distinguish an untouched entry from one written \
+                 inside the capture's own clock tick; refusing to capture a pre-image that cannot \
+                 convict: {e}",
+                self.workspace_root.display()
+            )
+        })?;
         let bytes = serde_json::to_vec(&manifest)
             .map_err(|e| format!("serialize workspace pre-image: {e}"))?;
         crate::utils::write_owner_only_file_atomic(&self.preimage_path, &bytes)
@@ -574,7 +711,10 @@ impl PostflightGate {
     /// 2. then load the parent-held pre-image (which carries the **pinned** walk
     ///    roots);
     /// 3. then re-scan **those roots** and compare;
-    /// 4. then apply the contract.
+    /// 4. then check the pre-image's **capture-time clock barrier** — an image
+    ///    whose timestamps cannot out-resolve the run window cannot prove that a
+    ///    match means "unchanged";
+    /// 5. then apply the contract.
     ///
     /// Step 3 never re-derives a walk root from the workspace: the worker has had
     /// write access to `.git`, so re-reading its `gitdir:` line here would let the
@@ -583,15 +723,22 @@ impl PostflightGate {
     /// `workspace/.git` like any other file.
     pub fn run(&self, liveness: &dyn DescendantLiveness) -> Result<GateOutcome, String> {
         let checked_at = chrono::Utc::now().to_rfc3339();
-        let base = |verdict: GateVerdict, unhashed: Vec<String>| GateOutcome {
-            env_id: self.env_id.clone(),
-            workspace_root: self.workspace_root.to_string_lossy().to_string(),
-            contract_label: self.contract.label(),
-            declared_scope: self.contract.declared_paths(),
-            liveness_probe: liveness.describe(),
-            content_unhashed_paths: unhashed,
-            verdict,
-            checked_at: checked_at.clone(),
+        // `barrier` is an explicit parameter rather than a field defaulted
+        // somewhere convenient: every early return has to name what it
+        // established, and the only value it can name before step 3b is
+        // `NotEstablished`.
+        let base = |verdict: GateVerdict, unhashed: Vec<String>, barrier: ClockBarrierEvidence| {
+            GateOutcome {
+                env_id: self.env_id.clone(),
+                workspace_root: self.workspace_root.to_string_lossy().to_string(),
+                contract_label: self.contract.label(),
+                declared_scope: self.contract.declared_paths(),
+                liveness_probe: liveness.describe(),
+                content_unhashed_paths: unhashed,
+                clock_barrier: barrier,
+                verdict,
+                checked_at: checked_at.clone(),
+            }
         };
 
         // (1) Never scan or tear down a workspace a live process can still write.
@@ -606,6 +753,7 @@ impl PostflightGate {
                     ),
                 },
                 Vec::new(),
+                ClockBarrierEvidence::NotEstablished,
             ));
         }
 
@@ -627,6 +775,7 @@ impl PostflightGate {
                         entries_checked: 0,
                     },
                     Vec::new(),
+                    ClockBarrierEvidence::NotEstablished,
                 ))
             }
         };
@@ -655,6 +804,7 @@ impl PostflightGate {
                         entries_checked: 0,
                     },
                     Vec::new(),
+                    ClockBarrierEvidence::NotEstablished,
                 ))
             }
         };
@@ -691,8 +841,56 @@ impl PostflightGate {
                     entries_checked,
                 },
                 unhashed,
+                ClockBarrierEvidence::NotEstablished,
             ));
         }
+
+        // (3b) A complete pre-image whose timestamps cannot out-resolve the run
+        // window is not a pass either. For the classes whose ONLY witness is a
+        // timestamp, "every field matched" is indistinguishable from "the clock
+        // never ticked" unless the capture recorded an observed barrier past
+        // every ctime. Re-checked here from the data, not trusted: an image from
+        // an older binary carries no barrier and must fail closed, not sail
+        // through (#1440).
+        //
+        // The POST-image is checked too, and not as a formality. A comparison
+        // has two sides: the barrier bounds when the pre-image's ctimes were
+        // taken, but it is the post-image's ctime that has to be *seen* moving
+        // past them. A post-image captured with no ctime witness, or spanning a
+        // second filesystem the barrier never measured, makes the comparison
+        // unsound however well-sealed the pre-image is — and a mount appearing
+        // under the walk root during the run is exactly a thing that happens
+        // between capture and gate.
+        let barrier_check = pre
+            .verify_clock_barriers()
+            .map_err(|why| (self.preimage_path.to_string_lossy().to_string(), why))
+            .and_then(|()| {
+                post.verify_timestamp_preconditions()
+                    .map_err(|why| (self.workspace_root.to_string_lossy().to_string(), why))
+            });
+        if let Err((path, why)) = barrier_check {
+            return Ok(base(
+                GateVerdict::Rejected {
+                    reason: RejectReason::UnusableImage,
+                    deltas: vec![WorkspaceDelta {
+                        path,
+                        kind: DeltaKind::Unreadable,
+                        detail: format!(
+                            "this run has no usable capture-time clock barrier over the compared \
+                             images, so an entry whose fields all match cannot be proven \
+                             unchanged: {why}"
+                        ),
+                        facets: Vec::new(),
+                        entry_kind: None,
+                    }],
+                    entries_checked,
+                },
+                unhashed,
+                ClockBarrierEvidence::NotEstablished,
+            ));
+        }
+        // Past this line — and only past it — the run has something to report.
+        let barrier = ClockBarrierEvidence::Verified(pre.clock_barriers.clone());
 
         // (4) Compare, then apply the contract.
         let prohibited: Vec<WorkspaceDelta> = manifest::diff(&pre, &post)
@@ -701,7 +899,11 @@ impl PostflightGate {
             .collect();
 
         if prohibited.is_empty() {
-            Ok(base(GateVerdict::Clean { entries_checked }, unhashed))
+            Ok(base(
+                GateVerdict::Clean { entries_checked },
+                unhashed,
+                barrier,
+            ))
         } else {
             Ok(base(
                 GateVerdict::Rejected {
@@ -710,6 +912,7 @@ impl PostflightGate {
                     entries_checked,
                 },
                 unhashed,
+                barrier,
             ))
         }
     }
