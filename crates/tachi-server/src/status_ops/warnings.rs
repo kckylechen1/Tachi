@@ -159,6 +159,9 @@ pub(crate) fn build_status_warnings(
     for issue in &snapshot.plan_c_split_brain {
         warnings.push(issue.warning_message());
     }
+    for issue in &snapshot.plan_c_alias_integrity {
+        warnings.push(issue.warning_message());
+    }
     if low_coverage_count > 0 {
         let mut details = snapshot
             .dbs

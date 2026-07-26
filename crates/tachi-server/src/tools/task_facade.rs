@@ -1,5 +1,18 @@
 use super::*;
 
+const TASK_STATUS_MAX_BYTES: usize = 1024 * 1024;
+const TASK_RESULT_MAX_BYTES: usize = 64 * 1024;
+const TASK_RESULT_RESPONSE_MAX_CHARS: usize = 8_000;
+
+fn task_runs_root(run_dir: &std::path::Path) -> Result<&std::path::Path, String> {
+    run_dir.parent().ok_or_else(|| {
+        format!(
+            "dispatch run directory {} has no runs root",
+            run_dir.display()
+        )
+    })
+}
+
 pub(super) async fn handle_tachi_task_wait(
     server: &MemoryServer,
     params: &TachiTaskParams,
@@ -22,7 +35,7 @@ pub(super) async fn handle_tachi_task_wait(
     let mut poll_delay = TASK_WAIT_INITIAL_POLL_DELAY;
 
     loop {
-        let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id);
+        let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id)?;
         if let Some(task) = task {
             let state = task
                 .get("state")
@@ -34,12 +47,17 @@ pub(super) async fn handle_tachi_task_wait(
                 // a bounded, ANSI-free failure_tail so the caller can
                 // autopsy the failure from this response alone, without a
                 // separate file read under ~/.tachi.
-                let failure_tail = (state == "TASK_STATE_FAILED")
-                    .then(|| task.get("run_dir").and_then(Value::as_str))
-                    .flatten()
-                    .and_then(|run_dir| {
-                        crate::dispatch_ops::read_failure_tail(std::path::Path::new(run_dir))
-                    });
+                let failure_tail = if state == "TASK_STATE_FAILED" {
+                    match task.get("run_dir").and_then(Value::as_str) {
+                        Some(run_dir) => crate::dispatch_ops::read_failure_tail(
+                            task_runs_root(std::path::Path::new(run_dir))?,
+                            std::path::Path::new(run_dir),
+                        )?,
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 return serde_json::to_string(&json!({
                     "status": "completed",
                     "dispatch_id": dispatch_id,
@@ -87,7 +105,7 @@ pub(super) fn read_dispatch_status_for_task(
         .filter(|id| !id.is_empty())
         .ok_or_else(|| format!("dispatch_id is required when action='{action}'"))?
         .to_string();
-    let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id)
+    let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id)?
         .ok_or_else(|| format!("dispatch '{dispatch_id}' was not found in the run ledger"))?;
     let run_dir = task
         .get("run_dir")
@@ -96,8 +114,18 @@ pub(super) fn read_dispatch_status_for_task(
         .map(PathBuf::from)
         .ok_or_else(|| format!("dispatch '{dispatch_id}' has no readable run_dir"))?;
     let status_path = run_dir.join("status.json");
-    let status = crate::task_lifecycle::read_json_file(&status_path)?
-        .ok_or_else(|| format!("dispatch '{dispatch_id}' has no status.json"))?;
+    let status_raw = crate::dispatch_ops::read_text_file_within(
+        task_runs_root(&run_dir)?,
+        &status_path,
+        TASK_STATUS_MAX_BYTES,
+    )?
+    .ok_or_else(|| format!("dispatch '{dispatch_id}' has no status.json"))?;
+    let status = serde_json::from_str(&status_raw).map_err(|error| {
+        format!(
+            "dispatch status artifact {} is not valid JSON: {error}",
+            status_path.display()
+        )
+    })?;
     Ok((dispatch_id, task, status, run_dir))
 }
 
@@ -148,14 +176,20 @@ pub(super) async fn handle_tachi_task_status(
     // lane report without local file access.
     if params.include_result {
         let result_path = run_dir.join("result.md");
-        match std::fs::read_to_string(&result_path) {
-            Ok(content) => {
-                const MAX_RESULT_CHARS: usize = 8_000;
+        match crate::dispatch_ops::read_text_file_within(
+            task_runs_root(&run_dir)?,
+            &result_path,
+            TASK_RESULT_MAX_BYTES,
+        )? {
+            Some(content) => {
                 let char_count = content.chars().count();
                 let byte_count = content.len();
-                let (body, truncated) = if char_count > MAX_RESULT_CHARS {
+                let (body, truncated) = if char_count > TASK_RESULT_RESPONSE_MAX_CHARS {
                     (
-                        content.chars().take(MAX_RESULT_CHARS).collect::<String>(),
+                        content
+                            .chars()
+                            .take(TASK_RESULT_RESPONSE_MAX_CHARS)
+                            .collect::<String>(),
                         true,
                     )
                 } else {
@@ -168,7 +202,7 @@ pub(super) async fn handle_tachi_task_status(
                     "full_size_bytes": byte_count,
                 });
             }
-            Err(_) => {
+            None => {
                 response["result"] = json!({
                     "body": null,
                     "note": "no result.md found in run directory (lane may not have produced a report)",
@@ -421,6 +455,56 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn status_include_result_loudly_refuses_outward_result_symlink() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-result-symlink";
+        write_fake_run(&runs_dir, dispatch_id, None);
+        let outside = tempfile::tempdir().expect("outside target");
+        let outside_result = outside.path().join("result.md");
+        std::fs::write(&outside_result, "outside result bytes").unwrap();
+        std::os::unix::fs::symlink(
+            &outside_result,
+            runs_dir.join(dispatch_id).join("result.md"),
+        )
+        .unwrap();
+
+        let error = handle_tachi_task_status(&server, &status_params(dispatch_id, true))
+            .await
+            .expect_err("result symlink refusal must reach the task caller");
+        assert!(error.contains("refusing descriptor-bound read"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn status_loudly_refuses_outward_status_symlink() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-status-symlink";
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let outside = tempfile::tempdir().expect("outside target");
+        let outside_status = outside.path().join("status.json");
+        std::fs::write(
+            &outside_status,
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_COMPLETED",
+                "updated_at": Utc::now().to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside_status, run_dir.join("status.json")).unwrap();
+
+        let error = handle_tachi_task_status(&server, &status_params(dispatch_id, false))
+            .await
+            .expect_err("status symlink refusal must reach the task caller");
+        assert!(error.contains("refusing descriptor-bound read"), "{error}");
+    }
+
     #[tokio::test]
     async fn status_without_include_result_omits_result_field() {
         let (tmp, server) = make_server_with_runs_dir();
@@ -468,6 +552,35 @@ mod tests {
         assert_eq!(
             response["result"]["full_size_chars"], 500,
             "char count should be 500, got: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_include_result_enforces_named_byte_limit_at_exact_boundary() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-result-byte-limit";
+        write_fake_run(&runs_dir, dispatch_id, None);
+        let result_path = runs_dir.join(dispatch_id).join("result.md");
+
+        std::fs::write(&result_path, vec![b'x'; TASK_RESULT_MAX_BYTES]).unwrap();
+        let exact = handle_tachi_task_status(&server, &status_params(dispatch_id, true))
+            .await
+            .expect("exact byte-limit result must remain readable");
+        let exact: Value = serde_json::from_str(&exact).unwrap();
+        assert_eq!(
+            exact["result"]["full_size_bytes"],
+            json!(TASK_RESULT_MAX_BYTES)
+        );
+
+        std::fs::write(&result_path, vec![b'x'; TASK_RESULT_MAX_BYTES + 1]).unwrap();
+        let error = handle_tachi_task_status(&server, &status_params(dispatch_id, true))
+            .await
+            .expect_err("one byte over the task result limit must be loud");
+        assert!(error.contains("named limit"), "{error}");
+        assert!(
+            error.contains(&format!("{} bytes", TASK_RESULT_MAX_BYTES)),
+            "{error}"
         );
     }
 
@@ -529,6 +642,64 @@ mod tests {
             response["failure_tail"].is_null(),
             "completed dispatch should not carry a failure_tail, got: {response}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wait_loudly_refuses_outward_status_symlink() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-wait-status-symlink";
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let outside = tempfile::tempdir().expect("outside target");
+        let outside_status = outside.path().join("status.json");
+        std::fs::write(
+            &outside_status,
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_COMPLETED",
+                "updated_at": Utc::now().to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside_status, run_dir.join("status.json")).unwrap();
+
+        let error = handle_tachi_task_wait(&server, &wait_params(dispatch_id))
+            .await
+            .expect_err("status symlink refusal must reach the wait caller");
+        assert!(error.contains("refusing descriptor-bound read"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wait_loudly_refuses_outward_failure_result_fallback() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-wait-result-symlink";
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_FAILED",
+                "exit_code": 1,
+                "updated_at": Utc::now().to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let outside = tempfile::tempdir().expect("outside target");
+        let outside_result = outside.path().join("result.md");
+        std::fs::write(&outside_result, "outside failure bytes").unwrap();
+        std::os::unix::fs::symlink(&outside_result, run_dir.join("result.md")).unwrap();
+
+        let error = handle_tachi_task_wait(&server, &wait_params(dispatch_id))
+            .await
+            .expect_err("failure-tail result refusal must reach the wait caller");
+        assert!(error.contains("refusing descriptor-bound read"), "{error}");
     }
 
     /// A partial verdict keeps its public INPUT_REQUIRED state, but its

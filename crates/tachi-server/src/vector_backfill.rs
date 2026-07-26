@@ -5,13 +5,14 @@ use std::time::Duration;
 
 use memcore::{MemoryStore, VectorBackfillScope};
 use rusqlite::OptionalExtension;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use tachi_llm::LlmClient;
 
 pub(crate) const AUTO_BACKFILL_COVERAGE_THRESHOLD: f64 = 0.99;
 const DEFAULT_AUTO_BACKFILL_PENDING_THRESHOLD: usize = 0;
 const VECTOR_SWEEP_STATE_TABLE: &str = "vector_sweep_state";
+const VECTOR_SWEEP_STATE_NAMESPACE: &str = "vector_sweep_state";
 const VECTOR_SWEEP_STATE_KEY: &str = "default";
 
 #[derive(Debug, Clone)]
@@ -49,6 +50,102 @@ pub(crate) struct VectorSweepState {
     pub(crate) current_pending_count: usize,
     pub(crate) current_pending_threshold: usize,
     pub(crate) current_backfill_needed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredVectorSweepState {
+    enabled: bool,
+    disabled_reason: Option<String>,
+    skip_recall_cache: bool,
+    last_run_at: String,
+    embedded_count: usize,
+    failed_count: usize,
+    last_error: Option<String>,
+    last_provider_error: Option<String>,
+    next_run_after: Option<String>,
+    interval_secs: Option<u64>,
+    updated_at: String,
+}
+
+impl StoredVectorSweepState {
+    fn from_update(
+        update: VectorSweepStateUpdate,
+        previous: Option<&Self>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let interval_secs = if update.preserve_schedule {
+            update
+                .interval_secs
+                .or_else(|| previous.and_then(|state| state.interval_secs))
+        } else {
+            update.interval_secs
+        };
+        let next_run_after = if update.preserve_schedule {
+            update
+                .interval_secs
+                .map(|secs| {
+                    (now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64)).to_rfc3339()
+                })
+                .or_else(|| previous.and_then(|state| state.next_run_after.clone()))
+        } else {
+            update.interval_secs.map(|secs| {
+                (now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64)).to_rfc3339()
+            })
+        };
+        let preserve_outcome = update.preserve_outcome && previous.is_some();
+        let timestamp = now.to_rfc3339();
+
+        Self {
+            enabled: update.enabled,
+            disabled_reason: update.disabled_reason,
+            skip_recall_cache: update.skip_recall_cache,
+            last_run_at: timestamp.clone(),
+            embedded_count: if preserve_outcome {
+                previous.expect("checked above").embedded_count
+            } else {
+                update.embedded_count
+            },
+            failed_count: if preserve_outcome {
+                previous.expect("checked above").failed_count
+            } else {
+                update.failed_count
+            },
+            last_error: if preserve_outcome {
+                previous.expect("checked above").last_error.clone()
+            } else {
+                update.last_error
+            },
+            last_provider_error: if preserve_outcome {
+                previous.expect("checked above").last_provider_error.clone()
+            } else {
+                update.last_provider_error
+            },
+            next_run_after,
+            interval_secs,
+            updated_at: timestamp,
+        }
+    }
+
+    fn into_status(self) -> VectorSweepState {
+        VectorSweepState {
+            enabled: self.enabled,
+            disabled_reason: self.disabled_reason,
+            skip_recall_cache: self.skip_recall_cache,
+            last_run_at: self.last_run_at,
+            embedded_count: self.embedded_count,
+            failed_count: self.failed_count,
+            last_error: self.last_error,
+            last_provider_error: self.last_provider_error,
+            next_run_after: self.next_run_after,
+            interval_secs: self.interval_secs,
+            updated_at: self.updated_at,
+            current_total_count: 0,
+            current_with_vector_count: 0,
+            current_pending_count: 0,
+            current_pending_threshold: 0,
+            current_backfill_needed: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,29 +235,6 @@ pub(crate) fn auto_backfill_needed(
     pending_enrichment > pending_threshold || coverage < AUTO_BACKFILL_COVERAGE_THRESHOLD
 }
 
-fn ensure_vector_sweep_state_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        &format!(
-            "CREATE TABLE IF NOT EXISTS {VECTOR_SWEEP_STATE_TABLE} (
-                key TEXT PRIMARY KEY,
-                enabled INTEGER NOT NULL,
-                disabled_reason TEXT,
-                skip_recall_cache INTEGER NOT NULL,
-                last_run_at TEXT NOT NULL,
-                embedded_count INTEGER NOT NULL,
-                failed_count INTEGER NOT NULL,
-                last_error TEXT,
-                last_provider_error TEXT,
-                next_run_after TEXT,
-                interval_secs INTEGER,
-                updated_at TEXT NOT NULL
-            )"
-        ),
-        [],
-    )?;
-    Ok(())
-}
-
 fn vector_sweep_state_table_exists(conn: &rusqlite::Connection) -> bool {
     conn.query_row(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
@@ -179,65 +253,18 @@ pub(crate) fn record_vector_sweep_state(
         .ok_or_else(|| format!("non-utf8 path: {}", db_path.display()))?;
     let store =
         MemoryStore::open(db_str).map_err(|e| format!("open {}: {e}", db_path.display()))?;
-    let conn = store.connection();
-    ensure_vector_sweep_state_table(conn)
-        .map_err(|e| format!("ensure vector sweep state table: {e}"))?;
-
     let now = chrono::Utc::now();
-    let last_run_at = now.to_rfc3339();
-    let next_run_after = update.interval_secs.map(|secs| {
-        (now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64)).to_rfc3339()
-    });
-    let schedule_clause = if update.preserve_schedule {
-        "next_run_after=COALESCE(excluded.next_run_after, vector_sweep_state.next_run_after),
-                interval_secs=COALESCE(excluded.interval_secs, vector_sweep_state.interval_secs)"
-    } else {
-        "next_run_after=excluded.next_run_after,
-                interval_secs=excluded.interval_secs"
-    };
-    let outcome_clause = if update.preserve_outcome {
-        "embedded_count=vector_sweep_state.embedded_count,
-                failed_count=vector_sweep_state.failed_count,
-                last_error=vector_sweep_state.last_error,
-                last_provider_error=vector_sweep_state.last_provider_error"
-    } else {
-        "embedded_count=excluded.embedded_count,
-                failed_count=excluded.failed_count,
-                last_error=excluded.last_error,
-                last_provider_error=excluded.last_provider_error"
-    };
-    conn.execute(
-        &format!(
-            "INSERT INTO {VECTOR_SWEEP_STATE_TABLE} (
-                key, enabled, disabled_reason, skip_recall_cache, last_run_at,
-                embedded_count, failed_count, last_error, last_provider_error,
-                next_run_after, interval_secs, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(key) DO UPDATE SET
-                enabled=excluded.enabled,
-                disabled_reason=excluded.disabled_reason,
-                skip_recall_cache=excluded.skip_recall_cache,
-                last_run_at=excluded.last_run_at,
-                {outcome_clause},
-                {schedule_clause},
-                updated_at=excluded.updated_at"
-        ),
-        rusqlite::params![
+    let previous = read_stored_vector_sweep_state(&store)?;
+    let state = StoredVectorSweepState::from_update(update, previous.as_ref(), now);
+    let payload =
+        serde_json::to_string(&state).map_err(|e| format!("serialize vector sweep state: {e}"))?;
+    store
+        .set_state(
+            VECTOR_SWEEP_STATE_NAMESPACE,
             VECTOR_SWEEP_STATE_KEY,
-            update.enabled,
-            update.disabled_reason,
-            update.skip_recall_cache,
-            last_run_at,
-            update.embedded_count as i64,
-            update.failed_count as i64,
-            update.last_error,
-            update.last_provider_error,
-            next_run_after,
-            update.interval_secs.map(|n| n as i64),
-            chrono::Utc::now().to_rfc3339(),
-        ],
-    )
-    .map_err(|e| format!("write vector sweep state: {e}"))?;
+            &payload,
+        )
+        .map_err(|e| format!("write vector sweep state: {e}"))?;
     Ok(())
 }
 
@@ -249,47 +276,61 @@ pub(crate) fn read_vector_sweep_state_for_status(
         .ok_or_else(|| format!("non-utf8 path: {}", db_path.display()))?;
     let store = MemoryStore::open_read_only(db_str)
         .map_err(|e| format!("open {} read-only: {e}", db_path.display()))?;
-    let conn = store.connection();
+    let Some(stored) = read_stored_vector_sweep_state(&store)? else {
+        return Ok(None);
+    };
+    let mut state = stored.into_status();
+    populate_current_sweep_counts(&store, &mut state)?;
+    Ok(Some(state))
+}
+
+fn read_stored_vector_sweep_state(
+    store: &MemoryStore,
+) -> Result<Option<StoredVectorSweepState>, String> {
+    if let Some((raw, _)) = store
+        .get_state_kv(VECTOR_SWEEP_STATE_NAMESPACE, VECTOR_SWEEP_STATE_KEY)
+        .map_err(|e| format!("read vector sweep state: {e}"))?
+    {
+        return serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|e| format!("read vector sweep state: decode hard_state payload: {e}"));
+    }
+    read_legacy_vector_sweep_state(store.connection())
+}
+
+fn read_legacy_vector_sweep_state(
+    conn: &rusqlite::Connection,
+) -> Result<Option<StoredVectorSweepState>, String> {
     if !vector_sweep_state_table_exists(conn) {
         return Ok(None);
     }
-    let mut state = conn
-        .query_row(
-            &format!(
-                "SELECT enabled, disabled_reason, skip_recall_cache, last_run_at,
+    conn.query_row(
+        &format!(
+            "SELECT enabled, disabled_reason, skip_recall_cache, last_run_at,
                     embedded_count, failed_count, last_error, last_provider_error,
                     next_run_after, interval_secs, updated_at
              FROM {VECTOR_SWEEP_STATE_TABLE}
              WHERE key=?1"
-            ),
-            [VECTOR_SWEEP_STATE_KEY],
-            |row| {
-                Ok(VectorSweepState {
-                    enabled: row.get::<_, bool>(0)?,
-                    disabled_reason: row.get(1)?,
-                    skip_recall_cache: row.get::<_, bool>(2)?,
-                    last_run_at: row.get(3)?,
-                    embedded_count: row.get::<_, i64>(4)?.max(0) as usize,
-                    failed_count: row.get::<_, i64>(5)?.max(0) as usize,
-                    last_error: row.get(6)?,
-                    last_provider_error: row.get(7)?,
-                    next_run_after: row.get(8)?,
-                    interval_secs: row.get::<_, Option<i64>>(9)?.map(|n| n.max(0) as u64),
-                    updated_at: row.get(10)?,
-                    current_total_count: 0,
-                    current_with_vector_count: 0,
-                    current_pending_count: 0,
-                    current_pending_threshold: 0,
-                    current_backfill_needed: false,
-                })
-            },
-        )
-        .optional()
-        .map_err(|e| format!("read vector sweep state: {e}"))?;
-    if let Some(state) = state.as_mut() {
-        populate_current_sweep_counts(&store, state)?;
-    }
-    Ok(state)
+        ),
+        [VECTOR_SWEEP_STATE_KEY],
+        |row| {
+            Ok(StoredVectorSweepState {
+                enabled: row.get::<_, bool>(0)?,
+                disabled_reason: row.get(1)?,
+                skip_recall_cache: row.get::<_, bool>(2)?,
+                last_run_at: row.get(3)?,
+                embedded_count: row.get::<_, i64>(4)?.max(0) as usize,
+                failed_count: row.get::<_, i64>(5)?.max(0) as usize,
+                last_error: row.get(6)?,
+                last_provider_error: row.get(7)?,
+                next_run_after: row.get(8)?,
+                interval_secs: row.get::<_, Option<i64>>(9)?.map(|n| n.max(0) as u64),
+                updated_at: row.get(10)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("read vector sweep state: {e}"))
 }
 
 fn populate_current_sweep_counts(
@@ -339,10 +380,17 @@ pub(crate) async fn embed_and_write_batch(
                 let dummy_vec = vec![0.0_f32; 1024];
                 let mut actual = 0usize;
                 for (id, _, _, revision) in entries.iter().take(outcome.written_count) {
-                    if store
-                        .update_enrichment_fields(id, None, Some(&dummy_vec), None, None, *revision)
-                        .map_err(|e| format!("test vector write failed: {e}"))?
-                    {
+                    let Some(mut entry) = store
+                        .get(id)
+                        .map_err(|e| format!("test vector read failed: {e}"))?
+                    else {
+                        continue;
+                    };
+                    if entry.revision == *revision {
+                        entry.vector = Some(dummy_vec.clone());
+                        store
+                            .upsert(&entry)
+                            .map_err(|e| format!("test vector write failed: {e}"))?;
                         actual += 1;
                     }
                 }
@@ -531,8 +579,8 @@ mod tests {
         read_vector_sweep_state_for_status, vector_counts_filtered,
     };
     use crate::test_support::EnvRestore;
-    use memcore::MemoryStore;
-    use rusqlite::params;
+    use memcore::{MemoryEntry, MemoryStore};
+    use serde_json::json;
 
     #[test]
     fn embedding_input_prefers_summary_for_long_text() {
@@ -565,31 +613,49 @@ mod tests {
         assert!(!auto_backfill_needed(1000, 990, 10, 10));
     }
 
-    fn insert_memory(store: &MemoryStore, id: &str, source: &str, topic: &str) {
+    fn insert_memory(store: &mut MemoryStore, id: &str, source: &str, topic: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         store
-            .connection()
-            .execute(
-                "INSERT INTO memories (
-                    id, path, summary, text, importance, timestamp, category, topic,
-                    keywords, entities, source, scope, archived,
-                    created_at, updated_at, access_count, revision, metadata
-                 ) VALUES (?1, '/p', '', 'body', 0.5, ?2, 'fact', ?3,
-                           '[]', '[]', ?4, 'project', 0,
-                           ?2, ?2, 0, 1, '{}')",
-                params![id, now, topic, source],
-            )
-            .expect("insert memory");
+            .upsert(&MemoryEntry {
+                id: id.to_string(),
+                path: "/p".to_string(),
+                summary: String::new(),
+                text: "body".to_string(),
+                importance: 0.5,
+                timestamp: now.clone(),
+                valid_from: now,
+                valid_until: None,
+                category: "fact".to_string(),
+                topic: topic.to_string(),
+                keywords: Vec::new(),
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                source: source.to_string(),
+                scope: "project".to_string(),
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                metadata: json!({}),
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
+            })
+            .expect("insert typed memory fixture");
     }
 
     #[test]
     fn vector_selection_matches_status_recall_cache_predicate() {
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("selection.db");
-        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
 
-        insert_memory(&store, "durable-1", "manual", "note");
-        insert_memory(&store, "cache-topic", "auto", "recall_rerank_cache");
+        insert_memory(&mut store, "durable-1", "manual", "note");
+        insert_memory(&mut store, "cache-topic", "auto", "recall_rerank_cache");
 
         let (total, with_vec) = vector_counts_filtered(&store, true).expect("counts");
         let selected =
@@ -615,17 +681,13 @@ mod tests {
     fn vector_selection_includes_archived_missing_vectors_like_counts() {
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("archived-selection.db");
-        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
 
-        insert_memory(&store, "active-missing", "manual", "note");
-        insert_memory(&store, "archived-missing", "manual", "note");
+        insert_memory(&mut store, "active-missing", "manual", "note");
+        insert_memory(&mut store, "archived-missing", "manual", "note");
         store
-            .connection()
-            .execute(
-                "UPDATE memories SET archived = 1 WHERE id = 'archived-missing'",
-                [],
-            )
-            .expect("archive row");
+            .archive_memory("archived-missing")
+            .expect("archive typed memory fixture");
 
         let (total, with_vec) = vector_counts_filtered(&store, true).expect("counts");
         let selected =
@@ -648,22 +710,12 @@ mod tests {
         let db_path = dir.path().join("malformed-sweep-state.db");
         let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
         store
-            .connection()
-            .execute(
-                "CREATE TABLE vector_sweep_state (
-                    key TEXT PRIMARY KEY,
-                    enabled TEXT NOT NULL
-                )",
-                [],
+            .set_state(
+                super::VECTOR_SWEEP_STATE_NAMESPACE,
+                super::VECTOR_SWEEP_STATE_KEY,
+                r#"{"enabled":"yes"}"#,
             )
-            .expect("create malformed state table");
-        store
-            .connection()
-            .execute(
-                "INSERT INTO vector_sweep_state (key, enabled) VALUES ('default', 'yes')",
-                [],
-            )
-            .expect("insert malformed state row");
+            .expect("seed malformed typed state fixture");
 
         let err = read_vector_sweep_state_for_status(&db_path)
             .expect_err("malformed state must be surfaced");
@@ -682,10 +734,10 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("threshold-drift.db");
-        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
-        insert_memory(&store, "threshold-pending-1", "manual", "note");
-        insert_memory(&store, "threshold-pending-2", "manual", "note");
-        insert_memory(&store, "threshold-pending-3", "manual", "note");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&mut store, "threshold-pending-1", "manual", "note");
+        insert_memory(&mut store, "threshold-pending-2", "manual", "note");
+        insert_memory(&mut store, "threshold-pending-3", "manual", "note");
         super::record_vector_sweep_state(
             &db_path,
             super::VectorSweepStateUpdate {

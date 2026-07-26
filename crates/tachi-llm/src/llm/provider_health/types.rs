@@ -13,6 +13,120 @@ pub struct ProviderSecret {
     pub value: String,
 }
 
+/// Provider families with an owner-verified, non-generating authentication
+/// probe. Z.AI/BigModel is named explicitly so callers can distinguish the
+/// documented absence of a safe probe from malformed configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthProbeFamily {
+    DeepSeek,
+    SiliconFlow,
+    ZaiBigModel,
+    Unsupported,
+}
+
+/// Public-safe outcome classes for the one-request, no-content auth probe.
+/// No variant carries an error message or provider response body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthProbeClass {
+    AuthOk,
+    AuthFailed,
+    ProviderExhausted,
+    RateLimited,
+    Transient,
+    RedirectRefused,
+    MalformedResponse,
+    MalformedConfiguration,
+    UnexpectedStatus,
+    CredentialUnavailable,
+    UnsupportedNoDocumentedProbe,
+}
+
+impl ProviderAuthProbeClass {
+    pub fn is_auth_ok(self) -> bool {
+        self == Self::AuthOk
+    }
+}
+
+/// Safe, observation-only receipt for a no-content provider auth probe. The
+/// selected model is configuration, while provider model IDs and all response
+/// bodies remain deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderAuthProbeResult {
+    pub provider_family: ProviderAuthProbeFamily,
+    pub provider_host: String,
+    pub effective_model: String,
+    pub auth_class: ProviderAuthProbeClass,
+    pub selected_model_present: Option<bool>,
+    pub model_count: Option<usize>,
+    pub latency_ms: u64,
+}
+
+impl ProviderAuthProbeResult {
+    pub fn clears_configured_model(&self) -> bool {
+        self.auth_class.is_auth_ok() && self.selected_model_present == Some(true)
+    }
+}
+
+/// Public-safe receipt for one successful provider HTTP completion. It names
+/// the endpoint and provider-reported identity, but deliberately never carries
+/// a secret value, request body, or response body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInvocationReceipt {
+    pub effective_provider: String,
+    pub effective_model: Option<String>,
+    pub effective_version: Option<String>,
+    pub fallback_chain: Vec<String>,
+    pub degraded: bool,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub latency_ms: u128,
+}
+
+/// Completion text plus its public-safe execution receipt. Consumers that
+/// persist a report must deliberately retain only the receipt when the text is
+/// not itself an approved output surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInvocationOutcome {
+    pub text: String,
+    pub truncated: bool,
+    pub receipt: ProviderInvocationReceipt,
+}
+
+/// Public-safe failure classes for spend-aware provider calls. These values
+/// deliberately contain no provider response, prompt, source text, endpoint,
+/// key identifier, or credential material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderInvocationFailureClass {
+    AuthFailed,
+    ProviderExhausted,
+    Transient,
+    LaneOutage,
+}
+
+impl ProviderInvocationFailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthFailed => "auth_failed",
+            Self::ProviderExhausted => "provider_exhausted",
+            Self::Transient => "transient",
+            Self::LaneOutage => "lane_outage",
+        }
+    }
+}
+
+/// Failure receipt for a bounded provider-only call. `provider_attempts`
+/// counts HTTP requests actually started; a resolver, selection, or open
+/// circuit failure therefore records zero rather than inventing spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderInvocationFailure {
+    pub class: ProviderInvocationFailureClass,
+    pub provider_attempts: usize,
+    pub latency_ms: u128,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderKeyCooldownStatus {
     pub key_id: String,

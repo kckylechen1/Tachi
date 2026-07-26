@@ -1,5 +1,6 @@
 use super::{CircuitProbeDecision, CircuitState};
 use crate::server_state::MemoryServer;
+use crate::shared_defs::{push_dead_letter_with_limits, DeadLetter};
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use serde_json::json;
@@ -7,6 +8,114 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tachi_hub::{capability_callable, capability_not_callable_reason};
+
+fn return_with_background_auto_ingest(
+    server: &MemoryServer,
+    capability_id: &str,
+    tool_name: &str,
+    definition: &serde_json::Value,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    mut result: rmcp::model::CallToolResult,
+) -> rmcp::model::CallToolResult {
+    if result.is_error.unwrap_or(false) {
+        return result;
+    }
+
+    let staged = match crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        server,
+        capability_id,
+        tool_name,
+        definition,
+        arguments,
+        &result,
+    ) {
+        Ok(Some(staged)) => staged,
+        Ok(None) => return result,
+        Err(error) => {
+            let now = Utc::now();
+            let failure_id = stable_hash(&format!(
+                "mcp-auto-ingest-stage:{capability_id}:{tool_name}:{error}"
+            ));
+            let dead_letter = DeadLetter {
+                id: failure_id.clone(),
+                tool_name: format!("mcp_auto_ingest:{tool_name}"),
+                arguments: arguments.cloned(),
+                error: error.clone(),
+                error_category: "durability".to_string(),
+                timestamp: now.to_rfc3339(),
+                retry_count: 0,
+                max_retries: 0,
+                status: "abandoned".to_string(),
+            };
+            let mut dead_letters = server.dead_letters_lock();
+            dead_letters.retain(|entry| entry.id != failure_id);
+            push_dead_letter_with_limits(&mut dead_letters, dead_letter, now);
+            drop(dead_letters);
+            attach_auto_ingest_persistence_warning(&mut result, &error);
+            tracing::warn!(
+                error = %error,
+                capability_id,
+                tool_name,
+                "failed to stage durable MCP result auto-ingest"
+            );
+            return result;
+        }
+    };
+    let ingest_server = server.clone();
+    let capability_id = capability_id.to_string();
+    let tool_name = tool_name.to_string();
+    let task = tokio::spawn(async move {
+        if let Err(error) =
+            crate::pipeline_ops::run_staged_auto_ingest(&ingest_server, staged).await
+        {
+            tracing::warn!(
+                error = %error,
+                capability_id,
+                tool_name,
+                "background MCP result auto-ingest failed"
+            );
+        }
+    });
+    drop(task);
+    result
+}
+
+fn attach_auto_ingest_persistence_warning(result: &mut rmcp::model::CallToolResult, reason: &str) {
+    const MAX_REASON_BYTES: usize = 512;
+    let reason = bounded_utf8(reason, MAX_REASON_BYTES).0;
+    let warning = json!({
+        "code": "auto_ingest_not_persisted",
+        "reason": reason,
+    });
+    let meta = result.meta.get_or_insert_with(rmcp::model::Meta::new);
+    let warnings = meta
+        .0
+        .entry("warnings".to_string())
+        .or_insert_with(|| json!([]));
+    if !warnings.is_array() {
+        let existing = std::mem::replace(warnings, json!([]));
+        warnings
+            .as_array_mut()
+            .expect("warnings was replaced with an array")
+            .push(existing);
+    }
+    let warnings = warnings
+        .as_array_mut()
+        .expect("warnings metadata is an array");
+    warnings.retain(|entry| entry.get("code") != Some(&json!("auto_ingest_not_persisted")));
+    warnings.push(warning);
+}
+
+fn bounded_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
+}
 
 impl MemoryServer {
     pub(crate) async fn proxy_call_internal(
@@ -97,17 +206,14 @@ impl MemoryServer {
             let result = self
                 .proxy_call_bigmodel_mcp(&server_id, &cap_def, tool_name, arguments.clone())
                 .await?;
-            if !result.is_error.unwrap_or(false) {
-                crate::pipeline_ops::schedule_auto_ingest_from_mcp(
-                    self,
-                    &server_id,
-                    tool_name,
-                    &cap_def,
-                    arguments.as_ref(),
-                    &result,
-                );
-            }
-            return Ok(result);
+            return Ok(return_with_background_auto_ingest(
+                self,
+                &server_id,
+                tool_name,
+                &cap_def,
+                arguments.as_ref(),
+                result,
+            ));
         }
         let (sandbox_policy, policy_source) =
             self.get_effective_sandbox_policy(requested_capability_id, &server_id);
@@ -349,21 +455,21 @@ impl MemoryServer {
         // 6. Process result, update circuit breaker, log audit
         let (final_result, sandbox_decision, sandbox_error_kind) = match result {
             Ok(Ok(r)) => {
-                if !r.is_error.unwrap_or(false) {
-                    crate::pipeline_ops::schedule_auto_ingest_from_mcp(
-                        self,
-                        &server_id,
-                        tool_name,
-                        &cap_def,
-                        arguments.as_ref(),
-                        &r,
-                    );
+                // The MCP transport succeeded regardless of the optional ingest outcome.
+                {
+                    let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+                    state
+                        .circuits
+                        .insert(server_name.to_string(), (CircuitState::Closed, 0));
                 }
-                // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
-                let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
-                state
-                    .circuits
-                    .insert(server_name.to_string(), (CircuitState::Closed, 0));
+                let r = return_with_background_auto_ingest(
+                    self,
+                    &server_id,
+                    tool_name,
+                    &cap_def,
+                    arguments.as_ref(),
+                    r,
+                );
                 (Ok(r), "allowed", None)
             }
             Ok(Err(e)) => {
@@ -451,5 +557,175 @@ impl MemoryServer {
             };
             state.connections.remove(server_name);
         }
+    }
+}
+
+#[cfg(test)]
+mod auto_ingest_response_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_auto_ingest_does_not_replace_successful_mcp_result() {
+        let server = crate::tests::make_server();
+        crate::test_support::with_unrestricted_fixture_connection(
+            &server.global_db_path_buf(),
+            |connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_proxy_auto_ingest_row \
+                         BEFORE INSERT ON memories \
+                         BEGIN SELECT RAISE(FAIL, 'injected proxy auto-ingest failure'); END;",
+                )
+            },
+        )
+        .expect("install proxy auto-ingest fault");
+        let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+            "content": [{"type": "text", "text": "successful remote MCP payload"}],
+            "isError": false
+        }))
+        .expect("successful MCP result fixture");
+        let original = serde_json::to_value(&result).expect("serialize original MCP result");
+        let definition = json!({
+            "auto_ingest": true,
+            "ingest_domain": "general",
+            "ingest_path_prefix": "/auto-ingest/proxy-failure"
+        });
+
+        let returned = return_with_background_auto_ingest(
+            &server,
+            "mcp:test-server",
+            "test-tool",
+            &definition,
+            None,
+            result,
+        );
+        assert_eq!(
+            serde_json::to_value(&returned).expect("serialize returned MCP result"),
+            original,
+            "optional ingest failure must not alter a successful MCP result"
+        );
+
+        let mut failure_audits = 0;
+        for _ in 0..100 {
+            failure_audits = server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT COUNT(*) FROM audit_log \
+                             WHERE server_id = 'ingest' AND tool_name = 'ingest_source' \
+                               AND success = 0 AND error_kind = 'durable_write_failed'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(|error| format!("count auto-ingest failures: {error}"))
+                })
+                .expect("read auto-ingest failure audit");
+            if failure_audits == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let audits = server
+            .with_global_store_read(|store| {
+                store
+                    .audit_log_list(20, Some("ingest"))
+                    .map_err(|error| format!("list ingest audits: {error}"))
+            })
+            .expect("list ingest audits");
+        assert_eq!(
+            failure_audits, 1,
+            "background ingest failure must be recorded; audits={audits:?}"
+        );
+        let retry_jobs = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events WHERE worker = 'auto_ingest_job'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| format!("count durable auto-ingest jobs: {error}"))
+            })
+            .expect("count durable auto-ingest jobs");
+        assert_eq!(
+            retry_jobs, 1,
+            "failed background ingest must remain retryable"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_auto_ingest_staging_is_visible_in_pipeline_status() {
+        let server = crate::tests::make_server();
+        crate::test_support::with_unrestricted_fixture_connection(
+            &server.global_db_path_buf(),
+            |connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_proxy_auto_ingest_stage \
+                         BEFORE INSERT ON processed_events \
+                         WHEN NEW.worker = 'auto_ingest_job' \
+                         BEGIN SELECT RAISE(FAIL, 'injected auto-ingest stage failure'); END;",
+                )
+            },
+        )
+        .expect("install auto-ingest stage fault");
+        let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+            "content": [{"type": "text", "text": "successful MCP payload with failed staging"}],
+            "isError": false
+        }))
+        .expect("successful MCP result fixture");
+        let original = serde_json::to_value(&result).expect("serialize original MCP result");
+        let returned = return_with_background_auto_ingest(
+            &server,
+            "mcp:test-server",
+            "stage-failure-tool",
+            &json!({"auto_ingest": true}),
+            None,
+            result,
+        );
+
+        let returned_json = serde_json::to_value(&returned).expect("serialize returned MCP result");
+        assert_eq!(returned_json["content"], original["content"]);
+        assert_eq!(
+            returned_json["structuredContent"],
+            original["structuredContent"]
+        );
+        assert_eq!(returned_json["isError"], original["isError"]);
+        let warnings = returned_json["_meta"]["warnings"]
+            .as_array()
+            .expect("structured auto-ingest persistence warning");
+        assert_eq!(warnings.len(), 1, "exactly one persistence warning");
+        assert_eq!(warnings[0]["code"], "auto_ingest_not_persisted");
+        assert!(warnings[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("injected auto-ingest stage failure")));
+        let status: serde_json::Value = serde_json::from_str(
+            &crate::pipeline_ops::handle_get_pipeline_status(&server)
+                .await
+                .expect("pipeline status remains available"),
+        )
+        .expect("decode pipeline status");
+        assert_eq!(
+            status["dead_letter_queue"]["abandoned"], 1,
+            "staging failure must be independently visible through pipeline status"
+        );
+        let dead_letters = server.dead_letters_lock();
+        let failure = dead_letters.front().expect("structured staging failure");
+        assert_eq!(failure.tool_name, "mcp_auto_ingest:stage-failure-tool");
+        assert!(failure.error.contains("injected auto-ingest stage failure"));
+        let durable_rows = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events \
+                         WHERE worker IN ('auto_ingest_job', 'auto_ingest_job_claim')",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count auto-ingest durable rows after staging failure");
+        assert_eq!(durable_rows, 0, "staging failure must not fake durability");
     }
 }

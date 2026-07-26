@@ -3,7 +3,10 @@ use serde_json::json;
 
 use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 use crate::server_state::{DbScope, MemoryServer};
-use memcore::{MemoryEdge, MemoryEntry, MemoryStore};
+use memcore::{
+    store::immutable_supersession::ImmutableSupersessionTransaction, MemoryEdge, MemoryEntry,
+    MemoryError, MemoryStore,
+};
 use tachi_foundry::{
     plan_daily_distill_memory, plan_distill_edges, should_archive_daily_distill_source,
     DailyDistillMemoryInput,
@@ -11,17 +14,37 @@ use tachi_foundry::{
 
 use super::types::{CandidateGroup, GroupPayload};
 
-fn archive_distilled_sources(
-    store: &mut MemoryStore,
+/// Claim every source before writing the candidate projection. The candidate
+/// id is generated before this transaction and `superseded_by` is deliberately
+/// not a foreign key, so the operation can fail fast on a stale source without
+/// even tentatively writing its replacement row.
+fn claim_distilled_sources<'a>(
+    replacement: &mut ImmutableSupersessionTransaction<'_>,
     distill_entry: &MemoryEntry,
-    source_entries: &[MemoryEntry],
-    batch_run_id: &str,
-) -> Result<usize, String> {
-    let mut archived_count = 0;
+    source_entries: &'a [MemoryEntry],
+) -> Result<Vec<&'a MemoryEntry>, MemoryError> {
+    let mut claimed = Vec::new();
     for source in source_entries
         .iter()
         .filter(|entry| should_archive_daily_distill_source(entry))
     {
+        // A false claim is an operation-wide conflict: this new distilled
+        // candidate must not persist its own row, derived projection, or any
+        // graph/archive side effect when an input already has an immutable
+        // successor.
+        replacement.claim_immutable_supersession(&source.id, &distill_entry.id)?;
+        claimed.push(source);
+    }
+    Ok(claimed)
+}
+
+fn archive_claimed_distilled_sources(
+    replacement: &mut ImmutableSupersessionTransaction<'_>,
+    distill_entry: &MemoryEntry,
+    claimed_sources: &[&MemoryEntry],
+    batch_run_id: &str,
+) -> Result<usize, MemoryError> {
+    for source in claimed_sources {
         let edge = MemoryEdge {
             source_id: distill_entry.id.clone(),
             target_id: source.id.clone(),
@@ -36,20 +59,10 @@ fn archive_distilled_sources(
             valid_from: distill_entry.timestamp.clone(),
             valid_to: None,
         };
-        store
-            .add_edge(&edge)
-            .map_err(|e| format!("add supersedes edge: {e}"))?;
-        store
-            .supersede_memory(&source.id, &distill_entry.id)
-            .map_err(|e| format!("mark distilled source superseded: {e}"))?;
-        if store
-            .archive_memory(&source.id)
-            .map_err(|e| format!("archive distilled source: {e}"))?
-        {
-            archived_count += 1;
-        }
+        replacement.add_edge(&edge)?;
+        replacement.archive_claimed_source(&source.id)?;
     }
-    Ok(archived_count)
+    Ok(claimed_sources.len())
 }
 
 /// Write a single distilled memory + its provenance edges to the target store
@@ -62,27 +75,26 @@ fn write_distill_entry(
     batch_run_id: &str,
 ) -> Result<(), String> {
     store
-        .upsert(entry)
-        .map_err(|e| format!("upsert distill memory: {e}"))?;
-    for edge in plan_distill_edges(entry, source_entries, "daily_batch", &entry.timestamp) {
-        store
-            .add_edge(&edge)
-            .map_err(|e| format!("add distill edge: {e}"))?;
-    }
-    store
-        .save_derived_with_id(
-            derived_id,
-            &entry.text,
-            &entry.path,
-            &entry.summary,
-            entry.importance,
-            &entry.source,
-            &entry.scope,
-            &entry.metadata,
-        )
-        .map_err(|e| format!("save derived distill item: {e}"))?;
-    archive_distilled_sources(store, entry, source_entries, batch_run_id)?;
-    Ok(())
+        .with_immutable_supersession_transaction(|replacement| {
+            let claimed_sources = claim_distilled_sources(replacement, entry, source_entries)?;
+            replacement.upsert(entry)?;
+            for edge in plan_distill_edges(entry, source_entries, "daily_batch", &entry.timestamp) {
+                replacement.add_edge(&edge)?;
+            }
+            replacement.save_derived_with_id(
+                derived_id,
+                &entry.text,
+                &entry.path,
+                &entry.summary,
+                entry.importance,
+                &entry.source,
+                &entry.scope,
+                &entry.metadata,
+            )?;
+            archive_claimed_distilled_sources(replacement, entry, &claimed_sources, batch_run_id)?;
+            Ok(())
+        })
+        .map_err(|e| format!("persist daily distill replacement: {e}"))
 }
 
 pub(crate) fn persist_distill_memory(

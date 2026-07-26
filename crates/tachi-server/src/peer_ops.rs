@@ -252,6 +252,7 @@ enum RunOutcome {
 /// trust posture the module doc already claims for `status.json`'s own
 /// fields (advisory projection, never a transcript).
 const PROGRESS_EVENT_PROJECTION_KEYS: &[&str] = &["event", "timestamp", "status", "dispatch_id"];
+const RECENT_PROGRESS_MAX_BYTES: usize = 1024 * 1024;
 
 /// Project one already-parsed progress-line JSON object down to
 /// [`PROGRESS_EVENT_PROJECTION_KEYS`]. Returns `None` for a line that did not
@@ -277,15 +278,26 @@ fn project_progress_event(value: &serde_json::Value) -> Option<serde_json::Value
 /// `tracing::warn!` — visible in daemon logs rather than silently vanishing,
 /// even though the best-effort tail itself stays lenient (one corrupt line
 /// must not sink the whole read).
-fn read_recent_progress_events(status: &serde_json::Value) -> RunSourceOutcome {
+fn read_recent_progress_events(
+    server: &MemoryServer,
+    status: &serde_json::Value,
+) -> RunSourceOutcome {
     let Some(run_dir) = status.get("run_dir").and_then(serde_json::Value::as_str) else {
         return RunSourceOutcome::Unavailable(
             "run status projection carried no run_dir".to_string(),
         );
     };
     let progress_path = std::path::Path::new(run_dir).join("progress.jsonl");
-    let raw = match std::fs::read_to_string(&progress_path) {
-        Ok(raw) => raw,
+    let runs_root = crate::dispatch_ops::runs_dir_for_server(server);
+    let raw = match crate::dispatch_ops::read_text_file_within(
+        &runs_root,
+        &progress_path,
+        RECENT_PROGRESS_MAX_BYTES,
+    ) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => {
+            return RunSourceOutcome::Unavailable(format!("{} not found", progress_path.display()))
+        }
         Err(err) => {
             return RunSourceOutcome::Unavailable(format!(
                 "read {}: {err}",
@@ -351,13 +363,14 @@ fn read_run(
         Err(err) => return RunOutcome::ClaimsUnavailable(err),
     };
     let status = match crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id) {
-        Some(value) => RunSourceOutcome::Ok(value),
-        None => RunSourceOutcome::Unavailable(format!(
+        Ok(Some(value)) => RunSourceOutcome::Ok(value),
+        Ok(None) => RunSourceOutcome::Unavailable(format!(
             "run_dir/status.json not found for dispatch_id {dispatch_id}"
         )),
+        Err(error) => RunSourceOutcome::Unavailable(error),
     };
     let recent_events = match &status {
-        RunSourceOutcome::Ok(value) => read_recent_progress_events(value),
+        RunSourceOutcome::Ok(value) => read_recent_progress_events(server, value),
         RunSourceOutcome::Unavailable(_) => {
             RunSourceOutcome::Unavailable("run status unreadable; progress not attempted".into())
         }

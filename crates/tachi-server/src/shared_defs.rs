@@ -57,17 +57,11 @@ pub(super) fn categorize_error(error: &str) -> String {
     }
 }
 
-/// Returns true when replaying the tool through DLQ could duplicate writes.
-/// #1098: delegates to the single typed action-effect authority
-/// (`crate::action_effect`) instead of maintaining its own
-/// `NON_IDEMPOTENT_TOOL_NAMES` / `FACADE_MUTATING_ACTIONS` string tables —
-/// that module canonicalizes `tool_name` before classifying it, closing the
-/// remote-prefix bypass those two hand-rolled tables were prone to.
-pub(super) fn dlq_mutation_is_unsafe(
+pub(super) fn dlq_replay_is_explicitly_safe(
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> bool {
-    crate::action_effect::dlq_mutation_is_unsafe(tool_name, arguments)
+    crate::action_effect::dlq_replay_is_explicitly_safe(tool_name, arguments)
 }
 
 pub(super) fn should_enqueue_dlq(
@@ -81,7 +75,7 @@ pub(super) fn should_enqueue_dlq(
     {
         return false;
     }
-    if is_native_route || dlq_mutation_is_unsafe(tool_name, arguments) {
+    if is_native_route || !dlq_replay_is_explicitly_safe(tool_name, arguments) {
         return false;
     }
     true
@@ -319,32 +313,32 @@ mod dlq_tests {
     }
 
     #[test]
-    fn dlq_mutation_is_unsafe_for_write_tools_and_hub_call() {
-        assert!(dlq_mutation_is_unsafe("save_memory", None));
-        assert!(dlq_mutation_is_unsafe("hub_call", None));
-        assert!(dlq_mutation_is_unsafe("remote__save_memory", None));
-        assert!(dlq_mutation_is_unsafe(
+    fn dlq_replay_authority_rejects_write_tools_and_hub_call() {
+        assert!(!dlq_replay_is_explicitly_safe("save_memory", None));
+        assert!(!dlq_replay_is_explicitly_safe("hub_call", None));
+        assert!(!dlq_replay_is_explicitly_safe("remote__save_memory", None));
+        assert!(!dlq_replay_is_explicitly_safe(
             "tachi_memory",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
                 json!("save")
             )]))
         ));
-        assert!(!dlq_mutation_is_unsafe(
+        assert!(!dlq_replay_is_explicitly_safe(
             "tachi_memory",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
                 json!("search")
             )]))
         ));
-        assert!(dlq_mutation_is_unsafe(
+        assert!(!dlq_replay_is_explicitly_safe(
             "tachi_event",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
                 json!("emit")
             )]))
         ));
-        assert!(!dlq_mutation_is_unsafe(
+        assert!(dlq_replay_is_explicitly_safe(
             "tachi_event",
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
@@ -354,19 +348,19 @@ mod dlq_tests {
     }
 
     #[test]
-    fn should_enqueue_dlq_skips_native_and_mutating_tools() {
+    fn should_enqueue_dlq_requires_an_explicit_safe_effect() {
         assert!(!should_enqueue_dlq("save_memory", None, true));
         assert!(!should_enqueue_dlq("hub_call", None, false));
-        assert!(should_enqueue_dlq("remote__echo", None, false));
+        assert!(!should_enqueue_dlq("remote__echo", None, false));
+        assert!(!should_enqueue_dlq("remote__unknown", None, false));
     }
 
     /// #1098: the owner's adjudication comment named this exact call shape —
     /// `remote__tachi_memory(action='save')` failing through a non-native
     /// (proxied) route used to pass the facade name match (raw name vs.
     /// canonical) and enter the DLQ, where it could be auto-replayed and
-    /// duplicate the write. Discrimination: red before #1098's
-    /// canonicalization fix (`should_enqueue_dlq` returned `true` here),
-    /// green after.
+    /// duplicate the write. All proxy-qualified names now fail closed because
+    /// the server has no per-remote-tool replay authority.
     #[test]
     fn f1098_should_enqueue_dlq_closes_remote_facade_mutation_bypass() {
         for action in [
@@ -390,15 +384,21 @@ mod dlq_tests {
                 "remote__tachi_event(action='{action}') must not enter the DLQ"
             );
         }
-        // A read-only failure through the same remote prefix still enters the
-        // normal (non-mutating) DLQ path — acceptance: "Read-only failures
-        // never enter a mutating DLQ path" does not mean they're excluded
-        // from the DLQ altogether, only that mutation classification never
-        // wrongly excludes them or wrongly admits an unsafe mutation.
-        let read_args = serde_json::Map::from_iter([("action".to_string(), json!("search"))]);
+        let aliased_read_args =
+            serde_json::Map::from_iter([("action".to_string(), json!("metrics"))]);
+        assert!(!should_enqueue_dlq(
+            "remote__tachi_event",
+            Some(&aliased_read_args),
+            false
+        ));
+
+        // Local read-only classification remains available to callers that
+        // have independently established a non-native replay boundary.
+        let local_read_args =
+            serde_json::Map::from_iter([("action".to_string(), json!("metrics"))]);
         assert!(should_enqueue_dlq(
-            "remote__tachi_memory",
-            Some(&read_args),
+            "tachi_event",
+            Some(&local_read_args),
             false
         ));
     }

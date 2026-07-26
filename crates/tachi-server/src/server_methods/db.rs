@@ -99,11 +99,28 @@ impl MemoryServer {
     /// can be stale). It falls back to the `~/.tachi/projects/<name>/` alias for
     /// backward compatibility (e.g. named stores like `wiki` that have no repo).
     pub(crate) fn resolve_named_project_db_path(project_name: &str) -> Result<PathBuf, String> {
-        if let Some(path) = Self::resolve_existing_named_project_db_path(project_name)? {
+        Self::resolve_named_project_db_path_in_home(project_name, &crate::path_utils::tachi_home())
+    }
+
+    pub(crate) fn resolve_server_named_project_db_path(
+        &self,
+        project_name: &str,
+    ) -> Result<PathBuf, String> {
+        Self::resolve_named_project_db_path_in_home(project_name, self.home_dir.as_path())
+    }
+
+    pub(crate) fn resolve_named_project_db_path_in_home(
+        project_name: &str,
+        tachi_home: &Path,
+    ) -> Result<PathBuf, String> {
+        if let Some(path) =
+            Self::resolve_existing_named_project_db_path_in_home(project_name, tachi_home)?
+        {
             return Ok(path);
         }
         let safe_name = Self::validate_named_project(project_name)?;
-        let db_path = crate::path_utils::plan_c_global_db_path_existing(&safe_name);
+        let db_path =
+            crate::path_utils::plan_c_global_db_path_existing_in_home(tachi_home, &safe_name);
         Err(format!(
             "Project '{}' not found (expected DB at {})",
             project_name,
@@ -114,25 +131,32 @@ impl MemoryServer {
     /// Three-state named-project lookup: `Some` is one unambiguous physical
     /// DB, `None` is a genuine absence, and `Err` is incomplete or conflicting
     /// identity evidence. Registration may continue only from `None`.
-    pub(crate) fn resolve_existing_named_project_db_path(
+    pub(crate) fn resolve_existing_named_project_db_path_in_home(
         project_name: &str,
+        tachi_home: &Path,
     ) -> Result<Option<PathBuf>, String> {
         let safe_name = Self::validate_named_project(project_name)?;
 
         // Prefer the manifest-recorded repo-local DB for this project name. This
         // makes repo-local addressing primary and removes the hard dependency on
         // the Plan C symlink (which does not exist on non-Unix hosts).
-        let repo_local = Self::manifest_repo_local_db_for_project(&safe_name)?;
+        let repo_local = Self::manifest_repo_local_db_for_project(&safe_name, tachi_home)?;
         if let Some(repo_local) = repo_local {
             if repo_local.exists() {
-                Self::reconcile_named_project_candidate(project_name, &repo_local, true)?;
+                Self::reconcile_named_project_candidate(
+                    project_name,
+                    &repo_local,
+                    true,
+                    tachi_home,
+                )?;
                 return Ok(Some(repo_local));
             }
         }
 
-        let alias = crate::path_utils::plan_c_existing_named_alias_db(&safe_name)?;
+        let alias =
+            crate::path_utils::plan_c_existing_named_alias_db_in_home(tachi_home, &safe_name)?;
         if let Some(alias) = alias {
-            Self::reconcile_named_project_candidate(project_name, &alias, false)?;
+            Self::reconcile_named_project_candidate(project_name, &alias, false, tachi_home)?;
             return Ok(Some(alias));
         }
         Ok(None)
@@ -142,6 +166,7 @@ impl MemoryServer {
         project_name: &str,
         db_path: &Path,
         manifest_owned: bool,
+        tachi_home: &Path,
     ) -> Result<(), String> {
         let canonical_db = std::fs::canonicalize(db_path).map_err(|err| {
             format!(
@@ -155,11 +180,12 @@ impl MemoryServer {
                 if manifest_owned {
                     return Some(root);
                 }
-                let is_named_symlink = crate::path_utils::named_project_from_path(db_path)
-                    .is_some()
-                    && std::fs::symlink_metadata(db_path)
-                        .map(|metadata| metadata.file_type().is_symlink())
-                        .unwrap_or(false);
+                let is_named_symlink =
+                    crate::path_utils::named_project_from_path_in_home(db_path, tachi_home)
+                        .is_some()
+                        && std::fs::symlink_metadata(db_path)
+                            .map(|metadata| metadata.file_type().is_symlink())
+                            .unwrap_or(false);
                 let is_root_alias = [
                     crate::path_utils::plan_c_dir_name_from_root(&root),
                     crate::path_utils::plan_c_previous_dir_name_from_root(&root),
@@ -175,7 +201,7 @@ impl MemoryServer {
             return Ok(());
         };
         if let Some(compatible_alias) =
-            crate::path_utils::plan_c_existing_alias_db_for_root(&project_root)?
+            crate::path_utils::plan_c_existing_alias_db_for_root_in_home(&project_root, tachi_home)?
         {
             let alias_identity = std::fs::canonicalize(&compatible_alias).map_err(|err| {
                 format!(
@@ -194,18 +220,18 @@ impl MemoryServer {
         Ok(())
     }
 
-    /// Resolve a caller alias to both its physical DB and the project identity
-    /// persisted for the session. The current gen-4 canonical name and the
-    /// human-meaningful gen-1 legacy bare-basename alias are stable first-class
-    /// identities and are kept verbatim as the session label (#1061 immutable
-    /// binding). Only the deprecated machine-generated hash schemes (gen-3
-    /// case-folded / gen-2 raw-canonical FNV-8) normalize to the gen-4
-    /// canonical. Standalone exact ASCII named stores retain their registered
-    /// alias.
-    pub(crate) fn resolve_named_project_binding(
+    pub(crate) fn resolve_server_named_project_binding(
+        &self,
         project_name: &str,
     ) -> Result<(String, PathBuf), String> {
-        let db_path = Self::resolve_named_project_db_path(project_name)?;
+        Self::resolve_named_project_binding_in_home(project_name, self.home_dir.as_path())
+    }
+
+    fn resolve_named_project_binding_in_home(
+        project_name: &str,
+        tachi_home: &Path,
+    ) -> Result<(String, PathBuf), String> {
+        let db_path = Self::resolve_named_project_db_path_in_home(project_name, tachi_home)?;
         let canonical_db = std::fs::canonicalize(&db_path).map_err(|err| {
             format!(
                 "Project '{project_name}' database cannot be canonicalized at {}: {err}",
@@ -222,7 +248,9 @@ impl MemoryServer {
                 // identities; arbitrary named stores must not be absorbed by
                 // an enclosing repository.
                 let root = crate::utils::find_git_root_from(&canonical_db)?;
-                let is_named_store = crate::path_utils::named_project_from_path(&db_path).is_some();
+                let is_named_store =
+                    crate::path_utils::named_project_from_path_in_home(&db_path, tachi_home)
+                        .is_some();
                 let is_symlink = std::fs::symlink_metadata(&db_path)
                     .map(|metadata| metadata.file_type().is_symlink())
                     .unwrap_or(false);
@@ -238,7 +266,8 @@ impl MemoryServer {
                 (!is_named_store || (is_symlink && is_root_alias)).then_some(root)
             });
         let canonical_name = if let Some(root) = project_root {
-            let compatible_alias = crate::path_utils::plan_c_alias_db_for_root(&root)?;
+            let compatible_alias =
+                crate::path_utils::plan_c_alias_db_for_root_in_home(&root, tachi_home)?;
             if std::fs::symlink_metadata(&compatible_alias).is_ok() {
                 let alias_identity = std::fs::canonicalize(&compatible_alias).map_err(|err| {
                     format!(
@@ -276,7 +305,10 @@ impl MemoryServer {
             if is_stable_caller_identity {
                 project_name.to_string()
             } else {
-                match Self::resolve_existing_named_project_db_path(&canonical_name)? {
+                match Self::resolve_existing_named_project_db_path_in_home(
+                    &canonical_name,
+                    tachi_home,
+                )? {
                     Some(migrated) => {
                         let migrated = std::fs::canonicalize(&migrated).map_err(|err| {
                             format!(
@@ -291,9 +323,10 @@ impl MemoryServer {
                             ));
                         }
                     }
-                    None => crate::project_db_ops::register_repo_local_manifest_entry(
+                    None => crate::project_db_ops::register_repo_local_manifest_entry_in_home(
                         &canonical_db,
                         &canonical_name,
+                        tachi_home,
                     )?,
                 }
                 canonical_name
@@ -312,15 +345,34 @@ impl MemoryServer {
     /// that matches multiple physical repo-local DBs is an error. Callers use
     /// this at write-isolation gates, where uncertainty must fail closed.
     pub(crate) fn resolve_named_project_db_identity(project_name: &str) -> Result<PathBuf, String> {
+        Self::resolve_named_project_db_identity_in_home(
+            project_name,
+            &crate::path_utils::tachi_home(),
+        )
+    }
+
+    pub(crate) fn resolve_server_named_project_db_identity(
+        &self,
+        project_name: &str,
+    ) -> Result<PathBuf, String> {
+        Self::resolve_named_project_db_identity_in_home(project_name, self.home_dir.as_path())
+    }
+
+    fn resolve_named_project_db_identity_in_home(
+        project_name: &str,
+        tachi_home: &Path,
+    ) -> Result<PathBuf, String> {
         let db_path =
-            Self::resolve_existing_named_project_db_path(project_name)?.ok_or_else(|| {
-                let expected = crate::path_utils::plan_c_global_db_path(project_name);
-                format!(
-                    "Project '{}' not found (expected DB at {})",
-                    project_name,
-                    expected.display()
-                )
-            })?;
+            Self::resolve_existing_named_project_db_path_in_home(project_name, tachi_home)?
+                .ok_or_else(|| {
+                    let expected =
+                        crate::path_utils::plan_c_global_db_path_in_home(tachi_home, project_name);
+                    format!(
+                        "Project '{}' not found (expected DB at {})",
+                        project_name,
+                        expected.display()
+                    )
+                })?;
         let canonical = std::fs::canonicalize(&db_path).map_err(|err| {
             format!(
                 "Project '{project_name}' database cannot be canonicalized at {}: {err}",
@@ -337,17 +389,7 @@ impl MemoryServer {
         // into another project's directory. `unnamed` is permanently
         // ambiguous with the historical sanitizer fallback and cannot be
         // auto-assigned safely.
-        if project_name.is_empty()
-            || project_name.trim() != project_name
-            || project_name.contains('/')
-            || project_name.contains('\\')
-            || project_name.contains("..")
-            || project_name.starts_with('.')
-            || project_name.eq_ignore_ascii_case("unnamed")
-            || !project_name
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-        {
+        if !crate::path_utils::is_canonical_project_identity(project_name) {
             return Err(format!(
                 "Invalid project identity '{project_name}': use the exact registered ASCII alias; ambiguous or lossy-normalized names are refused"
             ));
@@ -382,10 +424,13 @@ impl MemoryServer {
     /// whichever manifest entry happens to come first. A missing manifest or
     /// no match falls back to the named alias; an unreadable manifest fails
     /// closed because ownership evidence is incomplete.
-    fn manifest_repo_local_db_for_project(safe_name: &str) -> Result<Option<PathBuf>, String> {
+    fn manifest_repo_local_db_for_project(
+        safe_name: &str,
+        tachi_home: &Path,
+    ) -> Result<Option<PathBuf>, String> {
         // The runtime manifest lives at `<tachi_home>/manifest.json` (see
         // `bootstrap/serve.rs`, which uses `app_home == tachi_home()`).
-        let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
+        let manifest_path = tachi_home.join("manifest.json");
         let manifest = match crate::manifest::Manifest::load(&manifest_path) {
             Ok(manifest) => manifest,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -415,6 +460,7 @@ impl MemoryServer {
                             == Some(safe_name)
                 });
             if derived_match || scope_match {
+                crate::path_utils::manifest_db_leaf_exists(entry)?;
                 let identity = std::fs::canonicalize(db_path).map_err(|err| {
                     format!(
                         "Project '{safe_name}' manifest entry is missing or unreadable at {}: {err}",
@@ -442,7 +488,7 @@ impl MemoryServer {
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = Self::resolve_named_project_db_path(project_name)?;
+        let db_path = self.resolve_named_project_db_open_path(project_name)?;
         self.db.with_path_store_read_with_label(
             &db_path,
             &format!("named-project:{project_name}"),
@@ -456,9 +502,38 @@ impl MemoryServer {
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = Self::resolve_named_project_db_path(project_name)?;
+        let db_path = self.resolve_named_project_db_open_path(project_name)?;
         self.db
             .with_path_store_with_label(&db_path, project_name, f)
+    }
+
+    /// Establish the write-capable named-project state before a write facade
+    /// performs any read-before-write lookup. This is the only route that may
+    /// consume the runtime's exact v22-to-v23 guard migration authority.
+    pub(crate) fn prepare_named_project_store_for_write(
+        &self,
+        project_name: &str,
+    ) -> Result<(), String> {
+        self.with_named_project_store(project_name, |_| Ok(()))
+    }
+
+    fn resolve_named_project_db_open_path(&self, project_name: &str) -> Result<PathBuf, String> {
+        let addressed_path = self.resolve_server_named_project_db_path(project_name)?;
+        match std::fs::symlink_metadata(&addressed_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::canonicalize(&addressed_path).map_err(|error| {
+                    format!(
+                        "Project '{project_name}' alias cannot be canonicalized at {}: {error}",
+                        addressed_path.display()
+                    )
+                })
+            }
+            Ok(_) => Ok(addressed_path),
+            Err(error) => Err(format!(
+                "Project '{project_name}' database cannot be inspected at {}: {error}",
+                addressed_path.display()
+            )),
+        }
     }
 
     pub(crate) fn resolve_write_scope(&self, requested: &str) -> (DbScope, Option<String>) {
@@ -565,7 +640,7 @@ mod resolve_named_project_tests {
             let previous = crate::path_utils::plan_c_previous_dir_name_from_root(&repo)
                 .expect("pre-#1228 identity");
             let (canonical_name, previous_resolved) =
-                MemoryServer::resolve_named_project_binding(&previous)
+                MemoryServer::resolve_named_project_binding_in_home(&previous, &tachi_home)
                     .expect("pre-#1228 identity remains a compatibility alias");
             assert_eq!(previous_resolved, local_db);
             assert_eq!(canonical_name, name);
@@ -590,8 +665,9 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(previous_alias.parent().unwrap()).expect("alias parent");
             std::os::unix::fs::symlink(&local_db, &previous_alias).expect("legacy alias");
 
-            let (canonical, resolved) = MemoryServer::resolve_named_project_binding(&previous)
-                .expect("legacy binding migration");
+            let (canonical, resolved) =
+                MemoryServer::resolve_named_project_binding_in_home(&previous, &tachi_home)
+                    .expect("legacy binding migration");
             assert_ne!(canonical, previous);
             assert_eq!(
                 std::fs::canonicalize(resolved).unwrap(),
@@ -625,8 +701,9 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(previous_alias.parent().unwrap()).expect("alias parent");
             std::os::unix::fs::symlink(&custom_db, &previous_alias).expect("legacy alias");
 
-            let (canonical, resolved) = MemoryServer::resolve_named_project_binding(&previous)
-                .expect("custom legacy path migration");
+            let (canonical, resolved) =
+                MemoryServer::resolve_named_project_binding_in_home(&previous, &tachi_home)
+                    .expect("custom legacy path migration");
             assert_ne!(canonical, previous);
             assert_eq!(
                 std::fs::canonicalize(resolved).unwrap(),
@@ -690,7 +767,7 @@ mod resolve_named_project_tests {
             let before = serde_json::to_vec_pretty(&manifest).unwrap();
             std::fs::write(&manifest_path, &before).expect("manifest");
 
-            let error = MemoryServer::resolve_named_project_binding(&previous)
+            let error = MemoryServer::resolve_named_project_binding_in_home(&previous, &tachi_home)
                 .expect_err("canonical identity conflict must block migration");
             assert!(error.contains("unrelated DB"), "{error}");
             assert_eq!(
@@ -713,8 +790,9 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(db.parent().unwrap()).expect("named store parent");
             std::fs::write(&db, b"standalone").expect("named store");
 
-            let (identity, resolved) = MemoryServer::resolve_named_project_binding("wiki")
-                .expect("standalone store binding");
+            let (identity, resolved) =
+                MemoryServer::resolve_named_project_binding_in_home("wiki", &tachi_home)
+                    .expect("standalone store binding");
             assert_eq!(identity, "wiki");
             assert_eq!(
                 std::fs::canonicalize(resolved).unwrap(),
@@ -724,6 +802,60 @@ mod resolve_named_project_tests {
                 !tachi_home.join("manifest.json").exists(),
                 "standalone named store must not be claimed as the enclosing Git project"
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_project_runtime_opens_valid_plan_c_alias_via_physical_db() {
+        with_env_lock(|| {
+            use std::os::unix::fs::MetadataExt;
+
+            let tmp = crate::test_support::non_skipped_fixture_tempdir("server-methods-");
+            let tachi_home = tmp.path().join("home");
+            std::fs::create_dir_all(&tachi_home).expect("home");
+            let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+            let repo = tmp.path().join("Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("repo");
+            let local_db = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(local_db.parent().unwrap()).expect("project DB parent");
+            drop(
+                MemoryStore::open(local_db.to_str().expect("project DB path"))
+                    .expect("seed project DB"),
+            );
+            crate::test_support::with_unrestricted_fixture_connection(&local_db, |connection| {
+                connection.execute_batch(
+                    "CREATE TABLE alias_open_probe (value INTEGER NOT NULL);
+                     INSERT INTO alias_open_probe VALUES (7);",
+                )
+            })
+            .expect("seed alias-open probe fixture");
+            let target_identity = {
+                let metadata = std::fs::metadata(&local_db).expect("project DB metadata");
+                (metadata.dev(), metadata.ino())
+            };
+            let project_name =
+                crate::path_utils::plan_c_dir_name_from_root(&repo).expect("project name");
+            let alias = crate::path_utils::plan_c_global_db_path(&project_name);
+            std::fs::create_dir_all(alias.parent().unwrap()).expect("alias parent");
+            std::os::unix::fs::symlink(&local_db, &alias).expect("Plan C alias");
+
+            let global_db = tmp.path().join("global.db");
+            let server = MemoryServer::new(global_db, None).expect("server");
+            let value: i64 = server
+                .with_named_project_store_read(&project_name, |store| {
+                    store
+                        .connection()
+                        .query_row("SELECT value FROM alias_open_probe", [], |row| row.get(0))
+                        .map_err(|error| error.to_string())
+                })
+                .expect("read through valid Plan C alias");
+
+            assert_eq!(value, 7);
+            assert_eq!(std::fs::read_link(&alias).unwrap(), local_db);
+            let metadata = std::fs::metadata(&local_db).expect("project DB metadata after open");
+            assert_eq!((metadata.dev(), metadata.ino()), target_identity);
         });
     }
 
@@ -739,8 +871,9 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(db.parent().unwrap()).expect("named store parent");
             std::fs::write(&db, b"standalone").expect("named store");
 
-            let (identity, resolved) = MemoryServer::resolve_named_project_binding("Hyperion")
-                .expect("root-named standalone store binding");
+            let (identity, resolved) =
+                MemoryServer::resolve_named_project_binding_in_home("Hyperion", &tachi_home)
+                    .expect("root-named standalone store binding");
             assert_eq!(identity, "Hyperion");
             assert_eq!(
                 std::fs::canonicalize(resolved).unwrap(),

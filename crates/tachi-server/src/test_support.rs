@@ -1,5 +1,19 @@
 use std::path::{Path, PathBuf};
 
+/// Run deliberate fixture DDL on an unguarded, offline connection.
+///
+/// This exists only because a normal [`memcore::MemoryStore`] connection
+/// correctly rejects arbitrary schema mutation. Do not use it for `memories`
+/// row writes or authority-column updates; those must go through typed store
+/// APIs so the v23 authorization boundary remains exercised.
+pub(crate) fn with_unrestricted_fixture_connection<T>(
+    path: &Path,
+    operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    let connection = rusqlite::Connection::open(path)?;
+    operation(&connection)
+}
+
 /// Create repo-local DB fixtures outside OS temp roots and git worktrees.
 /// Production skip logic intentionally drops `/.tachi/memory.db` under
 /// `/tmp` and `/private/tmp`; root-resolution tests additionally need a path

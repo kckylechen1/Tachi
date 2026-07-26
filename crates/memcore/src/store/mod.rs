@@ -26,6 +26,8 @@ pub mod audit;
 pub mod crud;
 pub mod daily_pipeline;
 pub mod derived;
+#[cfg(feature = "admin")]
+pub mod dispatch_outcomes;
 pub mod distill;
 pub mod enrichment;
 pub mod events;
@@ -34,10 +36,12 @@ pub mod gc_candidates;
 pub mod graph;
 #[cfg(feature = "admin")]
 pub mod hub;
+pub mod immutable_supersession;
 pub mod lessons;
 pub mod linking;
 pub mod llm_usage;
 pub mod maintenance;
+pub mod memory_lifecycle;
 pub mod open;
 pub mod recall_cache;
 pub mod rem;

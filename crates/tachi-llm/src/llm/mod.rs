@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
+mod auth_probe;
 mod chat_lanes;
 mod circuit_breaker;
 mod embedding;
@@ -17,7 +18,11 @@ mod rerank;
 pub use chat_lanes::ReasoningOutcome;
 pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
 pub use provider_health::ProviderSecret;
-pub use provider_health::{ChatLaneConfig, LaneFallbackConfig, ProviderRuntimeConfig};
+pub use provider_health::{
+    ChatLaneConfig, LaneFallbackConfig, ProviderAuthProbeClass, ProviderAuthProbeFamily,
+    ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
+    ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderRuntimeConfig,
+};
 use provider_health::{
     ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState, ProviderState,
 };

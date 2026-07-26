@@ -71,7 +71,9 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::memory_search_ops::{save_eval_memory, scrub_secrets};
+use crate::memory_search_ops::{
+    save_eval_memory_with_authorized_reference_mutations, scrub_secrets,
+};
 use crate::precedent_ops::{
     extract_persisted_id, frame_field, normalize_ruling, project_segment, scrub_ruling,
     summary_line_with_prefix, NormalizedRuling,
@@ -116,6 +118,22 @@ struct NormalizedSourceRef {
     body_hash: Option<String>,
     commit_sha: Option<String>,
     section_or_span: Option<String>,
+}
+
+impl NormalizedSourceRef {
+    fn validated_append(&self) -> Result<memcore::db::ValidatedReferenceMutation, String> {
+        memcore::db::ValidatedReferenceMutation::precedent_source(
+            self.relation.clone(),
+            self.target_kind.clone(),
+            self.target_ref.clone(),
+            self.comment_id.clone(),
+            self.updated_at.clone(),
+            self.body_hash.clone(),
+            self.commit_sha.clone(),
+            self.section_or_span.clone(),
+        )
+        .map_err(|error| format!("validate precedent source ref append: {error}"))
+    }
 }
 
 /// Validate + normalize one caller-supplied source ref. `Err(reason)` marks
@@ -183,12 +201,23 @@ fn normalize_source_ref(raw: &RulingSourceRefParams) -> Result<NormalizedSourceR
         }
         _ => {}
     }
+    let updated_at = trimmed_opt(&raw.updated_at)
+        .map(|value| {
+            chrono::DateTime::parse_from_rfc3339(&value)
+                .map(|timestamp| {
+                    timestamp
+                        .with_timezone(&chrono::Utc)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                })
+                .map_err(|_| format!("source_ref has invalid `updated_at` timestamp {value:?}"))
+        })
+        .transpose()?;
     Ok(NormalizedSourceRef {
         relation,
         target_kind,
         target_ref,
         comment_id,
-        updated_at: trimmed_opt(&raw.updated_at),
+        updated_at,
         body_hash,
         commit_sha,
         section_or_span: trimmed_opt(&raw.section_or_span),
@@ -468,22 +497,6 @@ fn build_candidate_metadata(
             }),
         );
     }
-    map.insert(
-        "source_refs".into(),
-        json!(source_refs
-            .iter()
-            .map(|r| json!({
-                "relation": r.relation,
-                "target_kind": r.target_kind,
-                "target_ref": r.target_ref,
-                "comment_id": r.comment_id,
-                "updated_at": r.updated_at,
-                "body_hash": r.body_hash,
-                "commit_sha": r.commit_sha,
-                "section_or_span": r.section_or_span,
-            }))
-            .collect::<Vec<_>>()),
-    );
     map.insert("source_ref_count".into(), json!(source_refs.len()));
     if !source_ref_warnings.is_empty() {
         map.insert("source_ref_warnings".into(), json!(source_ref_warnings));
@@ -620,6 +633,22 @@ pub(crate) async fn record_complete_precedent_candidates(
         // — that must degrade the flag, never silently vanish.
         let authority_complete =
             adjudicator.is_some() && !source_refs.is_empty() && source_ref_warnings.is_empty();
+        let reference_appends = match source_refs
+            .iter()
+            .map(NormalizedSourceRef::validated_append)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(appends) => appends,
+            Err(reason) => {
+                tracing::warn!(reason = %reason, "skipping precedent candidate with invalid append shape");
+                skipped.push(json!({
+                    "case": normalized.case,
+                    "reason": reason,
+                    "stage": "reference_append",
+                }));
+                continue;
+            }
+        };
         // #1183 fix-round finding 6: "full" coverage is only true when
         // every supplied source_ref survived validation — a malformed ref
         // that got dropped is evidence that was silently discarded from the
@@ -726,7 +755,13 @@ pub(crate) async fn record_complete_precedent_candidates(
                 emit_continuity: false,
             };
 
-            match save_eval_memory(server, mem_params).await {
+            match save_eval_memory_with_authorized_reference_mutations(
+                server,
+                mem_params,
+                reference_appends.clone(),
+            )
+            .await
+            {
                 Ok(raw) => {
                     let saved: Value =
                         serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }));

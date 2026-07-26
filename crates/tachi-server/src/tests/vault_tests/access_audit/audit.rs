@@ -143,15 +143,11 @@ async fn vault_lock_reports_audit_persistence_failure() {
         .await
         .expect("vault_init should succeed");
 
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute("DROP TABLE vault_audit", [])
-                .map(|_| ())
-                .map_err(|e| format!("drop vault_audit: {e}"))
-        })
-        .expect("drop vault_audit");
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| connection.execute("DROP TABLE vault_audit", []).map(|_| ()),
+    )
+    .expect("drop vault_audit");
 
     let response = server
         .vault_lock()

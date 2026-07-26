@@ -50,6 +50,14 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         aliases: &["DISTILL_API_KEY", "REASONING_API_KEY"],
     },
     ApiKeyDef {
+        key: "DISTILL_API_KEY",
+        label: "Distill API lane override before provider fallbacks",
+        required: false,
+        deprecated: false,
+        canonical_key: "DISTILL_API_KEY",
+        aliases: &[],
+    },
+    ApiKeyDef {
         key: "ZAI_API_KEY",
         label: "Zhipu/BigModel OpenAI-compatible LLM",
         required: false,
@@ -164,10 +172,10 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
     },
     ApiKeyDef {
         key: "REASONING_API_KEY",
-        label: "Legacy reasoning lane",
+        label: "Reasoning API lane after DeepSeek and before provider fallbacks",
         required: false,
-        deprecated: true,
-        canonical_key: "DEEPSEEK_API_KEY",
+        deprecated: false,
+        canonical_key: "REASONING_API_KEY",
         aliases: &["ZAI_API_KEY", "BIGMODEL_API_KEY"],
     },
 ];

@@ -56,7 +56,7 @@ impl RepairRule for PlanCRepair {
 
     fn dry_run(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut report = RuleReport::new(self.id(), self.name(), ctx.label.clone());
-        if let Some(issue) = crate::path_utils::plan_c_split_brain_for_local_db(&ctx.path) {
+        if let Some(issue) = plan_c_split_brain_or_refuse(&ctx.path)? {
             report.findings.push(
                 Finding::new("plan_c_split_brain", 1).with_detail(json!({
                     "project_name": issue.project_name,
@@ -76,7 +76,7 @@ impl RepairRule for PlanCRepair {
 
     fn apply(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut report = self.dry_run(ctx)?;
-        let Some(issue) = crate::path_utils::plan_c_split_brain_for_local_db(&ctx.path) else {
+        let Some(issue) = plan_c_split_brain_or_refuse(&ctx.path)? else {
             return Ok(report);
         };
 
@@ -143,6 +143,19 @@ impl RepairRule for PlanCRepair {
             );
             Ok(report)
         }
+    }
+}
+
+fn plan_c_split_brain_or_refuse(
+    local_db: &Path,
+) -> Result<Option<crate::path_utils::PlanCSplitBrain>, RepairError> {
+    match crate::path_utils::inspect_plan_c_alias_for_local_db(local_db) {
+        crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => Ok(Some(issue)),
+        crate::path_utils::PlanCAliasInspection::Integrity(issue) => Err(RepairError::Io(
+            std::io::Error::other(issue.warning_message()),
+        )),
+        crate::path_utils::PlanCAliasInspection::Absent
+        | crate::path_utils::PlanCAliasInspection::MatchingSymlink => Ok(None),
     }
 }
 

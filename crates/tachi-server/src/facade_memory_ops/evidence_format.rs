@@ -191,6 +191,11 @@ pub(crate) fn shape_complete_response(bundle: Value, format: Option<&str>) -> Va
         return bundle;
     }
     let mut receipt = serde_json::Map::new();
+    // Successful completions keep the compact receipt's long-standing shape,
+    // but a deferred canonical outcome must be unmistakable to callers.
+    if bundle.get("recorded").and_then(Value::as_bool) == Some(false) {
+        receipt.insert("recorded".to_string(), Value::Bool(false));
+    }
     if let Some(count) = bundle.get("subagent_count") {
         receipt.insert("subagent_count".to_string(), count.clone());
     }
@@ -532,6 +537,15 @@ pub(crate) fn slim_kanban(value: Value) -> Value {
     let now = chrono::Utc::now();
     json!({
         "count": value.get("count"),
+        "incomplete": value.get("incomplete"),
+        "limit_incomplete": value.get("limit_incomplete"),
+        "warning": value.get("warning"),
+        "incomplete_reasons": value.get("incomplete_reasons"),
+        "kanban_fetch_truncated": value.get("kanban_fetch_truncated"),
+        "flow_fetch_truncated": value.get("flow_fetch_truncated"),
+        "run_fallback_incomplete": value.get("run_fallback_incomplete"),
+        "run_scan_truncated": value.get("run_scan_truncated"),
+        "run_scan_invalid_entries": value.get("run_scan_invalid_entries"),
         "tasks": value
             .get("tasks")
             .and_then(|v| v.as_array())
@@ -586,6 +600,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compact_completion_surfaces_a_pending_canonical_outcome() {
+        let receipt = shape_complete_response(
+            json!({
+                "recorded": false,
+                "subagent_count": 0,
+                "eval_entry": {"id": "eval-pending"},
+                "next_steps": [],
+                "pipeline": {
+                    "dispatch_outcome": {"recorded": false},
+                    "completion_receipt": {"status": "pending_canonical_outcome"}
+                },
+                "secret_redactions": 0,
+            }),
+            None,
+        );
+
+        assert_eq!(receipt["recorded"], json!(false));
+        assert_eq!(
+            receipt["pipeline"]["completion_receipt"],
+            json!("pending_canonical_outcome")
+        );
+    }
+
+    #[test]
     fn slim_kanban_marks_stale_working_rows() {
         let old = (chrono::Utc::now() - chrono::Duration::hours(12)).to_rfc3339();
         let fresh = chrono::Utc::now().to_rfc3339();
@@ -611,6 +649,35 @@ mod tests {
         assert!(tasks[0]["age_secs"]
             .as_i64()
             .is_some_and(|age| age >= 6 * 3600));
+    }
+
+    #[test]
+    fn slim_kanban_preserves_incomplete_board_evidence() {
+        let board = json!({
+            "count": 0,
+            "tasks": [],
+            "incomplete": true,
+            "limit_incomplete": true,
+            "warning": "bounded fallback is incomplete",
+            "incomplete_reasons": ["run_fallback_invalid_entries"],
+            "kanban_fetch_truncated": false,
+            "flow_fetch_truncated": false,
+            "run_fallback_incomplete": true,
+            "run_scan_truncated": false,
+            "run_scan_invalid_entries": 1,
+        });
+
+        let slim = slim_kanban(board);
+
+        assert_eq!(slim["incomplete"], json!(true), "{slim:#}");
+        assert_eq!(slim["limit_incomplete"], json!(true), "{slim:#}");
+        assert_eq!(
+            slim["incomplete_reasons"],
+            json!(["run_fallback_invalid_entries"]),
+            "{slim:#}"
+        );
+        assert_eq!(slim["warning"], json!("bounded fallback is incomplete"));
+        assert_eq!(slim["run_scan_invalid_entries"], json!(1));
     }
 
     #[test]

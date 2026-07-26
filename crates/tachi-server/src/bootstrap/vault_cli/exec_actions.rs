@@ -38,6 +38,7 @@ pub(super) async fn run_exec_action(
     insecure_password_file: bool,
     consumer: Option<&str>,
     require: &[String],
+    allow_unauthenticated: bool,
     command: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let require = normalize_requirements(require)?;
@@ -52,11 +53,22 @@ pub(super) async fn run_exec_action(
     .await
     {
         Ok(server) => server,
-        Err(err) if require.is_empty() => {
+        Err(err) if require.is_empty() && allow_unauthenticated => {
+            // Explicit opt-in (#1413 concern 4): run credential-less with the
+            // inherited environment, matching the historical fail-open path.
             eprintln!(
-                "vault exec: injected no vault variables: vault unavailable ({err}); executing with inherited environment"
+                "vault exec: injected no vault variables: vault unavailable ({err}); executing with inherited environment (--allow-unauthenticated)"
             );
             return run_command(command, &[]);
+        }
+        Err(err) if require.is_empty() => {
+            // Default: refuse to spawn a credential-less child before exec, so
+            // a caller that only checks exit status never silently gets a
+            // Vault-less run (#1413 concern 4).
+            return Err(format!(
+                "vault exec refused before spawn: vault unavailable ({err}); pass --allow-unauthenticated to run the child with the inherited environment"
+            )
+            .into());
         }
         Err(err) => {
             return Err(Box::new(RequiredEnvironmentUnavailable {
@@ -68,7 +80,14 @@ pub(super) async fn run_exec_action(
         }
     };
 
-    run_with_unlocked_server(&server, &cwd, consumer, &require, command)
+    run_with_unlocked_server(
+        &server,
+        &cwd,
+        consumer,
+        &require,
+        allow_unauthenticated,
+        command,
+    )
 }
 
 async fn unlock_cli_server(
@@ -111,6 +130,7 @@ fn run_with_unlocked_server(
     cwd: &Path,
     consumer: Option<&str>,
     require: &[String],
+    allow_unauthenticated: bool,
     command: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = match load_unlocked_env_secrets_for_child_env_with_consumer(
@@ -119,11 +139,20 @@ fn run_with_unlocked_server(
         consumer,
     ) {
         Ok(report) => report,
-        Err(err) if require.is_empty() => {
+        Err(err) if require.is_empty() && allow_unauthenticated => {
+            // Explicit opt-in (#1413 concern 4): run credential-less with the
+            // inherited environment, matching the historical fail-open path.
             eprintln!(
-                "vault exec: injected no vault variables: vault environment unavailable ({err}); executing with inherited environment"
+                "vault exec: injected no vault variables: vault environment unavailable ({err}); executing with inherited environment (--allow-unauthenticated)"
             );
             return run_command(command, &[]);
+        }
+        Err(err) if require.is_empty() => {
+            // Default: refuse to spawn a credential-less child before exec.
+            return Err(format!(
+                "vault exec refused before spawn: vault environment unavailable ({err}); pass --allow-unauthenticated to run the child with the inherited environment"
+            )
+            .into());
         }
         Err(err) => {
             return Err(Box::new(RequiredEnvironmentUnavailable {
@@ -262,6 +291,7 @@ mod tests {
             dir.path(),
             None,
             &["NOSUCHKEY_XYZ".to_string()],
+            false,
             &command,
         )
         .expect_err("missing requirement must refuse before spawn");
@@ -286,7 +316,7 @@ mod tests {
             "-c".to_string(),
             "test \"$TACHI_VAULT_EXEC_FILL_API_KEY\" = owner-value".to_string(),
         ];
-        run_with_unlocked_server(&server, dir.path(), None, &[], &command)
+        run_with_unlocked_server(&server, dir.path(), None, &[], false, &command)
             .expect("caller environment must win over the Vault value");
     }
 
@@ -308,6 +338,7 @@ mod tests {
             dir.path(),
             None,
             &["LOCKED_REQUIRED_API_KEY".to_string()],
+            false,
             &command,
         )
         .expect_err("locked Vault must refuse required name before spawn");
@@ -315,6 +346,142 @@ mod tests {
         assert!(err.to_string().contains("LOCKED_REQUIRED_API_KEY"), "{err}");
         assert!(err.to_string().contains("Vault"), "{err}");
         assert!(!marker.exists(), "locked-vault failure spawned the child");
+    }
+
+    // #1413 concern 4: with no `--require` names and no opt-in flag, a Vault
+    // environment-load failure must REFUSE to spawn the child before exec
+    // (fail-closed), so a caller that only checks exit status never silently
+    // gets a credential-less run.
+    //
+    // Discrimination: on the pre-fix code this arm fail-opened — empty require
+    // ran the child with the inherited environment and returned Ok — so the
+    // `expect_err` and the `!marker.exists()` assertions both FAIL there. With
+    // the opt-in flag the path is restored (see the test below).
+    #[test]
+    fn exec_env_load_failure_refuses_spawn_by_default() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let dir = tempfile::tempdir().expect("temp vault db");
+        // Uninitialized/locked Vault: env loading fails inside the helper.
+        let server = MemoryServer::new(dir.path().join("memory.db"), None).expect("server");
+        let marker = dir.path().join("must-not-exist");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch {}", marker.display()),
+        ];
+        let err = run_with_unlocked_server(&server, dir.path(), None, &[], false, &command)
+            .expect_err("default (no --allow-unauthenticated) must refuse before spawn");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refused before spawn") && msg.contains("--allow-unauthenticated"),
+            "default refusal must name the opt-in flag: {msg}"
+        );
+        assert!(!marker.exists(), "default refusal spawned the child");
+    }
+
+    // #1413 concern 4: the explicit opt-in restores the historical inherited-
+    // environment execution on the same env-load failure. This is the
+    // "inherited-environment execution" path the issue asks to keep available.
+    #[test]
+    fn exec_allow_unauthenticated_runs_inherited_on_env_load_failure() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let dir = tempfile::tempdir().expect("temp vault db");
+        let server = MemoryServer::new(dir.path().join("memory.db"), None).expect("server");
+        let marker = dir.path().join("must-exist");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch {}", marker.display()),
+        ];
+        run_with_unlocked_server(&server, dir.path(), None, &[], true, &command)
+            .expect("--allow-unauthenticated must run the child with the inherited environment");
+
+        assert!(
+            marker.exists(),
+            "--allow-unauthenticated must spawn the child"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn exec_action_unlock_failure_refuses_spawn_by_default() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let dir = tempfile::tempdir().expect("temp vault db");
+        let global_db_path = dir.path().join("memory.db");
+        let password_file = dir.path().join("password.txt");
+        std::fs::write(&password_file, "dummy-password\n").expect("write password file");
+        let marker = dir.path().join("must-not-exist");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch {}", marker.display()),
+        ];
+        let err = run_exec_action(
+            &global_db_path,
+            false,
+            false,
+            Some(&password_file),
+            true,
+            None,
+            &[],
+            false,
+            &command,
+        )
+        .await
+        .expect_err(
+            "default (no --allow-unauthenticated) must refuse before spawn when vault unlock fails",
+        );
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refused before spawn") && msg.contains("--allow-unauthenticated"),
+            "default refusal must name the opt-in flag: {msg}"
+        );
+        assert!(
+            msg.contains("vault unavailable"),
+            "refusal must surface the unlock failure as 'vault unavailable': {msg}"
+        );
+        assert!(!marker.exists(), "default refusal spawned the child");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn exec_action_unlock_failure_allow_unauthenticated_runs_inherited() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _inherited = EnvRestore::set("TACHI_VAULT_EXEC_ACTION_INHERITED", "sentinel-value");
+        let dir = tempfile::tempdir().expect("temp vault db");
+        let global_db_path = dir.path().join("memory.db");
+        let password_file = dir.path().join("password.txt");
+        std::fs::write(&password_file, "dummy-password\n").expect("write password file");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "test \"$TACHI_VAULT_EXEC_ACTION_INHERITED\" = sentinel-value".to_string(),
+        ];
+        run_exec_action(
+            &global_db_path,
+            false,
+            false,
+            Some(&password_file),
+            true,
+            None,
+            &[],
+            true,
+            &command,
+        )
+        .await
+        .expect(
+            "--allow-unauthenticated must run the child with the inherited environment when vault unlock fails",
+        );
     }
 
     #[test]

@@ -32,6 +32,42 @@ pub(crate) fn collect_snapshot_scoped(
     collect_snapshot_inner(app_home, global_db_path, project_db_path, false, all_dbs)
 }
 
+fn unavailable_db_status(entry: &DbEntry, label: String, orphan: bool, error: String) -> DbStatus {
+    DbStatus {
+        path: entry.path.clone(),
+        label,
+        orphan,
+        memory_total: 0,
+        vector_count: 0,
+        vector_missing: 0,
+        vector_orphans: 0,
+        vector_coverage: 0.0,
+        vector_dimension: None,
+        vector_sweep: None,
+        vector_sweep_error: None,
+        namespace: NamespaceHealth::default(),
+        continuity: memcore::ContinuityMetrics::default(),
+        pending_enrichment: 0,
+        enrichment_failed_recent: 0,
+        enrichment_failures: Vec::new(),
+        pending: 0,
+        running: 0,
+        active_jobs: 0,
+        completed: 0,
+        failed: 0,
+        dead_lettered: 0,
+        skipped: 0,
+        terminal_jobs: 0,
+        gc_eligible: 0,
+        stuck_in_progress: 0,
+        latest_active_job: None,
+        latest_terminal_job: None,
+        latest_job: None,
+        latest_failed_job: None,
+        error: Some(error),
+    }
+}
+
 fn collect_snapshot_inner(
     app_home: &Path,
     global_db_path: &Path,
@@ -74,42 +110,23 @@ fn collect_snapshot_inner(
     let mut dbs: Vec<DbStatus> = Vec::with_capacity(scoped_entries.len());
     for entry in scoped_entries {
         let path = PathBuf::from(&entry.path);
-        let label = db_status_label(entry, &path);
-        let orphan = is_orphan_entry(entry, &path, global_db_path, project_db_path);
-        if !path.exists() {
-            dbs.push(DbStatus {
-                path: entry.path.clone(),
+        let label = db_status_label(entry, &path, app_home);
+        let orphan =
+            is_orphan_entry_in_home(entry, &path, global_db_path, project_db_path, app_home);
+        let leaf_exists = match crate::path_utils::manifest_db_leaf_exists(entry) {
+            Ok(exists) => exists,
+            Err(error) => {
+                dbs.push(unavailable_db_status(entry, label, orphan, error));
+                continue;
+            }
+        };
+        if !leaf_exists {
+            dbs.push(unavailable_db_status(
+                entry,
                 label,
                 orphan,
-                memory_total: 0,
-                vector_count: 0,
-                vector_missing: 0,
-                vector_orphans: 0,
-                vector_coverage: 0.0,
-                vector_dimension: None,
-                vector_sweep: None,
-                vector_sweep_error: None,
-                namespace: NamespaceHealth::default(),
-                continuity: memcore::ContinuityMetrics::default(),
-                pending_enrichment: 0,
-                enrichment_failed_recent: 0,
-                enrichment_failures: Vec::new(),
-                pending: 0,
-                running: 0,
-                active_jobs: 0,
-                completed: 0,
-                failed: 0,
-                dead_lettered: 0,
-                skipped: 0,
-                terminal_jobs: 0,
-                gc_eligible: 0,
-                stuck_in_progress: 0,
-                latest_active_job: None,
-                latest_terminal_job: None,
-                latest_job: None,
-                latest_failed_job: None,
-                error: Some("missing on disk".to_string()),
-            });
+                "missing on disk".to_string(),
+            ));
             continue;
         }
         match probe_db(&path) {
@@ -164,39 +181,7 @@ fn collect_snapshot_inner(
                     error: None,
                 });
             }
-            Err(e) => dbs.push(DbStatus {
-                path: entry.path.clone(),
-                label,
-                orphan,
-                memory_total: 0,
-                vector_count: 0,
-                vector_missing: 0,
-                vector_orphans: 0,
-                vector_coverage: 0.0,
-                vector_dimension: None,
-                vector_sweep: None,
-                vector_sweep_error: None,
-                namespace: NamespaceHealth::default(),
-                continuity: memcore::ContinuityMetrics::default(),
-                pending_enrichment: 0,
-                enrichment_failed_recent: 0,
-                enrichment_failures: Vec::new(),
-                pending: 0,
-                running: 0,
-                active_jobs: 0,
-                completed: 0,
-                failed: 0,
-                dead_lettered: 0,
-                skipped: 0,
-                terminal_jobs: 0,
-                gc_eligible: 0,
-                stuck_in_progress: 0,
-                latest_active_job: None,
-                latest_terminal_job: None,
-                latest_job: None,
-                latest_failed_job: None,
-                error: Some(e),
-            }),
+            Err(error) => dbs.push(unavailable_db_status(entry, label, orphan, error)),
         }
     }
 
@@ -233,10 +218,23 @@ fn collect_snapshot_inner(
         .into_iter()
         .map(|warning| warning.message)
         .collect();
-    let plan_c_split_brain = project_db_path
-        .and_then(crate::path_utils::plan_c_split_brain_for_local_db)
-        .into_iter()
-        .collect();
+    let (plan_c_split_brain, plan_c_alias_integrity) = match project_db_path {
+        Some(path) => {
+            match crate::path_utils::inspect_plan_c_alias_for_local_db_in_home(path, app_home) {
+                crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
+                    (vec![issue], Vec::new())
+                }
+                crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
+                    (Vec::new(), vec![issue])
+                }
+                crate::path_utils::PlanCAliasInspection::Absent
+                | crate::path_utils::PlanCAliasInspection::MatchingSymlink => {
+                    (Vec::new(), Vec::new())
+                }
+            }
+        }
+        None => (Vec::new(), Vec::new()),
+    };
     let health_deductions = status_health::calculate_health_deductions(
         &daemon,
         &dbs,
@@ -261,6 +259,7 @@ fn collect_snapshot_inner(
         provider_probe_cache,
         project_warnings,
         plan_c_split_brain,
+        plan_c_alias_integrity,
         health_deductions,
         health_score,
         disk,
@@ -275,10 +274,11 @@ pub(crate) fn list_recent_checkpoint_entries(
 }
 
 pub(crate) fn list_recent_checkpoint_entries_for_project(
+    server: &crate::MemoryServer,
     project_name: &str,
     limit: usize,
 ) -> Vec<serde_json::Value> {
-    let Ok(db_path) = crate::MemoryServer::resolve_named_project_db_path(project_name) else {
+    let Ok(db_path) = server.resolve_server_named_project_db_path(project_name) else {
         return Vec::new();
     };
     let mut rows = Vec::new();
@@ -374,7 +374,7 @@ pub(super) fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn db_status_label(entry: &DbEntry, path: &Path) -> String {
+fn db_status_label(entry: &DbEntry, path: &Path, app_home: &Path) -> String {
     if matches!(entry.role, DbRole::Global) {
         return "global".to_string();
     }
@@ -385,7 +385,7 @@ fn db_status_label(entry: &DbEntry, path: &Path) -> String {
     if let Some(label) = label_for_tachi_run_db(path) {
         return label;
     }
-    if let Some(name) = crate::path_utils::named_project_for_db_path(path) {
+    if let Some(name) = crate::path_utils::named_project_for_db_path_in_home(path, app_home) {
         return format!("project:{name}");
     }
     if matches!(entry.role, DbRole::Project) {
@@ -438,5 +438,32 @@ fn label_for_tachi_run_db(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 pub(crate) fn db_status_label_for_tests(entry: &DbEntry, path: &Path) -> String {
-    db_status_label(entry, path)
+    db_status_label(entry, path, &crate::path_utils::tachi_home())
+}
+
+#[cfg(test)]
+mod env_drift_tests {
+    use super::*;
+    use crate::test_support::EnvRestore;
+
+    #[test]
+    fn snapshot_alias_health_stays_bound_after_environment_drift() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let project_root = crate::utils::find_project_git_root().expect("test project root");
+        let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+            .expect("test project identity");
+        let (server, project_db) = crate::tests::make_server_with_project_fixture(&project_name);
+        let app_home = server.tachi_home_dir();
+        let global_db = server.global_db_path_buf();
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        crate::tests::create_split_brain_alias(ambient_home.path(), &project_db);
+        let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        let snapshot = collect_snapshot(&app_home, &global_db, Some(&project_db));
+
+        assert!(snapshot.plan_c_split_brain.is_empty());
+        assert!(snapshot.plan_c_alias_integrity.is_empty());
+    }
 }

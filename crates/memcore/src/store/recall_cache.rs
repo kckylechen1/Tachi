@@ -3,6 +3,13 @@
 use crate::{db, error::MemoryError, MemoryStore};
 
 impl MemoryStore {
+    /// Read the DB-authoritative generation used to validate search-cache
+    /// entries across independent processes. Missing/corrupt metadata is an
+    /// error so callers can bypass the cache safely.
+    pub fn search_generation(&self) -> Result<i64, MemoryError> {
+        db::search_generation(&self.conn)
+    }
+
     /// Recall-cache lookup by a precomputed context-hash key. Returns a fresh
     /// hit (within `ttl_secs`; non-positive disables the freshness check) or
     /// `None`. The key is opaque here — callers build it from the query
@@ -20,6 +27,7 @@ impl MemoryStore {
     pub fn recall_cache_store(
         &self,
         cache_id: &str,
+        generation_fingerprint: &str,
         query: &str,
         rows_json: &str,
         result_count: i64,
@@ -28,6 +36,7 @@ impl MemoryStore {
         db::recall_cache_put(
             &self.conn,
             cache_id,
+            generation_fingerprint,
             query,
             rows_json,
             result_count,

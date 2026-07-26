@@ -1,4 +1,5 @@
 mod agent;
+mod approver_authority;
 mod coerce;
 mod dlq;
 mod facade;
@@ -17,6 +18,7 @@ mod sandbox;
 mod status;
 
 pub use agent::*;
+pub use approver_authority::*;
 pub use dlq::*;
 pub use facade::*;
 pub use foundry::*;

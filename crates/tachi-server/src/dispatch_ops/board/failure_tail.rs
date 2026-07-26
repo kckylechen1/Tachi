@@ -11,24 +11,48 @@ use std::path::Path;
 /// `<run_dir>/result.md` when no such line/field exists. Returns `None` when
 /// neither source is available.
 const FAILURE_TAIL_MAX_BYTES: usize = 2048;
+const FAILURE_PROGRESS_MAX_BYTES: usize = 1024 * 1024;
+const FAILURE_RESULT_MAX_BYTES: usize = 1024 * 1024;
 
-pub(crate) fn read_failure_tail(run_dir: &Path) -> Option<String> {
-    let raw = read_progress_output_tail(run_dir)
-        .or_else(|| std::fs::read_to_string(run_dir.join("result.md")).ok())?;
+pub(crate) fn read_failure_tail(
+    runs_root: &Path,
+    run_dir: &Path,
+) -> Result<Option<String>, String> {
+    let raw = match read_progress_output_tail(runs_root, run_dir)? {
+        Some(raw) => Some(raw),
+        None => crate::dispatch_ops::read_text_file_within(
+            runs_root,
+            &run_dir.join("result.md"),
+            FAILURE_RESULT_MAX_BYTES,
+        )?,
+    };
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
     let stripped = strip_ansi_escapes(&raw);
-    Some(tail_at_char_boundary(&stripped, FAILURE_TAIL_MAX_BYTES))
+    Ok(Some(tail_at_char_boundary(
+        &stripped,
+        FAILURE_TAIL_MAX_BYTES,
+    )))
 }
 
-fn read_progress_output_tail(run_dir: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(run_dir.join("progress.jsonl")).ok()?;
-    content.lines().rev().find_map(|line| {
+fn read_progress_output_tail(runs_root: &Path, run_dir: &Path) -> Result<Option<String>, String> {
+    let Some(content) = crate::dispatch_ops::read_text_file_within(
+        runs_root,
+        &run_dir.join("progress.jsonl"),
+        FAILURE_PROGRESS_MAX_BYTES,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(content.lines().rev().find_map(|line| {
         let event: serde_json::Value = serde_json::from_str(line).ok()?;
         event
             .get("output_tail")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-    })
+    }))
 }
 
 /// Returns the last `max_bytes` bytes of `s`, backed off to the nearest char
@@ -172,7 +196,9 @@ mod tests {
         .expect("write progress.jsonl");
         std::fs::write(run_dir.join("result.md"), "should not be used").expect("write result.md");
 
-        let tail = read_failure_tail(run_dir).expect("failure tail");
+        let tail = read_failure_tail(run_dir, run_dir)
+            .expect("failure-tail read")
+            .expect("failure tail");
         assert_eq!(tail, "FAILED: exit 1");
         assert!(!tail.contains('\u{1b}'));
     }
@@ -187,13 +213,15 @@ mod tests {
         )
         .expect("write result.md");
 
-        let tail = read_failure_tail(run_dir).expect("failure tail");
+        let tail = read_failure_tail(run_dir, run_dir)
+            .expect("failure-tail read")
+            .expect("failure tail");
         assert!(tail.contains("FAILED: no output_tail"));
     }
 
     #[test]
     fn read_failure_tail_none_when_nothing_present() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(read_failure_tail(tmp.path()).is_none());
+        assert!(read_failure_tail(tmp.path(), tmp.path()).unwrap().is_none());
     }
 }

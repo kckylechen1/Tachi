@@ -78,7 +78,8 @@ fn resolve_skill_content_source_library_present_resolves_and_hashes() {
     );
 
     let base = chrono::Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
-    let central = crate::utils::test_fixture_path(format!("tachi-builtins-hermeticity-present-{base}"));
+    let central =
+        crate::utils::test_fixture_path(format!("tachi-builtins-hermeticity-present-{base}"));
     let file = central.join(rel_path);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, fixture_content).unwrap();

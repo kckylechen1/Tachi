@@ -1,4 +1,6 @@
-use super::super::{ChatLaneConfig, LaneFallbackConfig, ProviderRuntimeConfig};
+use super::super::{
+    ChatLaneConfig, LaneFallbackConfig, ProviderInvocationFailureClass, ProviderRuntimeConfig,
+};
 use super::*;
 
 #[test]
@@ -536,7 +538,9 @@ async fn call_reasoning_llm_provider_only_is_pure_http_no_cli_ceremony_needed() 
                     "prompt_tokens": 1,
                     "completion_tokens": 1,
                     "total_tokens": 2
-                }
+                },
+                "model": "provider-returned-model",
+                "system_fingerprint": "provider-returned-version"
             }))
         }),
     );
@@ -583,12 +587,106 @@ async fn call_reasoning_llm_provider_only_is_pure_http_no_cli_ceremony_needed() 
         }],
     );
 
-    let text = client
-        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+    let outcome = client
+        .call_reasoning_llm_provider_only_with_receipt("system", "user", None, 0.0, 16)
         .await
         .expect("provider-only call should succeed from the mock lane alone");
 
-    assert_eq!(text, "provider-only answer");
+    assert_eq!(outcome.text, "provider-only answer");
+    assert_eq!(
+        outcome.receipt.effective_model.as_deref(),
+        Some("provider-returned-model"),
+        "the receipt must use the model actually returned by the provider"
+    );
+    assert_eq!(
+        outcome.receipt.effective_version.as_deref(),
+        Some("provider-returned-version"),
+        "a missing provider fingerprint must stay unknown rather than be invented"
+    );
+    assert_eq!(outcome.receipt.total_tokens, Some(2));
+    assert!(
+        !outcome.receipt.degraded && outcome.receipt.fallback_chain.is_empty(),
+        "the primary mock tier must not be misreported as a fallback"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn provider_only_receipt_401_is_one_attempt_without_pool_retry_or_fallback() {
+    use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/chat/completions",
+            post(|State(calls): State<Arc<AtomicUsize>>| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                (StatusCode::UNAUTHORIZED, "provider body must stay private").into_response()
+            }),
+        )
+        .with_state(Arc::clone(&calls));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "mock-reasoning-only-model".to_string(),
+            api_key_envs: vec!["REASONING_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    client.set_provider_secret_pool(
+        "REASONING_API_KEY",
+        vec![
+            ProviderSecret {
+                key_id: "REASONING_API_KEY_1".to_string(),
+                value: "test-key-one".to_string(),
+            },
+            ProviderSecret {
+                key_id: "REASONING_API_KEY_2".to_string(),
+                value: "test-key-two".to_string(),
+            },
+        ],
+    );
+
+    let err = client
+        .call_reasoning_llm_provider_only_with_receipt("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("401 must stop the spend-aware provider-only receipt call");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "401 must not rotate keys");
+    assert_eq!(err.class, ProviderInvocationFailureClass::AuthFailed);
+    assert_eq!(err.provider_attempts, 1);
 
     server_task.abort();
 }
@@ -654,7 +752,9 @@ async fn chat_lane_marks_insufficient_balance_as_exhausted() {
         .call_extract_llm("system", "user", None, 0.0, 16)
         .await
         .expect_err("insufficient balance should still fail this call");
-    assert!(err.contains("balance is insufficient"), "got: {err}");
+    assert!(err.contains("class=billing_or_quota"), "got: {err}");
+    assert!(err.contains("provider response redacted"), "got: {err}");
+    assert!(!err.contains("balance is insufficient"), "got: {err}");
 
     let status = client
         .provider_pool_statuses()
@@ -675,9 +775,87 @@ async fn chat_lane_marks_insufficient_balance_as_exhausted() {
         health
             .last_error
             .as_deref()
-            .is_some_and(|error| error.contains("balance is insufficient")),
-        "last_error should explain the exhausted balance: {health:?}"
+            .is_some_and(|error| error.contains("class=billing_or_quota")
+                && !error.contains("balance is insufficient")),
+        "last_error should classify but redact the provider body: {health:?}"
     );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn provider_error_boundary_redacts_echoed_prompt_source_and_secret() {
+    use axum::{http::HeaderMap, http::StatusCode, response::IntoResponse, routing::post, Router};
+
+    const SOURCE_SENTINEL: &str = "OWNER_SOURCE_MUST_NOT_ESCAPE";
+    const SYSTEM_SENTINEL: &str = "SYSTEM_PROMPT_MUST_NOT_ESCAPE";
+    const SECRET_SENTINEL: &str = "provider-secret-must-not-escape";
+    const BODY_SENTINEL: &str = "RAW_PROVIDER_BODY_MUST_NOT_ESCAPE";
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|headers: HeaderMap, body: String| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            (
+                StatusCode::BAD_REQUEST,
+                format!("{BODY_SENTINEL} auth={authorization} request={body}"),
+            )
+                .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let client = LlmClient::new_with_config(
+        config_with_extract(ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "mock-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY"],
+        }),
+        None,
+    )
+    .expect("client should initialize");
+    client.set_provider_secret_pool(
+        "EXTRACT_API_KEY",
+        vec![ProviderSecret {
+            key_id: "EXTRACT_API_KEY_1".to_string(),
+            value: SECRET_SENTINEL.to_string(),
+        }],
+    );
+
+    let err = client
+        .call_extract_llm(SYSTEM_SENTINEL, SOURCE_SENTINEL, None, 0.0, 16)
+        .await
+        .expect_err("provider rejection must remain loud");
+    let outage = client
+        .provider_health_status()
+        .lane_outages
+        .into_iter()
+        .find(|status| status.lane == "extract")
+        .and_then(|status| status.last_error)
+        .expect("outage aggregation must retain a safe failure");
+
+    for unsafe_value in [
+        SOURCE_SENTINEL,
+        SYSTEM_SENTINEL,
+        SECRET_SENTINEL,
+        BODY_SENTINEL,
+    ] {
+        assert!(!err.contains(unsafe_value), "unsafe provider error: {err}");
+        assert!(
+            !outage.contains(unsafe_value),
+            "unsafe outage aggregation: {outage}"
+        );
+    }
+    assert!(err.contains("provider response redacted"), "got: {err}");
 
     server_task.abort();
 }

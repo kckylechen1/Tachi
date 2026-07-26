@@ -1,4 +1,4 @@
-//! The D2 pilot report (#1073 "Kill gate").
+//! Legacy, non-authoritative pilot preview aggregation.
 //!
 //! "Report pass yield, per-case outcomes, token/cost/latency, provider
 //! receipts, and old-vs-new recall simulation before any scale decision." —
@@ -10,10 +10,10 @@
 //! yield threshold, and inventing one here would be exactly the kind of
 //! flat, un-adjudicated magic number this repo's own engineering discipline
 //! forbids for a gate this consequential (AGENTS.md: "No flat magic
-//! numbers — thresholds are per-action, named, provisional"). `PilotReport`
-//! reports the numbers the frozen contract asks for; whether that yield
-//! constitutes "material cold-start decision change" is the reader's
-//! (leader/owner's) call, made against the reported evidence.
+//! numbers — thresholds are per-action, named, provisional"). This legacy
+//! module predates exact 400-call accounting and cannot publish the D2 pilot
+//! completion artifact. [`super::runner::PilotRunReportV1`] is the only
+//! authoritative report surface.
 
 use tachi_params::LessonEngineReceiptV1;
 
@@ -57,6 +57,7 @@ pub enum PilotReportError {
     /// evidence for a row that was never selected/spend-gated cannot count
     /// toward this pilot's kill-gate decision.
     CaseNotInManifest(String),
+    AmbiguousLegacyCaseId(String),
 }
 
 impl std::fmt::Display for PilotReportError {
@@ -72,13 +73,19 @@ impl std::fmt::Display for PilotReportError {
                 "case_id {id} is not a row in the frozen pilot manifest — evidence for an \
                  unselected row cannot count toward the kill-gate decision"
             ),
+            Self::AmbiguousLegacyCaseId(id) => write!(
+                f,
+                "legacy case_id {id} is ambiguous; use the canonical route/id/revision binding"
+            ),
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
+/// Legacy aggregate preview. It intentionally cannot render an authoritative
+/// D2 completion report because its optional totals do not attest 400 calls.
 pub struct PilotReport {
-    pub cases: Vec<CaseReport>,
+    cases: Vec<CaseReport>,
 }
 
 impl PilotReport {
@@ -88,16 +95,18 @@ impl PilotReport {
     /// to the actual frozen 50-row pilot — a caller could report 3 cases,
     /// duplicate one case_id, or report cases for rows that were never
     /// frozen, and nothing would object). Refuses unless the case count
-    /// matches the manifest's row count exactly, every `case_id` is a
-    /// distinct member of the manifest, and no case_id repeats.
+    /// matches the manifest's row count exactly, every `case_id` resolves to
+    /// one route/id/revision binding, and no binding repeats. Legacy bare
+    /// source ids are accepted only when exactly one manifest row has that
+    /// id; accepted rows are normalized to their canonical full binding.
     ///
-    /// This is the constructor a real harness runner should use; the plain
-    /// struct literal remains available (its field is `pub`) for this
-    /// module's own unit tests, which exercise `PilotReport`'s aggregation
-    /// logic against hand-built fixtures rather than a full 50-row manifest.
+    /// This is the only public constructor for a populated report. The cases
+    /// field stays private so callers cannot bypass binding normalization;
+    /// this module's unit tests still use hand-built fixtures to exercise the
+    /// aggregation logic independently.
     pub fn from_manifest(
         manifest: &PilotManifestV1,
-        cases: Vec<CaseReport>,
+        mut cases: Vec<CaseReport>,
     ) -> Result<Self, Vec<PilotReportError>> {
         let mut errors = Vec::new();
         if cases.len() != manifest.rows().len() {
@@ -107,13 +116,29 @@ impl PilotReport {
             });
         }
         let mut seen = std::collections::HashSet::new();
-        for case in &cases {
-            if !seen.insert(case.case_id.clone()) {
-                errors.push(PilotReportError::DuplicateCaseId(case.case_id.clone()));
+        for case in &mut cases {
+            let matches: Vec<&super::pilot::PilotRowV1> = manifest
+                .rows()
+                .iter()
+                .filter(|row| {
+                    row.canonical_case_id() == case.case_id || row.source_id == case.case_id
+                })
+                .collect();
+            let Some(binding) = (matches.len() == 1).then(|| matches[0]) else {
+                if matches.is_empty() {
+                    errors.push(PilotReportError::CaseNotInManifest(case.case_id.clone()));
+                } else {
+                    errors.push(PilotReportError::AmbiguousLegacyCaseId(
+                        case.case_id.clone(),
+                    ));
+                }
+                continue;
+            };
+            let canonical_id = binding.canonical_case_id();
+            if !seen.insert(binding.binding_key()) {
+                errors.push(PilotReportError::DuplicateCaseId(canonical_id.clone()));
             }
-            if !manifest.rows().iter().any(|r| r.row_id == case.case_id) {
-                errors.push(PilotReportError::CaseNotInManifest(case.case_id.clone()));
-            }
+            case.case_id = canonical_id;
         }
         if errors.is_empty() {
             Ok(Self { cases })
@@ -127,6 +152,10 @@ impl PilotReport {
             .iter()
             .filter(|c| matches!(c.outcome, CaseOutcome::Pass))
             .count()
+    }
+
+    pub fn cases(&self) -> &[CaseReport] {
+        &self.cases
     }
 
     pub fn failed_count(&self) -> usize {
@@ -188,11 +217,15 @@ impl PilotReport {
             .collect()
     }
 
-    pub fn to_markdown(&self) -> String {
+    pub fn to_preview_markdown(&self) -> String {
         let mut out = String::new();
-        out.push_str("# D2 50-row pilot report (#1073)\n\n");
+        out.push_str("# NON-AUTHORITATIVE LEGACY PREVIEW (#1073)\n\n");
+        out.push_str(
+            "This preview is not the D2 50-row pilot report, cannot establish pilot completion, \
+             and does not replace the authoritative 400-call runner report.\n\n",
+        );
         out.push_str(&format!(
-            "Pass yield: {}/{} ({:.1}%) — {} failed, {} inconclusive\n\n",
+            "Preview pass yield: {}/{} ({:.1}%) — {} failed, {} inconclusive\n\n",
             self.passed_count(),
             self.total(),
             self.pass_yield() * 100.0,
@@ -227,7 +260,7 @@ impl PilotReport {
         // outcomes, token/cost/latency, provider receipts, and old-vs-new
         // recall simulation").
         out.push_str(
-            "| case_id | outcome | reasons | treated_tokens | baseline_tokens | cost_usd | \
+            "| source_binding | outcome | reasons | treated_tokens | baseline_tokens | cost_usd | \
              latency_ms | producer_identity | adjudicator | recall_sim |\n\
              |---|---|---|---|---|---|---|---|---|---|\n",
         );
@@ -302,13 +335,18 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
+            ..Default::default()
         }
     }
 
     fn adjudicator() -> AdjudicatorReceipt {
         AdjudicatorReceipt {
+            requested_role: "adjudicator".to_string(),
             effective_provider: Some("openai".to_string()),
             effective_model: Some("gpt".to_string()),
+            effective_version: Some("v1".to_string()),
+            fallback_chain: Vec::new(),
+            degraded: false,
         }
     }
 
@@ -329,28 +367,37 @@ mod tests {
     /// A 50-row frozen manifest whose row ids are `row-0..row-49`, for the
     /// `PilotReport::from_manifest` binding tests below.
     fn fifty_row_manifest() -> PilotManifestV1 {
-        use crate::lesson_forge_ops::pilot::{freeze_pilot_manifest, PilotRowKindV1, PilotRowV1};
+        use crate::lesson_forge_ops::pilot::{
+            freeze_pilot_manifest, PilotRowKindV1, PilotRowV1, PilotSourceRouteV1, PilotStratumV1,
+        };
         use tachi_params::LessonCandidateKindV1;
 
-        let mut rows = Vec::new();
-        for i in 0..49 {
-            rows.push(PilotRowV1 {
-                row_id: format!("row-{i}"),
-                revision: 1,
-                kind: PilotRowKindV1::Narrative,
-                selection_reason: "narrative row".to_string(),
-                reference_decision: "reference decision".to_string(),
+        let rows = (0..50)
+            .map(|index| PilotRowV1 {
+                source_route: if index < 25 {
+                    PilotSourceRouteV1::Antigravity
+                } else {
+                    PilotSourceRouteV1::Hapi
+                },
+                source_id: format!("row-{index}"),
+                source_revision: 1,
+                content_sha256: format!("{index:064x}"),
+                capture_timestamp: "2026-07-24T00:00:00Z".to_string(),
+                kind: if index % 2 == 0 {
+                    PilotRowKindV1::Narrative
+                } else {
+                    PilotRowKindV1::StructuredControl
+                },
+                stratum: match index {
+                    0..=16 => PilotStratumV1::CorrectionAlignment,
+                    17..=33 => PilotStratumV1::VerificationRecovery,
+                    _ => PilotStratumV1::RoutingStoreProvenance,
+                },
+                selection_reason: "public-safe fixture reason".to_string(),
+                reference_decision: "public-safe fixture decision".to_string(),
                 target_kind: LessonCandidateKindV1::Precedent,
-            });
-        }
-        rows.push(PilotRowV1 {
-            row_id: "row-49".to_string(),
-            revision: 1,
-            kind: PilotRowKindV1::StructuredControl,
-            selection_reason: "control row".to_string(),
-            reference_decision: "reference decision".to_string(),
-            target_kind: LessonCandidateKindV1::Precedent,
-        });
+            })
+            .collect();
         freeze_pilot_manifest(rows).expect("test manifest must freeze")
     }
 
@@ -424,6 +471,63 @@ mod tests {
         let report =
             PilotReport::from_manifest(&manifest, cases).expect("exactly-matching cases must bind");
         assert_eq!(report.total(), 50);
+    }
+
+    #[test]
+    fn from_manifest_keeps_cross_route_same_id_rows_distinct() {
+        let mut rows = fifty_row_manifest().rows().to_vec();
+        rows[0].source_id = "shared-id".to_string();
+        rows[25].source_id = "shared-id".to_string();
+        let manifest = crate::lesson_forge_ops::pilot::freeze_pilot_manifest(rows)
+            .expect("cross-route ids may overlap");
+        let cases: Vec<CaseReport> = manifest
+            .rows()
+            .iter()
+            .map(|row| {
+                case(
+                    &format!(
+                        "{}:{}@{}",
+                        row.source_route.as_str(),
+                        row.source_id,
+                        row.source_revision
+                    ),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        let report = PilotReport::from_manifest(&manifest, cases)
+            .expect("full route/id/revision bindings must remain distinct");
+        assert_eq!(report.total(), 50);
+        let markdown = report.to_preview_markdown();
+        assert!(markdown.contains("antigravity:shared-id@1"));
+        assert!(markdown.contains("hapi:shared-id@1"));
+    }
+
+    #[test]
+    fn from_manifest_rejects_ambiguous_legacy_source_id() {
+        let mut rows = fifty_row_manifest().rows().to_vec();
+        rows[0].source_id = "shared-id".to_string();
+        rows[25].source_id = "shared-id".to_string();
+        let manifest = crate::lesson_forge_ops::pilot::freeze_pilot_manifest(rows)
+            .expect("cross-route ids may overlap");
+        let mut cases: Vec<CaseReport> = manifest
+            .rows()
+            .iter()
+            .map(|row| {
+                case(
+                    &row.canonical_case_id(),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        cases[0].case_id = "shared-id".to_string();
+        let errors = PilotReport::from_manifest(&manifest, cases)
+            .expect_err("ambiguous legacy id must not alias either source route");
+        assert!(errors.iter().any(
+            |error| matches!(error, PilotReportError::AmbiguousLegacyCaseId(id) if id == "shared-id")
+        ));
     }
 
     #[test]
@@ -621,10 +725,30 @@ mod tests {
         let report = PilotReport {
             cases: vec![case("c1", CaseOutcome::Pass, Some(known_receipt()))],
         };
-        let md = report.to_markdown();
+        let md = report.to_preview_markdown();
         assert!(!md.to_ascii_lowercase().contains("verdict: stop"));
         assert!(!md.to_ascii_lowercase().contains("verdict: proceed"));
         assert!(md.contains("leader/owner adjudication"));
+    }
+
+    #[test]
+    fn legacy_markdown_cannot_claim_d2_completion_without_400_call_accounting() {
+        let manifest = fifty_row_manifest();
+        let cases: Vec<CaseReport> = manifest
+            .rows()
+            .iter()
+            .map(|row| {
+                case(
+                    &row.canonical_case_id(),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        let report = PilotReport::from_manifest(&manifest, cases).unwrap();
+        let markdown = report.to_preview_markdown();
+        assert!(markdown.contains("NON-AUTHORITATIVE LEGACY PREVIEW"));
+        assert!(!markdown.contains("# D2 50-row pilot report"));
     }
 
     #[test]

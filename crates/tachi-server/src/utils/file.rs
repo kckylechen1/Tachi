@@ -105,6 +105,7 @@ pub(crate) fn write_run_status_file(
     write_json_file_owner_only(&run_dir.join("status.json"), status)
 }
 
+#[cfg(test)]
 pub(crate) fn read_to_string_allow_missing(
     path: &std::path::Path,
     label: &str,

@@ -145,7 +145,7 @@ pub(in crate::foundry_runtime_ops) fn enqueue_capture_maintenance_jobs(
 /// [`memcore::FoundryJobKind::MemoryDistill`]. Distill is now handled
 /// exclusively by the daily batch scheduler
 /// (`run_daily_batch_distill`); per-capture distill jobs would defeat the
-/// batching that keeps Claude CLI invocations cheap.
+/// batching that keeps provider API calls efficient.
 pub(in crate::foundry_runtime_ops) fn capture_maintenance_specs(
     server: &MemoryServer,
     agent_id: &str,

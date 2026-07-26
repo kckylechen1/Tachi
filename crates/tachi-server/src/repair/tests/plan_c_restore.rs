@@ -79,16 +79,153 @@ fn r11_plan_c_split_brain_merges_alias_and_relinks_symlink() {
             .any(|entry| entry.file_name().to_string_lossy().contains(".bak.")),
         "alias backup should be written before relink"
     );
-    assert!(
-        crate::path_utils::plan_c_split_brain_for_local_db(&local_db).is_none(),
-        "post-repair split-brain detector should be clean"
-    );
+    assert!(matches!(
+        crate::path_utils::inspect_plan_c_alias_for_local_db(&local_db),
+        crate::path_utils::PlanCAliasInspection::MatchingSymlink
+    ));
 
     if let Some(value) = saved {
         std::env::set_var("TACHI_HOME", value);
     } else {
         std::env::remove_var("TACHI_HOME");
     }
+}
+
+#[test]
+fn plan_c_repair_opens_v23_guards_and_denies_raw_reference_writes() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("plan-c-v23.db");
+    let conn = fresh_db_at(&db_path, "project:plan-c-v23");
+    insert_memory(
+        &conn,
+        "guarded-row",
+        "/project/guarded",
+        "guarded row",
+        "{}",
+        None,
+        None,
+    );
+    drop(conn);
+
+    let ctx = open_ctx(&db_path, "project:plan-c-v23");
+    let schema_version: i64 = ctx
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        schema_version,
+        i64::from(memcore::db::migrations::EXPECTED_SCHEMA_VERSION),
+        "fixture must retain the current canonical schema"
+    );
+    let reference_guard_count: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'trigger'
+               AND name IN (
+                   'memories_reserved_refs_insert_guard',
+                   'memories_reserved_refs_update_guard'
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        reference_guard_count, 2,
+        "v23 canonical reference-write triggers must be present"
+    );
+
+    let error = ctx
+        .conn
+        .execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata, '$.source_refs', json('[\"untyped\"]'))
+             WHERE id = 'guarded-row'",
+            [],
+        )
+        .expect_err("raw repair connection must not bypass reserved reference guards");
+    assert!(
+        error
+            .to_string()
+            .contains("reserved memory reference metadata requires typed mutation"),
+        "unexpected protected-write result: {error}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn quarantine_subcommands_refuse_manifest_project_symlink_without_following_foreign_db() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = TempDir::new().unwrap();
+    let foreign_db = dir.path().join("foreign.db");
+    let conn = fresh_db_at(&foreign_db, "foreign");
+    let metadata = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/restored/item",
+            "expected_db": foreign_db.display().to_string(),
+            "actual_db": foreign_db.display().to_string(),
+            "detected_at": "2020-01-01T00:00:00Z"
+        }
+    });
+    insert_memory(
+        &conn,
+        "linked-row",
+        "/_quarantine/cross-db/item",
+        "foreign row",
+        &metadata.to_string(),
+        None,
+        None,
+    );
+    drop(conn);
+    let project_link = dir.path().join("project.db");
+    std::os::unix::fs::symlink(&foreign_db, &project_link).unwrap();
+    let manifest = Manifest {
+        schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: project_link.to_string_lossy().into_owned(),
+            role: DbRole::Project,
+            owner: "tachi".into(),
+            schema_kind: "tachi".into(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: String::new(),
+            last_classification: "healthy".into(),
+            scope_hint: "project:linked".into(),
+            notes: String::new(),
+        }],
+    };
+    let foreign_metadata = std::fs::symlink_metadata(&foreign_db).unwrap();
+    let foreign_identity = (foreign_metadata.dev(), foreign_metadata.ino());
+    let foreign_before = std::fs::read(&foreign_db).unwrap();
+    let link_metadata = std::fs::symlink_metadata(&project_link).unwrap();
+    let link_identity = (link_metadata.dev(), link_metadata.ino());
+
+    let results = [
+        crate::repair::quarantine::cmd_list(&manifest, true),
+        crate::repair::quarantine::cmd_restore(&manifest, "linked-row", false, true),
+        crate::repair::quarantine::cmd_restore_all(&manifest, "project:linked", false, true),
+        crate::repair::quarantine::cmd_purge(&manifest, 1, false, true),
+    ];
+
+    for result in results {
+        let error = result.expect_err("quarantine subcommand must reject project symlink");
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "unexpected refusal: {error}"
+        );
+    }
+    let link_after = std::fs::symlink_metadata(&project_link).unwrap();
+    assert_eq!((link_after.dev(), link_after.ino()), link_identity);
+    assert_eq!(std::fs::read_link(&project_link).unwrap(), foreign_db);
+    let foreign_after = std::fs::symlink_metadata(&foreign_db).unwrap();
+    assert_eq!((foreign_after.dev(), foreign_after.ino()), foreign_identity);
+    assert_eq!(std::fs::read(&foreign_db).unwrap(), foreign_before);
 }
 
 #[test]

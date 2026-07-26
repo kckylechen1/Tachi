@@ -11,7 +11,9 @@ mod runtime_files;
 mod test_support;
 
 pub use llm::{
-    LlmClient, ProviderSecret, ReasoningOutcome, RerankConfig, RerankProviderKind,
+    LlmClient, ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult,
+    ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
+    ProviderInvocationReceipt, ProviderSecret, ReasoningOutcome, RerankConfig, RerankProviderKind,
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
 pub use provider_materialization::{

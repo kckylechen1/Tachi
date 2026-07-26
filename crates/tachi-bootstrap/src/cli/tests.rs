@@ -26,6 +26,7 @@ fn vault_exec_cli_parses_require_and_trailing_command() {
                 keychain: true,
                 consumer: Some(consumer),
                 require,
+                allow_unauthenticated: false,
                 command,
                 ..
             }
@@ -34,6 +35,35 @@ fn vault_exec_cli_parses_require_and_trailing_command() {
             && command == ["opencode", "run", "--auto"]
     ));
     assert!(Cli::try_parse_from(["tachi", "vault", "exec", "--keychain"]).is_err());
+}
+
+// #1413 concern 4: --allow-unauthenticated is an explicit opt-in to the
+// inherited-environment fail-open path. Default is false (asserted above); the
+// flag must parse to true and stay compatible with --require.
+#[test]
+fn vault_exec_cli_parses_allow_unauthenticated_opt_in() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "exec",
+        "--keychain",
+        "--allow-unauthenticated",
+        "--",
+        "opencode",
+        "run",
+    ])
+    .expect("--allow-unauthenticated should parse");
+
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Vault {
+            action: VaultAction::Exec {
+                allow_unauthenticated: true,
+                command,
+                ..
+            }
+        }) if command == ["opencode", "run"]
+    ));
 }
 
 #[test]
@@ -777,4 +807,38 @@ fn vault_sync_help_names_offline_guessing_risk() {
         "{import_help}"
     );
     assert!(import_help.contains("--allow-unsigned"), "{import_help}");
+}
+
+#[test]
+fn help_reports_api_only_distill_and_canonical_db_paths() {
+    let mut root_cmd = Cli::command();
+    let root_help = root_cmd.render_long_help().to_string();
+    assert!(
+        root_help.contains("Run batch memory distill through the configured API lane"),
+        "{root_help}"
+    );
+    assert!(
+        root_help.contains("never launches Claude CLI"),
+        "{root_help}"
+    );
+    assert!(
+        !root_help.contains("Claude CLI when configured"),
+        "{root_help}"
+    );
+    assert!(root_help.contains(".tachi/tachi-memory.db"), "{root_help}");
+
+    let mut backfill_cmd = Cli::command();
+    let backfill_help = backfill_cmd
+        .find_subcommand_mut("backfill-vectors")
+        .expect("backfill-vectors command")
+        .render_long_help()
+        .to_string();
+    assert!(
+        backfill_help.contains("~/.tachi/projects/<name>/tachi-memory.db"),
+        "{backfill_help}"
+    );
+    assert!(
+        !backfill_help.contains("~/.tachi/projects/<name>/memory.db"),
+        "{backfill_help}"
+    );
 }

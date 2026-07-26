@@ -1,7 +1,10 @@
 use crate::scorer::HybridWeights;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+pub const MAX_RECALL_CONFIG_ENV_BYTES: usize = 1024 * 1024;
 
 const DEFAULT_EXPANDED_FTS_SCORE_FACTOR: f64 = 0.78;
 const DEFAULT_MAX_EXPANDED_FTS_QUERIES: usize = 6;
@@ -91,11 +94,20 @@ impl RecallConfig {
         }
         let mut config = Self::default();
         if let Some(path) = config_env_path() {
-            if let Ok(body) = std::fs::read_to_string(&path) {
-                config.apply_config_env(&parse_config_env(&body));
+            if let Ok(body) = read_config_env_bounded(&path) {
+                config = Self::from_config_env_source(&body);
             }
         }
         config.apply_config_env(&process_recall_env());
+        config.sanitized()
+    }
+
+    /// Parse the same config.env source consumed by production `load` without
+    /// consulting process-global paths or environment variables. Later
+    /// declarations win because `parse_config_env` collects into a HashMap.
+    pub fn from_config_env_source(body: &str) -> RecallConfig {
+        let mut config = Self::default();
+        config.apply_config_env(&parse_config_env(body));
         config.sanitized()
     }
 
@@ -284,6 +296,28 @@ fn process_recall_env() -> HashMap<String, String> {
         .collect()
 }
 
+fn read_config_env_bounded(path: &std::path::Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_RECALL_CONFIG_ENV_BYTES as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "recall config.env exceeds maximum size",
+        ));
+    }
+    let mut body = String::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take((MAX_RECALL_CONFIG_ENV_BYTES + 1) as u64)
+        .read_to_string(&mut body)?;
+    if body.len() > MAX_RECALL_CONFIG_ENV_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "recall config.env exceeds maximum size",
+        ));
+    }
+    Ok(body)
+}
+
 fn parse_config_env(body: &str) -> HashMap<String, String> {
     body.lines()
         .filter_map(|line| {
@@ -463,6 +497,37 @@ mod tests {
         assert_eq!(config.or_fallback_fts_score_factor, 0.22);
         assert_eq!(config.or_fallback_fts_max_terms, 4);
         assert_eq!(config.raw_vector_similarity_floor, 0.28);
+    }
+
+    #[test]
+    fn production_config_parser_uses_last_duplicate_recall_declaration() {
+        let config = RecallConfig::from_config_env_source(
+            "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.1\n\
+             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=2\n\
+             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6\n\
+             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4\n",
+        );
+
+        assert_eq!(config.or_fallback_fts_score_factor, 0.6);
+        assert_eq!(config.or_fallback_fts_max_terms, 4);
+    }
+
+    #[test]
+    fn production_config_reader_accepts_size_boundary_and_refuses_one_byte_over() {
+        let temp = tempfile::tempdir().expect("config tempdir");
+        let path = temp.path().join("config.env");
+        let boundary = "x".repeat(MAX_RECALL_CONFIG_ENV_BYTES);
+        std::fs::write(&path, &boundary).expect("write boundary config");
+        assert_eq!(
+            read_config_env_bounded(&path)
+                .expect("read exact boundary")
+                .len(),
+            MAX_RECALL_CONFIG_ENV_BYTES
+        );
+
+        std::fs::write(&path, format!("{boundary}x")).expect("write over-limit config");
+        let err = read_config_env_bounded(&path).expect_err("over-limit config must refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

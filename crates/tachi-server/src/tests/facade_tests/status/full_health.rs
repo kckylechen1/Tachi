@@ -12,15 +12,16 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
 
     server
         .with_global_store(|store| {
-            store
-                .connection()
-                .execute(
-                    "INSERT INTO memories
-                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
-                     VALUES (?1, '/facts/status', 'status', 'status diagnostic memory', 0.8, ?2, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
-                    rusqlite::params!["status-memory", Utc::now().to_rfc3339()],
-                )
-                .map_err(|e| e.to_string())?;
+            let mut status_memory = make_entry("status-memory");
+            status_memory.path = "/facts/status".to_string();
+            status_memory.summary = "status".to_string();
+            status_memory.text = "status diagnostic memory".to_string();
+            status_memory.importance = 0.8;
+            status_memory.category = "fact".to_string();
+            status_memory.topic = "status".to_string();
+            status_memory.source = "manual".to_string();
+            status_memory.scope = "project".to_string();
+            store.upsert(&status_memory).map_err(|e| e.to_string())?;
             store
                 .connection()
                 .execute(
@@ -130,15 +131,16 @@ async fn tachi_status_reports_durable_vector_sweep_state() {
 
     server
         .with_global_store(|store| {
-            store
-                .connection()
-                .execute(
-                    "INSERT INTO memories
-                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
-                     VALUES (?1, '/facts/sweep', 'sweep', 'durable vector sweep test', 0.8, ?2, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
-                    rusqlite::params!["sweep-memory", Utc::now().to_rfc3339()],
-                )
-                .map_err(|e| e.to_string())?;
+            let mut sweep_memory = make_entry("sweep-memory");
+            sweep_memory.path = "/facts/sweep".to_string();
+            sweep_memory.summary = "sweep".to_string();
+            sweep_memory.text = "durable vector sweep test".to_string();
+            sweep_memory.importance = 0.8;
+            sweep_memory.category = "fact".to_string();
+            sweep_memory.topic = "status".to_string();
+            sweep_memory.source = "manual".to_string();
+            sweep_memory.scope = "project".to_string();
+            store.upsert(&sweep_memory).map_err(|e| e.to_string())?;
             Ok(())
         })
         .expect("seed status db");
@@ -206,28 +208,24 @@ async fn tachi_status_surfaces_malformed_vector_sweep_state() {
     let (server, temp_home) = make_server_with_temp_home();
     let manifest_path = temp_home.temp_home.join(".tachi/manifest.json");
 
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute(
-                    "CREATE TABLE vector_sweep_state (
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| {
+            connection.execute(
+                "CREATE TABLE vector_sweep_state (
                         key TEXT PRIMARY KEY,
                         enabled TEXT NOT NULL
                     )",
-                    [],
-                )
-                .map_err(|e| e.to_string())?;
-            store
-                .connection()
-                .execute(
-                    "INSERT INTO vector_sweep_state (key, enabled) VALUES ('default', 'yes')",
-                    [],
-                )
-                .map_err(|e| e.to_string())?;
+                [],
+            )?;
+            connection.execute(
+                "INSERT INTO vector_sweep_state (key, enabled) VALUES ('default', 'yes')",
+                [],
+            )?;
             Ok(())
-        })
-        .expect("seed malformed sweep state");
+        },
+    )
+    .expect("seed malformed sweep state");
 
     let manifest = crate::manifest::Manifest {
         schema_version: 1,

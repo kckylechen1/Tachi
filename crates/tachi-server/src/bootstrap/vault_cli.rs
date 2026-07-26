@@ -60,6 +60,7 @@ pub(super) async fn run_vault_command(
             insecure_password_file,
             consumer,
             require,
+            allow_unauthenticated,
             command,
         } => {
             exec_actions::run_exec_action(
@@ -70,6 +71,7 @@ pub(super) async fn run_vault_command(
                 insecure_password_file,
                 consumer.as_deref(),
                 &require,
+                allow_unauthenticated,
                 &command,
             )
             .await

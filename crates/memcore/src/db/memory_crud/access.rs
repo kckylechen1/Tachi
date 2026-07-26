@@ -313,21 +313,42 @@ pub fn get_access_times(
 #[cfg(test)]
 mod get_access_times_tests {
     use super::*;
-    use crate::MemoryStore;
+    use crate::{MemoryEntry, MemoryStore};
     use chrono::Duration as ChronoDuration;
 
-    fn seed_memory(conn: &Connection, id: &str) {
-        conn.execute(
-            "INSERT INTO memories
-                (id, path, summary, text, importance, timestamp, category, topic,
-                 keywords, entities, source, scope, archived,
-                 created_at, updated_at, access_count, last_access, revision, metadata)
-             VALUES (?1, '/facts/readonly', '', '', 0.5, '2026-01-01T00:00:00Z', 'fact', '',
-                     '[]', '[]', 'manual', 'general', 0,
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1, '{}')",
-            rusqlite::params![id],
-        )
-        .expect("seed memory row");
+    fn seed_memory(store: &mut MemoryStore, id: &str) {
+        let entry = MemoryEntry {
+            id: id.to_string(),
+            path: "/facts/readonly".to_string(),
+            summary: String::new(),
+            text: String::new(),
+            importance: 0.5,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            valid_from: "2026-01-01T00:00:00Z".to_string(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "manual".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            metadata: serde_json::json!({}),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        };
+        store
+            .insert_if_absent(&entry)
+            .expect("seed memory row through typed store API");
     }
 
     /// Inserts `count` `access_history` rows for `id`, each one second older
@@ -347,9 +368,9 @@ mod get_access_times_tests {
 
     #[test]
     fn caps_at_max_per_memory_and_keeps_most_recent() {
-        let store = MemoryStore::open_in_memory().expect("open in-memory store");
+        let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+        seed_memory(&mut store, "busy");
         let conn = store.connection();
-        seed_memory(conn, "busy");
         // One more row than the cap — the oldest single row must be dropped.
         seed_access_history(conn, "busy", ACCESS_TIMES_MAX_PER_MEMORY + 1);
 
@@ -373,9 +394,9 @@ mod get_access_times_tests {
 
     #[test]
     fn under_cap_is_unaffected() {
-        let store = MemoryStore::open_in_memory().expect("open in-memory store");
+        let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+        seed_memory(&mut store, "quiet");
         let conn = store.connection();
-        seed_memory(conn, "quiet");
         seed_access_history(conn, "quiet", 3);
 
         let times = get_access_times(conn, &["quiet".to_string()]).expect("get_access_times");

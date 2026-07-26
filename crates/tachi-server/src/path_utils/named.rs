@@ -1,11 +1,7 @@
-use super::alias::plan_c_existing_alias_db_for_root;
 use super::home::tachi_home;
 use std::path::Path;
 
-/// Extract a project name from `<tachi_home>/projects/<name>/tachi-memory.db`
-/// (or the pre-#1132 `.../memory.db`, still accepted here so paths sourced
-/// from a not-yet-migrated manifest entry keep resolving).
-pub(crate) fn named_project_from_path(db_path: &Path) -> Option<String> {
+pub(crate) fn named_project_from_path_in_home(db_path: &Path, tachi_home: &Path) -> Option<String> {
     if !db_path
         .file_name()
         .and_then(|f| f.to_str())
@@ -15,7 +11,7 @@ pub(crate) fn named_project_from_path(db_path: &Path) -> Option<String> {
         return None;
     }
     let project_dir = db_path.parent()?;
-    let projects_dir = tachi_home().join("projects");
+    let projects_dir = tachi_home.join("projects");
     let rel = project_dir.strip_prefix(&projects_dir).ok()?;
     if rel.components().count() != 1 {
         return None;
@@ -31,7 +27,14 @@ pub(crate) fn named_project_from_path(db_path: &Path) -> Option<String> {
 /// same canonical DB (also the pre-#1132 `memory.db` name, for paths sourced
 /// from a not-yet-migrated manifest entry).
 pub(crate) fn named_project_for_db_path(db_path: &Path) -> Option<String> {
-    if let Some(name) = named_project_from_path(db_path) {
+    named_project_for_db_path_in_home(db_path, &tachi_home())
+}
+
+pub(crate) fn named_project_for_db_path_in_home(
+    db_path: &Path,
+    tachi_home: &Path,
+) -> Option<String> {
+    if let Some(name) = named_project_from_path_in_home(db_path, tachi_home) {
         return Some(name);
     }
 
@@ -50,7 +53,9 @@ pub(crate) fn named_project_for_db_path(db_path: &Path) -> Option<String> {
         }) {
             // Fast-path: check the alias that would actually be used for this
             // root (hashed, falling back to a pre-existing legacy un-hashed dir).
-            if let Ok(Some(named_path)) = plan_c_existing_alias_db_for_root(project_root) {
+            if let Ok(Some(named_path)) =
+                super::alias::plan_c_existing_alias_db_for_root_in_home(project_root, tachi_home)
+            {
                 if std::fs::canonicalize(&named_path)
                     .map(|path| path == canonical)
                     .unwrap_or(false)
@@ -67,7 +72,7 @@ pub(crate) fn named_project_for_db_path(db_path: &Path) -> Option<String> {
         }
     }
 
-    let projects_dir = tachi_home().join("projects");
+    let projects_dir = tachi_home.join("projects");
     let entries = std::fs::read_dir(projects_dir).ok()?;
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
@@ -103,7 +108,11 @@ pub(crate) fn named_project_for_db_path(db_path: &Path) -> Option<String> {
 /// checkpoint so busy named projects (e.g. hyperion) get their `-wal`
 /// reclaimed too — not just the global + workspace-project stores.
 pub(crate) fn list_named_projects() -> Vec<String> {
-    let projects_dir = tachi_home().join("projects");
+    list_named_projects_in_home(&tachi_home())
+}
+
+pub(crate) fn list_named_projects_in_home(tachi_home: &Path) -> Vec<String> {
+    let projects_dir = tachi_home.join("projects");
     let Ok(entries) = std::fs::read_dir(&projects_dir) else {
         return Vec::new();
     };

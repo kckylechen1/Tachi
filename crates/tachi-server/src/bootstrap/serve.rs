@@ -32,8 +32,8 @@ fn no_project_serve_detaches_launch_cwd(command: &Commands, no_project_db: bool)
     no_project_db && matches!(command, Commands::Serve)
 }
 
-fn should_load_project_local_env(no_project_db: bool) -> bool {
-    !no_project_db
+fn should_load_project_local_env(command: &Commands, no_project_db: bool) -> bool {
+    !no_project_db && !matches!(command, Commands::Vault { .. })
 }
 
 fn should_defer_manifest_startup(command: &Commands, daemon: bool, no_project_db: bool) -> bool {
@@ -125,6 +125,17 @@ fn expand_user_path(raw: &str, home: &Path) -> PathBuf {
 
 fn expand_cli_path(raw: &Path, home: &Path) -> PathBuf {
     expand_user_path(raw.to_string_lossy().as_ref(), home)
+}
+
+fn distill_db_override(command: &Commands, home: &Path) -> Option<PathBuf> {
+    use tachi_bootstrap::cli::DistillAction;
+
+    match command {
+        Commands::Distill {
+            action: DistillAction::Run { db: Some(db), .. },
+        } => Some(expand_cli_path(db, home)),
+        _ => None,
+    }
 }
 
 /// `<main>-wal` / `<main>-shm` sidecar path for a SQLite main file.
@@ -257,7 +268,7 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
             "--no-project-db serve detached launch cwd to runtime"
         );
     }
-    let load_project_local_env = should_load_project_local_env(cli.no_project_db);
+    let load_project_local_env = should_load_project_local_env(&command, cli.no_project_db);
     let defer_manifest_startup =
         should_defer_manifest_startup(&command, cli.daemon, cli.no_project_db);
     let git_root = if load_project_local_env {
@@ -530,6 +541,7 @@ async fn run_startup_hygiene(
 
     // Resolve project DB path
     let explicit_project_db = cli.project_db.is_some();
+    let mut legacy_project_copy = None;
     let project_db_path = if cli.no_project_db {
         if cli.project_db.is_some() {
             eprintln!("--project-db is ignored because --no-project-db is set");
@@ -545,12 +557,7 @@ async fn run_startup_hygiene(
         let project_legacy = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
 
         if project_legacy.exists() && !project_default.exists() {
-            copy_legacy_db_guarded(&project_legacy, &project_default).await?;
-            eprintln!(
-                "Migrated legacy project DB: {} -> {}",
-                project_legacy.display(),
-                project_default.display()
-            );
+            legacy_project_copy = Some((project_legacy, project_default.clone()));
         }
 
         Some(project_default)
@@ -558,44 +565,69 @@ async fn run_startup_hygiene(
         None
     };
 
+    let distill_db_override = distill_db_override(&ctx.command, &ctx.home);
+    // A distill override is the canonical project data file for this command,
+    // not a managed Plan C alias. Classify its leaf before startup can create
+    // the auto project's alias or copy legacy data.
+    if let Some(db_path) = distill_db_override.as_deref() {
+        crate::path_utils::canonical_db_leaf_exists_without_symlink(db_path)?;
+    }
+
+    // The repo-local project DB is the canonical data file, never the Plan C
+    // alias. Reject a symlink leaf before alias inspection/creation or a
+    // legacy copy can follow it into an external target.
+    if let Some(db_path) = project_db_path.as_deref() {
+        crate::path_utils::canonical_db_leaf_exists_without_symlink(db_path)?;
+    }
+
     // Plan C: link <tachi_home>/projects/<sanitized-dir>/tachi-memory.db -> repo-local DB.
     // Explicit project DBs are caller-owned (for example embedded agent workspaces)
     // and must not rewrite the repo's global named-project alias.
-    if should_refresh_plan_c_symlink(
+    let refresh_plan_c_symlink = should_refresh_plan_c_symlink(
         project_db_path.as_deref(),
         ctx.git_root.as_deref(),
         explicit_project_db,
-    ) {
+    );
+    if refresh_plan_c_symlink {
         if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
-            // Fail-closed (#1228 invariant #5): an ambiguous or unresolvable
-            // Plan C project identity for the daemon's own launch repo must
-            // abort startup, never silently boot with guessed addressing. This
-            // is the ONE `ensure_plan_c_symlink` call site with no preceding
-            // `preflight_project_identity` gate, so the identity check is made
-            // explicit here rather than left to the symlink outcome.
-            if let Err(error) = crate::path_utils::plan_c_alias_db_for_root(root) {
-                return Err(format!(
-                    "Plan C project identity for {} is ambiguous or unresolvable; refusing to \
-                     start with guessed project addressing: {error}",
-                    root.display()
-                )
-                .into());
+            match crate::path_utils::inspect_plan_c_alias_in_home(db_path, root, &ctx.app_home) {
+                crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => {
+                    return Err(issue.warning_message().into());
+                }
+                crate::path_utils::PlanCAliasInspection::Integrity(issue) => {
+                    return Err(issue.warning_message().into());
+                }
+                crate::path_utils::PlanCAliasInspection::Absent
+                | crate::path_utils::PlanCAliasInspection::MatchingSymlink => {}
             }
+        }
+    }
+
+    if let Some((project_legacy, project_default)) = legacy_project_copy {
+        copy_legacy_db_guarded(&project_legacy, &project_default).await?;
+        eprintln!(
+            "Migrated legacy project DB: {} -> {}",
+            project_legacy.display(),
+            project_default.display()
+        );
+    }
+
+    if refresh_plan_c_symlink {
+        if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
             match crate::path_utils::ensure_plan_c_symlink(db_path, root) {
                 crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                    eprintln!("[!] {}", issue.warning_message());
+                    return Err(issue.warning_message().into());
                 }
-                // A best-effort symlink syscall failure (identity already
-                // resolved cleanly above) is non-fatal — repo-local/manifest
-                // addressing does not depend on the alias symlink — but it must
-                // be surfaced loudly, not silently dropped.
+                crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
+                    return Err(issue.warning_message().into());
+                }
                 crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                    eprintln!(
-                        "[!] Plan C alias symlink could not be created at {}: {} (the project \
-                         remains reachable by its repo-local path)",
+                    return Err(format!(
+                        "Plan C alias symlink failed at {}: {}; refusing startup",
                         path.display(),
                         error
-                    );
+                    )
+                    .into());
                 }
                 crate::path_utils::PlanCLinkOutcome::AlreadyLinked
                 | crate::path_utils::PlanCLinkOutcome::Created(_)
@@ -606,16 +638,18 @@ async fn run_startup_hygiene(
 
     if let Commands::Distill { action } = &ctx.command {
         use tachi_bootstrap::cli::DistillAction;
-        let DistillAction::Run { db, no_consolidate } = action;
-        let target_project = db
+        let DistillAction::Run {
+            db: _,
+            no_consolidate,
+        } = action;
+        let target_project = distill_db_override
             .clone()
-            .map(|p| expand_user_path(p.to_string_lossy().as_ref(), &ctx.home))
             .or(project_db_path.clone())
             .ok_or_else(|| {
                 "distill run requires a project DB: pass --project-db PATH or `distill run --db PATH`"
                     .to_string()
             })?;
-        if !target_project.exists() {
+        if !crate::path_utils::canonical_db_leaf_exists_without_symlink(&target_project)? {
             return Err(format!("project DB not found: {}", target_project.display()).into());
         }
         let server = MemoryServer::new(global_db_path.to_path_buf(), Some(target_project.clone()))?;
@@ -701,7 +735,7 @@ async fn start_stdio_proxy_transport(
     let client_project_name = project_db_path.and_then(|p| {
         crate::memory_search_ops::client_project_precedence(
             crate::memory_search_ops::explicit_workspace_project(),
-            crate::memory_search_ops::named_project_from_db_path(p),
+            crate::memory_search_ops::named_project_from_db_path_in_home(p, &ctx.app_home),
             crate::memory_search_ops::resolve_workspace_named_project(),
         )
     });
@@ -717,6 +751,7 @@ async fn start_stdio_proxy_transport(
         {
             if stdio::proxy_can_preserve_project_context(
                 &info,
+                &ctx.app_home,
                 global_db_path,
                 project_db_path.map(|path| path.as_path()),
                 client_project_name.as_deref(),
@@ -767,6 +802,10 @@ fn build_server_state(
         std::env::set_var("TACHI_DAEMON", "1");
     } else {
         std::env::remove_var("TACHI_DAEMON");
+    }
+
+    if let Some(project_db_path) = hygiene.project_db_path.as_deref() {
+        crate::path_utils::canonical_db_leaf_exists_without_symlink(project_db_path)?;
     }
 
     // #1119: the serve/daemon path is the ONE process allowed to migrate a
@@ -1000,6 +1039,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvRestore;
 
     #[cfg(unix)]
     struct ClearOwnershipInject;
@@ -1008,6 +1048,631 @@ mod tests {
         fn drop(&mut self) {
             crate::db_ownership::set_ownership_inject_for_test(None);
         }
+    }
+
+    fn startup_test_cli() -> Cli {
+        Cli {
+            daemon: false,
+            port: 6919,
+            global_db: None,
+            project_db: None,
+            no_project_db: false,
+            allow_schema_migration: false,
+            profile: None,
+            gc_enabled: None,
+            gc_initial_delay_secs: None,
+            gc_interval_secs: None,
+            command: Some(Commands::Serve),
+        }
+    }
+
+    fn startup_test_context(root: &Path, app_home: &Path) -> StartupContext {
+        StartupContext {
+            home: root.to_path_buf(),
+            app_home: app_home.to_path_buf(),
+            command: Commands::Serve,
+            defer_manifest_startup: false,
+            git_root: Some(root.to_path_buf()),
+            schema_migration: memcore::MigrationAuthority::Deny,
+        }
+    }
+
+    fn startup_distill_cli_and_context(
+        root: &Path,
+        app_home: &Path,
+        db: PathBuf,
+    ) -> (Cli, StartupContext) {
+        use tachi_bootstrap::cli::DistillAction;
+
+        let mut cli = startup_test_cli();
+        cli.command = Some(Commands::Distill {
+            action: DistillAction::Run {
+                db: Some(db.clone()),
+                no_consolidate: false,
+            },
+        });
+        let mut ctx = startup_test_context(root, app_home);
+        ctx.command = Commands::Distill {
+            action: DistillAction::Run {
+                db: Some(db),
+                no_consolidate: false,
+            },
+        };
+        (cli, ctx)
+    }
+
+    #[cfg(unix)]
+    fn startup_file_identity(path: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path).expect("path metadata");
+        (metadata.dev(), metadata.ino())
+    }
+
+    #[cfg(unix)]
+    fn assert_startup_canonical_symlink_refusal_side_effects(
+        root: &Path,
+        app_home: &Path,
+        canonical_db: &Path,
+        expected_target: &Path,
+        canonical_identity: (u64, u64),
+        legacy_db: &Path,
+        manifest_before: &[u8],
+    ) {
+        assert_eq!(startup_file_identity(canonical_db), canonical_identity);
+        assert_eq!(
+            std::fs::read_link(canonical_db).expect("canonical symlink preserved"),
+            expected_target
+        );
+        assert_eq!(
+            std::fs::read(legacy_db).expect("legacy DB preserved"),
+            b"legacy-source"
+        );
+        assert_eq!(
+            std::fs::read(app_home.join("manifest.json")).expect("manifest preserved"),
+            manifest_before
+        );
+        let project = crate::path_utils::plan_c_dir_name_from_root(root).expect("project name");
+        let alias = crate::path_utils::plan_c_global_db_path(&project);
+        assert!(
+            std::fs::symlink_metadata(alias).is_err(),
+            "canonical refusal must precede Plan C alias creation"
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_distill_override_refusal_side_effects(
+        root: &Path,
+        app_home: &Path,
+        global_db: &Path,
+        manifest_before: &[u8],
+    ) {
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        assert!(
+            std::fs::symlink_metadata(&canonical_db).is_err(),
+            "override refusal must not create the auto project DB"
+        );
+        let project = crate::path_utils::plan_c_dir_name_from_root(root).expect("project name");
+        let alias = crate::path_utils::plan_c_global_db_path(&project);
+        assert!(
+            std::fs::symlink_metadata(alias).is_err(),
+            "override refusal must precede Plan C alias creation"
+        );
+        assert!(
+            std::fs::symlink_metadata(global_db).is_err(),
+            "override refusal must precede global DB open"
+        );
+        assert_eq!(
+            std::fs::read(app_home.join("manifest.json")).expect("manifest preserved"),
+            manifest_before
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn distill_db_override_dangling_symlink_refuses_before_side_effects() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("distill-db-override-");
+        let root = fixture.path().join("Dangling-Override-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"distill-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let external_target = fixture.path().join("external/dangling.db");
+        let override_db = fixture.path().join("override.db");
+        std::os::unix::fs::symlink(&external_target, &override_db).expect("dangling override");
+        let override_identity = startup_file_identity(&override_db);
+        let (cli, ctx) = startup_distill_cli_and_context(&root, &app_home, override_db.clone());
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("dangling distill DB override must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert_eq!(startup_file_identity(&override_db), override_identity);
+        assert_eq!(std::fs::read_link(&override_db).unwrap(), external_target);
+        assert!(std::fs::symlink_metadata(&external_target).is_err());
+        assert_distill_override_refusal_side_effects(&root, &app_home, &global_db, manifest_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn distill_db_override_wrong_symlink_refuses_without_external_mutation() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("distill-db-override-");
+        let root = fixture.path().join("Wrong-Override-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"distill-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let external_target = fixture.path().join("external/foreign.db");
+        std::fs::create_dir_all(external_target.parent().unwrap()).expect("external parent");
+        let store = memcore::MemoryStore::open(external_target.to_str().expect("UTF-8 DB"))
+            .expect("seed foreign DB");
+        drop(store);
+        let external_identity = startup_file_identity(&external_target);
+        let external_before = std::fs::read(&external_target).expect("foreign DB bytes");
+        let override_db = fixture.path().join("override.db");
+        std::os::unix::fs::symlink(&external_target, &override_db).expect("wrong override");
+        let override_identity = startup_file_identity(&override_db);
+        let (cli, ctx) = startup_distill_cli_and_context(&root, &app_home, override_db.clone());
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("wrong-target distill DB override must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert_eq!(startup_file_identity(&override_db), override_identity);
+        assert_eq!(std::fs::read_link(&override_db).unwrap(), external_target);
+        assert_eq!(startup_file_identity(&external_target), external_identity);
+        assert_eq!(std::fs::read(&external_target).unwrap(), external_before);
+        assert_distill_override_refusal_side_effects(&root, &app_home, &global_db, manifest_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn distill_db_override_symlink_loop_refuses_before_side_effects() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("distill-db-override-");
+        let root = fixture.path().join("Loop-Override-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"distill-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let override_db = fixture.path().join("override.db");
+        std::os::unix::fs::symlink(&override_db, &override_db).expect("looped override");
+        let override_identity = startup_file_identity(&override_db);
+        let (cli, ctx) = startup_distill_cli_and_context(&root, &app_home, override_db.clone());
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("looped distill DB override must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert_eq!(startup_file_identity(&override_db), override_identity);
+        assert_eq!(std::fs::read_link(&override_db).unwrap(), override_db);
+        assert_distill_override_refusal_side_effects(&root, &app_home, &global_db, manifest_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn distill_db_override_regular_file_opens_normally() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("distill-db-override-");
+        let root = fixture.path().join("Regular-Override-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let override_db = fixture.path().join("override.db");
+        let store = memcore::MemoryStore::open(override_db.to_str().expect("UTF-8 DB"))
+            .expect("seed regular override DB");
+        drop(store);
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("global parent");
+        let global = memcore::MemoryStore::open(global_db.to_str().expect("UTF-8 global DB"))
+            .expect("seed global DB");
+        drop(global);
+        let (cli, ctx) = startup_distill_cli_and_context(&root, &app_home, override_db.clone());
+
+        let result = run_startup_hygiene(&cli, &ctx, &global_db)
+            .await
+            .expect("regular distill DB override works");
+
+        assert!(result.is_none(), "distill command completes during hygiene");
+        let metadata = std::fs::symlink_metadata(override_db).expect("override metadata");
+        assert!(metadata.file_type().is_file());
+        assert!(!metadata.file_type().is_symlink());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_canonical_db_dangling_symlink_refuses_before_side_effects() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-canonical-");
+        let root = fixture.path().join("Dangling-Canonical-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(canonical_db.parent().unwrap()).expect("canonical parent");
+        let external_target = fixture.path().join("external/dangling.db");
+        std::os::unix::fs::symlink(&external_target, &canonical_db)
+            .expect("dangling canonical symlink");
+        let canonical_identity = startup_file_identity(&canonical_db);
+        let legacy_db = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(legacy_db.parent().unwrap()).expect("legacy parent");
+        std::fs::write(&legacy_db, b"legacy-source").expect("legacy DB");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"startup-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("dangling canonical DB symlink must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&external_target).is_err(),
+            "startup must not create the dangling external target"
+        );
+        assert_startup_canonical_symlink_refusal_side_effects(
+            &root,
+            &app_home,
+            &canonical_db,
+            &external_target,
+            canonical_identity,
+            &legacy_db,
+            manifest_before,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_canonical_db_wrong_target_symlink_refuses_before_side_effects() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-canonical-");
+        let root = fixture.path().join("Wrong-Canonical-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(canonical_db.parent().unwrap()).expect("canonical parent");
+        let external_target = fixture.path().join("external/wrong.db");
+        std::fs::create_dir_all(external_target.parent().unwrap()).expect("external parent");
+        std::fs::write(&external_target, b"foreign-external-db").expect("external DB");
+        let external_identity = startup_file_identity(&external_target);
+        std::os::unix::fs::symlink(&external_target, &canonical_db)
+            .expect("wrong-target canonical symlink");
+        let canonical_identity = startup_file_identity(&canonical_db);
+        let legacy_db = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(legacy_db.parent().unwrap()).expect("legacy parent");
+        std::fs::write(&legacy_db, b"legacy-source").expect("legacy DB");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"startup-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("wrong-target canonical DB symlink must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert_eq!(startup_file_identity(&external_target), external_identity);
+        assert_eq!(
+            std::fs::read(&external_target).expect("external DB preserved"),
+            b"foreign-external-db"
+        );
+        assert_startup_canonical_symlink_refusal_side_effects(
+            &root,
+            &app_home,
+            &canonical_db,
+            &external_target,
+            canonical_identity,
+            &legacy_db,
+            manifest_before,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_canonical_db_symlink_loop_refuses_before_side_effects() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-canonical-");
+        let root = fixture.path().join("Loop-Canonical-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(canonical_db.parent().unwrap()).expect("canonical parent");
+        std::os::unix::fs::symlink(&canonical_db, &canonical_db).expect("looped canonical symlink");
+        let canonical_identity = startup_file_identity(&canonical_db);
+        let legacy_db = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(legacy_db.parent().unwrap()).expect("legacy parent");
+        std::fs::write(&legacy_db, b"legacy-source").expect("legacy DB");
+        std::fs::create_dir_all(&app_home).expect("app home");
+        let manifest_before = b"startup-manifest-preimage";
+        std::fs::write(app_home.join("manifest.json"), manifest_before).expect("manifest");
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("canonical DB symlink loop must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("canonical repo DB path")
+                && error.to_string().contains("must not be a symlink"),
+            "expected canonical leaf refusal, got: {error}"
+        );
+        assert_startup_canonical_symlink_refusal_side_effects(
+            &root,
+            &app_home,
+            &canonical_db,
+            &canonical_db,
+            canonical_identity,
+            &legacy_db,
+            manifest_before,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_canonical_db_normal_absence_keeps_plan_c_alias_and_opens_regular_db() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-canonical-");
+        let root = fixture.path().join("Absent-Canonical-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        assert!(std::fs::symlink_metadata(&canonical_db).is_err());
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let hygiene = run_startup_hygiene(&cli, &ctx, &global_db)
+            .await
+            .expect("normal absent startup hygiene")
+            .expect("serve continues");
+        let server = MemoryServer::new(global_db, hygiene.project_db_path.clone())
+            .expect("startup opens absent canonical DB as a regular file");
+        drop(server);
+
+        let metadata = std::fs::symlink_metadata(&canonical_db).expect("canonical DB created");
+        assert!(metadata.file_type().is_file());
+        assert!(!metadata.file_type().is_symlink());
+        let project = crate::path_utils::plan_c_dir_name_from_root(&root).expect("project name");
+        let alias = crate::path_utils::plan_c_global_db_path(&project);
+        assert_eq!(
+            std::fs::canonicalize(alias).expect("Plan C alias resolves"),
+            std::fs::canonicalize(canonical_db).expect("canonical DB resolves")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_canonical_db_regular_file_keeps_plan_c_alias_and_opens() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-canonical-");
+        let root = fixture.path().join("Regular-Canonical-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(canonical_db.parent().unwrap()).expect("canonical parent");
+        let store = memcore::MemoryStore::open(canonical_db.to_str().expect("UTF-8 DB"))
+            .expect("seed regular canonical DB");
+        drop(store);
+        let canonical_identity = startup_file_identity(&canonical_db);
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+
+        let hygiene = run_startup_hygiene(&cli, &ctx, &global_db)
+            .await
+            .expect("regular canonical startup hygiene")
+            .expect("serve continues");
+        let server = MemoryServer::new(global_db, hygiene.project_db_path.clone())
+            .expect("startup opens regular canonical DB");
+        drop(server);
+
+        assert_eq!(startup_file_identity(&canonical_db), canonical_identity);
+        let project = crate::path_utils::plan_c_dir_name_from_root(&root).expect("project name");
+        let alias = crate::path_utils::plan_c_global_db_path(&project);
+        assert_eq!(
+            std::fs::canonicalize(alias).expect("Plan C alias resolves"),
+            std::fs::canonicalize(canonical_db).expect("canonical DB resolves")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_plan_c_alias_refusal_precedes_legacy_copy_for_regular_file() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-alias-");
+        let root = fixture.path().join("Regular-Alias-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let legacy_db = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(legacy_db.parent().unwrap()).expect("legacy parent");
+        std::fs::write(&legacy_db, b"legacy-source").expect("legacy DB");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        let alias_name = crate::path_utils::plan_c_dir_name_from_root(&root).expect("alias name");
+        let alias_db = crate::path_utils::plan_c_global_db_path(&alias_name);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::fs::write(&alias_db, b"divergent-alias").expect("alias DB");
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("divergent alias must refuse startup"),
+        };
+
+        assert!(error.to_string().contains("split-brain"), "{error}");
+        assert!(!canonical_db.exists(), "canonical DB must remain absent");
+        assert!(
+            !canonical_db.parent().unwrap().exists(),
+            "canonical parent must remain absent"
+        );
+        assert_eq!(std::fs::read(&legacy_db).unwrap(), b"legacy-source");
+        assert_eq!(std::fs::read(&alias_db).unwrap(), b"divergent-alias");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn startup_plan_c_alias_refusal_precedes_legacy_copy_for_wrong_symlink() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("startup-alias-");
+        let root = fixture.path().join("Wrong-Symlink-Repo");
+        let app_home = fixture.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        std::fs::create_dir_all(root.join(".git")).expect("git root");
+        let legacy_db = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(legacy_db.parent().unwrap()).expect("legacy parent");
+        std::fs::write(&legacy_db, b"legacy-source").expect("legacy DB");
+        let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        let alias_name = crate::path_utils::plan_c_dir_name_from_root(&root).expect("alias name");
+        let alias_db = crate::path_utils::plan_c_global_db_path(&alias_name);
+        let wrong_db = fixture.path().join("wrong-target.db");
+        std::fs::write(&wrong_db, b"wrong-target").expect("wrong target");
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&wrong_db, &alias_db).expect("wrong symlink");
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        let cli = startup_test_cli();
+        let ctx = startup_test_context(&root, &app_home);
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let error = match run_startup_hygiene(&cli, &ctx, &global_db).await {
+            Err(error) => error,
+            Ok(_) => panic!("wrong-target alias must refuse startup"),
+        };
+
+        assert!(
+            error.to_string().contains("instead of canonical DB"),
+            "{error}"
+        );
+        assert!(!canonical_db.exists(), "canonical DB must remain absent");
+        assert!(
+            !canonical_db.parent().unwrap().exists(),
+            "canonical parent must remain absent"
+        );
+        assert_eq!(std::fs::read(&legacy_db).unwrap(), b"legacy-source");
+        assert_eq!(std::fs::read(&wrong_db).unwrap(), b"wrong-target");
+        assert_eq!(std::fs::read_link(&alias_db).unwrap(), wrong_db);
     }
 
     #[tokio::test]
@@ -1376,9 +2041,75 @@ mod tests {
     }
 
     #[test]
-    fn project_local_env_loading_is_disabled_for_no_project_db() {
-        assert!(!should_load_project_local_env(true));
-        assert!(should_load_project_local_env(false));
+    fn project_local_env_loading_skips_no_project_and_vault_commands() {
+        assert!(!should_load_project_local_env(&Commands::Serve, true));
+        assert!(!should_load_project_local_env(
+            &Commands::Vault {
+                action: tachi_bootstrap::cli::VaultAction::Status,
+            },
+            false
+        ));
+        assert!(should_load_project_local_env(&Commands::Serve, false));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn vault_exec_does_not_create_project_alias_from_cwd() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = tempfile::tempdir().expect("vault exec fixture");
+        let app_home = fixture.path().join("home");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("create synthetic git root");
+
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = crate::test_support::EnvRestore::remove("SIGIL_HOME");
+        let _app_home = crate::test_support::EnvRestore::remove("TACHI_APP_HOME");
+        let _tachi_root = crate::test_support::EnvRestore::remove("TACHI_ROOT");
+        let _memory_db = crate::test_support::EnvRestore::remove("MEMORY_DB_PATH");
+        let _cwd = crate::test_support::CwdRestore::set(&repo);
+
+        let cli = Cli {
+            daemon: false,
+            port: 6919,
+            global_db: Some(app_home.join("global/tachi-memory.db")),
+            project_db: None,
+            no_project_db: false,
+            allow_schema_migration: false,
+            profile: None,
+            gc_enabled: None,
+            gc_initial_delay_secs: None,
+            gc_interval_secs: None,
+            command: Some(Commands::Vault {
+                action: tachi_bootstrap::cli::VaultAction::Exec {
+                    stdin_password: false,
+                    keychain: false,
+                    password_file: None,
+                    insecure_password_file: false,
+                    consumer: None,
+                    require: vec![],
+                    // This regression test deliberately executes `/usr/bin/true`
+                    // without a configured Vault to prove the CLI path does not
+                    // derive a project alias from its cwd. Keep that synthetic
+                    // credential-less path explicit now that production defaults
+                    // to refusal.
+                    allow_unauthenticated: true,
+                    command: vec!["/usr/bin/true".to_string()],
+                },
+            }),
+        };
+
+        tokio_main(cli).expect("vault exec should run without project identity");
+
+        assert!(
+            !app_home.join("projects").exists(),
+            "vault exec must not create a Plan C alias from its launch cwd"
+        );
+        assert!(
+            !repo.join(".tachi").exists(),
+            "vault exec must not initialize a repo-local project DB"
+        );
     }
 
     #[test]

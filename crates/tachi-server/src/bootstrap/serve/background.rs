@@ -150,12 +150,14 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
     // proposal rows — `pending`/`approved` rows must stay TTL-less until
     // their own terminal write.
     for namespace in [
-        // `consolidate_ops::LIFECYCLE_PROPOSAL_NS` and
-        // `recall_proposal_ops::RECALL_CONFIG_PROPOSAL_NS` are module-private
-        // (not reachable from here) — hardcoded literals, source of truth:
-        // crates/tachi-server/src/facade_memory_ops/consolidate_ops.rs:42 and
+        // The lifecycle namespace moved into memcore and is `pub` there, so
+        // this reads the constant instead of a literal — one less string to
+        // drift.
+        memcore::store::memory_lifecycle::LIFECYCLE_PROPOSAL_NS,
+        // `recall_proposal_ops::RECALL_CONFIG_PROPOSAL_NS` is still
+        // module-private (not reachable from here) — hardcoded literal, source
+        // of truth:
         // crates/tachi-server/src/facade_memory_ops/recall_proposal_ops.rs:12.
-        "memory_lifecycle_proposals",
         "recall_config_proposals",
     ] {
         total += store
@@ -225,7 +227,7 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
         });
     }
     if maintain_named_projects {
-        for name in crate::path_utils::list_named_projects() {
+        for name in crate::path_utils::list_named_projects_in_home(&ckpt_server.tachi_home_dir()) {
             if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
                 store.checkpoint_wal_truncate().map_err(|e| e.to_string())
             }) {
@@ -684,6 +686,30 @@ mod tests {
                 .contains_key(&std::fs::canonicalize(foreign_db).expect("canonical foreign DB")),
             "manifest-wide maintenance must keep maintaining named-project DBs"
         );
+    }
+
+    #[test]
+    fn background_checkpoint_enumerates_server_home_after_environment_drift() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let server = crate::tests::make_server();
+        let fixture_db =
+            crate::tests::create_named_project_db(&server.tachi_home_dir(), "fixture-checkpoint");
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        let ambient_db =
+            crate::tests::create_named_project_db(ambient_home.path(), "ambient-checkpoint");
+        let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        run_wal_checkpoint(&server, true);
+
+        let attached = server
+            .db
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(attached.contains_key(&std::fs::canonicalize(fixture_db).expect("fixture DB")));
+        assert!(!attached.contains_key(&std::fs::canonicalize(ambient_db).expect("ambient DB")));
     }
 
     #[test]

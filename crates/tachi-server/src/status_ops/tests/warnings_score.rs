@@ -52,6 +52,7 @@ fn empty_snapshot(dbs: Vec<DbStatus>) -> StatusSnapshot {
         provider_probe_cache: None,
         project_warnings: Vec::new(),
         plan_c_split_brain: Vec::new(),
+        plan_c_alias_integrity: Vec::new(),
         health_deductions: Vec::new(),
         health_score: 95,
         disk: empty_disk_status(),
@@ -163,6 +164,28 @@ fn build_status_warnings_includes_project_warnings() {
             .iter()
             .any(|warning| warning.contains(".tachi/env.generated")),
         "project warning should be surfaced in status warnings, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn build_status_warnings_includes_plan_c_alias_integrity() {
+    let mut snapshot = empty_snapshot(vec![]);
+    snapshot.plan_c_alias_integrity = vec![crate::path_utils::PlanCAliasIntegrity::WrongTarget {
+        alias_db: "/tmp/plan-c/project.db".into(),
+        expected_db: "/repo/.tachi/tachi-memory.db".into(),
+        actual_db: "/foreign/tachi-memory.db".into(),
+    }];
+
+    let warnings = build_status_warnings(&snapshot, &daemon_running());
+
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.contains("Plan C alias integrity failure")
+                && warning.contains("/tmp/plan-c/project.db")
+                && warning.contains("/foreign/tachi-memory.db")
+                && warning.contains("/repo/.tachi/tachi-memory.db")
+        }),
+        "Plan C alias integrity warning should retain all conflicting paths, got: {warnings:?}"
     );
 }
 

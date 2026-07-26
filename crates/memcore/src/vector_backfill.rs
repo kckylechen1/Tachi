@@ -131,6 +131,15 @@ mod tests {
     use crate::MemoryStore;
     use rusqlite::params;
 
+    fn fixture_sql<T>(store: &MemoryStore, operation: impl FnOnce() -> T) -> T {
+        // Backfill membership needs rows production writes correctly reject
+        // (anchors and raw cache variants), so authorize fixture DML only.
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize vector backfill fixture SQL");
+        operation()
+    }
+
     fn insert_memory(
         store: &MemoryStore,
         id: &str,
@@ -141,26 +150,28 @@ mod tests {
         archived: bool,
     ) {
         let now = chrono::Utc::now().to_rfc3339();
-        store
-            .connection()
-            .execute(
-                "INSERT INTO memories (
-                    id, path, summary, text, importance, timestamp, category, topic,
-                    keywords, entities, source, scope, archived,
-                    created_at, updated_at, access_count, revision, metadata
-                 ) VALUES (?1, ?2, '', 'body', 0.5, ?3, 'fact', ?4,
-                           '[]', '[]', ?5, 'project', ?6,
-                           ?3, ?3, 0, 1, ?7)",
-                params![id, path, now, topic, source, archived, metadata],
-            )
-            .expect("insert memory");
+        fixture_sql(store, || {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO memories (
+                        id, path, summary, text, importance, timestamp, category, topic,
+                        keywords, entities, source, scope, archived,
+                        created_at, updated_at, access_count, revision, metadata
+                     ) VALUES (?1, ?2, '', 'body', 0.5, ?3, 'fact', ?4,
+                               '[]', '[]', ?5, 'project', ?6,
+                               ?3, ?3, 0, 1, ?7)",
+                    params![id, path, now, topic, source, archived, metadata],
+                )
+                .expect("insert memory");
+        });
     }
 
     #[test]
     fn vector_backfill_selection_and_counts_share_all_membership_classes() {
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("vector-backfill.db");
-        let mut store = MemoryStore::open(db_path.to_str().expect("utf8")).expect("open");
+        let store = MemoryStore::open(db_path.to_str().expect("utf8")).expect("open");
 
         insert_memory(&store, "ordinary", "/notes", "manual", "note", "{}", false);
         insert_memory(&store, "archived", "/notes", "manual", "note", "{}", true);
@@ -239,9 +250,15 @@ mod tests {
         );
 
         let vector = vec![0.0_f32; 1024];
-        assert!(store
-            .update_enrichment_fields("vector-present", None, Some(&vector), None, None, 1)
-            .expect("write vector"));
+        fixture_sql(&store, || {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
+                    params!["vector-present", crate::db::serialize_f32(&vector)],
+                )
+                .expect("seed vector-present fixture vector");
+        });
 
         let durable_scope = VectorBackfillScope::default();
         let durable_counts = store.vector_backfill_counts(durable_scope).expect("counts");

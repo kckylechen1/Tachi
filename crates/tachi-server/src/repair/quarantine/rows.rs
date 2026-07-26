@@ -16,7 +16,10 @@ pub(in crate::repair::quarantine) fn collect_quarantined(
     manifest: &Manifest,
 ) -> Result<Vec<QRow>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
-    for entry in select_dbs(manifest, None) {
+    for entry in &manifest.dbs {
+        crate::path_utils::manifest_db_leaf_exists(entry)?;
+    }
+    for entry in select_dbs(manifest, None)? {
         let conn = match Connection::open(&entry.path) {
             Ok(c) => c,
             Err(_) => continue,

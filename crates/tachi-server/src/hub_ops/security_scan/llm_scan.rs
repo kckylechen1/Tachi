@@ -21,11 +21,11 @@ pub(in crate::hub_ops) async fn scan_skill_definition_with_llm(
         return None;
     }
 
-    // Phase 2: SKILL_SECURITY_SCAN_BACKEND chooses how the LLM portion is
-    // executed. `claude_cli` is the default — call the pool first and fall
-    // back to the raw_api lane on Err. `raw_api` bypasses the pool entirely.
-    // `disabled` skips the LLM portion (callers still receive the static
-    // heuristic scan via merge_skill_scans).
+    // SKILL_SECURITY_SCAN_BACKEND selects the LLM policy. The historical
+    // `claude_cli` name runs the two-vote, provider-only, fail-closed path;
+    // `raw_api` makes one provider-only vote; `disabled` skips the LLM
+    // portion (callers still receive the static heuristic scan via
+    // merge_skill_scans). No selector launches a Claude subprocess here.
     let backend = resolve_security_scan_backend();
     if backend == SecurityScanBackend::Disabled {
         return None;
@@ -133,14 +133,12 @@ async fn two_vote_provider_scan(server: &MemoryServer, payload: &str) -> (String
     )
 }
 
-/// One strong-tier vote: provider (reasoning lane, no Claude-CLI-first
-/// behavior — see `LlmClient::call_reasoning_llm_provider_only`'s doc
-/// comment) first; on Err, the Claude CLI pool as a fallback for the
-/// rollout cycle (#1087 point 4). Both paths go through
-/// `ClaudePool::call`/`call_via_provider` so the run-directory artifact
-/// contract (`prompt.md`/`result.md`/`status.json`) is written on the
-/// provider-success path too, not just on CLI fallback — a successful
-/// vote is still an audit-surface event for a security scan (#1214 BUG#1).
+/// One strong-tier vote through the configured reasoning provider only.
+/// `llm_recorder` preserves the run-directory artifact contract
+/// (`prompt.md`/`result.md`/`status.json`) around the provider call. A provider
+/// error returns to `two_vote_provider_scan`, which substitutes a fail-closed
+/// sentinel when one vote is unavailable (or the fail-closed default when both
+/// votes fail), so this security path has no CLI fallback.
 async fn one_vote(
     server: &MemoryServer,
     payload: &str,

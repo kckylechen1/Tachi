@@ -242,14 +242,18 @@ pub(crate) fn list_available_named_projects(home: &std::path::Path) -> Vec<Strin
         .collect()
 }
 
-pub(crate) fn named_project_db_exists(name: &str) -> bool {
-    crate::MemoryServer::resolve_named_project_db_path(name)
+pub(crate) fn named_project_db_exists(server: &crate::MemoryServer, name: &str) -> bool {
+    server
+        .resolve_server_named_project_db_path(name)
         .map(|path| path.exists())
         .unwrap_or(false)
 }
 
-pub(crate) fn named_project_from_db_path(path: &std::path::Path) -> Option<String> {
-    crate::path_utils::named_project_from_path(path).or_else(|| {
+pub(crate) fn named_project_from_db_path_in_home(
+    path: &std::path::Path,
+    tachi_home: &std::path::Path,
+) -> Option<String> {
+    crate::path_utils::named_project_from_path_in_home(path, tachi_home).or_else(|| {
         crate::path_utils::plan_c_project_root_from_local_db(path)
             .and_then(|root| crate::path_utils::plan_c_dir_name_from_root(&root))
     })
@@ -323,18 +327,20 @@ pub(crate) fn resolve_effective_named_project(
     explicit: Option<&str>,
 ) -> Option<String> {
     if let Some(name) = explicit.map(str::trim).filter(|name| !name.is_empty()) {
-        if named_project_db_exists(name) {
+        if named_project_db_exists(server, name) {
             return Some(name.to_string());
         }
     }
     if server.has_project_db() {
         return server
             .project_db_path_buf()
-            .and_then(|path| named_project_from_db_path(path.as_path()))
-            .filter(|name| named_project_db_exists(name));
+            .and_then(|path| {
+                named_project_from_db_path_in_home(path.as_path(), &server.tachi_home_dir())
+            })
+            .filter(|name| named_project_db_exists(server, name));
     }
     if let Some(name) =
-        resolve_workspace_named_project().filter(|name| named_project_db_exists(name))
+        resolve_workspace_named_project().filter(|name| named_project_db_exists(server, name))
     {
         return Some(name);
     }
@@ -356,9 +362,9 @@ pub(crate) fn bound_project_label(server: &crate::MemoryServer) -> Option<String
     if !server.has_project_db() {
         return None;
     }
-    server
-        .project_db_path_buf()
-        .and_then(|path| named_project_from_db_path(path.as_path()))
+    server.project_db_path_buf().and_then(|path| {
+        named_project_from_db_path_in_home(path.as_path(), &server.tachi_home_dir())
+    })
 }
 
 pub(crate) fn infer_search_project(
@@ -383,7 +389,7 @@ fn infer_search_project_with(
         query,
         domain,
         config,
-        named_project_db_exists,
+        |name| crate::MemoryServer::resolve_named_project_db_path_in_home(name, home).is_ok(),
         list_available_named_projects(home),
     )
 }

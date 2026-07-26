@@ -240,7 +240,7 @@ pub(in crate::memory_search_ops::save_memory) fn apply_write_affinity(
         id_resolves_at_target,
         &config,
         bound_project_label(server),
-        named_project_db_exists,
+        |name| named_project_db_exists(server, name),
     )
 }
 
@@ -333,7 +333,7 @@ pub(crate) fn apply_write_affinity_for_domain(
         id_resolves_at_target,
         &config,
         bound_project_label(server),
-        named_project_db_exists,
+        |name| named_project_db_exists(server, name),
     )
 }
 

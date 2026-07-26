@@ -465,6 +465,8 @@ impl MemoryStore {
         &mut self,
         plan: &ExactDedupePlan,
     ) -> Result<ExactDedupeApplyResult, MemoryError> {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         plan.validate()?;
         let effective: String = self.conn.query_row(
             "SELECT file FROM pragma_database_list WHERE name='main'",
@@ -593,6 +595,8 @@ impl MemoryStore {
         &mut self,
         receipt: &ExactDedupeReceipt,
     ) -> Result<ExactDedupeRestoreResult, MemoryError> {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         receipt.validate()?;
         let effective: String = self.conn.query_row(
             "SELECT file FROM pragma_database_list WHERE name='main'",
@@ -683,12 +687,21 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn fixture_sql<T>(store: &MemoryStore, operation: impl FnOnce() -> T) -> T {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize exact-dedupe fixture SQL");
+        operation()
+    }
+
     fn insert(store: &MemoryStore, id: &str, path: &str, text: &str) {
-        store.conn.execute(
-            "INSERT INTO memories(id,path,text,timestamp,created_at,updated_at) VALUES(?1,?2,?3,'2026-01-01','2026-01-01','2026-01-01')",
-            params![id,path,text],
-        ).unwrap();
-        crate::db::sync_memories_symbolic_fts(&store.conn, id).unwrap();
+        fixture_sql(store, || {
+            store.conn.execute(
+                "INSERT INTO memories(id,path,text,timestamp,created_at,updated_at) VALUES(?1,?2,?3,'2026-01-01','2026-01-01','2026-01-01')",
+                params![id,path,text],
+            ).unwrap();
+            crate::db::sync_memories_symbolic_fts(&store.conn, id).unwrap();
+        });
     }
 
     fn insert_edge(store: &MemoryStore, source: &str, target: &str, relation: &str) {
@@ -828,13 +841,15 @@ mod tests {
             let other = format!("other-{index}");
             insert(&store, &preferred, &path, "same");
             insert(&store, &other, &path, "same");
-            store
-                .conn
-                .execute(
-                    &format!("UPDATE memories SET {assignment} WHERE id=?1"),
-                    [&preferred],
-                )
-                .unwrap();
+            fixture_sql(&store, || {
+                store
+                    .conn
+                    .execute(
+                        &format!("UPDATE memories SET {assignment} WHERE id=?1"),
+                        [&preferred],
+                    )
+                    .unwrap();
+            });
             let plan = store
                 .plan_exact_dedupe(":memory:".into(), None, Some(&path))
                 .unwrap();
@@ -898,14 +913,16 @@ mod tests {
             "path='/drifted'",
             "text='drifted'",
         ] {
-            store.conn.execute("UPDATE memories SET revision=1,archived=0,superseded_by=NULL,path='/b',text='same-b' WHERE id='b2'", []).unwrap();
-            store
-                .conn
-                .execute(
-                    &format!("UPDATE memories SET {assignment} WHERE id='b2'"),
-                    [],
-                )
-                .unwrap();
+            fixture_sql(&store, || {
+                store.conn.execute("UPDATE memories SET revision=1,archived=0,superseded_by=NULL,path='/b',text='same-b' WHERE id='b2'", []).unwrap();
+                store
+                    .conn
+                    .execute(
+                        &format!("UPDATE memories SET {assignment} WHERE id='b2'"),
+                        [],
+                    )
+                    .unwrap();
+            });
             assert!(
                 store.apply_exact_dedupe(&plan).is_err(),
                 "accepted {assignment}"
@@ -955,13 +972,15 @@ mod tests {
 
             insert(&store, id, "/WIKI/child", "same");
             if let Some(policy) = retention_policy {
-                store
-                    .conn
-                    .execute(
-                        "UPDATE memories SET retention_policy=?1 WHERE id=?2",
-                        params![policy, id],
-                    )
-                    .unwrap();
+                fixture_sql(&store, || {
+                    store
+                        .conn
+                        .execute(
+                            "UPDATE memories SET retention_policy=?1 WHERE id=?2",
+                            params![policy, id],
+                        )
+                        .unwrap();
+                });
             }
 
             let error = store.apply_exact_dedupe(&plan).unwrap_err();
@@ -982,13 +1001,15 @@ mod tests {
         let (_dir, identity, mut store) = disk_store();
         insert(&store, "winner", "/Wiki//child/", "same");
         insert(&store, "loser", "/wiki/child", "same");
-        store
-            .conn
-            .execute(
-                "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
-                [],
-            )
-            .unwrap();
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
+                    [],
+                )
+                .unwrap();
+        });
         let before_total: i64 = store
             .conn
             .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
@@ -1078,13 +1099,15 @@ mod tests {
         insert(&store, "loser", "/a", "same-a");
         insert(&store, "neighbor-in", "/n1", "unrelated");
         insert(&store, "neighbor-out", "/n2", "unrelated");
-        store
-            .conn
-            .execute(
-                "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
-                [],
-            )
-            .unwrap();
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
+                    [],
+                )
+                .unwrap();
+        });
 
         // A -> loser: should transfer to A -> winner.
         insert_edge(&store, "neighbor-in", "loser", "related_to");
@@ -1139,13 +1162,15 @@ mod tests {
         let (_dir, identity, mut store) = disk_store();
         insert(&store, "winner", "/a", "same-a");
         insert(&store, "loser", "/a", "same-a");
-        store
-            .conn
-            .execute(
-                "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
-                [],
-            )
-            .unwrap();
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
+                    [],
+                )
+                .unwrap();
+        });
         let plan = store
             .plan_exact_dedupe(identity, None, None)
             .expect("build plan");

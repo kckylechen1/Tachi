@@ -85,15 +85,13 @@ mod tests {
         let server =
             MemoryServer::new(global_db, Some(project_db)).expect("server with project db");
 
-        server
-            .with_project_store(|store| {
-                store
-                    .connection()
-                    .execute("DROP TABLE memories", [])
-                    .map_err(|e| format!("drop memories: {e}"))?;
-                Ok(())
-            })
-            .expect("break project memories table");
+        let project_db = server
+            .project_db_path_buf()
+            .expect("server should bind project database");
+        crate::test_support::with_unrestricted_fixture_connection(&project_db, |connection| {
+            connection.execute("DROP TABLE memories", []).map(|_| ())
+        })
+        .expect("break project memories table");
 
         let err = read_kanban_snapshot(&server, "dispatch-readback-failure")
             .expect_err("project read failure should not be treated as a missing card");

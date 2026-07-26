@@ -54,7 +54,7 @@ pub(crate) async fn handle_get_memory(
 
     if params.project.is_none() {
         if let Some(project_name) = crate::memory_search_ops::resolve_workspace_named_project() {
-            if crate::memory_search_ops::named_project_db_exists(&project_name) {
+            if crate::memory_search_ops::named_project_db_exists(server, &project_name) {
                 let project_entry =
                     server.with_named_project_store_read(&project_name, |store| {
                         store
@@ -261,9 +261,17 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "vec_available": server.project_vec_available(),
         })
     });
-    let plan_c_split_brain = project_db_path
-        .as_ref()
-        .and_then(|path| crate::path_utils::plan_c_split_brain_for_local_db(path.as_path()));
+    let (plan_c_split_brain, plan_c_alias_integrity) = match project_db_path.as_deref() {
+        Some(path) => {
+            match crate::path_utils::inspect_plan_c_alias_for_local_db_in_home(path, &app_home) {
+                crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => (Some(issue), None),
+                crate::path_utils::PlanCAliasInspection::Integrity(issue) => (None, Some(issue)),
+                crate::path_utils::PlanCAliasInspection::Absent
+                | crate::path_utils::PlanCAliasInspection::MatchingSymlink => (None, None),
+            }
+        }
+        None => (None, None),
+    };
     let binding = crate::memory_search_ops::library_binding_receipt(server, None);
 
     serde_json::to_string(&json!({
@@ -287,6 +295,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "project": project,
             "single_db_mode": !server.has_project_db(),
             "plan_c_split_brain": plan_c_split_brain,
+            "plan_c_alias_integrity": plan_c_alias_integrity,
         },
         "binding": binding,
         "env": {
@@ -312,6 +321,17 @@ pub(crate) async fn handle_delete_memory(
                 .map_err(|e| format!("Delete failed in project '{}': {}", project_name, e))
         })?;
         if project_deleted {
+            // #1413 concern 1: a delete changes what a subsequent search
+            // surfaces; bust the shared (global) recall cache AFTER the store
+            // commit returned. `invalidate_recall_cache_after_write` re-takes
+            // the global write gate via `with_global_store`; calling it from
+            // inside the `with_named_project_store` closure above would nest
+            // that gate inside the named-project gate (or recurse on it when
+            // the delete targets the global store), so it must run here.
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "delete_memory",
+            );
             return serde_json::to_string(&json!({
                 "deleted": true,
                 "db": "project",
@@ -326,6 +346,14 @@ pub(crate) async fn handle_delete_memory(
                 .delete(&params.id)
                 .map_err(|e| format!("Delete failed in global DB: {}", e))
         })?;
+        if global_deleted {
+            // #1413 concern 1: invalidate after the global store commit
+            // (never inside the closure above — see the note above).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "delete_memory",
+            );
+        }
         return serde_json::to_string(&json!({
             "deleted": global_deleted,
             "db": if global_deleted { "global" } else { "not_found" },
@@ -342,6 +370,12 @@ pub(crate) async fn handle_delete_memory(
                 .map_err(|e| format!("Delete failed: {}", e))
         })?;
         if deleted {
+            // #1413 concern 1: invalidate after the project-store commit
+            // (never inside the `with_project_store` closure above).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "delete_memory",
+            );
             return serde_json::to_string(
                 &json!({ "deleted": true, "db": "project", "id": params.id }),
             )
@@ -354,6 +388,12 @@ pub(crate) async fn handle_delete_memory(
             .delete(&params.id)
             .map_err(|e| format!("Delete failed: {}", e))
     })?;
+    if deleted {
+        // #1413 concern 1: invalidate after the global store commit (never
+        // inside the closure above — it would recurse on `global_rw_gate`).
+        let _ =
+            crate::memory_search_ops::invalidate_recall_cache_after_write(server, "delete_memory");
+    }
 
     serde_json::to_string(&json!({
         "deleted": deleted,
@@ -374,6 +414,15 @@ pub(crate) async fn handle_archive_memory(
                 .map_err(|e| format!("Archive failed in project '{}': {}", project_name, e))
         })?;
         if project_archived {
+            // #1413 concern 1: an archive changes what a subsequent (default
+            // non-archived) search surfaces; bust the shared (global) recall
+            // cache AFTER the store commit returned — never inside the
+            // `with_named_project_store` closure above (the invalidator
+            // re-takes the global write gate via `with_global_store`).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "archive_memory",
+            );
             return serde_json::to_string(&json!({
                 "archived": true,
                 "db": "project",
@@ -388,6 +437,14 @@ pub(crate) async fn handle_archive_memory(
                 .archive_memory(&params.id)
                 .map_err(|e| format!("Archive failed in global DB: {}", e))
         })?;
+        if global_archived {
+            // #1413 concern 1: invalidate after the global store commit
+            // (never inside the closure above).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "archive_memory",
+            );
+        }
         return serde_json::to_string(&json!({
             "archived": global_archived,
             "db": if global_archived { "global" } else { "not_found" },
@@ -404,6 +461,12 @@ pub(crate) async fn handle_archive_memory(
                 .map_err(|e| format!("Archive failed: {}", e))
         })?;
         if archived {
+            // #1413 concern 1: invalidate after the project-store commit
+            // (never inside the `with_project_store` closure above).
+            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                server,
+                "archive_memory",
+            );
             return serde_json::to_string(
                 &json!({ "archived": true, "db": "project", "id": params.id }),
             )
@@ -416,6 +479,12 @@ pub(crate) async fn handle_archive_memory(
             .archive_memory(&params.id)
             .map_err(|e| format!("Archive failed: {}", e))
     })?;
+    if archived {
+        // #1413 concern 1: invalidate after the global store commit (never
+        // inside the closure above — it would recurse on `global_rw_gate`).
+        let _ =
+            crate::memory_search_ops::invalidate_recall_cache_after_write(server, "archive_memory");
+    }
 
     serde_json::to_string(&json!({
         "archived": archived,
@@ -476,11 +545,56 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
         Ok(gc)
     })?;
     results.insert("global".into(), global_gc);
+    // #1413 concern 1: bust the shared (global) recall cache right after the
+    // GLOBAL gc closure returns — never inside it (the invalidator re-takes the
+    // global write gate via `with_global_store`, which would recurse on the
+    // non-reentrant `global_rw_gate`). Invalidating per-closure (not once at
+    // the end) closes the partial-success gap: if the project gc arm below
+    // returns Err, the global content change above is still reflected in the
+    // cache rather than left stale behind a now-aborted batch.
+    let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(server, "memory_gc");
 
     if server.has_project_db() {
         let project_gc = server.with_project_store(|store| gc_common_store(store, "project"))?;
         results.insert("project".into(), project_gc);
+        // #1413 concern 1: bust again after the PROJECT gc closure returns.
+        // Project writes can stale the shared (global) recall cache too (a
+        // project-scoped search caches its rows in the global recall_cache
+        // table, keyed by project), so this closure's commit needs its own
+        // bust — never inside the closure.
+        let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(server, "memory_gc");
     }
 
     serde_json::to_string(&results).map_err(|e| format!("Failed to serialize: {}", e))
+}
+
+#[cfg(test)]
+mod env_drift_tests {
+    use super::*;
+    use crate::test_support::EnvRestore;
+
+    #[tokio::test]
+    // The process-global TACHI_HOME override must remain serialized through
+    // the awaited runtime-info operation.
+    #[allow(clippy::await_holding_lock)]
+    async fn runtime_info_alias_health_stays_bound_after_environment_drift() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let project_root = crate::utils::find_project_git_root().expect("test project root");
+        let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+            .expect("test project identity");
+        let (server, project_db) = crate::tests::make_server_with_project_fixture(&project_name);
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        crate::tests::create_split_brain_alias(ambient_home.path(), &project_db);
+        let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        let output = handle_runtime_info(&server)
+            .await
+            .expect("runtime info after environment drift");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("runtime info JSON");
+
+        assert!(value["databases"]["plan_c_split_brain"].is_null());
+        assert!(value["databases"]["plan_c_alias_integrity"].is_null());
+    }
 }

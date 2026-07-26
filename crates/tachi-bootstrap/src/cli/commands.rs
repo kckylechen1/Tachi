@@ -64,7 +64,7 @@ pub enum Commands {
         /// Skip per-DB interactive confirmation prompts (requires --execute)
         #[arg(long)]
         yes: bool,
-        /// Override the migration target DB (defaults to ~/.tachi/global/memory.db)
+        /// Override the migration target DB (defaults to ~/.tachi/global/tachi-memory.db)
         #[arg(long, value_name = "PATH")]
         target_db: Option<PathBuf>,
     },
@@ -117,7 +117,7 @@ pub enum Commands {
     },
     /// Enumerate every known memory DB (global, manifest-addressed named
     /// projects resolved to their real backing file, and the current
-    /// workspace's `.tachi/memory.db`) and report each one's schema-version
+    /// workspace's `.tachi/tachi-memory.db`) and report each one's schema-version
     /// gap against this binary's `EXPECTED_SCHEMA_VERSION` (kckylechen1/tachi#1223).
     ///
     /// Plan-only (read-only, zero writes) by default. `--apply` authorizes
@@ -197,7 +197,7 @@ pub enum Commands {
         /// Target DB path (defaults to global DB)
         #[arg(long, value_name = "PATH", conflicts_with_all = ["project", "all_projects"])]
         db: Option<PathBuf>,
-        /// Target named project DB under ~/.tachi/projects/<name>/memory.db
+        /// Target named project DB under ~/.tachi/projects/<name>/tachi-memory.db
         #[arg(long, conflicts_with = "all_projects")]
         project: Option<String>,
         /// Run against every manifest-owned writable Tachi DB.
@@ -244,7 +244,8 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Run batch memory distill (raw API by default; Claude CLI when configured).
+    /// Run batch memory distill through the configured API lane. The legacy
+    /// backend selector remains accepted but never launches Claude CLI.
     Distill {
         #[command(subcommand)]
         action: DistillAction,

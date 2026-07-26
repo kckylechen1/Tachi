@@ -53,6 +53,7 @@ pub(crate) struct StatusSnapshot {
     pub(crate) provider_probe_cache: Option<status_health::ProviderProbeCache>,
     pub(crate) project_warnings: Vec<String>,
     pub(crate) plan_c_split_brain: Vec<crate::path_utils::PlanCSplitBrain>,
+    pub(crate) plan_c_alias_integrity: Vec<crate::path_utils::PlanCAliasIntegrity>,
     pub(crate) health_deductions: Vec<status_health::HealthDeduction>,
     pub(crate) health_score: u8,
     pub(crate) disk: disk::DiskStatus,

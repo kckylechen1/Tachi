@@ -95,6 +95,68 @@ impl super::super::LlmClient {
             .ok_or_else(|| self.provider_secret_unavailable_error(keys))
     }
 
+    /// Select the same currently usable credential as the normal provider
+    /// path without advancing its round-robin cursor, pruning state, or
+    /// persisting health. This is reserved for the observation-only auth
+    /// clearance probe.
+    pub(in crate::llm) fn selected_secret_readonly(
+        &self,
+        keys: &[&str],
+    ) -> Option<SelectedProviderSecret> {
+        let now = Instant::now();
+        let now_utc = Self::now_utc();
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let vault_value = keys.iter().find_map(|key| {
+            let entries = state.secrets.get(*key)?;
+            if entries.is_empty() {
+                return None;
+            }
+            let start = *state.indices.get(*key).unwrap_or(&0);
+            (0..entries.len()).find_map(|offset| {
+                let entry = &entries[(start + offset) % entries.len()];
+                let in_active_cooldown = state
+                    .cooldowns
+                    .get(&entry.key_id)
+                    .is_some_and(|until| *until > now);
+                let (availability, remaining_seconds) =
+                    Self::key_health_blocked_in_state(&state, key, &entry.key_id, now_utc);
+                (!entry.value.trim().is_empty()
+                    && !in_active_cooldown
+                    && !Self::availability_is_unusable(availability, remaining_seconds))
+                .then(|| SelectedProviderSecret {
+                    logical_name: (*key).to_string(),
+                    key_id: entry.key_id.clone(),
+                    value: entry.value.trim().to_string(),
+                })
+            })
+        });
+
+        vault_value.or_else(|| {
+            keys.iter().find_map(|key| {
+                let in_active_cooldown =
+                    state.cooldowns.get(*key).is_some_and(|until| *until > now);
+                let (availability, remaining_seconds) =
+                    Self::key_health_blocked_in_state(&state, key, key, now_utc);
+                if in_active_cooldown
+                    || Self::availability_is_unusable(availability, remaining_seconds)
+                {
+                    return None;
+                }
+                Self::first_env(&[*key])
+                    .filter(|value| !crate::provider_names::is_vault_alias(value))
+                    .map(|value| SelectedProviderSecret {
+                        logical_name: (*key).to_string(),
+                        key_id: (*key).to_string(),
+                        value,
+                    })
+            })
+        })
+    }
+
     pub fn has_configured_secret(&self, keys: &[&str]) -> bool {
         self.select_secret(keys).is_some()
     }

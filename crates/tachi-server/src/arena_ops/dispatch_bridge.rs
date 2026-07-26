@@ -96,7 +96,11 @@ pub(super) fn dispatch_params_for_mission(
     })
 }
 
-pub(super) fn completion_draft_for_mission(status: &Value, result_path: &Path) -> Value {
+pub(super) fn completion_draft_for_mission(
+    status: &Value,
+    result_path: &Path,
+    result: &str,
+) -> Value {
     let task = status
         .get("task")
         .and_then(Value::as_str)
@@ -106,7 +110,7 @@ pub(super) fn completion_draft_for_mission(status: &Value, result_path: &Path) -
         .and_then(Value::as_str)
         .or_else(|| status.get("harness").and_then(Value::as_str))
         .unwrap_or("arena-worker");
-    let inferred_outcome = infer_completion_outcome(result_path);
+    let inferred_outcome = infer_completion_outcome(result);
     let mut arguments = serde_json::Map::new();
     arguments.insert("action".into(), json!("complete"));
     arguments.insert(
@@ -154,9 +158,8 @@ pub(super) fn completion_draft_for_mission(status: &Value, result_path: &Path) -
     Value::Object(draft)
 }
 
-pub(super) fn infer_completion_outcome(result_path: &Path) -> Option<&'static str> {
-    let raw = std::fs::read_to_string(result_path).ok()?;
-    let lower = raw.to_ascii_lowercase();
+pub(super) fn infer_completion_outcome(result: &str) -> Option<&'static str> {
+    let lower = result.to_ascii_lowercase();
     if lower.contains("exit_code: 0") || lower.contains("status: success") {
         Some("success")
     } else if lower.contains("exit_code:") && !lower.contains("exit_code: 0") {

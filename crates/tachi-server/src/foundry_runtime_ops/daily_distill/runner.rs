@@ -41,9 +41,9 @@ pub async fn run_daily_batch_distill_with_options(
 ) -> Result<DistillBatchReport, String> {
     let mut report = DistillBatchReport::default();
 
-    let bound_name = server
-        .project_db_path_buf()
-        .and_then(|p| crate::path_utils::named_project_for_db_path(&p));
+    let bound_name = server.project_db_path_buf().and_then(|p| {
+        crate::path_utils::named_project_for_db_path_in_home(&p, &server.tachi_home_dir())
+    });
 
     // 1. The daemon's bound project DB (existing behavior).
     if server.has_project_db() {
@@ -59,7 +59,7 @@ pub async fn run_daily_batch_distill_with_options(
     }
 
     // 2. Every other named-project DB in the manifest.
-    for name in crate::path_utils::list_named_projects() {
+    for name in crate::path_utils::list_named_projects_in_home(&server.tachi_home_dir()) {
         if name.eq_ignore_ascii_case("wiki") {
             continue; // wiki has its own curation path
         }
@@ -381,11 +381,12 @@ async fn apply_parsed_groups(
     }
 }
 
-/// Run the distill batch call via the provider executor. The run-directory
+/// Run the daily distill batch through the API recorder. The run-directory
 /// artifact contract (`prompt.md`/`result.md`/`status.json`) is preserved,
-/// since the path goes through `LlmCallRecorder::record_call`. #1261 step
-/// 2/3 removed the CLI fallback branch; step 3/3 renamed the recorder
-/// (formerly `ClaudePool::call_via_provider`) to its executor-agnostic name.
+/// since the path goes through `LlmCallRecorder::record_call`. The
+/// `call_claude_batch` name and `claude_cli` selector are retained for
+/// compatibility, but this path invokes `call_distill_llm` only and never a
+/// Claude subprocess.
 pub(crate) async fn call_claude_batch(
     server: &MemoryServer,
     label: &str,
@@ -494,4 +495,41 @@ fn derive_project_label(server: &MemoryServer) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "project".to_string())
+}
+
+#[cfg(test)]
+mod env_drift_tests {
+    use super::*;
+    use crate::test_support::EnvRestore;
+
+    #[tokio::test]
+    // The process-global TACHI_HOME override must remain serialized through
+    // the awaited distill operation.
+    #[allow(clippy::await_holding_lock)]
+    async fn daily_distill_enumerates_server_home_after_environment_drift() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let project_root = crate::utils::find_project_git_root().expect("test project root");
+        let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+            .expect("test project identity");
+        let (server, _project_db) = crate::tests::make_server_with_project_fixture(&project_name);
+        crate::tests::create_named_project_db(&server.tachi_home_dir(), "fixture-distill");
+        let ambient_home = tempfile::tempdir().expect("ambient home");
+        let ambient_db =
+            crate::tests::create_named_project_db(ambient_home.path(), "ambient-distill");
+        std::fs::write(&ambient_db, b"not a SQLite database").expect("corrupt ambient project DB");
+        let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
+
+        let report = run_daily_batch_distill_with_options(&server, false)
+            .await
+            .expect("daily distill after environment drift");
+
+        assert_eq!(report.projects_scanned, 2);
+        assert!(
+            report.errors.is_empty(),
+            "ambient project must not be scanned: {:?}",
+            report.errors
+        );
+    }
 }

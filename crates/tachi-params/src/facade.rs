@@ -470,7 +470,7 @@ pub struct TachiWikiParams {
 
 fn tachi_component_action_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
     string_enum_schema(
-        &["list", "show", "check", "plan"],
+        action_inventory::TACHI_COMPONENT_ACTIONS,
         "Component governance action.",
         gen,
     )

@@ -576,9 +576,12 @@ async fn render_one(
         }
         println!();
     }
-    if !snapshot.plan_c_split_brain.is_empty() {
+    if !snapshot.plan_c_split_brain.is_empty() || !snapshot.plan_c_alias_integrity.is_empty() {
         println!("Plan C Warnings");
         for issue in &snapshot.plan_c_split_brain {
+            println!("  [!] {}", issue.warning_message());
+        }
+        for issue in &snapshot.plan_c_alias_integrity {
             println!("  [!] {}", issue.warning_message());
         }
         println!();

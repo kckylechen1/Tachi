@@ -74,7 +74,7 @@ impl LessonCandidateStatusV1 {
 /// field and this leaf's contract names one explicitly; reusing it would
 /// either drop a required field or force an unrelated leaf's type to grow a
 /// field it doesn't need.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LessonEngineReceiptV1 {
     pub requested_role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,6 +181,9 @@ pub struct LessonCandidateV1 {
     /// criterion 4 ("cites its immutable source refs") and the forge
     /// refuses to construct one (see `tachi-server::lesson_forge_ops::forge`).
     pub refs: Vec<EvidenceRefV1>,
+    /// Source key. Route-based pilot sources use the canonical
+    /// `<route>:<stable-id>` form so provenance stays collision-free without
+    /// adding a required public field to this shipped struct-literal surface.
     pub source_row_id: String,
     pub source_revision: String,
     pub coverage: LessonCoverageV1,

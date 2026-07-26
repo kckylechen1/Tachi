@@ -30,6 +30,9 @@ pub(crate) async fn handle_tachi_wiki_write(
     let use_named_project =
         requested_project.is_some() || default_named_project_available(server, &project_name);
     let target_project = use_named_project.then(|| project_name.clone());
+    if let Some(project) = target_project.as_deref() {
+        server.prepare_named_project_store_for_write(project)?;
+    }
     let summary = params
         .summary
         .clone()
@@ -54,13 +57,8 @@ pub(crate) async fn handle_tachi_wiki_write(
     } else {
         Vec::new()
     };
-    let layer_metadata = wiki_layer_metadata(
-        &path,
-        &params.scope,
-        target_project.as_deref(),
-        &references,
-        params.metadata.as_ref(),
-    );
+    let layer_metadata =
+        wiki_layer_metadata(&path, &params.scope, target_project.as_deref(), &references);
     let mut wiki_metadata = params.metadata.clone().unwrap_or_else(|| json!({}));
     if !wiki_metadata.is_object() {
         return Err("metadata must be a JSON object when supplied for wiki write".to_string());
@@ -70,6 +68,8 @@ pub(crate) async fn handle_tachi_wiki_write(
         // top-level reference shape. Nested source_refs belong to their
         // containing metadata and are intentionally unaffected.
         obj.remove("source_refs");
+        obj.remove("review_receipt");
+        obj.remove("source_bundle_hash");
         obj.insert("wiki".to_string(), json!(true));
         obj.insert("wiki_title".to_string(), json!(params.title.clone()));
         obj.insert("user_force".to_string(), json!(params.force));
@@ -90,13 +90,6 @@ pub(crate) async fn handle_tachi_wiki_write(
     })?;
     if let Some(existing) = &existing {
         if let Some(obj) = wiki_metadata.as_object_mut() {
-            // Metadata patch merging has no delete operation. Tombstone a
-            // legacy top-level source_refs key only when this update is
-            // replacing a row that actually has one, so stale refs cannot
-            // survive and become the preferred reader's fallback.
-            if existing.metadata.get("source_refs").is_some() {
-                obj.insert("source_refs".to_string(), Value::Null);
-            }
             obj.insert("wiki_update_of".to_string(), json!(existing.id));
             obj.insert(
                 "wiki_previous_revision".to_string(),
@@ -106,44 +99,75 @@ pub(crate) async fn handle_tachi_wiki_write(
     }
     let update_id = existing.as_ref().map(|entry| entry.id.clone());
     let existing_revision = existing.as_ref().map(|entry| entry.revision).unwrap_or(1);
+    let captured_at = Utc::now().to_rfc3339();
+    let mut reference_mutations = build_evidence_refs_v1(&references, &captured_at)
+        .into_iter()
+        .map(|reference| {
+            let target_kind = reference
+                .target_kind
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| format!("serialize wiki target kind: {error}"))?
+                .and_then(|value| value.as_str().map(str::to_string));
+            memcore::db::ValidatedReferenceMutation::evidence(
+                reference.target_ref,
+                reference.captured_at,
+                target_kind,
+            )
+            .map_err(|error| format!("validate wiki reference mutation: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if references.is_empty() {
+        reference_mutations
+            .push(memcore::db::ValidatedReferenceMutation::ensure_empty_evidence_refs_v1());
+    }
+    if existing
+        .as_ref()
+        .is_some_and(|entry| entry.metadata.get("source_refs").is_some())
+    {
+        reference_mutations
+            .push(memcore::db::ValidatedReferenceMutation::tombstone_legacy_source_refs());
+    }
 
-    let save_result = handle_save_memory(
-        server,
-        SaveMemoryParams {
-            text: entry_text.clone(),
-            summary,
-            path: path.clone(),
-            importance: params.importance.clamp(0.0, 1.0),
-            category: params.category,
-            topic: topic.clone(),
-            keywords,
-            persons: vec![],
-            entities: params.entities,
-            location: String::new(),
-            scope: params.scope,
-            vector: None,
-            id: update_id.clone(),
-            force: true,
-            auto_link: true,
-            project: target_project.clone(),
-            // #1041 F2: server-internal, programmatic construction (wiki
-            // writes are their own write path, out of #1041 S1's scope per
-            // F1) — `target_project.is_some()` preserves the exact pre-F2
-            // gate behavior (this is not the raw client `project=`, it may
-            // already be a resolved "wiki" default, but it was always this
-            // call's own deliberate placement, never a session-identity
-            // transport default).
-            project_explicit: target_project.is_some(),
-            retention_policy: Some(params.retention_policy),
-            domain: domain.clone(),
-            timestamp: None,
-            valid_from: None,
-            valid_until: None,
-            metadata: Some(wiki_metadata),
-            emit_continuity: false,
-        },
-    )
-    .await?;
+    let save_result =
+        crate::memory_search_ops::handle_save_memory_with_authorized_reference_mutations(
+            server,
+            SaveMemoryParams {
+                text: entry_text.clone(),
+                summary,
+                path: path.clone(),
+                importance: params.importance.clamp(0.0, 1.0),
+                category: params.category,
+                topic: topic.clone(),
+                keywords,
+                persons: vec![],
+                entities: params.entities,
+                location: String::new(),
+                scope: params.scope,
+                vector: None,
+                id: update_id.clone(),
+                force: true,
+                auto_link: true,
+                project: target_project.clone(),
+                // #1041 F2: server-internal, programmatic construction (wiki
+                // writes are their own write path, out of #1041 S1's scope per
+                // F1) — `target_project.is_some()` preserves the exact pre-F2
+                // gate behavior (this is not the raw client `project=`, it may
+                // already be a resolved "wiki" default, but it was always this
+                // call's own deliberate placement, never a session-identity
+                // transport default).
+                project_explicit: target_project.is_some(),
+                retention_policy: Some(params.retention_policy),
+                domain: domain.clone(),
+                timestamp: None,
+                valid_from: None,
+                valid_until: None,
+                metadata: Some(wiki_metadata),
+                emit_continuity: false,
+            },
+            reference_mutations,
+        )
+        .await?;
 
     let mut response: Value =
         serde_json::from_str(&save_result).map_err(|e| format!("parse wiki save response: {e}"))?;

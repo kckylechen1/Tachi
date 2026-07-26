@@ -25,7 +25,8 @@ pub(in crate::memory_search_ops::save_memory) fn format_save_error(
     }
 
     let db_path = match named_project {
-        Some(name) => crate::MemoryServer::resolve_named_project_db_path(name)
+        Some(name) => server
+            .resolve_server_named_project_db_path(name)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| format!("<named project: {name}>")),
         None => match target_db {

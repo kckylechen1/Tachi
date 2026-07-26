@@ -264,7 +264,7 @@ Tachi requires at minimum one API key:
 | `VOYAGE_API_KEY` | **Yes** | [Voyage AI](https://dash.voyageai.com/) | Vector embeddings (Voyage-4) |
 | `SILICONFLOW_API_KEY` | Recommended | [SiliconFlow](https://siliconflow.cn/) | Fact extraction, summaries, foundry distillation (Qwen3.5-27B) |
 
-Phase 2 simplified the lane model. Background skill and foundry calls now prefer the **Claude CLI pool** and fall back to `SILICONFLOW_*` on error. For most deployments, only `VOYAGE_API_KEY` + `SILICONFLOW_API_KEY` are needed.
+Phase 2 simplified the background lanes. Extraction, summary, and daily distillation go through configured OpenAI-compatible API lanes; a distinct configured provider fallback is tried before loud `LANE_OUTAGE` recording when a chain is exhausted. `FOUNDRY_DISTILL_BACKEND=claude_cli` remains a compatibility selector but still calls the API distill lane, not a Claude subprocess. Ordinary reasoning/chat is separate: it tries Claude CLI first, then the configured API fallback; provider-only callers intentionally omit CLI. For most deployments, only `VOYAGE_API_KEY` + `SILICONFLOW_API_KEY` are needed.
 
 ### Optional Per-Lane Overrides
 
@@ -273,9 +273,9 @@ For advanced setups, you can still route different LLM tasks to different provid
 | Env Prefix | Purpose | Notes |
 |---|---|---|
 | `EXTRACT_*` | Structured fact extraction | Falls back to `SILICONFLOW_*` when omitted. |
-| `DISTILL_*` | Compaction & rollups | **Deprecated in Phase 2**. Kept for backward compatibility only. |
+| `DISTILL_*` | Compaction & rollups | Explicit API-lane override. API-key precedence is `DISTILL_*`, then DeepSeek, reasoning, ZAI/BigModel, extract, and SiliconFlow; a fallback requires a distinct `DISTILL_FALLBACK_*` or SiliconFlow provider. |
 | `SUMMARY_*` | Fast L0 summaries | Falls back to `SILICONFLOW_*` when omitted. |
-| `REASONING_*` | Skill evolution, planning | **Deprecated in Phase 2**. Kept for backward compatibility only. |
+| `REASONING_*` | Skill evolution, planning | Ordinary reasoning/chat tries Claude CLI before this API lane; provider-only callers bypass it. API-key precedence is DeepSeek, `REASONING_*`, ZAI/BigModel, distill, extract, and SiliconFlow; a fallback requires a distinct `REASONING_FALLBACK_*` or SiliconFlow provider. |
 
 Each prefix supports `_API_KEY`, `_BASE_URL`, and `_MODEL` suffixes.
 
@@ -609,6 +609,36 @@ Safety defaults:
 - `tachi doctor` warns if `.tachi/env.generated` is git-tracked.
 
 Add `.tachi/env.generated` to `.gitignore`. Keep only `.tachi/vault.env` (vault aliases) in version control.
+
+#### Vault exec CLI (`tachi vault exec`)
+
+Run a child command with Vault-delivered credentials injected into its
+environment. Vault only fills env names the caller did **not** already set
+(the caller's own value always wins), injection diagnostics are name-only,
+and the child's exit code propagates.
+
+```bash
+# Require ZHIPUAI_API_KEY to be resolvable before spawning (fail-loud, no run)
+tachi vault exec --keychain --require ZHIPUAI_API_KEY -- opencode run
+
+# Run with whatever Vault can resolve; no hard requirement
+tachi vault exec --keychain -- cargo test
+```
+
+Safety default (#1413 concern 4): **if the Vault cannot be unlocked or its
+environment cannot be loaded, `vault exec` refuses to spawn the child and
+exits nonzero before exec** — a caller that only checks exit status never
+silently gets a credential-less run. This is a change from the earlier
+fail-open behavior, which ran the child with the inherited environment on
+such a failure.
+
+- `--require NAME,NAME` — comma-separated env names that must be present
+  (from Vault **or** the caller's existing environment) before spawning.
+  `--require` always wins: a required name that cannot be satisfied fails
+  before spawn regardless of the flag below.
+- `--allow-unauthenticated` — opt back in to the inherited-environment path
+  when the Vault is unavailable **and** no `--require` names were set. Use
+  this only when a credential-less run is explicitly acceptable.
 
 #### DLQ and dispatch safety
 
