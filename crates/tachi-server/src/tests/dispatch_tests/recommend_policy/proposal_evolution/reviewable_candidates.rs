@@ -1,4 +1,100 @@
 use super::*;
+use crate::MemoryServer;
+
+async fn mint_loadout_v3_fixture(server: &MemoryServer, fixture: &str) -> String {
+    for idx in 0..10 {
+        let agent = if idx < 5 { "claude" } else { "claude-alt" };
+        server
+            .tachi_complete(Parameters(TachiCompleteParams {
+                task_id: Some(format!("loadout-v3-{fixture}-{idx}")),
+                task: "Plan a dispatch loadout evolution slice".to_string(),
+                agent: agent.to_string(),
+                outcome: "success".to_string(),
+                task_type: Some("plan_request".to_string()),
+                profile: Some("claude_plan".to_string()),
+                risk: Some("medium".to_string()),
+                duration_ms: Some(20_000),
+                skills_used: vec!["skill:planning-ux-review".to_string()],
+                cost_tokens: Some(1200),
+                cost_usd: Some(0.03),
+                quality_score: Some(0.92),
+                notes: Some(format!("Seed {fixture} loadout identity fixture.")),
+                trajectory: None,
+                diff: None,
+                worktree: None,
+                subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
+                dispatch_id: None,
+                flow_id: Some(format!("flow-loadout-v3-{fixture}")),
+                issue_ref: Some("kckylechen1/tachi#1431".to_string()),
+                pr_ref: None,
+                evidence_refs: vec![
+                    "docs/engineering/architecture/dispatch-policy-learning-spec.md".to_string(),
+                ],
+                tests_run: vec!["cargo test -p tachi-server dispatch".to_string()],
+                diff_present: Some(false),
+                scope: Some("project".to_string()),
+                project: None,
+                format: None,
+                signatures: Vec::new(),
+                rulings: Vec::new(),
+                adjudication: None,
+                eval_run_ids: Vec::new(),
+            }))
+            .await
+            .expect("seed loadout identity fixture");
+    }
+
+    let mut proposal_params = task_params("proposals");
+    proposal_params.limit = Some(50);
+    let raw = server
+        .tachi_task(Parameters(proposal_params))
+        .await
+        .expect("proposals should succeed");
+    let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
+    proposals["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|proposal| {
+                proposal["kind"] == json!("loadout_evolution")
+                    && proposal["operation"] == json!("promote_observed_skill_to_signature")
+            })
+        })
+        .and_then(|proposal| proposal["proposal_id"].as_str())
+        .expect("minted loadout proposal id")
+        .to_string()
+}
+
+async fn approve_loadout_v3_fixture(server: &MemoryServer, proposal_id: &str) {
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(proposal_id.to_string());
+    review.review_status = Some("approved".to_string());
+    server
+        .tachi_task(Parameters(review))
+        .await
+        .expect("loadout proposal approval should succeed");
+}
+
+fn read_loadout_state(server: &MemoryServer, namespace: &str, key: &str) -> Option<(String, u32)> {
+    server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(namespace, key)
+                .map_err(|err| err.to_string())
+        })
+        .expect("read loadout fixture state")
+}
+
+fn install_loadout_trigger(server: &MemoryServer, sql: &str) {
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute_batch(sql)
+                .map_err(|err| err.to_string())
+        })
+        .expect("install loadout transaction trigger");
+}
 
 #[tokio::test]
 async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() {
@@ -890,5 +986,385 @@ async fn loadout_review_refuses_evidence_drift_without_partial_mutation() {
     assert_eq!(
         before_overlay, after_overlay,
         "a refused review must leave overlay bytes and state version unchanged"
+    );
+}
+
+#[tokio::test]
+async fn loadout_v3_review_refuses_baseline_display_tamper_without_mutation() {
+    let server = make_server();
+    let proposal_id = mint_loadout_v3_fixture(&server, "baseline-display-tamper").await;
+
+    server
+        .with_global_store(|store| {
+            let (raw, _version) = store
+                .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
+                .map_err(|err| err.to_string())?
+                .expect("loadout proposal row");
+            let mut value: serde_json::Value = serde_json::from_str(&raw).expect("proposal JSON");
+            value["current_loadout"]["signature_skills"] =
+                json!(["skill:attacker-controlled-baseline"]);
+            store
+                .set_state(
+                    tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+                    &proposal_id,
+                    &serde_json::to_string(&value).expect("serialize tampered proposal"),
+                )
+                .map_err(|err| err.to_string())
+        })
+        .expect("tamper reviewer-visible baseline");
+
+    let proposal_before = read_loadout_state(
+        &server,
+        tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+        &proposal_id,
+    );
+    let overlay_before = read_loadout_state(
+        &server,
+        tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+        "claude_plan",
+    );
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = server
+        .tachi_task(Parameters(review))
+        .await
+        .expect_err("baseline display tamper must refuse review");
+    assert!(
+        err.contains("display_copy_drift"),
+        "expected display_copy_drift refusal, got: {err}"
+    );
+    assert_eq!(
+        proposal_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+            &proposal_id,
+        ),
+        "refused baseline-tamper review must preserve proposal bytes and version"
+    );
+    assert_eq!(
+        overlay_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+            "claude_plan",
+        ),
+        "refused baseline-tamper review must preserve overlay bytes and version"
+    );
+}
+
+#[tokio::test]
+async fn loadout_v3_review_refuses_live_overlay_drift_without_mutation() {
+    let server = make_server();
+    let proposal_id = mint_loadout_v3_fixture(&server, "overlay-drift-review").await;
+    server
+        .with_global_store(|store| {
+            store
+                .set_state(
+                    tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+                    "claude_plan",
+                    r#"{"kind":"profile_card_loadout_overlay","profile":"claude_plan","source_proposal_ids":["concurrent-review-writer"]}"#,
+                )
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        })
+        .expect("drift live overlay before review");
+
+    let proposal_before = read_loadout_state(
+        &server,
+        tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+        &proposal_id,
+    );
+    let overlay_before = read_loadout_state(
+        &server,
+        tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+        "claude_plan",
+    );
+    let mut review = task_params("review_proposal");
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    let err = server
+        .tachi_task(Parameters(review))
+        .await
+        .expect_err("overlay drift before review must refuse");
+    assert!(
+        err.contains("source_state_drift"),
+        "expected source_state_drift refusal, got: {err}"
+    );
+    assert_eq!(
+        proposal_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+            &proposal_id,
+        ),
+        "refused overlay-drift review must preserve proposal bytes and version"
+    );
+    assert_eq!(
+        overlay_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+            "claude_plan",
+        ),
+        "refused overlay-drift review must preserve overlay bytes and version"
+    );
+}
+
+#[tokio::test]
+async fn loadout_v3_apply_refuses_live_overlay_drift_without_mutation() {
+    let server = make_server();
+    let proposal_id = mint_loadout_v3_fixture(&server, "overlay-drift-apply").await;
+    approve_loadout_v3_fixture(&server, &proposal_id).await;
+    server
+        .with_global_store(|store| {
+            store
+                .set_state(
+                    tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+                    "claude_plan",
+                    r#"{"kind":"profile_card_loadout_overlay","profile":"claude_plan","source_proposal_ids":["concurrent-apply-writer"]}"#,
+                )
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        })
+        .expect("drift live overlay before apply");
+
+    let proposal_before = read_loadout_state(
+        &server,
+        tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+        &proposal_id,
+    );
+    let overlay_before = read_loadout_state(
+        &server,
+        tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+        "claude_plan",
+    );
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("overlay drift before apply must refuse");
+    assert!(
+        err.contains("source_state_drift"),
+        "expected source_state_drift refusal, got: {err}"
+    );
+    assert_eq!(
+        proposal_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+            &proposal_id,
+        ),
+        "refused overlay-drift apply must preserve proposal bytes and version"
+    );
+    assert_eq!(
+        overlay_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+            "claude_plan",
+        ),
+        "refused overlay-drift apply must preserve overlay bytes and version"
+    );
+}
+
+#[tokio::test]
+async fn loadout_v3_apply_refuses_stale_overlay_cas_without_lost_update() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            store
+                .set_state(
+                    tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+                    "claude_plan",
+                    r#"{"kind":"profile_card_loadout_overlay","profile":"claude_plan","source_proposal_ids":["preexisting-overlay"]}"#,
+                )
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        })
+        .expect("seed overlay before proposal mint");
+    let proposal_id = mint_loadout_v3_fixture(&server, "stale-overlay-cas").await;
+    approve_loadout_v3_fixture(&server, &proposal_id).await;
+    install_loadout_trigger(
+        &server,
+        &format!(
+            r#"
+            CREATE TRIGGER loadout_stale_overlay_after_proposal_cas
+            AFTER UPDATE ON hard_state
+            WHEN OLD.namespace = '{proposal_ns}' AND OLD.key = '{proposal_id}'
+            BEGIN
+                UPDATE hard_state
+                SET version = version + 1
+                WHERE namespace = '{overlay_ns}' AND key = 'claude_plan';
+            END;
+            "#,
+            proposal_ns = tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+            overlay_ns = tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+        ),
+    );
+
+    let proposal_before = read_loadout_state(
+        &server,
+        tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+        &proposal_id,
+    );
+    let overlay_before = read_loadout_state(
+        &server,
+        tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+        "claude_plan",
+    );
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("stale overlay CAS must refuse apply");
+    assert!(
+        err.contains("stale_overlay_version"),
+        "expected stale_overlay_version refusal, got: {err}"
+    );
+    assert_eq!(
+        proposal_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+            &proposal_id,
+        ),
+        "stale overlay CAS must roll back proposal stamp bytes and version"
+    );
+    assert_eq!(
+        overlay_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+            "claude_plan",
+        ),
+        "stale overlay CAS must roll back the competing overlay version bump"
+    );
+}
+
+#[tokio::test]
+async fn loadout_v3_forced_overlay_write_failure_rolls_back_both_rows() {
+    let server = make_server();
+    let proposal_id = mint_loadout_v3_fixture(&server, "overlay-write-failure").await;
+    approve_loadout_v3_fixture(&server, &proposal_id).await;
+    install_loadout_trigger(
+        &server,
+        &format!(
+            r#"
+            CREATE TRIGGER loadout_force_overlay_insert_failure
+            BEFORE INSERT ON hard_state
+            WHEN NEW.namespace = '{overlay_ns}' AND NEW.key = 'claude_plan'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced_overlay_write_failure');
+            END;
+            "#,
+            overlay_ns = tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+        ),
+    );
+
+    let proposal_before = read_loadout_state(
+        &server,
+        tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+        &proposal_id,
+    );
+    let overlay_before = read_loadout_state(
+        &server,
+        tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+        "claude_plan",
+    );
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("forced overlay write failure must refuse apply");
+    assert!(
+        err.contains("forced_overlay_write_failure"),
+        "expected forced overlay write failure, got: {err}"
+    );
+    assert_eq!(
+        proposal_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+            &proposal_id,
+        ),
+        "overlay write failure must roll back proposal stamp bytes and version"
+    );
+    assert_eq!(
+        overlay_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+            "claude_plan",
+        ),
+        "overlay write failure must preserve absent overlay state"
+    );
+}
+
+#[tokio::test]
+async fn loadout_v3_forced_proposal_stamp_failure_rolls_back_both_rows() {
+    let server = make_server();
+    let proposal_id = mint_loadout_v3_fixture(&server, "proposal-stamp-failure").await;
+    approve_loadout_v3_fixture(&server, &proposal_id).await;
+    install_loadout_trigger(
+        &server,
+        &format!(
+            r#"
+            CREATE TRIGGER loadout_force_proposal_stamp_failure
+            BEFORE UPDATE ON hard_state
+            WHEN OLD.namespace = '{proposal_ns}' AND OLD.key = '{proposal_id}'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced_proposal_stamp_failure');
+            END;
+            "#,
+            proposal_ns = tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+        ),
+    );
+
+    let proposal_before = read_loadout_state(
+        &server,
+        tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+        &proposal_id,
+    );
+    let overlay_before = read_loadout_state(
+        &server,
+        tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+        "claude_plan",
+    );
+    let mut apply = task_params("apply_proposals");
+    apply.proposal_id = Some(proposal_id.clone());
+    apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(apply))
+        .await
+        .expect_err("forced proposal stamp failure must refuse apply");
+    assert!(
+        err.contains("forced_proposal_stamp_failure"),
+        "expected forced proposal stamp failure, got: {err}"
+    );
+    assert_eq!(
+        proposal_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
+            &proposal_id,
+        ),
+        "proposal stamp failure must preserve proposal bytes and version"
+    );
+    assert_eq!(
+        overlay_before,
+        read_loadout_state(
+            &server,
+            tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
+            "claude_plan",
+        ),
+        "proposal stamp failure must preserve overlay bytes and version"
     );
 }

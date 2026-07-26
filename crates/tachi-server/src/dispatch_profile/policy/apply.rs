@@ -115,6 +115,7 @@ pub(crate) fn handle_route_policy_apply(
                 let identity_payload = super::handlers::validate_loadout_evolution_proposal(
                     proposal_id,
                     &value,
+                    None,
                 )?;
                 let apply_payload = identity_payload
                     .get("apply_payload")
@@ -152,11 +153,29 @@ pub(crate) fn handle_route_policy_apply(
                     ));
                 }
 
-                let mut overlay = if let Some((raw, _version)) = store
-                    .get_state_kv(PROFILE_CARD_OVERLAY_NS, profile.name)
-                    .map_err(|e| format!("load profile/card overlay: {e}"))?
-                {
-                    serde_json::from_str::<Value>(&raw)
+                // Reserve the write transaction before reading the effective
+                // overlay source. The exact row version/content snapshot is
+                // both revalidated against the proposal identity and retained
+                // for the explicit overlay CAS below.
+                let tx = store
+                    .connection_mut()
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|e| format!("open loadout evolution apply tx: {e}"))?;
+                let overlay_snapshot =
+                    memcore::db::get_state(&tx, PROFILE_CARD_OVERLAY_NS, profile.name)
+                        .map_err(|e| format!("load profile/card overlay in apply tx: {e}"))?;
+                let live_source_revision = super::handlers::loadout_evolution_source_revision(
+                    profile,
+                    overlay_snapshot.as_ref(),
+                );
+                super::handlers::validate_loadout_evolution_proposal(
+                    proposal_id,
+                    &value,
+                    Some(&live_source_revision),
+                )?;
+
+                let mut overlay = if let Some((raw, _version)) = overlay_snapshot.as_ref() {
+                    serde_json::from_str::<Value>(raw)
                         .map_err(|e| format!("parse profile/card overlay: {e}"))?
                 } else {
                     json!({
@@ -420,14 +439,9 @@ pub(crate) fn handle_route_policy_apply(
                 });
                 let next = serde_json::to_string(&value)
                     .map_err(|e| format!("serialize applied loadout proposal: {e}"))?;
-                // The overlay write and the approved -> applied lifecycle
-                // transition are one transaction. The explicit proposal-row
-                // CAS remains correct if the coarse store lock is narrowed:
-                // on a stale row, the overlay write is rolled back as well.
-                let tx = store
-                    .connection_mut()
-                    .transaction()
-                    .map_err(|e| format!("open loadout evolution apply tx: {e}"))?;
+                // Proposal lifecycle and overlay projection are independent
+                // per-row CAS operations in one transaction. Either stale row
+                // or either write failure rolls back both rows.
                 let cas_ok = memcore::db::set_state_if_version(
                     &tx,
                     DISPATCH_POLICY_PROPOSAL_NS,
@@ -441,8 +455,28 @@ pub(crate) fn handle_route_policy_apply(
                         "stale_state_version: loadout_evolution proposal {proposal_id} changed before apply; reload and retry"
                     ));
                 }
-                memcore::db::set_state(&tx, PROFILE_CARD_OVERLAY_NS, profile.name, &overlay_raw)
-                    .map_err(|e| format!("persist profile/card overlay: {e}"))?;
+                let overlay_cas_ok = match overlay_snapshot.as_ref() {
+                    Some((_raw, expected_version)) => memcore::db::set_state_if_version(
+                        &tx,
+                        PROFILE_CARD_OVERLAY_NS,
+                        profile.name,
+                        &overlay_raw,
+                        *expected_version,
+                    ),
+                    None => memcore::db::insert_state_if_absent(
+                        &tx,
+                        PROFILE_CARD_OVERLAY_NS,
+                        profile.name,
+                        &overlay_raw,
+                    ),
+                }
+                .map_err(|e| format!("CAS profile/card overlay: {e}"))?;
+                if !overlay_cas_ok {
+                    return Err(format!(
+                        "stale_overlay_version: profile/card overlay {} changed before loadout_evolution proposal {proposal_id} could apply; reload, regenerate, and re-review",
+                        profile.name
+                    ));
+                }
                 tx.commit()
                     .map_err(|e| format!("commit loadout evolution apply tx: {e}"))?;
             }

@@ -149,6 +149,9 @@ pub fn loadout_evolution_v3_apply_payload(proposal: &Value) -> Value {
         "evidence_id": proposal.get("evidence_id").cloned().unwrap_or(Value::Null),
         "weakness_id": proposal.get("weakness_id").cloned().unwrap_or(Value::Null),
         "proposed_patch": proposal.get("proposed_patch").cloned().unwrap_or(Value::Null),
+        "current_loadout": proposal.get("current_loadout").cloned().unwrap_or(Value::Null),
+        "current_evidence_contract": proposal.get("current_evidence_contract").cloned().unwrap_or(Value::Null),
+        "current_card": proposal.get("current_card").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -160,11 +163,13 @@ pub fn loadout_evolution_v3_identity_payload(
     evidence_review: &Value,
     policy_version: &str,
     target: &str,
+    source_revision: &str,
 ) -> Value {
     let mut map: BTreeMap<String, Value> = BTreeMap::new();
     map.insert("kind".to_string(), json!(LOADOUT_EVOLUTION_PROPOSAL_KIND));
     map.insert("policy_version".to_string(), json!(policy_version));
     map.insert("target".to_string(), json!(target));
+    map.insert("source_revision".to_string(), json!(source_revision));
     map.insert("apply_payload".to_string(), canonical_json(apply_payload));
     map.insert(
         "evidence_review".to_string(),
@@ -647,32 +652,7 @@ where
         }
     }
 
-    Ok(out
-        .into_iter()
-        .map(mint_loadout_evolution_v3_identity)
-        .collect())
-}
-
-fn mint_loadout_evolution_v3_identity(mut proposal: Value) -> Value {
-    let legacy_proposal_id = proposal
-        .get("proposal_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let apply_payload = loadout_evolution_v3_apply_payload(&proposal);
-    let evidence_review = proposal.get("evidence").cloned().unwrap_or(json!({}));
-    let identity_payload = loadout_evolution_v3_identity_payload(
-        &apply_payload,
-        &evidence_review,
-        LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION,
-        LOADOUT_EVOLUTION_PROPOSAL_TARGET,
-    );
-    proposal["legacy_proposal_id"] = json!(legacy_proposal_id);
-    proposal["schema_version"] = json!(LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION);
-    proposal["policy_version"] = json!(LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION);
-    proposal["target"] = json!(LOADOUT_EVOLUTION_PROPOSAL_TARGET);
-    proposal["identity_payload"] = identity_payload;
-    proposal
+    Ok(out)
 }
 
 fn build_evidence_contract_evolution_proposals(
