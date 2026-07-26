@@ -468,6 +468,15 @@ impl MemoryStore {
         let conn = db::open_read_only(db_path)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        if compat_operation.is_some() {
+            let raw_schema_version: i64 =
+                conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if raw_schema_version < 0 {
+                return Err(MemoryError::InvalidArg(format!(
+                    "read-only backfill compatibility refuses negative PRAGMA user_version {raw_schema_version}"
+                )));
+            }
+        }
         db::migrations::check_schema_version_gate(&conn)?;
         let stored_schema_version = db::migrations::read_schema_version(&conn)?;
         let is_stamped_older_schema =
@@ -780,6 +789,47 @@ mod exact_dedupe_open_tests {
                 .to_string()
                 .contains("read-only backfill compatibility requires memories schema"),
             "unexpected malformed v22 refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn read_only_existing_schema_compat_rejects_negative_user_version_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("negative-version.db");
+        drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+        let offline = Connection::open(&path).unwrap();
+        offline.execute_batch("PRAGMA user_version = -1;").unwrap();
+        drop(offline);
+
+        let error = match open_compat_summaries(&path.to_string_lossy()) {
+            Ok(_) => panic!("negative user_version was normalized into an accepted v0 DB"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(
+                "read-only backfill compatibility refuses negative PRAGMA user_version -1"
+            ),
+            "unexpected negative-version refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn read_only_existing_schema_compat_preserves_unstamped_current_shape_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unstamped-current-shape.db");
+        drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
+
+        let offline = Connection::open(&path).unwrap();
+        offline.execute_batch("PRAGMA user_version = 0;").unwrap();
+        drop(offline);
+
+        let store = open_compat_summaries(&path.to_string_lossy())
+            .expect("documented v0 current-shape DB must remain readable");
+        assert_eq!(
+            db::migrations::read_schema_version(store.connection()).unwrap(),
+            0,
+            "read-only compatibility open must preserve the unstamped value"
         );
     }
 
