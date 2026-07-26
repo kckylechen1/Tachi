@@ -105,12 +105,6 @@ pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
 #[cfg(test)]
 pub(crate) use memory_crud::AccessUpdate;
 pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
-/// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
-/// function's own doc for when a hand-built fixture is legitimate.
-#[cfg(test)]
-pub(crate) use memory_crud::{
-    assert_memories_fixture_matches_select_columns, memory_select_required_columns,
-};
 pub use memory_crud::{
     archive_memory, archive_memory_if_revision, delete, delete_memories_symbolic_fts, fetch_by_ids,
     find_active_wiki_entry_by_path_or_topic, find_exact_path_text_id, get_access_times, get_all,
@@ -123,6 +117,12 @@ pub use memory_crud::{
     MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES,
     MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+};
+/// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
+/// function's own doc for when a hand-built fixture is legitimate.
+#[cfg(test)]
+pub(crate) use memory_crud::{
+    assert_memories_fixture_matches_select_columns, memory_select_required_columns,
 };
 /// Caller-transaction upsert seam for lifecycle-apply: runs the full upsert
 /// body (main row + FTS + vectors + idless semantics) inside a caller-owned
