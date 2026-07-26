@@ -106,8 +106,8 @@ pub(super) const SETUP_API_KEYS: [SetupApiKey; 6] = [
     },
     SetupApiKey {
         key: "REASONING_API_KEY",
-        label: "GLM-5.1 reasoning lane — DEPRECATED compatibility key",
-        deprecated: true,
+        label: "Reasoning API fallback (optional)",
+        deprecated: false,
     },
 ];
 
@@ -117,23 +117,27 @@ mod setup_api_key_tests {
 
     #[test]
     fn deprecated_compatibility_keys_do_not_claim_active_routing() {
-        for key in ["MINIMAX_API_KEY", "REASONING_API_KEY"] {
-            let entry = SETUP_API_KEYS
-                .iter()
-                .find(|entry| entry.key == key)
-                .expect("deprecated setup key must remain listed");
-            assert!(entry.deprecated, "{key} must remain deprecated");
-            assert!(
-                entry.label.contains("DEPRECATED compatibility key"),
-                "{key} must be described only as a compatibility key: {}",
-                entry.label
-            );
-            assert!(
-                !entry.label.contains("Claude pool"),
-                "{key} must not claim routing through the retired pool: {}",
-                entry.label
-            );
-        }
+        let entry = SETUP_API_KEYS
+            .iter()
+            .find(|entry| entry.key == "MINIMAX_API_KEY")
+            .expect("deprecated setup key must remain listed");
+        assert!(entry.deprecated, "MINIMAX_API_KEY must remain deprecated");
+        assert!(
+            entry.label.contains("DEPRECATED compatibility key"),
+            "MINIMAX_API_KEY must be described only as a compatibility key: {}",
+            entry.label
+        );
+        assert!(!entry.label.contains("Claude pool"));
+    }
+
+    #[test]
+    fn live_reasoning_key_remains_available_to_setup() {
+        let entry = SETUP_API_KEYS
+            .iter()
+            .find(|entry| entry.key == "REASONING_API_KEY")
+            .expect("live reasoning key must remain listed");
+        assert!(!entry.deprecated, "live reasoning key must be prompted");
+        assert!(!entry.label.contains("DEPRECATED"));
     }
 }
 
