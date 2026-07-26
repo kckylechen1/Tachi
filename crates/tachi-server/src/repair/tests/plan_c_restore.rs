@@ -482,6 +482,152 @@ fn arm_symbolic_fts_delete_failure(conn: &Connection, seed_id: &str) {
     .unwrap();
 }
 
+/// Replace `memories_fts` with a plain table + aborting DELETE trigger so
+/// purge's lexical FTS delete propagates (same fault-path shape as symbolic).
+fn arm_memories_fts_delete_failure(conn: &Connection, seed_id: &str) {
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS memories_fts;
+        CREATE TABLE memories_fts (
+            id TEXT PRIMARY KEY,
+            path TEXT,
+            summary TEXT,
+            text TEXT,
+            keywords TEXT,
+            entities TEXT
+        );
+        "#,
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+         VALUES (?1, 'seed', '', '', '', '')",
+        params![seed_id],
+    )
+    .unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TRIGGER memories_fts_fail_delete
+        BEFORE DELETE ON memories_fts
+        BEGIN
+            SELECT RAISE(ABORT, 'injected memories_fts failure');
+        END;
+        "#,
+    )
+    .unwrap();
+}
+
+/// Replace `memories_fts` with a plain table + aborting UPDATE trigger so
+/// same-DB restore's lexical FTS path UPDATE propagates (not warn-and-continue).
+fn arm_memories_fts_update_failure(conn: &Connection, seed_id: &str) {
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS memories_fts;
+        CREATE TABLE memories_fts (
+            id TEXT PRIMARY KEY,
+            path TEXT,
+            summary TEXT,
+            text TEXT,
+            keywords TEXT,
+            entities TEXT
+        );
+        "#,
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+         VALUES (?1, 'seed', '', '', '', '')",
+        params![seed_id],
+    )
+    .unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TRIGGER memories_fts_fail_update
+        BEFORE UPDATE ON memories_fts
+        BEGIN
+            SELECT RAISE(ABORT, 'injected memories_fts update failure');
+        END;
+        "#,
+    )
+    .unwrap();
+}
+
+/// #1335 oracle: same-DB restore must roll back when memories_fts path UPDATE
+/// fails (propagate + rollback, not warn-and-continue).
+#[test]
+fn quarantine_restore_rolls_back_when_memories_fts_update_fails() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    let dir = TempDir::new().unwrap();
+    let (db_path, conn) = fresh_db(&dir, "same-fts-fail.db");
+
+    let quarantine_path = "/_quarantine/cross-db/scratch/restore-fts-fail";
+    let meta = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/scratch/restore-fts-fail",
+            "expected_db": db_path.display().to_string(),
+            "actual_db": db_path.display().to_string(),
+            "detected_at": "2026-01-01T00:00:00Z",
+        }
+    });
+    insert_memory(
+        &conn,
+        "qs-fts-fail",
+        quarantine_path,
+        "restore fts update fault path",
+        &meta.to_string(),
+        None,
+        None,
+    );
+    arm_memories_fts_update_failure(&conn, "qs-fts-fail");
+    drop(conn);
+
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: db_path.display().to_string(),
+            role: DbRole::Project,
+            owner: "test".into(),
+            schema_kind: "tachi".into(),
+            vec_enabled: false,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "tachi".into(),
+            scope_hint: "project:same-fts-fail".into(),
+            notes: String::new(),
+        }],
+    };
+
+    let err = crate::repair::quarantine::cmd_restore(&manifest, "qs-fts-fail", true, true)
+        .expect_err("memories_fts UPDATE failure must abort restore");
+    assert!(
+        err.to_string()
+            .contains("injected memories_fts update failure")
+            || err.to_string().contains("ABORT"),
+        "error should surface injected failure, got: {err}"
+    );
+
+    let conn = Connection::open(&db_path).unwrap();
+    let (path, meta): (String, String) = conn
+        .query_row(
+            "SELECT path, metadata FROM memories WHERE id = 'qs-fts-fail'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("primary row must still exist after rolled-back restore");
+    assert_eq!(
+        path, quarantine_path,
+        "memories.path must not commit on memories_fts UPDATE failure"
+    );
+    let v: serde_json::Value = serde_json::from_str(&meta).unwrap();
+    assert!(
+        v.get("quarantine").is_some(),
+        "quarantine metadata must not be stripped when FTS UPDATE fails: {meta}"
+    );
+}
+
 /// #1335 oracle: same-DB restore must roll back the memories UPDATE when
 /// symbolic sync fails after the old projection was deleted.
 #[test]
@@ -622,6 +768,75 @@ fn quarantine_purge_rolls_back_when_symbolic_delete_fails() {
     assert_eq!(
         n, 1,
         "memories row must not commit-delete when symbolic delete fails"
+    );
+}
+
+/// #1335 oracle: purge must not commit memories DELETE when memories_fts
+/// delete fails (propagate + rollback, not warn-and-continue).
+#[test]
+fn quarantine_purge_rolls_back_when_memories_fts_delete_fails() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    let dir = TempDir::new().unwrap();
+    let (db_path, conn) = fresh_db(&dir, "purge-fts-fail.db");
+
+    let meta = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/scratch/purge-fts-fail",
+            "expected_db": db_path.display().to_string(),
+            "actual_db": db_path.display().to_string(),
+            "detected_at": "2020-01-01T00:00:00Z",
+        }
+    });
+    insert_memory(
+        &conn,
+        "qp-fts-fail",
+        "/_quarantine/cross-db/scratch/purge-fts-fail",
+        "purge fts fault path",
+        &meta.to_string(),
+        None,
+        None,
+    );
+    arm_memories_fts_delete_failure(&conn, "qp-fts-fail");
+    drop(conn);
+
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: db_path.display().to_string(),
+            role: DbRole::Project,
+            owner: "test".into(),
+            schema_kind: "tachi".into(),
+            vec_enabled: false,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "tachi".into(),
+            scope_hint: "project:purge-fts-fail".into(),
+            notes: String::new(),
+        }],
+    };
+
+    let err = crate::repair::quarantine::cmd_purge(&manifest, 1, true, true)
+        .expect_err("memories_fts delete failure must abort purge");
+    assert!(
+        err.to_string().contains("injected memories_fts failure")
+            || err.to_string().contains("ABORT"),
+        "error should surface injected failure, got: {err}"
+    );
+
+    let n: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = 'qp-fts-fail'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 1,
+        "memories row must not commit-delete when memories_fts delete fails"
     );
 }
 

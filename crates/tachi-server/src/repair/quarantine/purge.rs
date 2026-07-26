@@ -62,14 +62,9 @@ pub fn cmd_purge(
         let tx = conn.transaction()?;
         for q in group {
             tx.execute("DELETE FROM memories WHERE id = ?1", params![&q.id])?;
-            if let Err(e) = tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&q.id]) {
-                eprintln!(
-                    "warning: failed to delete FTS row for purged quarantine row {}: {e}",
-                    q.id
-                );
-            }
-            // Propagate symbolic delete failure so the memories DELETE cannot
-            // commit without removing the trigram projection (#1335 oracle NOT-READY).
+            // Propagate lexical + symbolic FTS deletes so the memories DELETE
+            // cannot commit while leaving either projection behind (#1335).
+            tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&q.id])?;
             memcore::db::delete_memories_symbolic_fts(&tx, &q.id)?;
             purged += 1;
         }

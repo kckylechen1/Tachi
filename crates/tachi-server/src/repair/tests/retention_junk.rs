@@ -120,6 +120,26 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
         [],
     )
     .unwrap();
+    // Discriminative seed: insert_memory does not project into symbolic FTS.
+    // Seed the junk ids so a delete that forgets symbolic_fts fails red.
+    let junk_ids = ["cache-1", "cache-2", "empty-turn"];
+    {
+        let tx = conn.unchecked_transaction().unwrap();
+        for id in junk_ids {
+            memcore::db::sync_memories_symbolic_fts(&tx, id).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    for id in junk_ids {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_symbolic_fts WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "precondition: symbolic seed for {id}");
+    }
     drop(conn);
 
     let mut ctx = open_ctx(&path, "test");
@@ -137,5 +157,33 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
     assert_eq!(
         remaining, 2,
         "same text under different paths should be preserved"
+    );
+
+    for id in junk_ids {
+        let n: i64 = ctx
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_symbolic_fts WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "junk cleanup must leave zero memories_symbolic_fts rows for deleted id {id}"
+        );
+    }
+    let orphan_symbolic: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_symbolic_fts \
+             WHERE id NOT IN (SELECT id FROM memories)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphan_symbolic, 0,
+        "junk cleanup must leave no orphan memories_symbolic_fts rows"
     );
 }

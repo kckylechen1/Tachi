@@ -94,14 +94,33 @@ pub(crate) fn canonical_worktree_path(worktree_path: &str) -> Result<String, Str
         Err(full_error) => {
             let mut ancestor = absolute.as_path();
             let mut suffix = Vec::new();
-            while !ancestor.exists() {
-                let leaf = ancestor.file_name().ok_or_else(|| {
-                    format!("cannot canonicalize worktree path '{worktree_path}': {full_error}")
-                })?;
-                suffix.push(leaf.to_os_string());
-                ancestor = ancestor.parent().ok_or_else(|| {
-                    format!("cannot canonicalize worktree path '{worktree_path}': {full_error}")
-                })?;
+            // Three-state path doctrine (same spirit as
+            // `bootstrap/clean_cli.rs::lease_path_state`): only ConfirmedAbsent
+            // continues walking; Unknown IO errors fail closed.
+            loop {
+                match path_presence(ancestor) {
+                    PathPresence::Present => break,
+                    PathPresence::ConfirmedAbsent => {
+                        let leaf = ancestor.file_name().ok_or_else(|| {
+                            format!(
+                                "cannot canonicalize worktree path '{worktree_path}': {full_error}"
+                            )
+                        })?;
+                        suffix.push(leaf.to_os_string());
+                        ancestor = ancestor.parent().ok_or_else(|| {
+                            format!(
+                                "cannot canonicalize worktree path '{worktree_path}': {full_error}"
+                            )
+                        })?;
+                    }
+                    PathPresence::Unknown(err) => {
+                        return Err(format!(
+                            "cannot canonicalize worktree path '{worktree_path}': \
+                             inconclusive stat on '{}': {err}",
+                            ancestor.display()
+                        ));
+                    }
+                }
             }
             let mut path = std::fs::canonicalize(ancestor).map_err(|error| {
                 format!("cannot canonicalize ancestor for worktree path '{worktree_path}': {error}")
@@ -116,6 +135,41 @@ pub(crate) fn canonical_worktree_path(worktree_path: &str) -> Result<String, Str
         .into_os_string()
         .into_string()
         .map_err(|_| format!("canonical worktree path for '{worktree_path}' is not valid UTF-8"))
+}
+
+/// Three-state path presence via `symlink_metadata` — never collapse unknown
+/// IO errors into "absent" the way [`Path::exists`] does.
+enum PathPresence {
+    Present,
+    ConfirmedAbsent,
+    Unknown(std::io::Error),
+}
+
+fn path_presence(path: &Path) -> PathPresence {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => PathPresence::Present,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => PathPresence::ConfirmedAbsent,
+        Err(err) => PathPresence::Unknown(err),
+    }
+}
+
+#[cfg(test)]
+mod canonical_worktree_path_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn canonical_worktree_path_walks_confirmed_absent_suffix() {
+        let dir = tempdir().unwrap();
+        let existing = dir.path();
+        let future = existing.join("not-yet").join("leaf");
+        let got = canonical_worktree_path(future.to_str().unwrap()).unwrap();
+        let expected = format!(
+            "{}/not-yet/leaf",
+            existing.canonicalize().unwrap().display()
+        );
+        assert_eq!(got, expected);
+    }
 }
 
 /// Explicit approval for a `build-private` env: who signed off, and how much
