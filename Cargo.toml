@@ -54,15 +54,27 @@ debug = "line-tables-only"
 # x86_64-pc-windows-msvc + 4 *nix targets with no per-platform SQLite install;
 # version drift would risk silent migration regressions).
 #
-# Bumped 0.32 -> 0.38 (security floor) so bundled SQLite is >= 3.50.3
-# (libsqlite3-sys 0.36.0 with the `bundled` feature ships plain sqlite3 3.51.1;
-# no sqlcipher variant is used):
+# Bundled SQLite must be >= 3.50.3 (security floor, #833):
 #   - CVE-2025-7709: corrupt FTS5 index -> memory access (fixed 3.50.3)
 #   - CVE-2025-6965: aggregate term count overflow (fixed 3.50.2)
 #   - CVE-2025-29087 / -3277: concat_ws() integer overflow (fixed 3.49.1)
 #   - CVE-2025-29088: lookaside allocator DoS via sqlite3_db_config (fixed 3.49.1)
-# memcore asserts sqlite_version() >= 3.50.3 at test time.
-rusqlite = { version = "0.38", features = ["backup", "bundled", "vtab", "functions"] }
+#
+# The version range below does NOT by itself carry that floor. Bundled versions
+# are plain sqlite3, no sqlcipher variant: its upper end (rusqlite 0.38 /
+# libsqlite3-sys 0.36.0) bundles 3.51.1, but its lower end (rusqlite 0.37 /
+# libsqlite3-sys 0.35.0) bundles 3.50.2 — one patch short, missing exactly
+# CVE-2025-7709. The range is widened anyway (#1453) so that consumers pinned to
+# 0.37 by other crates can build memcore; that lower bound is permitted only
+# because the floor is enforced independently of the range, in two places:
+#   - compile time: `const _: () = assert!(SQLITE_VERSION_NUMBER >= 3_050_003)`
+#     in crates/memcore/src/lib.rs — fails the build of anyone, including a
+#     downstream git-dependency consumer, who resolves below the floor.
+#   - run time: `bundled_sqlite_meets_security_floor_3_50_3` in
+#     crates/memcore/src/db/tests.rs — checks the library actually loaded.
+# Both restate `3.50.3` on purpose; do not collapse them onto one shared
+# constant, and do not relax either one to make a below-floor pin resolve.
+rusqlite = { version = ">=0.37, <0.39", features = ["backup", "bundled", "vtab", "functions"] }
 sqlite-vec = "0.1.7-alpha.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

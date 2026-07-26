@@ -17,6 +17,34 @@
 //    agent_profile product surfaces. Downstream memory forks do
 //    not need these to open a DB or run save/search/readiness.
 
+// ── Bundled-SQLite security floor, compile-time half (#833, #1453) ───────────
+//
+// `SQLITE_VERSION_NUMBER` is the version of the SQLite headers this crate is
+// being compiled against, encoded as major*1_000_000 + minor*1_000 + patch;
+// 3.50.3 is 3_050_003. Failing this assertion fails the *build*, which is the
+// half of the floor that reaches consumers: a downstream crate taking memcore
+// as a git dependency never runs memcore's test suite, so the runtime check in
+// `db::tests::sqlite_security_floor` protects only people who run our tests.
+//
+// The floor is 3.50.3 because of CVE-2025-7709 (fixed 3.50.3): a corrupt FTS5
+// index yields unauthorized memory access. memcore's core search *is* FTS5 and
+// its content is user-writable (memories, wiki, events, URL ingest), so this is
+// the exact attack surface, not a theoretical one. The workspace `rusqlite`
+// requirement is a range (`>=0.37, <0.39`) whose lower bound resolves to
+// libsqlite3-sys 0.35.0 / SQLite 3.50.2 — below the floor. That lower bound is
+// permitted *only* because this assertion refuses such a build outright.
+//
+// If this fails: bump `rusqlite`/`libsqlite3-sys` until the bundled SQLite is
+// >= 3.50.3. Do not lower the constant, and do not replace it and the runtime
+// test with one shared constant — the duplicated literal is deliberate, so that
+// lowering the floor in one place still trips the other.
+const _: () = assert!(
+    rusqlite::ffi::SQLITE_VERSION_NUMBER >= 3_050_003,
+    "SQLite headers are below the 3.50.3 security floor (CVE-2025-7709: corrupt \
+     FTS5 index -> unauthorized memory access). Bump rusqlite/libsqlite3-sys; do \
+     not lower this constant. See the workspace Cargo.toml #833 comment."
+);
+
 #[cfg(feature = "admin")]
 pub mod agent_profile;
 pub mod db;
