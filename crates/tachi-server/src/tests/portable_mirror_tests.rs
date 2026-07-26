@@ -73,9 +73,8 @@ fn extract_mmr_threshold(source: &str) -> f64 {
         }
         cursor += line.len();
     }
-    let after_some = after_some.unwrap_or_else(|| {
-        panic!("no `{SOME_ANCHOR}` found inside `{FN_ANCHOR}` function body")
-    });
+    let after_some = after_some
+        .unwrap_or_else(|| panic!("no `{SOME_ANCHOR}` found inside `{FN_ANCHOR}` function body"));
     let rest = &body[after_some..];
     let end = rest
         .find(')')

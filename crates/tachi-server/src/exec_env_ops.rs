@@ -164,7 +164,10 @@ mod canonical_worktree_path_tests {
         let existing = dir.path();
         let future = existing.join("not-yet").join("leaf");
         let got = canonical_worktree_path(future.to_str().unwrap()).unwrap();
-        let expected = format!("{}/not-yet/leaf", existing.canonicalize().unwrap().display());
+        let expected = format!(
+            "{}/not-yet/leaf",
+            existing.canonicalize().unwrap().display()
+        );
         assert_eq!(got, expected);
     }
 }

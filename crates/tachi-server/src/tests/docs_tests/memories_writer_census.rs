@@ -339,7 +339,8 @@ fn is_memories_table_sql(code: &str) -> Option<&'static str> {
                 Some(c) if c.is_ascii_whitespace() || matches!(c, '(' | '\n' | '\r') => true,
                 // `UPDATE memories SET` / `UPDATE memories\n`
                 Some(_)
-                    if kind == "UPDATE" && (after.starts_with(" set") || after.starts_with('\n')) =>
+                    if kind == "UPDATE"
+                        && (after.starts_with(" set") || after.starts_with('\n')) =>
                 {
                     true
                 }
@@ -361,7 +362,10 @@ fn sets_indexed_column(update_sql: &str) -> bool {
     let lower = update_sql.to_ascii_lowercase();
     let Some(set_pos) = lower.find(" set ") else {
         // multiline `UPDATE memories\n SET …`
-        if let Some(set_pos) = lower.find("\n         set ").or_else(|| lower.find(" set\n")) {
+        if let Some(set_pos) = lower
+            .find("\n         set ")
+            .or_else(|| lower.find(" set\n"))
+        {
             let after = &lower[set_pos..];
             return INDEXED_COLUMNS.iter().any(|col| {
                 after.contains(&format!(" {col} "))
@@ -392,14 +396,12 @@ fn function_syncs_both_fts(fn_source: &str) -> bool {
     // Match the bare helper name carefully so
     // `sync_memories_symbolic_fts` does not count as the dual helper.
     let has_dual_helper = fn_source.contains("sync_memories_fts(")
-        || fn_source
-            .lines()
-            .any(|line| {
-                let code = code_before_line_comment(line);
-                code.contains("sync_memories_fts")
-                    && !code.contains("sync_memories_symbolic_fts")
-                    && !code.contains("fn sync_memories_fts")
-            });
+        || fn_source.lines().any(|line| {
+            let code = code_before_line_comment(line);
+            code.contains("sync_memories_fts")
+                && !code.contains("sync_memories_symbolic_fts")
+                && !code.contains("fn sync_memories_fts")
+        });
     if has_dual_helper {
         return true;
     }
@@ -421,10 +423,7 @@ fn allow_match(relative: &str, function: &str) -> Option<&'static AllowEntry> {
         } else {
             relative == entry.path
         };
-        path_ok
-            && entry
-                .function
-                .is_none_or(|want| want == function)
+        path_ok && entry.function.is_none_or(|want| want == function)
     })
 }
 
@@ -458,19 +457,17 @@ fn observe_writers(root: &Path) -> Vec<WriterSite> {
         for (idx, line) in lines.iter().enumerate() {
             let code = code_before_line_comment(line);
             let fragment = collect_sql_fragment(&lines, idx);
-            let Some(kind) = is_memories_table_sql(code)
-                .or_else(|| {
-                    // Opening quote may be on this line with SQL continuing.
-                    if code.contains("INSERT INTO memories")
-                        || code.contains("UPDATE memories")
-                        || code.contains("DELETE FROM memories")
-                    {
-                        is_memories_table_sql(&fragment)
-                    } else {
-                        None
-                    }
-                })
-            else {
+            let Some(kind) = is_memories_table_sql(code).or_else(|| {
+                // Opening quote may be on this line with SQL continuing.
+                if code.contains("INSERT INTO memories")
+                    || code.contains("UPDATE memories")
+                    || code.contains("DELETE FROM memories")
+                {
+                    is_memories_table_sql(&fragment)
+                } else {
+                    None
+                }
+            }) else {
                 continue;
             };
             // Re-validate fragment to drop memories_fts false positives where
@@ -549,9 +546,8 @@ fn memories_writer_census_synced_or_allowlisted() {
         .filter(|s| s.classification == "UNCLASSIFIED")
         .collect();
     if !bad.is_empty() {
-        let mut msg = String::from(
-            "memories writers missing dual FTS sync and not on allowlist:\n",
-        );
+        let mut msg =
+            String::from("memories writers missing dual FTS sync and not on allowlist:\n");
         for site in &bad {
             msg.push_str(&format!(
                 "  {}:{} {} in {}()\n",
