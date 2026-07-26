@@ -55,7 +55,13 @@ pub fn vault_api_key_pools_from_keychain(
 fn resolve_vault_pools(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
-) -> Result<(HashMap<String, Vec<ProviderSecret>>, VaultSourceAvailability), String> {
+) -> Result<
+    (
+        HashMap<String, Vec<ProviderSecret>>,
+        VaultSourceAvailability,
+    ),
+    String,
+> {
     // Starts unavailable and is only promoted by a read that actually
     // succeeded: an unproven source must never license retention.
     let mut availability = VaultSourceAvailability::LockedOrUnavailable;

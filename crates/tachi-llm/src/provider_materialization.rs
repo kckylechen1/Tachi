@@ -140,7 +140,13 @@ pub fn materialize_provider_secrets_from_durable_source<I, S, F>(
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
-    F: FnOnce() -> Result<(HashMap<String, Vec<ProviderSecret>>, VaultSourceAvailability), String>,
+    F: FnOnce() -> Result<
+        (
+            HashMap<String, Vec<ProviderSecret>>,
+            VaultSourceAvailability,
+        ),
+        String,
+    >,
 {
     let _materialization_guard = llm.provider_materialization_guard()?;
     let (vault_pools, availability) = load_vault_pools()?;
@@ -1068,6 +1074,10 @@ mod tests {
                 &stale_llm,
                 &HashMap::new(),
                 [logical_name],
+                // These two race tests are about a LOCKED source being
+                // overtaken mid-refresh, which is exactly the case that still
+                // retains its last-known-good pool.
+                VaultSourceAvailability::LockedOrUnavailable,
                 Some(Box::new(move || {
                     snapshot_tx.send(()).expect("announce stale snapshot");
                     release_rx.recv().expect("release stale refresh");
@@ -1147,6 +1157,10 @@ mod tests {
                 &stale_llm,
                 &HashMap::new(),
                 [logical_name],
+                // These two race tests are about a LOCKED source being
+                // overtaken mid-refresh, which is exactly the case that still
+                // retains its last-known-good pool.
+                VaultSourceAvailability::LockedOrUnavailable,
                 Some(Box::new(move || {
                     snapshot_tx.send(()).expect("announce stale snapshot");
                     release_rx.recv().expect("release stale materialization");
@@ -1354,7 +1368,9 @@ mod tests {
         .expect("skip");
 
         assert!(
-            readable.skipped_aliases[0].1.contains("absent from a readable Vault"),
+            readable.skipped_aliases[0]
+                .1
+                .contains("absent from a readable Vault"),
             "{:?}",
             readable.skipped_aliases
         );
@@ -1365,7 +1381,9 @@ mod tests {
         );
         for report in [&readable, &locked] {
             assert!(
-                !report.skipped_aliases[0].1.contains("TACHI_TEST_SKIP_REASON_TARGET"),
+                !report.skipped_aliases[0]
+                    .1
+                    .contains("TACHI_TEST_SKIP_REASON_TARGET"),
                 "the skip reason must not echo the alias target: {:?}",
                 report.skipped_aliases
             );

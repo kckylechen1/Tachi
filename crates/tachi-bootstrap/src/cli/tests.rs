@@ -89,8 +89,8 @@ fn vault_providers_doctor_parses_explicit_report_only_password_source() {
                 password_file: Some(password),
                 ..
             }
-        }) if config == std::path::PathBuf::from("/tmp/opencode-fixture.json")
-            && password == std::path::PathBuf::from("/tmp/vault-password-fixture")
+        }) if config == std::path::Path::new("/tmp/opencode-fixture.json")
+            && password == std::path::Path::new("/tmp/vault-password-fixture")
     ));
     assert!(
         Cli::try_parse_from([

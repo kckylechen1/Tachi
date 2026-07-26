@@ -100,10 +100,10 @@ impl MemoryServer {
             tracing::warn!(
                 "{}",
                 crate::provider_config::format_skipped_alias_warning(
-                        key,
-                        retained,
-                        report.source_availability,
-                    )
+                    key,
+                    retained,
+                    report.source_availability,
+                )
             );
         }
         Ok(report)
