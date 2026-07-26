@@ -149,7 +149,7 @@ pub(super) fn auto_query_embedding_would_run_with_named_project_reads(
     let default_wiki_vec_available = params.project.is_none()
         && wiki_path_prefix
         && named_project_db_exists(server, "wiki")
-        && { named_project_vec_available(server, "wiki", named_project_reads.as_deref_mut()) };
+        && { named_project_vec_available(server, "wiki", named_project_reads) };
 
     server.global_vec_available()
         || server.project_vec_available()
@@ -547,7 +547,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
     let project_recall_quality = deduped_results
         .iter()
         .any(|(_, db_scope)| *db_scope == DbScope::Project)
-        .then(|| recall_quality_for_project(server, &params, named_project_reads.as_deref_mut()))
+        .then(|| recall_quality_for_project(server, &params, named_project_reads))
         .flatten();
 
     let mut output: Vec<serde_json::Value> = deduped_results

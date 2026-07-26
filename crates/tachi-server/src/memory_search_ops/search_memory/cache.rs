@@ -380,6 +380,7 @@ struct GenerationFingerprint {
 /// cause duplicate work or inconsistent labels. A hard-link alias is rejected:
 /// SQLite derives WAL sidecars from the opened path, so two names for one inode
 /// are not a cache-safe database identity.
+#[cfg(test)]
 pub(super) fn recall_cache_generation_fingerprint(
     server: &MemoryServer,
     params: &SearchMemoryParams,

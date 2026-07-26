@@ -4,6 +4,9 @@ version = "1.9.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 
+[features]
+test-support = []
+
 [dependencies]
 memcore = { path = "../memcore" }
 serde = { workspace = true }

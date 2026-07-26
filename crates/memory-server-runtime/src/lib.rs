@@ -2,7 +2,9 @@ use memcore::MemoryStore;
 use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "test-support")]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -1477,12 +1479,14 @@ fn write_or_recover<'a, T>(
     }
 }
 
+#[cfg(feature = "test-support")]
 #[derive(Clone)]
 struct ReadStoreOpenObserver {
     db_path: PathBuf,
     count: Arc<AtomicUsize>,
 }
 
+#[cfg(feature = "test-support")]
 /// Test instrumentation for physical direct read-store opens at one canonical
 /// DB path. Pool construction does not use this path; the observer therefore
 /// counts precisely the one-off opens used by unattached path reads.
@@ -1491,12 +1495,14 @@ pub struct ReadStoreOpenObservation {
     observer: ReadStoreOpenObserver,
 }
 
+#[cfg(feature = "test-support")]
 impl ReadStoreOpenObservation {
     pub fn count(&self) -> usize {
         self.observer.count.load(Ordering::SeqCst)
     }
 }
 
+#[cfg(feature = "test-support")]
 impl Drop for ReadStoreOpenObservation {
     fn drop(&mut self) {
         let mut guard = lock_or_recover(read_store_open_observer(), "read_store_open_observer");
@@ -1509,6 +1515,7 @@ impl Drop for ReadStoreOpenObservation {
     }
 }
 
+#[cfg(feature = "test-support")]
 /// Install one path-filtered observer for a targeted test. The observation is
 /// process-global because direct unattached opens do not carry `DbRuntime`
 /// state; callers must serialize tests that observe the same process.
@@ -1534,11 +1541,13 @@ pub fn observe_read_store_opens_for_test(
     Ok(ReadStoreOpenObservation { observer })
 }
 
+#[cfg(feature = "test-support")]
 fn read_store_open_observer() -> &'static StdMutex<Option<ReadStoreOpenObserver>> {
     static OBSERVER: OnceLock<StdMutex<Option<ReadStoreOpenObserver>>> = OnceLock::new();
     OBSERVER.get_or_init(|| StdMutex::new(None))
 }
 
+#[cfg(feature = "test-support")]
 fn record_read_store_open(db_path: &Path) {
     let observer = lock_or_recover(read_store_open_observer(), "read_store_open_observer").clone();
     if observer
@@ -1562,6 +1571,7 @@ fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
     })?;
     let store =
         MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))?;
+    #[cfg(feature = "test-support")]
     record_read_store_open(db_path);
     Ok(store)
 }

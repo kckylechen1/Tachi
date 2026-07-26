@@ -72,6 +72,8 @@ pub(crate) async fn handle_search_memory_with_access(
         && !sandboxed_search
         && !record_access
         && !memcore::should_skip_query(&params.query);
+    // This candidate scope is intentional: reuse still avoids duplicate named
+    // reads when auto embedding later makes the request cache-ineligible.
     // A session is prepared before the vec-capability probe so every named
     // read in a cache-capable request shares its one physical read-only open.
     // Planning failures retain the existing fail-open cache bypass behavior;
