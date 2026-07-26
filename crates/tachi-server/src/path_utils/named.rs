@@ -1,6 +1,9 @@
 use super::home::tachi_home;
 use std::path::Path;
 
+/// Extract a project name from `<tachi_home>/projects/<name>/tachi-memory.db`
+/// (or the pre-#1132 `.../memory.db`, still accepted here so paths sourced
+/// from a not-yet-migrated manifest entry keep resolving).
 pub(crate) fn named_project_from_path_in_home(db_path: &Path, tachi_home: &Path) -> Option<String> {
     if !db_path
         .file_name()
