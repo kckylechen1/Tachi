@@ -115,35 +115,18 @@ pub(super) fn rank_candidate_entries(
     let access_times = get_access_times(conn, &candidate_ids_vec)?;
     let access_elapsed = access_start.map(|s| s.elapsed());
     let weights = resolve_weights(opts);
-    let mut scores = crate::scorer::hybrid_score_with_policy(
+    let mut scores = merge_pre_boost_scores(
+        opts,
         &entries_ref,
         vec_scores,
         fts_scores,
         &symbolic_scores,
         &weights,
         &access_times,
-        DecayPolicyContext::new(recall_config(opts), decay_policy(opts)),
+        exact_id,
+        include_superseded,
+        &superseded_ids,
     );
-    if let Some(exact_id) = exact_id.filter(|id| entries_ref.contains_key(*id)) {
-        scores.insert(
-            exact_id.to_string(),
-            HybridScore {
-                vector: 1.0,
-                fts: 1.0,
-                symbolic: 1.0,
-                decay: 1.0,
-                final_score: 10.0,
-            },
-        );
-    }
-
-    if include_superseded {
-        for id in &superseded_ids {
-            if let Some(score) = scores.get_mut(id) {
-                score.final_score *= 0.3;
-            }
-        }
-    }
 
     apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
     apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
@@ -212,6 +195,63 @@ pub(super) fn rank_candidate_entries(
         ranked_result_count,
     });
     Ok((results, receipt))
+}
+
+/// Pure merge of the four channel scores (vector/FTS/symbolic + ACT-R decay)
+/// into a `HybridScore` per candidate, followed by the two score overrides
+/// that happen before any multiplicative boost: the exact-id override (score
+/// 10.0) and the 0.3x superseded-entry scaling.
+///
+/// Factored out of `rank_candidate_entries` (tachi#1344 boost-attribution
+/// harness) as a pure code-motion — identical calls, identical order,
+/// identical values; `rank_candidate_entries` itself is otherwise byte-for-
+/// byte unchanged. This lets the `#[cfg(test)]`-gated attribution harness
+/// (see `mod attribution` below) reconstruct the exact same pre-boost
+/// baseline instead of re-deriving this merge, so no scoring math is
+/// duplicated between the production path and the observation path.
+#[allow(clippy::too_many_arguments)]
+fn merge_pre_boost_scores(
+    opts: &SearchOptions,
+    entries_ref: &HashMap<String, &MemoryEntry>,
+    vec_scores: &HashMap<String, f64>,
+    fts_scores: &HashMap<String, f64>,
+    symbolic_scores: &HashMap<String, f64>,
+    weights: &crate::scorer::HybridWeights,
+    access_times: &HashMap<String, Vec<f64>>,
+    exact_id: Option<&str>,
+    include_superseded: bool,
+    superseded_ids: &std::collections::HashSet<String>,
+) -> HashMap<String, HybridScore> {
+    let mut scores = crate::scorer::hybrid_score_with_policy(
+        entries_ref,
+        vec_scores,
+        fts_scores,
+        symbolic_scores,
+        weights,
+        access_times,
+        DecayPolicyContext::new(recall_config(opts), decay_policy(opts)),
+    );
+    if let Some(exact_id) = exact_id.filter(|id| entries_ref.contains_key(*id)) {
+        scores.insert(
+            exact_id.to_string(),
+            HybridScore {
+                vector: 1.0,
+                fts: 1.0,
+                symbolic: 1.0,
+                decay: 1.0,
+                final_score: 10.0,
+            },
+        );
+    }
+
+    if include_superseded {
+        for id in superseded_ids {
+            if let Some(score) = scores.get_mut(id) {
+                score.final_score *= 0.3;
+            }
+        }
+    }
+    scores
 }
 
 fn symbolic_scores(
@@ -624,6 +664,247 @@ fn apply_mmr_diversity(
 
     selected.extend(deferred);
     selected
+}
+
+// ---------------------------------------------------------------------------
+// tachi#1344 (Phase 0 boost-attribution harness) — observation-only rank
+// decomposition. See `search/tests/rank_attribution.rs` for the JSONL driver
+// that runs this against the golden_corpus / ops_audit_corpus fixtures.
+//
+// Zero production overhead: this entire module is `#[cfg(test)]`-gated (the
+// same convention `mod tests` below already uses) — a default `cargo build`
+// / `cargo build --release` / `cargo clippy` (without `--tests`) does not
+// compile any of it, so there is no runtime branch, no allocation, and no
+// code-size cost on the production path. The only non-test-gated change
+// this leaf makes to `rank_candidate_entries` above is the
+// `merge_pre_boost_scores` extraction — a pure code-motion (identical calls,
+// identical order, identical values); `rank_candidate_entries`'s own
+// behavior is unchanged.
+//
+// This does NOT re-derive the boost math: every step below calls the exact
+// same private `apply_*_boost` functions the production sequence
+// (ranking.rs `rank_candidate_entries`, the `apply_precision_boosts` .. `
+// apply_lexical_overlap_boost` calls) invokes, in the same order, on a
+// snapshot-observed clone of the identical pre-boost baseline
+// (`merge_pre_boost_scores`). The one thing NOT shared by construction is
+// the CALL SEQUENCE ITSELF (7 one-line calls, listed a second time below) —
+// if a future change adds/removes/reorders a boost in `rank_candidate_entries`,
+// this module's list must be updated to match by hand; there is no
+// compile-time link between the two sequences, only this comment.
+#[cfg(test)]
+pub(super) mod attribution {
+    use super::*;
+
+    /// One boost step's effect on every candidate it touched (or didn't).
+    /// `before`/`after` are `final_score` snapshots keyed by candidate id,
+    /// taken immediately before and after this ONE `apply_*` call in the
+    /// real production sequence — every other boost is held at whatever
+    /// state it was actually in at that point (this is the real sequence,
+    /// snapshotted, not an isolated/idealized replay).
+    #[derive(Debug, Clone)]
+    pub(crate) struct BoostStep {
+        pub(crate) label: &'static str,
+        before: HashMap<String, f64>,
+        after: HashMap<String, f64>,
+    }
+
+    impl BoostStep {
+        /// This step's multiplier on `id` (`after / before`), or `None` if
+        /// `id` had no score at this step (filtered out / not a candidate)
+        /// or its pre-step score was exactly `0.0` (multiplier undefined —
+        /// `0.0 * anything` stays `0.0`, so "what multiplier was applied"
+        /// has no determinate answer).
+        pub(crate) fn multiplier_for(&self, id: &str) -> Option<f64> {
+            let b = *self.before.get(id)?;
+            let a = *self.after.get(id)?;
+            if b == 0.0 {
+                return None;
+            }
+            Some(a / b)
+        }
+
+        /// `true` iff this step changed `id`'s score by more than float
+        /// noise. Every boost in this file is a multiplier `>= 1.0`, so any
+        /// change this small is measurement noise, not an applied boost.
+        pub(crate) fn hit(&self, id: &str) -> bool {
+            self.multiplier_for(id)
+                .is_some_and(|m| (m - 1.0).abs() > 1e-9)
+        }
+    }
+
+    /// Full attribution for one ranking call: the pre-boost baseline
+    /// `HybridScore` per candidate (vector/FTS/symbolic/decay merge, before
+    /// any boost), each of the 7 boost steps in production order, and the
+    /// resulting final scores.
+    #[derive(Debug, Clone)]
+    pub(crate) struct RankAttribution {
+        pub(crate) base_scores: HashMap<String, HybridScore>,
+        pub(crate) steps: Vec<BoostStep>,
+        pub(crate) final_scores: HashMap<String, f64>,
+    }
+
+    /// Attribution twin of `rank_candidate_entries`. Re-derives the same
+    /// pre-boost baseline via the shared `merge_pre_boost_scores` (no
+    /// scoring math duplicated there), then walks the SAME 7 boost calls
+    /// `rank_candidate_entries` makes, in the SAME order, snapshotting
+    /// scores before/after each. Does not sort, apply MMR, or truncate to
+    /// `top_k` — callers that need actual production rank order should call
+    /// `hybrid_search`/`rank_candidate_entries` separately (see
+    /// `hybrid_search_with_attribution` in `search.rs`, which does exactly
+    /// that pairing).
+    pub(crate) fn rank_candidate_entries_with_attribution(
+        conn: &Connection,
+        ranking: CandidateRanking<'_>,
+    ) -> Result<RankAttribution, MemoryError> {
+        let CandidateRanking {
+            query,
+            opts,
+            entries_map,
+            vec_scores,
+            fts_scores,
+            exact_id,
+            include_superseded,
+            as_of_utc,
+        } = ranking;
+
+        let symbolic_scores = symbolic_scores(query, &entries_map);
+        let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
+        let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec)?;
+
+        // Same candidate filter as `rank_candidate_entries` (ranking.rs
+        // above) — kept as a second copy rather than shared because the
+        // production copy is entangled with phase-receipt timing this
+        // observation-only twin does not need.
+        let entries_ref: HashMap<String, &MemoryEntry> = entries_map
+            .iter()
+            .filter(|(id, e)| {
+                if !valid_at(e, as_of_utc) {
+                    return false;
+                }
+                if !include_superseded && superseded_ids.contains(*id) {
+                    return false;
+                }
+                if is_search_noise_entry(e, opts.path_prefix.as_deref()) {
+                    return false;
+                }
+                if let Some(prefix) = &opts.path_prefix {
+                    if !e.path.starts_with(prefix.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(domain) = &opts.domain {
+                    match &e.domain {
+                        Some(d) if d == domain => {}
+                        _ => return false,
+                    }
+                }
+                true
+            })
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
+
+        if entries_ref.is_empty() {
+            return Ok(RankAttribution {
+                base_scores: HashMap::new(),
+                steps: Vec::new(),
+                final_scores: HashMap::new(),
+            });
+        }
+
+        let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
+        let access_times = get_access_times(conn, &candidate_ids_vec)?;
+        let weights = resolve_weights(opts);
+        let mut scores = merge_pre_boost_scores(
+            opts,
+            &entries_ref,
+            vec_scores,
+            fts_scores,
+            &symbolic_scores,
+            &weights,
+            &access_times,
+            exact_id,
+            include_superseded,
+            &superseded_ids,
+        );
+        let base_scores = scores.clone();
+
+        let mut steps: Vec<BoostStep> = Vec::with_capacity(7);
+        fn snapshot(scores: &HashMap<String, HybridScore>) -> HashMap<String, f64> {
+            scores
+                .iter()
+                .map(|(k, v)| (k.clone(), v.final_score))
+                .collect()
+        }
+
+        let before = snapshot(&scores);
+        apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
+        steps.push(BoostStep {
+            label: "precision",
+            before,
+            after: snapshot(&scores),
+        });
+
+        let before = snapshot(&scores);
+        apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
+        steps.push(BoostStep {
+            label: "quality",
+            before,
+            after: snapshot(&scores),
+        });
+
+        let before = snapshot(&scores);
+        apply_access_feedback(&entries_ref, &mut scores);
+        steps.push(BoostStep {
+            label: "access_feedback",
+            before,
+            after: snapshot(&scores),
+        });
+
+        let before = snapshot(&scores);
+        apply_tier_boosts(&entries_ref, &mut scores);
+        steps.push(BoostStep {
+            label: "tier",
+            before,
+            after: snapshot(&scores),
+        });
+
+        let before = snapshot(&scores);
+        apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
+        steps.push(BoostStep {
+            label: "entity_recency",
+            before,
+            after: snapshot(&scores),
+        });
+
+        let before = snapshot(&scores);
+        apply_decision_and_research_boosts(query, &entries_ref, &mut scores);
+        steps.push(BoostStep {
+            label: "decision_and_research",
+            before,
+            after: snapshot(&scores),
+        });
+
+        let before = snapshot(&scores);
+        apply_lexical_overlap_boost(
+            query,
+            opts.path_prefix.as_deref(),
+            &entries_ref,
+            &mut scores,
+        );
+        steps.push(BoostStep {
+            label: "lexical_overlap",
+            before,
+            after: snapshot(&scores),
+        });
+
+        let final_scores = snapshot(&scores);
+
+        Ok(RankAttribution {
+            base_scores,
+            steps,
+            final_scores,
+        })
+    }
 }
 
 #[cfg(test)]

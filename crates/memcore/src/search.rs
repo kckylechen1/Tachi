@@ -559,5 +559,67 @@ fn finish_receipt(
     receipt
 }
 
+// ---------------------------------------------------------------------------
+// tachi#1344 (Phase 0 boost-attribution harness) — pairs the real ranked
+// order (via the unmodified `hybrid_search`) with a per-boost score
+// breakdown (via `ranking::attribution::rank_candidate_entries_with_attribution`,
+// `#[cfg(test)]`-gated in ranking.rs) for the SAME query/opts. Test-only:
+// does not exist in a default `cargo build`/`cargo build --release`, so it
+// costs the production path nothing. See `search/tests/rank_attribution.rs`
+// for the JSONL-printing driver that calls this against the golden_corpus /
+// ops_audit_corpus fixtures.
+#[cfg(test)]
+fn hybrid_search_with_attribution(
+    conn: &Connection,
+    query: &str,
+    opts: &SearchOptions,
+) -> Result<(Vec<SearchResult>, ranking::attribution::RankAttribution), MemoryError> {
+    let ranked = hybrid_search(conn, query, opts)?;
+
+    let as_of_utc = opts
+        .as_of
+        .as_deref()
+        .map(crate::db::normalize_utc_iso)
+        .transpose()?;
+    let include_superseded = opts.include_superseded
+        || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED")
+        || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
+
+    let (candidates, _receipt) = candidates::collect_candidates(
+        conn,
+        query,
+        opts,
+        include_superseded,
+        as_of_utc.as_deref(),
+        false,
+    )?;
+    if candidates.candidate_ids.is_empty() {
+        return Ok((
+            ranked,
+            ranking::attribution::RankAttribution {
+                base_scores: std::collections::HashMap::new(),
+                steps: Vec::new(),
+                final_scores: std::collections::HashMap::new(),
+            },
+        ));
+    }
+
+    let entries_map = fetch_by_ids(conn, &candidates.candidate_ids, opts.include_archived)?;
+    let attribution = ranking::attribution::rank_candidate_entries_with_attribution(
+        conn,
+        ranking::CandidateRanking {
+            query,
+            opts,
+            entries_map,
+            vec_scores: &candidates.vec_scores,
+            fts_scores: &candidates.fts_scores,
+            exact_id: candidates.exact_id.as_deref(),
+            include_superseded,
+            as_of_utc: as_of_utc.as_deref(),
+        },
+    )?;
+    Ok((ranked, attribution))
+}
+
 #[cfg(test)]
 mod tests;

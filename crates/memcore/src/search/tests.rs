@@ -18,6 +18,7 @@ mod graph;
 mod noise;
 mod ops_audit_corpus;
 mod phase_receipts;
+mod rank_attribution;
 mod raw_vector_floor;
 mod supersession;
 mod symbolic;

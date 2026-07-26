@@ -456,8 +456,11 @@ const SEEDS: &[Seed] = &[
     },
 ];
 
+/// `pub(super)`: reused by `search/tests/rank_attribution.rs` (tachi#1344
+/// boost-attribution harness) so it seeds the byte-identical corpus rather
+/// than inventing a parallel one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DefectClass {
+pub(super) enum DefectClass {
     /// Recent project decision buried under older roadmap/review noise.
     RankDilution,
     /// Labeled research wiki not at rank 1 vs adjacent architecture wiki.
@@ -466,14 +469,14 @@ enum DefectClass {
     GovernanceMiss,
 }
 
-struct CaseSpec {
-    class: DefectClass,
-    name: &'static str,
-    query: &'static str,
-    expected: &'static str,
+pub(super) struct CaseSpec {
+    pub(super) class: DefectClass,
+    pub(super) name: &'static str,
+    pub(super) query: &'static str,
+    pub(super) expected: &'static str,
 }
 
-const CASES: &[CaseSpec] = &[
+pub(super) const CASES: &[CaseSpec] = &[
     CaseSpec {
         class: DefectClass::RankDilution,
         name: "open-issue-priority-decision",
@@ -513,7 +516,8 @@ fn seed_entry(s: &Seed) -> MemoryEntry {
     e
 }
 
-fn seed_corpus(conn: &mut Connection) {
+/// `pub(super)`: see the `DefectClass` doc above.
+pub(super) fn seed_corpus(conn: &mut Connection) {
     for s in SEEDS {
         insert_entry(conn, seed_entry(s));
     }
