@@ -802,9 +802,9 @@ mod tests {
         assert!(report.retained_from_last_known_good.is_empty());
         assert_eq!(report.skipped_aliases.len(), 1);
         assert_eq!(report.skipped_aliases[0].0, "VOYAGE_API_KEY");
-        assert!(report.skipped_aliases[0]
-            .1
-            .contains("missing or Vault is locked"));
+        // The pre-resolved test entry reports LockedOrUnavailable, so the skip
+        // reason is the unreadable-source wording rather than the revoked one.
+        assert!(report.skipped_aliases[0].1.contains("could not be read"));
         assert!(!report.skipped_aliases[0].1.contains(alias_target));
         assert!(llm
             .provider_pool_statuses()
