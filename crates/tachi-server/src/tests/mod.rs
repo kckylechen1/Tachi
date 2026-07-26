@@ -280,7 +280,9 @@ pub(crate) fn make_server() -> TestServer {
     make_test_server(None).0
 }
 
-fn make_server_with_project_fixture(project_name: &str) -> (TestServer, std::path::PathBuf) {
+pub(crate) fn make_server_with_project_fixture(
+    project_name: &str,
+) -> (TestServer, std::path::PathBuf) {
     let (server, project_db_path) = make_test_server(Some(project_name));
     (
         server,

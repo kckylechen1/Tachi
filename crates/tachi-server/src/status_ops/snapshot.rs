@@ -451,12 +451,12 @@ mod env_drift_tests {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let server = crate::tests::make_server();
+        let project_root = crate::utils::find_project_git_root().expect("test project root");
+        let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+            .expect("test project identity");
+        let (server, project_db) = crate::tests::make_server_with_project_fixture(&project_name);
         let app_home = server.tachi_home_dir();
         let global_db = server.global_db_path_buf();
-        let project_db = server
-            .project_db_path_buf()
-            .expect("test server project DB");
         let ambient_home = tempfile::tempdir().expect("ambient home");
         crate::tests::create_split_brain_alias(ambient_home.path(), &project_db);
         let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());

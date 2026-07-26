@@ -1009,10 +1009,10 @@ mod tests {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let server = crate::tests::make_server();
         let project_root = crate::utils::find_project_git_root().expect("test project root");
         let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
             .expect("test project identity");
+        let (server, _project_db) = crate::tests::make_server_with_project_fixture(&project_name);
         let event_hash = "heartbeat-environment-drift";
         let audit_key = ingest_audit_key(
             "ingest_source",

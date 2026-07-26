@@ -509,10 +509,15 @@ mod env_drift_tests {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let server = crate::tests::make_server();
+        let project_root = crate::utils::find_project_git_root().expect("test project root");
+        let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+            .expect("test project identity");
+        let (server, _project_db) = crate::tests::make_server_with_project_fixture(&project_name);
         crate::tests::create_named_project_db(&server.tachi_home_dir(), "fixture-distill");
         let ambient_home = tempfile::tempdir().expect("ambient home");
-        crate::tests::create_named_project_db(ambient_home.path(), "ambient-distill");
+        let ambient_db =
+            crate::tests::create_named_project_db(ambient_home.path(), "ambient-distill");
+        std::fs::write(&ambient_db, b"not a SQLite database").expect("corrupt ambient project DB");
         let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
 
         let report = run_daily_batch_distill_with_options(&server, false)
@@ -520,6 +525,10 @@ mod env_drift_tests {
             .expect("daily distill after environment drift");
 
         assert_eq!(report.projects_scanned, 2);
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(
+            report.errors.is_empty(),
+            "ambient project must not be scanned: {:?}",
+            report.errors
+        );
     }
 }

@@ -5,11 +5,10 @@ fn capture_provenance_uses_server_home_after_environment_drift() {
     let _guard = tachi_home_test_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let server = crate::tests::make_server();
     let project_root = crate::utils::find_project_git_root().expect("test project root");
     let project_name =
         crate::path_utils::plan_c_dir_name_from_root(&project_root).expect("test project identity");
-    let fixture_db = server.project_db_path_buf().expect("fixture project DB");
+    let (server, fixture_db) = crate::tests::make_server_with_project_fixture(&project_name);
 
     let ambient_home = tempdir().expect("ambient home");
     let ambient_db = ambient_home.path().join("ambient-project.db");
