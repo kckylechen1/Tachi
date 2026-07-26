@@ -25,6 +25,36 @@
 //! `relatime`/`noatime` mounts make it non-deterministic), so it is noise, not
 //! signal.
 //!
+//! ## Why a timestamp is only evidence once the clock has been shown to resolve it
+//!
+//! Two of those rows — the same-size overwrite of a file under an unhashed root,
+//! and mutate-then-restore — have **no witness except a timestamp**. Every other
+//! fingerprint field (content hash, size, mode, inode, nlink, xattrs) is equal by
+//! construction in those two classes, so "no field moved" is decided entirely by
+//! whether the inode clock ticked between the capture and the worker's write.
+//!
+//! Filesystem timestamps are stamped from a *coarse* kernel clock (on Linux, one
+//! jiffy — 1–4 ms — regardless of the nanosecond fields ext4/overlayfs can
+//! store). Two events inside one tick get byte-identical `{sec, nsec}`. When that
+//! happens the comparison finds nothing, and a gate that reads "no delta" as
+//! "proven unchanged" certifies a mutated workspace as clean. That is not a flaky
+//! test, it is a fail-open (#1440).
+//!
+//! The fix is not a more tolerant comparison, it is a **capture-time clock
+//! barrier**: before a pre-image is sealed, the parent spins on a probe file — on
+//! the same filesystem, outside every walk root — until it *observes* a
+//! filesystem stamp strictly greater than every `ctime` in the image (see
+//! [`WorkspaceManifest::seal_with_clock_barrier`]). Any inode change after that
+//! point is stamped by a monotone clock at or past the barrier, hence strictly
+//! past the recorded `ctime`, and the existing comparison becomes sound. `ctime`
+//! is the barrier's target because POSIX bumps it on *every* inode change and no
+//! unprivileged process can set it.
+//!
+//! If the barrier cannot be observed, capture **fails** — it never degrades to a
+//! best-effort sleep, and a pre-image that carries no dominating barrier is
+//! refused at gate time ([`WorkspaceManifest::verify_clock_barriers`]) rather
+//! than passed. "I could not resolve this window" is not "nothing happened".
+//!
 //! ## The walk roots are PINNED by the parent, never re-derived from the tree
 //!
 //! One of the two walk roots — a linked worktree's external `gitdir` — is named
@@ -47,6 +77,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
@@ -63,6 +94,38 @@ pub const GITDIR_ROOT_LABEL: &str = "gitdir";
 /// fingerprinted — only the **content hash** is skipped, which is the part that
 /// costs multiple GB of BLAKE2 on a Rust tree with an in-tree `target/`.
 pub const BUILD_ARTIFACT_DIR_NAMES: &[&str] = &["target"];
+
+/// How long [`establish_clock_barrier`] will wait for the filesystem clock to
+/// be observed advancing. Generous next to any real tick (Linux jiffies are
+/// 1–4 ms); reaching it means the clock is not behaving, which is a refusal, not
+/// a longer sleep.
+const CLOCK_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Pause between probe writes so the spin does not burn a core on a coarse
+/// filesystem.
+const CLOCK_BARRIER_POLL: Duration = Duration::from_micros(200);
+
+/// One inode timestamp, `{sec, nsec}`, compared as a whole (derived `Ord` is
+/// field order, i.e. seconds then nanoseconds — which is the chronological
+/// order, not a lexicographic one).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default, Hash,
+)]
+pub struct FsTime {
+    pub sec: i64,
+    pub nsec: i64,
+}
+
+impl FsTime {
+    pub fn new(sec: i64, nsec: i64) -> FsTime {
+        FsTime { sec, nsec }
+    }
+}
+
+impl std::fmt::Display for FsTime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{:09}", self.sec, self.nsec)
+    }
+}
 
 /// Filesystem entry class as seen through `symlink_metadata` (symlinks are
 /// never followed).
@@ -98,12 +161,16 @@ pub struct EntryFingerprint {
     pub mtime_sec: i64,
     pub mtime_nsec: i64,
     /// Inode change time — unforgeable by an unprivileged worker, so this is
-    /// the field that catches mutate-then-restore.
+    /// the field that catches mutate-then-restore. It only *proves* anything
+    /// once the capture is sealed with a clock barrier that strictly exceeds it
+    /// ([`WorkspaceManifest::clock_barriers`]); without that, a write inside the
+    /// capture's own clock tick carries the same stamp and is invisible.
     pub ctime_sec: i64,
     pub ctime_nsec: i64,
     /// `None` for a non-file, and also for a file under an unhashed root (see
     /// [`WorkspaceManifest::unhashed_roots`]) — there, detection falls back to
-    /// size/inode/mtime/**ctime**, which an unprivileged worker cannot restore.
+    /// size/inode/mtime/**ctime**, which an unprivileged worker cannot restore
+    /// and which the capture-time clock barrier makes resolvable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,6 +203,23 @@ pub struct WorkspaceManifest {
     /// weaker proof than the rest of the image.
     #[serde(default)]
     pub unhashed_roots: Vec<String>,
+    /// **Capture-time clock barrier**, one per walk root label (`workspace`,
+    /// `gitdir`): a filesystem timestamp the parent *observed on that root's
+    /// filesystem* after the walk, strictly greater than every `ctime` the walk
+    /// recorded for that root.
+    ///
+    /// This is what turns the timestamp fields from an observation into a proof.
+    /// Set only on a **pre-image** (see
+    /// [`WorkspaceManifest::seal_with_clock_barrier`]); a post-image never needs
+    /// one, and never gets one.
+    ///
+    /// `#[serde(default)]` yields an EMPTY map, which is the pessimistic value:
+    /// a pre-image written by an older binary — or one whose barrier drifted —
+    /// carries no barrier, and [`WorkspaceManifest::verify_clock_barriers`]
+    /// refuses it. A version skew therefore over-rejects (visible) instead of
+    /// silently passing (the #1440 fail-open through a second door).
+    #[serde(default)]
+    pub clock_barriers: BTreeMap<String, FsTime>,
 }
 
 impl WorkspaceManifest {
@@ -151,6 +235,235 @@ impl WorkspaceManifest {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// The walk roots this image was captured from, as `(root label, path)`.
+    pub fn walk_roots(&self) -> Vec<(String, PathBuf)> {
+        let mut roots = vec![(
+            WORKSPACE_ROOT_LABEL.to_string(),
+            PathBuf::from(&self.workspace_root),
+        )];
+        if let Some(gitdir) = &self.gitdir_root {
+            roots.push((GITDIR_ROOT_LABEL.to_string(), PathBuf::from(gitdir)));
+        }
+        roots
+    }
+
+    /// The newest `ctime` recorded under each root label — the value a barrier
+    /// for that root must strictly exceed.
+    pub fn max_ctime_by_root(&self) -> BTreeMap<String, FsTime> {
+        let mut maxes: BTreeMap<String, FsTime> = BTreeMap::new();
+        for (key, entry) in &self.entries {
+            let label = root_label_of_key(key).to_string();
+            let ctime = FsTime::new(entry.ctime_sec, entry.ctime_nsec);
+            maxes
+                .entry(label)
+                .and_modify(|current| {
+                    if ctime > *current {
+                        *current = ctime;
+                    }
+                })
+                .or_insert(ctime);
+        }
+        maxes
+    }
+
+    /// Seal this **pre-image** with a capture-time clock barrier per walk root.
+    ///
+    /// Call it after the walk and before the image is written. On success every
+    /// root that has entries carries a barrier the parent *observed* on that
+    /// root's own filesystem, strictly greater than every `ctime` in the image
+    /// for that root — so any later inode change is stamped strictly past what
+    /// was recorded, and the `mtime`/`ctime` comparison in `compare_entry`
+    /// stops depending on clock resolution.
+    ///
+    /// Fails (never degrades, never sleeps a fixed amount) when the advance
+    /// cannot be observed. A pre-image whose window cannot be resolved cannot
+    /// convict, so the dispatch must not start under it.
+    pub fn seal_with_clock_barrier(&mut self) -> Result<(), String> {
+        let maxes = self.max_ctime_by_root();
+        let roots = self.walk_roots();
+        let root_paths: Vec<PathBuf> = roots.iter().map(|(_, path)| path.clone()).collect();
+        let mut barriers: BTreeMap<String, FsTime> = BTreeMap::new();
+        for (label, root) in roots {
+            // A root the walk produced no entries for needs no barrier — and
+            // `verify_clock_barriers` only demands one where entries exist.
+            let Some(must_exceed) = maxes.get(&label).copied() else {
+                continue;
+            };
+            let observed = establish_clock_barrier(&root, must_exceed, &root_paths)
+                .map_err(|e| format!("clock barrier for walk root {label}: {e}"))?;
+            barriers.insert(label, observed);
+        }
+        self.clock_barriers = barriers;
+        // Self-check: seal and verify must agree, or the barrier is decorative.
+        self.verify_clock_barriers()
+    }
+
+    /// Does this pre-image carry a barrier that dominates every `ctime` it
+    /// recorded? `Err` names the first entry it cannot vouch for.
+    ///
+    /// This is deliberately re-checked at gate time rather than trusted: it
+    /// makes the invariant a property of the *data*, so an image produced by an
+    /// older binary, a partial write, or a future refactor that forgets to seal
+    /// is caught instead of quietly passing.
+    pub fn verify_clock_barriers(&self) -> Result<(), String> {
+        for (key, entry) in &self.entries {
+            let label = root_label_of_key(key);
+            let ctime = FsTime::new(entry.ctime_sec, entry.ctime_nsec);
+            match self.clock_barriers.get(label) {
+                None => {
+                    return Err(format!(
+                        "walk root {label:?} carries no capture-time clock barrier, so a \
+                         timestamp that looks unchanged at {key} cannot be proven unchanged \
+                         (a write inside the capture's own clock tick would be invisible)"
+                    ))
+                }
+                Some(barrier) if *barrier <= ctime => {
+                    return Err(format!(
+                        "clock barrier for walk root {label:?} is {barrier}, which does not \
+                         strictly exceed the ctime {ctime} recorded at {key}: a post-capture \
+                         write to that entry could carry the same stamp, so an unchanged-looking \
+                         comparison there proves nothing"
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The walk-root label a manifest key belongs to (`workspace/src/x` →
+/// `workspace`; the bare root entry `workspace` → `workspace`).
+pub fn root_label_of_key(key: &str) -> &str {
+    match key.split_once('/') {
+        Some((label, _)) => label,
+        None => key,
+    }
+}
+
+/// Observe the filesystem clock of `root` advancing strictly past `must_exceed`.
+///
+/// The probe file is written **beside** `root`, never inside it: an entry the
+/// walk already fingerprinted cannot be used as the witness (bumping it would
+/// bump the value the barrier has to exceed — the chase never converges), and a
+/// probe inside the lease would change this gate's custody story, which is that
+/// the parent does not write into the workspace it is about to certify.
+///
+/// The probe's device is compared against the root's, because a barrier measured
+/// on a *different* filesystem's clock proves nothing about this one — a coarse
+/// root plus a fine sibling is exactly the silent fail-open this function
+/// exists to remove. A mismatch is a refusal.
+///
+/// `walk_roots` is every root this image covers. A probe location that falls
+/// inside any of them is refused rather than used: a `gitdir:` pointer can name
+/// a path *inside* the lease, and the probe would then bump a directory the walk
+/// had already fingerprinted — a self-inflicted delta, and the parent writing
+/// into the tree it is about to certify.
+pub fn establish_clock_barrier(
+    root: &Path,
+    must_exceed: FsTime,
+    walk_roots: &[PathBuf],
+) -> Result<FsTime, String> {
+    let probe_dir = root.parent().ok_or_else(|| {
+        format!(
+            "walk root {} has no parent directory to hold the clock probe; the parent must be \
+             able to write one file beside the root, on the same filesystem",
+            root.display()
+        )
+    })?;
+    let resolved_probe_dir = probe_dir
+        .canonicalize()
+        .unwrap_or_else(|_| probe_dir.to_path_buf());
+    for walk_root in walk_roots {
+        let resolved = walk_root
+            .canonicalize()
+            .unwrap_or_else(|_| walk_root.clone());
+        if resolved_probe_dir.starts_with(&resolved) {
+            return Err(format!(
+                "the clock probe for walk root {} would be written to {}, which is inside walk \
+                 root {}; the parent must not write into a tree it is about to certify unchanged, \
+                 and an entry the walk already fingerprinted cannot witness the clock advance",
+                root.display(),
+                probe_dir.display(),
+                walk_root.display()
+            ));
+        }
+    }
+    let root_meta = std::fs::symlink_metadata(root)
+        .map_err(|e| format!("lstat walk root {}: {e}", root.display()))?;
+    let root_dev = device_id(&root_meta);
+
+    let probe = probe_dir.join(format!(".tachi-postflight-clock-probe.{}", probe_suffix()));
+    let observed = barrier_spin(&probe, root, root_dev, must_exceed);
+    // Best-effort cleanup on every path: the probe is scratch, and it lives
+    // outside every walk root, so a leftover cannot affect a verdict.
+    let _ = std::fs::remove_file(&probe);
+    observed
+}
+
+fn barrier_spin(
+    probe: &Path,
+    root: &Path,
+    root_dev: Option<u64>,
+    must_exceed: FsTime,
+) -> Result<FsTime, String> {
+    let deadline = Instant::now() + CLOCK_BARRIER_TIMEOUT;
+    let mut device_checked = false;
+    loop {
+        std::fs::write(probe, b"tachi postflight clock probe").map_err(|e| {
+            format!(
+                "write clock probe {}: {e}; the parent must be able to write one file beside the \
+                 walk root to observe that filesystem's clock",
+                probe.display()
+            )
+        })?;
+        let meta = std::fs::symlink_metadata(probe)
+            .map_err(|e| format!("lstat clock probe {}: {e}", probe.display()))?;
+
+        if !device_checked {
+            let probe_dev = device_id(&meta);
+            if let (Some(root_dev), Some(probe_dev)) = (root_dev, probe_dev) {
+                if root_dev != probe_dev {
+                    return Err(format!(
+                        "clock probe {} is on device {probe_dev} but walk root {} is on device \
+                         {root_dev}; a barrier measured on another filesystem's clock proves \
+                         nothing about this one",
+                        probe.display(),
+                        root.display()
+                    ));
+                }
+            }
+            device_checked = true;
+        }
+
+        let (sec, nsec) = unix_ctime(&meta);
+        let observed = FsTime::new(sec, nsec);
+        if observed > must_exceed {
+            return Ok(observed);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the filesystem clock at {} did not advance past {must_exceed} within \
+                 {CLOCK_BARRIER_TIMEOUT:?} (last observed {observed}); without an observed \
+                 advance, a worker's write could carry the same stamp as the pre-image and be \
+                 invisible, so this dispatch must not start",
+                root.display(),
+            ));
+        }
+        std::thread::sleep(CLOCK_BARRIER_POLL);
+    }
+}
+
+fn probe_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos:x}-{seq:x}", std::process::id())
 }
 
 /// What to walk. Both roots are supplied by the caller: nothing in here is
@@ -203,6 +516,11 @@ pub fn capture(spec: &CaptureSpec) -> Result<WorkspaceManifest, String> {
         entries: BTreeMap::new(),
         errors: Vec::new(),
         unhashed_roots: Vec::new(),
+        // A bare capture is not yet a usable pre-image: only
+        // `seal_with_clock_barrier` can fill this in, and a post-image never
+        // needs one. Leaving it empty here is what makes an unsealed image fail
+        // closed at gate time.
+        clock_barriers: BTreeMap::new(),
     };
 
     walk_root(
@@ -448,6 +766,14 @@ fn unix_ctime(meta: &std::fs::Metadata) -> (i64, i64) {
     use std::os::unix::fs::MetadataExt;
     (meta.ctime(), meta.ctime_nsec())
 }
+/// The filesystem a path lives on. `None` on a platform where this module has
+/// no way to ask — a **stated blind spot**, in the same shape as the xattr one
+/// below: the clock-barrier device check is then skipped rather than guessed at.
+#[cfg(unix)]
+fn device_id(meta: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(meta.dev())
+}
 
 #[cfg(not(unix))]
 fn unix_size(meta: &std::fs::Metadata) -> u64 {
@@ -472,6 +798,10 @@ fn unix_mtime(meta: &std::fs::Metadata) -> (i64, i64) {
 #[cfg(not(unix))]
 fn unix_ctime(meta: &std::fs::Metadata) -> (i64, i64) {
     file_time_pair(meta.created().ok())
+}
+#[cfg(not(unix))]
+fn device_id(_meta: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 #[cfg(not(unix))]
 fn file_time_pair(time: Option<std::time::SystemTime>) -> (i64, i64) {

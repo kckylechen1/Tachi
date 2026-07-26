@@ -42,6 +42,14 @@
 //! [`manifest`], which fingerprints content (BLAKE2s-256), symlink targets,
 //! xattrs, mode/size/nlink, inode, mtime **and ctime**.
 //!
+//! Two of those classes (mutate-then-restore; a same-size overwrite under an
+//! unhashed root) have **no witness except a timestamp**, so the pre-image is
+//! additionally **sealed with an observed capture-time clock barrier** before a
+//! worker is spawned, and [`PostflightGate::run`] refuses any pre-image that
+//! does not carry one. Without that, a write landing inside the capture's own
+//! clock tick leaves every field equal and the gate certifies a mutated tree as
+//! clean — see the `manifest` module docs and #1440.
+//!
 //! # Composition (what this module does NOT decide)
 //!
 //! *Which* contract a dispatch runs under is the job of the effective-authority
@@ -282,9 +290,10 @@ impl GateOutcome {
         }
         Some(format!(
             "content under {} was NOT hashed by this run: {}. Changes there are still detected \
-             via size/inode/nlink/mode/xattr/mtime/ctime (ctime cannot be restored by an \
-             unprivileged worker), but the proof for those paths is metadata-only and no content \
-             digest exists for them.",
+             via size/inode/nlink/mode/xattr/mtime/ctime — ctime cannot be restored by an \
+             unprivileged worker, and the pre-image is sealed with an observed capture-time clock \
+             barrier so a same-tick write cannot carry the recorded stamp — but the proof for \
+             those paths is metadata-only and no content digest exists for them.",
             if self.content_unhashed_paths.len() == 1 {
                 "1 path".to_string()
             } else {
@@ -475,7 +484,10 @@ pub struct PostflightGate {
     /// those paths — size, inode, nlink, mode, xattrs, mtime and ctime are still
     /// fingerprinted, and ctime cannot be restored by an unprivileged worker —
     /// but the proof there is metadata-only, and every receipt says so by name
-    /// (`content_unhashed_paths`).
+    /// (`content_unhashed_paths`). That metadata-only proof is exactly why the
+    /// pre-image is sealed with a capture-time clock barrier: with no content
+    /// digest to fall back on, a same-size overwrite has nothing but the
+    /// timestamps to testify with.
     pub unhashed_dir_names: Vec<String>,
 }
 
@@ -539,7 +551,7 @@ impl PostflightGate {
             &self.worker_writable_roots(gitdir.as_deref()),
             &self.preimage_path,
         )?;
-        let manifest = manifest::capture(&CaptureSpec {
+        let mut manifest = manifest::capture(&CaptureSpec {
             workspace_root: &self.workspace_root,
             gitdir_root: gitdir.as_deref(),
             unhashed_dir_names: &self.unhashed_dir_names,
@@ -559,6 +571,22 @@ impl PostflightGate {
                 manifest.errors.join("\n  - ")
             ));
         }
+        // A complete image is still not a *provable* one. Two mutation classes —
+        // mutate-then-restore, and a same-size overwrite under an unhashed root —
+        // have no witness except a timestamp, so the image proves nothing until
+        // the parent has OBSERVED the filesystem clock move strictly past every
+        // ctime it just recorded. Sealing does that; failing to seal refuses the
+        // dispatch rather than starting one whose postflight could not convict
+        // (#1440 — an unobserved clock made the gate certify a mutated tree).
+        manifest.seal_with_clock_barrier().map_err(|e| {
+            format!(
+                "pre-image of {} cannot be sealed against the filesystem clock, so a later \
+                 postflight comparison could not distinguish an untouched entry from one written \
+                 inside the capture's own clock tick; refusing to capture a pre-image that cannot \
+                 convict: {e}",
+                self.workspace_root.display()
+            )
+        })?;
         let bytes = serde_json::to_vec(&manifest)
             .map_err(|e| format!("serialize workspace pre-image: {e}"))?;
         crate::utils::write_owner_only_file_atomic(&self.preimage_path, &bytes)
@@ -574,6 +602,9 @@ impl PostflightGate {
     /// 2. then load the parent-held pre-image (which carries the **pinned** walk
     ///    roots);
     /// 3. then re-scan **those roots** and compare;
+    /// 3b. then check the pre-image's **capture-time clock barrier** — an image
+    ///    whose timestamps cannot out-resolve the run window cannot prove a
+    ///    match means "unchanged";
     /// 4. then apply the contract.
     ///
     /// Step 3 never re-derives a walk root from the workspace: the worker has had
@@ -688,6 +719,33 @@ impl PostflightGate {
                 GateVerdict::Rejected {
                     reason: RejectReason::UnusableImage,
                     deltas,
+                    entries_checked,
+                },
+                unhashed,
+            ));
+        }
+
+        // (3b) A complete pre-image whose timestamps cannot out-resolve the run
+        // window is not a pass either. For the classes whose ONLY witness is a
+        // timestamp, "every field matched" is indistinguishable from "the clock
+        // never ticked" unless the capture recorded an observed barrier past
+        // every ctime. Re-checked here from the data, not trusted: an image from
+        // an older binary carries no barrier and must fail closed, not sail
+        // through (#1440).
+        if let Err(why) = pre.verify_clock_barriers() {
+            return Ok(base(
+                GateVerdict::Rejected {
+                    reason: RejectReason::UnusableImage,
+                    deltas: vec![WorkspaceDelta {
+                        path: self.preimage_path.to_string_lossy().to_string(),
+                        kind: DeltaKind::Unreadable,
+                        detail: format!(
+                            "pre-image carries no usable capture-time clock barrier, so an \
+                             entry whose fields all match cannot be proven unchanged: {why}"
+                        ),
+                        facets: Vec::new(),
+                        entry_kind: None,
+                    }],
                     entries_checked,
                 },
                 unhashed,

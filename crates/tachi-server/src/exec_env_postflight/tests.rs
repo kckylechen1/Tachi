@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::liveness::DescendantLiveness;
-use super::manifest::DeltaKind;
+use super::manifest::{DeltaKind, FsTime};
 use super::{
     apply_verdict, naming, rejection_log_message, BlockReason, FileQuarantineSink, GateOutcome,
     GateVerdict, PostflightGate, QuarantineSink, RejectReason, WriteContract,
@@ -910,6 +910,235 @@ fn naming_rule_detector_actually_detects() {
         Some("read-only enforcement")
     );
     assert!(naming::violates_naming_rule("detect-and-reject postflight gate").is_none());
+}
+
+// ─── the capture-time clock barrier (#1440) ─────────────────────────────────
+//
+// Two of the eight surfaces above — mutate-then-restore, and the same-size
+// overwrite under an unhashed root — have NO witness except a timestamp. Every
+// other fingerprint field is equal by construction there (measured: a same-size
+// in-place rewrite moves only {mtime, ctime}; mutate-then-restore + utimensat
+// moves only {ctime}). So those two tests are decided entirely by whether the
+// filesystem clock ticked between the capture and the write — and on a coarse
+// clock (a Linux jiffy, 1–4 ms) it often does not, at which point the gate saw
+// nothing and certified a mutated tree as Clean. That is not a flaky assertion;
+// it is a fail-open, and it is why those two tests were red 1-in-3 on Linux.
+//
+// The mechanism fix is the barrier below. These tests pin it from both ends: the
+// barrier is really established (and really dominates), and an image WITHOUT a
+// dominating barrier is refused instead of passed.
+
+/// Rewrite the on-disk pre-image. Used to put the gate in the exact state a
+/// coarse clock — or an older binary — would leave it in, without touching the
+/// workspace at all, so the only thing under test is what the gate does with an
+/// image it cannot trust.
+fn rewrite_preimage(
+    path: &Path,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) {
+    let bytes = fs::read(path).expect("read pre-image");
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse pre-image");
+    edit(value.as_object_mut().expect("pre-image is a JSON object"));
+    fs::write(
+        path,
+        serde_json::to_vec(&value).expect("serialize pre-image"),
+    )
+    .expect("write pre-image");
+}
+
+#[test]
+fn the_preimage_is_sealed_with_an_observed_clock_barrier_past_every_ctime() {
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    let pre = gate.capture_preimage().expect("pre-image");
+
+    let barrier = *pre
+        .clock_barriers
+        .get("workspace")
+        .expect("a sealed pre-image must carry a barrier for the workspace walk root");
+    for (key, entry) in &pre.entries {
+        let ctime = FsTime::new(entry.ctime_sec, entry.ctime_nsec);
+        assert!(
+            barrier > ctime,
+            "the barrier {barrier} must STRICTLY exceed the ctime {ctime} recorded at {key}, or a \
+             write in that same tick is invisible"
+        );
+    }
+    pre.verify_clock_barriers()
+        .expect("sealing and verifying must agree, or the barrier is decorative");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_write_after_the_barrier_is_stamped_strictly_past_the_recorded_ctime() {
+    // The property the whole gate rests on, asserted directly: once the
+    // pre-image is sealed, ANY inode change carries a ctime at or past the
+    // barrier — hence strictly past what the pre-image recorded — so
+    // `compare_entry` cannot come back empty for a mutated entry no matter how
+    // coarse the filesystem clock is. This is the assertion that goes red on a
+    // 1–4 ms tick if the barrier is ever removed or weakened.
+    use std::os::unix::fs::MetadataExt;
+
+    let fx = Fixture::new();
+    let target = fx.ws().join("src/tracked.rs");
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    let pre = gate.capture_preimage().expect("pre-image");
+
+    let recorded = &pre.entries["workspace/src/tracked.rs"];
+    let recorded_ctime = FsTime::new(recorded.ctime_sec, recorded.ctime_nsec);
+    let barrier = *pre.clock_barriers.get("workspace").expect("barrier");
+
+    // The worker writes the instant the barrier is in place: the tightest
+    // window there is, and the one a same-tick collision needs.
+    fs::write(&target, b"// tamper\n").expect("mutate");
+    let after = fs::symlink_metadata(&target).expect("metadata");
+    let after_ctime = FsTime::new(after.ctime(), after.ctime_nsec());
+
+    assert!(
+        after_ctime >= barrier,
+        "the filesystem clock is not monotone with the observed barrier: wrote at {after_ctime}, \
+         barrier was {barrier}"
+    );
+    assert!(
+        after_ctime > recorded_ctime,
+        "a post-capture write must be stamped strictly past the pre-image's ctime; got \
+         {after_ctime} vs recorded {recorded_ctime} (barrier {barrier})"
+    );
+}
+
+#[test]
+fn a_preimage_with_no_clock_barrier_is_not_a_pass() {
+    // Byte-for-byte the pre-image an older binary wrote — and the state any
+    // capture is in when the clock advance could not be observed. Nothing in
+    // the workspace is touched, so the diff is empty and the ONLY question is
+    // what the gate does with an image whose timestamps prove nothing.
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+
+    rewrite_preimage(&fx.preimage_path(), |obj| {
+        obj.remove("clock_barriers");
+    });
+
+    let outcome = gate.run(&Reaped).expect("gate run");
+    let GateVerdict::Rejected { reason, deltas, .. } = &outcome.verdict else {
+        panic!(
+            "an unsealed pre-image cannot prove a match means unchanged; passing it as clean is \
+             the #1440 fail-open: {:?}",
+            outcome.verdict
+        );
+    };
+    assert_eq!(*reason, RejectReason::UnusableImage);
+    assert!(
+        deltas
+            .iter()
+            .any(|d| d.detail.contains("clock barrier") && d.kind == DeltaKind::Unreadable),
+        "the receipt must say WHY it could not decide: {deltas:#?}"
+    );
+    assert!(!outcome.artifacts_released());
+    assert!(outcome.lease_quarantine_required());
+}
+
+#[test]
+fn a_clock_barrier_that_does_not_outrank_the_recorded_ctimes_is_not_a_pass() {
+    // The coarse-clock filesystem, reproduced at the one place it is observable
+    // from a test: an image sealed with a barrier that does NOT strictly exceed
+    // what the walk recorded. That is exactly the state a 1–4 ms tick leaves the
+    // capture in, and the gate must refuse it rather than read "every field
+    // matched" as "nothing happened".
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+
+    rewrite_preimage(&fx.preimage_path(), |obj| {
+        obj.insert(
+            "clock_barriers".to_string(),
+            serde_json::json!({ "workspace": { "sec": 0, "nsec": 0 } }),
+        );
+    });
+
+    let outcome = gate.run(&Reaped).expect("gate run");
+    let GateVerdict::Rejected { reason, .. } = &outcome.verdict else {
+        panic!(
+            "a barrier that does not dominate the recorded ctimes proves nothing; passing it as \
+             clean is the #1440 fail-open: {:?}",
+            outcome.verdict
+        );
+    };
+    assert_eq!(*reason, RejectReason::UnusableImage);
+    assert!(!outcome.artifacts_released());
+    assert!(outcome.lease_quarantine_required());
+}
+
+#[test]
+fn a_linked_worktrees_gitdir_gets_its_own_barrier() {
+    // A barrier measured on one filesystem says nothing about another's clock,
+    // so every walk root carries its own — including the external gitdir, which
+    // routinely lives on a different mount from the lease.
+    let fx = Fixture::linked_worktree();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    let pre = gate.capture_preimage().expect("pre-image");
+
+    for label in ["workspace", "gitdir"] {
+        assert!(
+            pre.clock_barriers.contains_key(label),
+            "walk root {label} has entries but no barrier: {:?}",
+            pre.clock_barriers
+        );
+    }
+    pre.verify_clock_barriers().expect("both roots are sealed");
+
+    // And a barrier for one root does not vouch for the other.
+    rewrite_preimage(&fx.preimage_path(), |obj| {
+        if let Some(barriers) = obj
+            .get_mut("clock_barriers")
+            .and_then(|b| b.as_object_mut())
+        {
+            barriers.remove("gitdir");
+        }
+    });
+    let outcome = gate.run(&Reaped).expect("gate run");
+    let GateVerdict::Rejected { reason, .. } = &outcome.verdict else {
+        panic!(
+            "an unsealed gitdir root must not ride in on the workspace's barrier: {:?}",
+            outcome.verdict
+        );
+    };
+    assert_eq!(*reason, RejectReason::UnusableImage);
+}
+
+#[test]
+fn the_clock_probe_is_written_outside_every_walk_root() {
+    // The probe cannot live inside the workspace: an entry the walk already
+    // fingerprinted cannot be the witness (bumping it bumps the value the
+    // barrier must exceed — the chase never converges), and the parent writing
+    // into the tree it is about to certify would change this gate's custody
+    // story. So a sealed capture must leave the workspace byte-identical and
+    // the following clean run must still pass.
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    let pre = gate.capture_preimage().expect("pre-image");
+
+    assert!(
+        !pre.entries.keys().any(|key| key.contains("clock-probe")),
+        "the clock probe leaked into the manifest: {:?}",
+        pre.entries.keys().collect::<Vec<_>>()
+    );
+    for entry in fs::read_dir(fx.ws()).expect("read workspace") {
+        let name = entry.expect("dir entry").file_name();
+        assert!(
+            !name.to_string_lossy().contains("clock-probe"),
+            "the clock probe was left inside the lease workspace: {name:?}"
+        );
+    }
+
+    // Sealing must not itself be a delta.
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert!(
+        matches!(outcome.verdict, GateVerdict::Clean { .. }),
+        "sealing the pre-image must not show up as a change: {:?}",
+        outcome.verdict
+    );
 }
 
 // ─── unix test helpers ──────────────────────────────────────────────────────
