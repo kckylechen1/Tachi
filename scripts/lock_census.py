@@ -319,11 +319,14 @@ def match_historical(
        over from that function via v2 nearest-line matching. The callsite
        falls back to honest regenerated structural evidence.
 
-    3. **Legitimate prior.** When no exact archive match exists and the prior
+    3. **Durable structural provenance.** A prior structural fallback keeps
+       its ``regenerated_structural`` label across later regeneration passes.
+
+    4. **Legitimate prior.** When no exact archive match exists and the prior
        evidence does NOT appear in the archive at all, it is kept (legitimately
        new evidence for a function added since the archive).
 
-    4. **No match → structural fallback.**
+    5. **No match → structural fallback.**
 
     Returns (matched_entry_or_None, source_label).
     """
@@ -441,7 +444,7 @@ def regenerate(fixture_path: Path) -> dict:
         )
         if historical:
             evidence = historical.get("evidence", "")
-            evidence_provenance = hist_source  # "archive_authoritative" or "committed_prior"
+            evidence_provenance = hist_source
             hist_class = historical.get("class", "class2_runtime_config")
         else:
             evidence = f"structural inspection of {fn_name}"
