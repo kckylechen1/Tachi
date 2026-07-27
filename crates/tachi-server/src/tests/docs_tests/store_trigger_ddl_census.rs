@@ -481,19 +481,19 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
             },
             Site {
                 symbol:
-                    "stamped_v23_with_missing_search_generation_trigger_is_refused_without_repair",
+                    "stamped_current_with_missing_search_generation_trigger_is_refused_without_repair",
                 trigger: "MEMORY_SEARCH_GENERATION_AFTER_UPDATE",
                 ddl: "d232a9fb5db0971e",
                 occurrences: 1,
             },
             Site {
-                symbol: "v22_to_v23_installs_reserved_reference_guards_and_stamps",
+                symbol: "v22_to_current_installs_reserved_reference_guards_and_scored_count",
                 trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
                 ddl: "bb3d35f8dd48927f",
                 occurrences: 1,
             },
             Site {
-                symbol: "v22_to_v23_installs_reserved_reference_guards_and_stamps",
+                symbol: "v22_to_current_installs_reserved_reference_guards_and_scored_count",
                 trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
                 ddl: "07bdacf9fb6a3723",
                 occurrences: 1,
@@ -511,12 +511,12 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "v22->v23 migration tests; the pinned digests are the migration's \
+        reason: "v22-to-current migration tests; the pinned digests are the migration's \
                  own canonical DDL. Enclosing symbols: \
-                 v22_to_v23_installs_reserved_reference_guards_and_stamps, \
+                 v22_to_current_installs_reserved_reference_guards_and_scored_count, \
                  v23_guard_install_failure_rolls_back_triggers_sentinel_and_stamp, \
                  stamped_v23_with_missing_guards_is_refused_even_with_migration_authority, \
-                 stamped_v23_with_missing_search_generation_trigger_is_refused_without_repair. \
+                 stamped_current_with_missing_search_generation_trigger_is_refused_without_repair. \
                  Enclosing symbols extracted mechanically; bodies NOT read. This \
                  file names a store doorway and does not arm the migration \
                  token, so nothing here is machine-provable — it is a \
@@ -637,20 +637,20 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         },
         sites: &[
             Site {
-                symbol: "seed_pre_v23_fixture",
+                symbol: "seed_v22_fixture",
                 trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
                 ddl: "90d32439353dd888",
                 occurrences: 1,
             },
             Site {
-                symbol: "seed_pre_v23_fixture",
+                symbol: "seed_v22_fixture",
                 trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
                 ddl: "dbf593b87f7b0e74",
                 occurrences: 1,
             },
         ],
-        reason: "seed_pre_v23_fixture drops the canonical guards on a fixture \
-                 database to manufacture a pre-v23 shape. Enclosing symbol \
+        reason: "seed_v22_fixture drops the canonical guards on a fixture \
+                 database to manufacture a v22 shape. Enclosing symbol \
                  extracted mechanically; body NOT read. The file names a store \
                  doorway, so the no-doorway proof does not hold and this is a \
                  declaration.",
