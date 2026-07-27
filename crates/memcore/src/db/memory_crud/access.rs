@@ -88,9 +88,9 @@ impl AccessEventKind {
     ///    is checked. Turning the knob ON makes this gate strictly harder to
     ///    pass in the common case (a memory's `use` days are near zero while
     ///    its `display` days accumulate), so the ON state performs *fewer*
-    ///    irreversible promotions than OFF. Non-promotion is recoverable — the
-    ///    row is re-examined on every pipeline run and promotes as soon as it
-    ///    earns it. Promotion is not.
+    ///    irreversible promotions than OFF. A withheld row remains eligible
+    ///    for reconsideration whenever the bounded candidate scan selects it;
+    ///    promotion itself is not reversible.
     /// 3. It is one defect with one substrate (`access_history.event_kind`).
     ///    Two knobs over one column is how the two halves drift apart.
     ///

@@ -289,11 +289,10 @@ async fn run_truth_maintenance_for_target(
     // once outside the loop: the arm is a property of the configuration, not of
     // the candidate, and re-resolving it per entry would let a mid-run config
     // reload promote two candidates under two different rules.
-    let promotion_event_kind =
-        memcore::db::AccessEventKind::for_promotion(memcore::RecallConfig::get());
+    let recall_config = memcore::RecallConfig::get();
     for entry in &promotion_candidates {
         let access_days = store
-            .distinct_access_days(&entry.id, promotion_event_kind)
+            .distinct_promotion_days(&entry.id, recall_config)
             .map_err(|e| format!("count access days for {}: {e}", entry.id))?;
         if crate::pipeline_ops::calculate_promotion_score(entry, access_days) < 0.60 {
             continue;

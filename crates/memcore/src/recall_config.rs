@@ -66,9 +66,10 @@ pub struct RecallConfig {
     /// consumer whose output cannot be undone by flipping the knob back —
     /// `promote_memory_to_durable` pins `importance` and `retention_policy`
     /// permanently. The sign is favourable (the ON history is a subset of the
-    /// unfiltered OFF history, and a withheld promotion is re-decided on the
-    /// next pipeline run), but anyone flipping this is changing retention, not
-    /// only rank order, and should read that function's rationale first.
+    /// unfiltered OFF history, and a withheld promotion remains eligible for
+    /// reconsideration whenever the bounded candidate scan selects it), but
+    /// anyone flipping this is changing retention, not only rank order, and
+    /// should read that function's rationale first.
     pub use_provenance_recency: bool,
 }
 

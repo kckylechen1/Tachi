@@ -198,20 +198,32 @@ pub fn list_promotion_candidate_ids(
     Ok(out)
 }
 
+pub fn count_distinct_access_days(
+    conn: &Connection,
+    memory_id: &str,
+) -> Result<usize, MemoryError> {
+    count_distinct_access_days_of_kind(conn, memory_id, None)
+}
+
 /// Distinct calendar days feeding `calculate_promotion_score`, i.e. tachi#1446
 /// **lever 6**.
 ///
-/// Pick the promotion arm with [`AccessEventKind::for_promotion`], never by
-/// hand. `None` is the knob-OFF arm and deliberately preserves the literal
-/// pre-#1446 unfiltered query. `Some(Use)` is the knob-ON arm and excludes the
-/// system's own display events from the irreversible promotion decision.
-///
-/// * `None` — the knob-OFF arm. Counts every history row exactly as the old SQL
-///   did, including `use` rows written by the already-landed signal pipeline.
-/// * `Some(`[`AccessEventKind::Use`]`)` — the knob-ON arm. Counts only days on which a
-///   caller-initiated save cited this memory, so being shown by the recall
-///   pipeline, however often, contributes nothing to the promotion score.
-pub fn count_distinct_access_days(
+/// The config selects the arm through [`AccessEventKind::for_promotion`]: OFF
+/// preserves the literal pre-#1446 unfiltered query, while ON counts only days
+/// on which a caller-initiated save cited this memory.
+pub fn count_distinct_promotion_days(
+    conn: &Connection,
+    memory_id: &str,
+    recall_config: &crate::RecallConfig,
+) -> Result<usize, MemoryError> {
+    count_distinct_access_days_of_kind(
+        conn,
+        memory_id,
+        AccessEventKind::for_promotion(recall_config),
+    )
+}
+
+pub(crate) fn count_distinct_access_days_of_kind(
     conn: &Connection,
     memory_id: &str,
     kind: Option<AccessEventKind>,

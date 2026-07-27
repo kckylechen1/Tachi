@@ -1,6 +1,5 @@
 //! Daily truth-maintenance helpers on [`MemoryStore`].
 
-use crate::db::AccessEventKind;
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,25 +111,19 @@ impl MemoryStore {
             .collect())
     }
 
-    /// Count the distinct days feeding the durable-promotion gate. `None`
-    /// preserves the pre-#1446 unfiltered knob-OFF query; `Some(kind)` selects
-    /// one provenance.
-    ///
-    /// Delegates to [`db::count_distinct_access_days`]. Until tachi#1446
-    /// lever 6 this method carried its own copy of that SQL, so the promotion
-    /// ratchet and the `db`-layer helper of the same name were two
-    /// independently editable statements that happened to agree; the live
-    /// pipeline read this copy, which is why fixing only the `db` one would
-    /// have changed nothing. One statement now, one place to get it wrong.
-    ///
-    /// Callers pick the arm with [`AccessEventKind::for_promotion`] rather
-    /// than naming a variant, so the knob is read in exactly one place.
-    pub fn distinct_access_days(
+    /// Count distinct access days using the pre-#1446 unfiltered semantics.
+    pub fn distinct_access_days(&self, id: &str) -> Result<usize, MemoryError> {
+        db::count_distinct_access_days(&self.conn, id)
+    }
+
+    /// Count the distinct days feeding the durable-promotion gate. The config
+    /// selects the frozen unfiltered OFF arm or the use-only ON arm.
+    pub fn distinct_promotion_days(
         &self,
         id: &str,
-        kind: Option<AccessEventKind>,
+        recall_config: &crate::RecallConfig,
     ) -> Result<usize, MemoryError> {
-        db::count_distinct_access_days(&self.conn, id, kind)
+        db::count_distinct_promotion_days(&self.conn, id, recall_config)
     }
 
     /// Pin importance and durable retention once a memory passes the
@@ -392,17 +385,10 @@ mod tests {
         }
 
         assert_eq!(
-            store
-                .distinct_access_days("tracked", Some(AccessEventKind::Display))
-                .expect("count days"),
+            store.distinct_access_days("tracked").expect("count days"),
             2
         );
-        assert_eq!(
-            store
-                .distinct_access_days("other", Some(AccessEventKind::Display))
-                .expect("count days"),
-            0
-        );
+        assert_eq!(store.distinct_access_days("other").expect("count days"), 0);
     }
 
     /// tachi#1446 lever 6: the arm the promotion ratchet reads is decided by
@@ -472,14 +458,14 @@ mod tests {
 
         assert_eq!(
             store
-                .distinct_access_days("shown-often", AccessEventKind::for_promotion(&off))
+                .distinct_promotion_days("shown-often", &off)
                 .expect("count days"),
             6,
             "default config keeps counting the six display days, unchanged"
         );
         assert_eq!(
             store
-                .distinct_access_days("shown-often", AccessEventKind::for_promotion(&on))
+                .distinct_promotion_days("shown-often", &on)
                 .expect("count days"),
             0,
             "six displays are six displays — with the knob on, none of them is \
