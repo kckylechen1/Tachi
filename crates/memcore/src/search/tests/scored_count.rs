@@ -154,6 +154,12 @@ fn scorer_count_respects_record_access_and_excludes_graph_only_results() {
     assert_eq!(counts(&conn, "seed"), (0, 0, 0));
     assert_eq!(counts(&conn, "graph-only"), (0, 0, 0));
 
+    conn.execute(
+        "UPDATE memories SET scored_count = 7 WHERE id = 'graph-only'",
+        [],
+    )
+    .unwrap();
+
     let record = SearchOptions {
         record_access: true,
         ..no_record
@@ -161,7 +167,7 @@ fn scorer_count_respects_record_access_and_excludes_graph_only_results() {
     let results = hybrid_search(&conn, "ScoredCountGraph", &record).unwrap();
     assert!(results.iter().any(|result| result.entry.id == "graph-only"));
     assert_eq!(counts(&conn, "seed").1, 1);
-    assert_eq!(counts(&conn, "graph-only"), (1, 0, 1));
+    assert_eq!(counts(&conn, "graph-only"), (1, 7, 1));
 }
 
 #[test]
