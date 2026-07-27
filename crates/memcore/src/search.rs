@@ -511,9 +511,12 @@ fn hybrid_search_inner(
     //
     // tachi#1459: this is the **only** production call site of
     // `record_access_with_updates`, and therefore the only place
-    // `access_count`, `recall_count` and `query_diversity` ever move. Those
-    // counters observe the search path only; reads through path-listing routes
-    // (`db::list_by_path`, `db::list_by_path_recent`,
+    // `access_count` and `recall_count` increment and the only source of the
+    // history from which `query_diversity` is derived. `gc_tables` can later
+    // reconcile `query_diversity` downward from that history; it adds no
+    // non-search observation. These counters observe the search path only;
+    // reads through path-listing routes (`db::list_by_path`,
+    // `db::list_by_path_recent`,
     // `db::list_memories_by_path_prefix`) do not increment them. Anything
     // downstream that reads a zero as "never retrieved" is reading this line's
     // absence, not a fact about the memory.

@@ -25,9 +25,10 @@ pub struct PathPrefixMemoryRow {
 ///
 /// tachi#1459: this route records nothing. The access counters observe the
 /// search path only — `record_access_with_updates`, from `hybrid_search`, is
-/// their sole production writer — so a sweep over this function neither
-/// increments them nor may treat their zero values as evidence that the rows it
-/// found are unused.
+/// their sole production observation path. `gc_tables` can reconcile
+/// `query_diversity` from search-written history but adds no non-search use, so
+/// a sweep over this function neither records an observation nor may treat zero
+/// values as evidence that the rows it found are unused.
 pub fn list_memories_by_path_prefix(
     conn: &Connection,
     path_like_pattern: &str,

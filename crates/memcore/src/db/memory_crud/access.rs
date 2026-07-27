@@ -145,8 +145,10 @@ pub(crate) fn record_access(
 /// Applies a promotion gate: tier -> "consolidated" when `recall_count >= 3`
 /// and `query_diversity >= 3`.
 ///
-/// **This is the only production writer of all three counters, and it has
-/// exactly one production caller: `search.rs`'s `hybrid_search`** (tachi#1459).
+/// **This is the only production path that increments all three counters, and
+/// it has exactly one production caller: `search.rs`'s `hybrid_search`**
+/// (tachi#1459). `gc_tables` can later reconcile `query_diversity` downward
+/// from the search-written `access_history`; it does not add non-search use.
 /// So every counter it maintains observes the search path only; reads through
 /// path-listing routes do not increment them — `list_by_path`,
 /// `list_by_path_recent` and `list_memories_by_path_prefix` return rows without
