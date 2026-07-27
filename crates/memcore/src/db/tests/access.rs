@@ -77,8 +77,9 @@ fn record_access_with_updates_returns_post_write_access_fields() {
     e.access_count = 7;
     upsert(&mut conn, &e, false).unwrap();
 
-    let updates = record_access_with_updates(&conn, &["touch-return".to_string()], &[], None)
-        .expect("record access updates");
+    let ids = ["touch-return".to_string()];
+    let updates =
+        record_access_with_updates(&conn, &ids, &ids, &[], None).expect("record access updates");
     let update = updates.get("touch-return").expect("updated row");
     let db_update: AccessUpdate = conn
         .query_row(
@@ -106,6 +107,7 @@ fn record_access_with_updates_ignores_missing_ids() {
 
     let updates = record_access_with_updates(
         &conn,
+        &["touch-present".to_string(), "touch-missing".to_string()],
         &["touch-present".to_string(), "touch-missing".to_string()],
         &[],
         None,

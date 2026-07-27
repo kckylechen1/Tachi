@@ -157,6 +157,7 @@ fn build_capture_entry(query: &str, expected_id: &str, top_k: usize) -> MemoryEn
         scope: "user".to_string(),
         archived: false,
         access_count: 0,
+        scored_count: 0,
         last_access: None,
         last_use_at: None,
         revision: 1,

@@ -64,18 +64,22 @@ fn record_access_deduplicates_repeated_ids_before_incrementing() {
         "duplicate-access".to_string(),
     ];
     let updates =
-        record_access_with_updates(&conn, &ids, &ids, Some("DuplicateAccessProbe")).unwrap();
+        record_access_with_updates(&conn, &ids, &ids, &ids, Some("DuplicateAccessProbe")).unwrap();
 
     assert_eq!(updates["duplicate-access"].access_count, 1);
-    let (access_count, recall_count): (i64, i64) = conn
+    let (access_count, recall_count, scored_count): (i64, i64, i64) = conn
         .query_row(
-            "SELECT access_count, recall_count FROM memories WHERE id = ?1",
+            "SELECT access_count, recall_count, scored_count FROM memories WHERE id = ?1",
             rusqlite::params!["duplicate-access"],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(access_count, 1);
     assert_eq!(recall_count, 1);
+    assert_eq!(
+        scored_count, 1,
+        "duplicate scored IDs increment exactly once"
+    );
 
     let history_count: i64 = conn
         .query_row(

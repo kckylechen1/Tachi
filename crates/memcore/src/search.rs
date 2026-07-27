@@ -481,7 +481,7 @@ fn hybrid_search_inner(
         fetched_count: entries_map.len(),
     });
 
-    let (mut results, rank_receipt) = ranking::rank_candidate_entries(
+    let (mut results, scored_ids, rank_receipt) = ranking::rank_candidate_entries(
         conn,
         ranking::CandidateRanking {
             query,
@@ -526,8 +526,13 @@ fn hybrid_search_inner(
         let accessed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
         // FTS hits drive recall_count; collect before taking results slice
         let fts_hit_ids: Vec<String> = candidates.fts_scores.keys().cloned().collect();
-        let access_updates =
-            record_access_with_updates(conn, &accessed_ids, &fts_hit_ids, Some(query))?;
+        let access_updates = record_access_with_updates(
+            conn,
+            &accessed_ids,
+            &scored_ids,
+            &fts_hit_ids,
+            Some(query),
+        )?;
         for r in &mut results {
             if let Some(update) = access_updates.get(&r.entry.id) {
                 r.entry.access_count = update.access_count;

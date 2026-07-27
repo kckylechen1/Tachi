@@ -3,6 +3,30 @@ use crate::store::enrichment::ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS;
 use crate::MemoryStore;
 
 #[test]
+fn ordinary_upsert_preserves_existing_scored_count() {
+    let mut conn = make_conn();
+    let entry = make_entry("scored-upsert", "scored count survives ordinary save");
+    upsert(&mut conn, &entry, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET scored_count = 7 WHERE id = 'scored-upsert'",
+        [],
+    )
+    .unwrap();
+    upsert(&mut conn, &entry, false).unwrap();
+    let scored_count: i64 = conn
+        .query_row(
+            "SELECT scored_count FROM memories WHERE id = 'scored-upsert'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        scored_count, 7,
+        "default MemoryEntry must not erase diagnostics"
+    );
+}
+
+#[test]
 fn upsert_folds_persons_into_entities_without_persisting_persons_column() {
     let mut conn = make_conn();
     let mut e = make_entry("pers-1", "Kyle prefers concise handoffs");

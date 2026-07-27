@@ -179,7 +179,7 @@ pub(crate) fn record_access(
     fts_hits: &[String],
     query: Option<&str>,
 ) -> Result<(), MemoryError> {
-    record_access_with_updates(conn, ids, fts_hits, query).map(|_| ())
+    record_access_with_updates(conn, ids, ids, fts_hits, query).map(|_| ())
 }
 
 /// Bump `access_count` and `last_access` for a list of IDs after a non-empty
@@ -211,11 +211,12 @@ pub(crate) fn record_access(
 /// `fts_hits`.
 pub(crate) fn record_access_with_updates(
     conn: &Connection,
-    ids: &[String],
+    displayed_ids: &[String],
+    scored_ids: &[String],
     fts_hits: &[String],
     query: Option<&str>,
 ) -> Result<HashMap<String, AccessUpdate>, MemoryError> {
-    if ids.is_empty() {
+    if displayed_ids.is_empty() && scored_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
@@ -226,9 +227,15 @@ pub(crate) fn record_access_with_updates(
     // atomic without widening the public search API to require `&mut Connection`.
     let tx = conn.unchecked_transaction()?;
 
-    let unique_ids = unique_id_order(ids);
-    let mut existing_set = HashSet::with_capacity(unique_ids.len());
-    for batch in unique_ids.chunks(IN_BATCH_SIZE) {
+    let mut candidate_ids = unique_id_order(displayed_ids);
+    let displayed_set: HashSet<&str> = candidate_ids.iter().copied().collect();
+    candidate_ids.extend(
+        unique_id_order(scored_ids)
+            .into_iter()
+            .filter(|id| !displayed_set.contains(id)),
+    );
+    let mut existing_set = HashSet::with_capacity(candidate_ids.len());
+    for batch in candidate_ids.chunks(IN_BATCH_SIZE) {
         let placeholders = numbered_placeholders(1, batch.len());
         let sql = format!("SELECT id FROM memories WHERE id IN ({placeholders})");
         let values = batch
@@ -243,7 +250,7 @@ pub(crate) fn record_access_with_updates(
             existing_set.insert(row?);
         }
     }
-    let existing_ids = unique_ids
+    let existing_ids = candidate_ids
         .into_iter()
         .filter(|id| existing_set.contains(*id))
         .collect::<Vec<_>>();
@@ -252,7 +259,34 @@ pub(crate) fn record_access_with_updates(
         return Ok(HashMap::new());
     }
 
-    for batch in existing_ids.chunks(IN_BATCH_SIZE) {
+    let displayed_set: HashSet<&str> = displayed_ids.iter().map(String::as_str).collect();
+    let scored_set: HashSet<&str> = scored_ids.iter().map(String::as_str).collect();
+    let displayed_existing_ids = existing_ids
+        .iter()
+        .copied()
+        .filter(|id| displayed_set.contains(*id))
+        .collect::<Vec<_>>();
+    let scored_existing_ids = existing_ids
+        .iter()
+        .copied()
+        .filter(|id| scored_set.contains(*id))
+        .collect::<Vec<_>>();
+
+    // Scoring-count invariant: once per existing score key, without creating
+    // display history for MMR/top-k losers.
+    for batch in scored_existing_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(1, batch.len());
+        let sql = format!(
+            "UPDATE memories SET scored_count = scored_count + 1 WHERE id IN ({placeholders})"
+        );
+        let values = batch
+            .iter()
+            .map(|id| Value::Text((*id).to_string()))
+            .collect::<Vec<_>>();
+        tx.execute(&sql, params_from_iter(values.iter()))?;
+    }
+
+    for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE) {
         let placeholders = numbered_placeholders(2, batch.len());
         let sql = format!(
             "UPDATE memories
@@ -274,7 +308,7 @@ pub(crate) fn record_access_with_updates(
     // `display` is the only correct value here by construction: the sole
     // production caller of this function is `search.rs`'s `hybrid_search`,
     // recording the rows it just returned.
-    for batch in existing_ids.chunks(IN_BATCH_SIZE / 3) {
+    for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE / 3) {
         let sql = format!(
             "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES {}",
             values_clause(1, batch.len(), 3)
@@ -289,7 +323,7 @@ pub(crate) fn record_access_with_updates(
     }
 
     let fts_set = fts_hits.iter().map(String::as_str).collect::<HashSet<_>>();
-    let recall_ids = existing_ids
+    let recall_ids = displayed_existing_ids
         .iter()
         .copied()
         .filter(|id| fts_set.contains(*id))
@@ -308,7 +342,7 @@ pub(crate) fn record_access_with_updates(
 
     if !query_hash.is_empty() {
         let mut first_hash_ids = Vec::new();
-        for batch in existing_ids.chunks(IN_BATCH_SIZE - 1) {
+        for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE - 1) {
             let placeholders = numbered_placeholders(1, batch.len());
             let hash_idx = batch.len() + 1;
             let sql = format!(
@@ -351,7 +385,7 @@ pub(crate) fn record_access_with_updates(
     // also one-way here: nothing in this function demotes a row whose counters
     // later fall back below the thresholds (`gc_tables`' reconciliation can
     // lower `query_diversity` after the fact).
-    for batch in existing_ids.chunks(IN_BATCH_SIZE) {
+    for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE) {
         let placeholders = numbered_placeholders(1, batch.len());
         let sql = format!(
             "UPDATE memories SET tier = 'consolidated'
@@ -367,8 +401,8 @@ pub(crate) fn record_access_with_updates(
         tx.execute(&sql, params_from_iter(values.iter()))?;
     }
 
-    let mut updates = HashMap::with_capacity(existing_ids.len());
-    for batch in existing_ids.chunks(IN_BATCH_SIZE) {
+    let mut updates = HashMap::with_capacity(displayed_existing_ids.len());
+    for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE) {
         let placeholders = numbered_placeholders(1, batch.len());
         let sql = format!(
             "SELECT id, access_count, last_access FROM memories WHERE id IN ({placeholders})"
@@ -720,6 +754,7 @@ mod get_access_times_tests {
             scope: "general".to_string(),
             archived: false,
             access_count: 0,
+            scored_count: 0,
             last_access: None,
             last_use_at: None,
             revision: 1,

@@ -1079,7 +1079,7 @@ fn measure_l3_tier_ratchet() {
         // id sees this hash for the first time, which is the
         // `HAVING COUNT(*) = 1` condition that increments `query_diversity`
         // (`access.rs:156-190`).
-        record_access_with_updates(&conn, &ids, &ids, Some("l3 promotion gate probe"))
+        record_access_with_updates(&conn, &ids, &ids, &ids, Some("l3 promotion gate probe"))
             .expect("record_access_with_updates");
 
         assert_eq!(

@@ -453,6 +453,7 @@ impl PortableServer {
             scope,
             archived: false,
             access_count: 0,
+            scored_count: 0,
             last_access: None,
             last_use_at: None,
             revision: 1,

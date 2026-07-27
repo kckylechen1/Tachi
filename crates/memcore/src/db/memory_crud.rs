@@ -74,18 +74,18 @@ fn simple_query_input(query: &str) -> String {
     out
 }
 
-/// 27 columns. `row_to_entry` reads them by name, but
+/// 28 columns. `row_to_entry` reads them by name, but
 /// `memory_crud::read::get_many_with_vectors` appends `v.embedding` after this
 /// list and reads it **by ordinal** — see [`MEMORY_EMBEDDING_COLUMN_INDEX`].
-pub(crate) const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,last_use_at,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
-pub(crate) const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.last_access,m.last_use_at,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
+pub(crate) const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,scored_count,last_access,last_use_at,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
+pub(crate) const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.scored_count,m.last_access,m.last_use_at,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
 
 /// Ordinal of `v.embedding` when it is selected immediately after
 /// [`MEMORY_SELECT_COLUMNS_QUALIFIED`]: the count of columns in that list.
 /// Named so the coupling is visible from the constant it depends on — before
 /// tachi#1446 this was a bare `26` literal at the read site, three files away
 /// from the string it counts.
-pub(crate) const MEMORY_EMBEDDING_COLUMN_INDEX: usize = 27;
+pub(crate) const MEMORY_EMBEDDING_COLUMN_INDEX: usize = 28;
 
 /// The bare `memories` column names [`MEMORY_SELECT_COLUMNS`] requires a table
 /// to actually carry.
@@ -1098,6 +1098,7 @@ mod reserved_reference_tests {
             scope: "general".to_string(),
             archived: false,
             access_count: 0,
+            scored_count: 0,
             last_access: None,
             last_use_at: None,
             revision: 1,
@@ -2669,6 +2670,7 @@ mod idless_upsert_tests {
             scope: "general".to_string(),
             archived: false,
             access_count: 0,
+            scored_count: 0,
             last_access: None,
             last_use_at: None,
             revision: 1,
