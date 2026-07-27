@@ -273,16 +273,33 @@ pub struct MemoryEntry {
     #[serde(default)]
     pub archived: bool,
 
-    /// Number of times this entry has been retrieved
+    /// Number of times `hybrid_search` returned this entry — **not** the number
+    /// of times it was retrieved (tachi#1459).
+    ///
+    /// This counter observes the search path only; reads through path-listing
+    /// routes do not increment it. Its sole production writer is
+    /// `db::record_access_with_updates`, reached only from `search.rs`'s
+    /// `hybrid_search`. `db::list_by_path`, `db::list_by_path_recent` and
+    /// `db::list_memories_by_path_prefix` — the routes behind kanban, handoffs,
+    /// briefing projections, the cards mirror and GC candidate scans — never
+    /// touch it, so a memory read constantly through one of those still reads
+    /// zero here. `access_count = 0` therefore means "never surfaced by
+    /// search", and any starvation ratio computed from it is an upper bound on
+    /// an unknown, not a measurement.
     #[serde(default)]
     pub access_count: i64,
 
-    /// Last retrieval time (ISO 8601), None if never retrieved.
+    /// Last time `hybrid_search` returned this entry (ISO 8601), None if it
+    /// never has.
     ///
     /// Written by the recall pipeline for **every row a search returns**
-    /// (`db/memory_crud/access.rs:112-117`), so this is an *exposure*
+    /// (`db::record_access_with_updates`), so this is an *exposure*
     /// timestamp: it records that the system displayed the memory, not that
     /// anything used it. See [`Self::last_use_at`].
+    ///
+    /// Same blind spot as [`Self::access_count`] (tachi#1459): this timestamp
+    /// observes the search path only; reads through path-listing routes do not
+    /// update it, so `None` does not mean the row was never read.
     #[serde(default)]
     pub last_access: Option<String>,
 
@@ -329,12 +346,31 @@ pub struct MemoryEntry {
     pub metadata: serde_json::Value,
 
     // ── Memory Lifecycle fields (tier-based decay and training flags) ─────────
-    /// How many times this memory has been retrieved via a search hit (FTS).
+    /// How many times a search returned this memory **with the FTS leg
+    /// matching it** — not the number of times it was retrieved (tachi#1459).
+    ///
+    /// This counter observes the search path only; reads through path-listing
+    /// routes do not increment it. Its blind spot is strictly wider than
+    /// [`Self::access_count`]'s: the sole production writer is the same
+    /// `db::record_access_with_updates` call in `hybrid_search`, and it
+    /// increments only for the ids in that call's `fts_hits` argument, so a row
+    /// the vector leg alone surfaced does not count either.
     #[serde(default)]
     pub recall_count: i64,
 
     /// Number of distinct query contexts (FNV-1a hash of query string) that
     /// have retrieved this memory.  Used as the promotion gate signal.
+    ///
+    /// This counter observes the search path only; reads through path-listing
+    /// routes do not increment it (tachi#1459) — it is derived from
+    /// `access_history` rows, and only `db::record_access_with_updates` writes
+    /// rows carrying a query hash. Two writers, both search-path-only: the
+    /// increment in that function, and the full-table reconciliation in
+    /// `db::gc_tables`, which recomputes this column as the count of distinct
+    /// non-empty `query_hash` values surviving in `access_history`. Because
+    /// that history is pruned per memory and the tier promotion it gates is not
+    /// reverted, a promoted row's recorded diversity can afterwards read lower
+    /// than the value that promoted it.
     #[serde(default)]
     pub query_diversity: i64,
 

@@ -146,7 +146,8 @@ fn default_decay_score_with_config(
     let now = Utc::now();
     // tachi#1446 lever 1. The stored timestamp this reads is the whole of the
     // exposure loop's dominant channel: `last_access` is written for every row
-    // a search RETURNS (`db/memory_crud/access.rs:112-117`), so reading it here
+    // a search RETURNS (`record_access_with_updates` in
+    // `db/memory_crud/access.rs`), so reading it here
     // makes the system's own act of display the age reference. One exposure
     // sets `age_days = 0` for every returned row simultaneously, which does not
     // merely inflate them — it collapses this channel's dynamic range to a
@@ -185,6 +186,12 @@ fn default_decay_score_with_config(
     // with the knob off this frequency term is the second channel through
     // which being displayed pays: one exposure multiplies the recency term by
     // `1 + 0.2*log10(2) = 1.060` for every returned row at once.
+    //
+    // tachi#1459: that counter observes the search path only; reads through
+    // path-listing routes do not increment it. So the knob-off frequency term
+    // is not "how much this memory is used" — it is "how often search has shown
+    // it", and it stays flat at zero for a memory whose readers all arrive
+    // through `list_by_path` and friends.
     //
     // With `use_provenance_recency` ON the count comes from the same use-event
     // rows the ACT-R floor is already reading, so it costs no extra query and
@@ -374,6 +381,14 @@ pub fn surprise_score_with_config(
     // that column — `db::record_memory_use` is its only writer), so this lever
     // needs no new column and no count: the knob just swaps which
     // never-touched predicate is read.
+    //
+    // tachi#1459: `access_count` observes the search path only; reads through
+    // path-listing routes do not increment it. Read as "overlooked", the
+    // knob-off predicate is therefore over-inclusive in one direction — a
+    // heavily-read kanban or handoff row that search never returns scores as
+    // overlooked — and the knob-on predicate is over-inclusive in another,
+    // since path listing does not mark use either. Neither arm can distinguish
+    // "nobody wanted it" from "nobody could have found it this way".
     let never_used = if recall_config.use_provenance_recency {
         entry.last_use_at.is_none()
     } else {

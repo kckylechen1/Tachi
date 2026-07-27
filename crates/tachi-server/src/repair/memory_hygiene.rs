@@ -75,6 +75,13 @@ const MISSING_DISTILLED_FROM_EDGE_SQL: &str = r#"
     WHERE e.source_id IS NULL
 "#;
 
+// tachi#1459: the `access_count=0 AND recall_count=0` guard in this query
+// observes the search path only; reads through path-listing routes do not
+// increment those columns. A non-zero count is sound evidence to spare a source
+// row, but zero does not establish that nothing read it — a row served only by
+// `list_by_path` / `list_by_path_recent` / `list_memories_by_path_prefix` reads
+// zero here however heavily it is used. The `pinned`/`permanent` and importance
+// filters, not this guard, are what keep the live path-listed namespaces out.
 const COVERED_SAFE_RAW_SQL: &str = r#"
     WITH coverage AS (
       SELECT d.id AS distill_id, e.target_id AS source_id, d.timestamp AS distill_ts
@@ -117,6 +124,12 @@ const COVERED_SAFE_RAW_SQL: &str = r#"
     SELECT source_id FROM ranked WHERE rn=1
 "#;
 
+// tachi#1459: `access_count` / `recall_count` appear below only as survivor
+// tiebreakers among rows already established to be duplicates, ordered after
+// the retention-policy rank. They observe the search path only; reads through
+// path-listing routes do not increment them, so between two identical rows this
+// keeps whichever search has shown more often, which is not the same as
+// whichever has been read more often.
 const SAFE_DUPLICATE_RAW_SQL: &str = r#"
     WITH normalized AS (
       SELECT id, path, summary, source, category, retention_policy, access_count,
@@ -226,6 +239,11 @@ impl RepairRule for MemoryHygiene {
         }
 
         let tx = ctx.conn.transaction()?;
+        // The batch below re-states COVERED_SAFE_RAW_SQL and
+        // SAFE_DUPLICATE_RAW_SQL inline; both copies of the
+        // `access_count`/`recall_count` guard carry the tachi#1459 caveat
+        // documented on those constants — the counters observe the search path
+        // only; reads through path-listing routes do not increment them.
         tx.execute_batch(
             r#"
             CREATE TEMP TABLE r12_missing_edges(
