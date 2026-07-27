@@ -370,6 +370,15 @@ def match_historical(
                     # step 1 missed it (degenerate). Keep prior.
                     return (best, "committed_prior")
             else:
+                # Preserve a prior structural fallback's durable provenance.
+                # This follows the foreign-prose check above, so it cannot
+                # turn foreign archive evidence into a trusted prior.
+                if (
+                    best.get("evidence_provenance") == "regenerated_structural"
+                    and prior_evidence == f"structural inspection of {fn_name}"
+                ):
+                    return (best, "regenerated_structural")
+
                 # Prior evidence is NOT in the archive — legitimately new.
                 return (best, "committed_prior")
 

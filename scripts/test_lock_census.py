@@ -429,6 +429,25 @@ class HistoricalMapping(unittest.TestCase):
         self.assertIsNotNone(matched)
         self.assertEqual(label, "committed_prior")
 
+    def test_regenerated_structural_prior_keeps_durable_provenance(self):
+        """A second regen must not relabel an honest structural fallback."""
+        prior = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 30, "test_or_fn_name": "new_test",
+                 "evidence": "structural inspection of new_test",
+                 "evidence_provenance": "regenerated_structural",
+                 "class": "class2_runtime_config"},
+            ]
+        }
+        archive = {"callsites": []}
+        arch_idx = build_archive_evidence_index(archive)
+        callsite = {"file": "crates/foo/a.rs", "line": 31}
+        matched, label = match_historical(
+            callsite, "new_test", [prior, archive], arch_idx,
+        )
+        self.assertIsNotNone(matched)
+        self.assertEqual(label, "regenerated_structural")
+
     def test_cross_function_invariant_holds_under_all_paths(self):
         """No code path may attach a different function's evidence."""
         prior = {

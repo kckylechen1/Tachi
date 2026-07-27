@@ -1,29 +1,29 @@
 {
  "schema_version": "3",
- "generated_at": "2026-07-27T16:39:41Z",
+ "generated_at": "2026-07-27T16:49:16Z",
  "generated_from_note": "Refreshed by scripts/lock_census.py regen against the current branch head. Evidence source selection: archive exact (file, fn_name) match is authoritative and beats committed prior (cleans v2 nearest-line contamination). When no archive match exists, prior evidence matching a different archive function's prose is rejected as foreign; the callsite falls to regenerated structural evidence. env_vars_touched is re-derived; env_role and deletion_scope are schema v3 additions (Refs #1476). See historical_mapping.evidence_provenance_counts for the distribution.",
  "definitions": [
-  {
-   "file": "crates/tachi-llm/src/test_support.rs",
-   "line": 65,
-   "kind": "fn_definition"
-  },
   {
    "file": "crates/tachi-server/src/utils/locks.rs",
    "line": 43,
    "kind": "fn_definition"
+  },
+  {
+   "file": "crates/tachi-llm/src/test_support.rs",
+   "line": 65,
+   "kind": "fn_definition"
   }
  ],
  "doc_comment_references_non_callsites": [
-  "crates/tachi-llm/src/test_support.rs:63 (/// let _guard = crate::test_support::global_test_lock().lock();)",
   "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:12 (//! `global_test_lock()` because `DISPATCH_V2_ENABLED` / `TACHI_HOME` are)",
-  "crates/tachi-server/src/foundry_runtime_ops/daily_distill/tests.rs:486 (/// `crate::utils::global_test_lock()`, matching their convention, not a)",
-  "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs:277 (// `global_test_lock()` with a `!Send`-guard-across-`.await` claim that)",
   "crates/tachi-server/src/test_support.rs:321 (/// Deliberately does NOT wrap the whole test in `global_test_lock()`:)",
   "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs:613 (// holds `crate::utils::global_test_lock()` for its lifetime (see)",
   "crates/tachi-server/src/builtins/tests.rs:26 (/// `crate::utils::global_test_lock()` so a mutation here can never race a)",
+  "crates/tachi-server/src/foundry_runtime_ops/daily_distill/tests.rs:486 (/// `crate::utils::global_test_lock()`, matching their convention, not a)",
+  "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs:277 (// `global_test_lock()` with a `!Send`-guard-across-`.await` claim that)",
   "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1098 (// `global_test_lock()` is a process-wide `std::sync::Mutex<()>` (see)",
-  "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1105 (// `global_test_lock()` acquisition on this async path — neither)"
+  "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1105 (// `global_test_lock()` acquisition on this async path — neither)",
+  "crates/tachi-llm/src/test_support.rs:63 (/// let _guard = crate::test_support::global_test_lock().lock();)"
  ],
  "callsites": [
   {
@@ -1709,7 +1709,7 @@
    "test_or_fn_name": "acquire",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of acquire",
-   "evidence_provenance": "committed_prior",
+   "evidence_provenance": "regenerated_structural",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2301,7 +2301,7 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_env_lock",
-   "evidence_provenance": "committed_prior",
+   "evidence_provenance": "regenerated_structural",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2505,7 +2505,7 @@
    "test_or_fn_name": "tachi_home_test_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of tachi_home_test_lock",
-   "evidence_provenance": "committed_prior",
+   "evidence_provenance": "regenerated_structural",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2572,7 +2572,7 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_env_lock",
-   "evidence_provenance": "committed_prior",
+   "evidence_provenance": "regenerated_structural",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2778,7 +2778,7 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_env_lock",
-   "evidence_provenance": "committed_prior",
+   "evidence_provenance": "regenerated_structural",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -3131,7 +3131,7 @@
    "test_or_fn_name": "live_lane_keys_are_not_deprecated_or_remove_migrate_targets",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of live_lane_keys_are_not_deprecated_or_remove_migrate_targets",
-   "evidence_provenance": "committed_prior",
+   "evidence_provenance": "regenerated_structural",
    "env_vars_touched": [
     "DISTILL_API_KEY",
     "REASONING_API_KEY"
@@ -3608,7 +3608,7 @@
    "test_or_fn_name": "home_test_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of home_test_lock",
-   "evidence_provenance": "committed_prior",
+   "evidence_provenance": "regenerated_structural",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -3654,7 +3654,7 @@
    "test_or_fn_name": "default_and_fill_missing_preserve_inherited_openai_api_key",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of default_and_fill_missing_preserve_inherited_openai_api_key",
-   "evidence_provenance": "committed_prior",
+   "evidence_provenance": "regenerated_structural",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_VAULT_CHILD_ENV"
@@ -4179,7 +4179,8 @@
   ],
   "evidence_provenance_counts": {
    "archive_authoritative": 107,
-   "committed_prior": 149
+   "committed_prior": 141,
+   "regenerated_structural": 8
   },
   "source_preference": "Archive exact (file, test_or_fn_name) match is authoritative and beats committed prior — including prior non-placeholder text — to clean v2 nearest-line contamination. When no archive exact match exists, committed-prior evidence is rejected if it exactly matches an archive row for a different function (foreign prose); the callsite falls back to honest regenerated structural evidence. No cross-function matching.",
   "note": "Every original Leaf-0 archive row is accounted for. Matched by (file, test_or_fn_name) against the live callsite set; unmatched rows are callsites whose function was removed, renamed, or whose line drifted to a different function since the 2026-07-14 audit."
