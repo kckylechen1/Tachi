@@ -62,8 +62,9 @@ if [[ "$(rustup_version || true)" != "${RUSTUP_VERSION}" ]]; then
     fi
   done
 
-  rustup_init="$(mktemp)"
-  trap 'rm -f -- "${rustup_init}"' EXIT
+  rustup_tmp_dir="$(mktemp -d)"
+  rustup_init="${rustup_tmp_dir}/rustup-init"
+  trap 'rm -rf -- "${rustup_tmp_dir}"' EXIT
   readonly rustup_url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_HOST}/rustup-init"
   printf 'setup: installing rustup %s from pinned archive\n' "${RUSTUP_VERSION}"
   curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
@@ -71,7 +72,7 @@ if [[ "$(rustup_version || true)" != "${RUSTUP_VERSION}" ]]; then
   printf '%s  %s\n' "${RUSTUP_INIT_SHA256}" "${rustup_init}" | sha256sum --check --status
   chmod +x "${rustup_init}"
   "${rustup_init}" -y --no-modify-path --profile minimal --default-toolchain none
-  rm -f -- "${rustup_init}"
+  rm -rf -- "${rustup_tmp_dir}"
   trap - EXIT
 fi
 

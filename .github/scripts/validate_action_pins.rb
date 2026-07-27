@@ -59,6 +59,10 @@ class SetupPolicy
     'cargo install cargo-nextest --version "${REQUIRED_CARGO_NEXTEST_VERSION}" --locked --force',
     'cargo install cargo-audit --version "${REQUIRED_CARGO_AUDIT_VERSION}" --locked --force'
   ].freeze
+  APPROVED_RUSTUP_STAGING = [
+    'rustup_tmp_dir="$(mktemp -d)"',
+    'rustup_init="${rustup_tmp_dir}/rustup-init"'
+  ].freeze
 
   def validate!(source)
     lines = source.lines.map { |line| line.chomp.strip }
@@ -76,6 +80,10 @@ class SetupPolicy
       raise PolicyError, "setup download command must match the approved pinned rustup fetch"
     end
     executable_lines = lines.reject { |line| line.empty? || line.start_with?("#") }
+    staging_lines = executable_lines.grep(/\Arustup_(?:tmp_dir|init)=/)
+    unless staging_lines == APPROVED_RUSTUP_STAGING
+      raise PolicyError, "setup must stage the installer with basename rustup-init"
+    end
     downloader_lines = executable_lines.grep(%r{\A(?:(?:command|env)[[:space:]]+)?(?:[^;&|[:space:]]*/)?(?:curl|wget)(?:[;&|[:space:]]|\z)})
     unless downloader_lines == [APPROVED_DOWNLOAD.lines.first.strip]
       raise PolicyError, "setup contains an unapproved downloader command"
@@ -540,6 +548,8 @@ def self_test!
     readonly RUSTUP_VERSION="1.28.2"
     readonly RUSTUP_HOST="x86_64-unknown-linux-gnu"
     readonly RUSTUP_INIT_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+    rustup_tmp_dir="$(mktemp -d)"
+    rustup_init="${rustup_tmp_dir}/rustup-init"
     readonly rustup_url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_HOST}/rustup-init"
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
       --output "${rustup_init}" "${rustup_url}"
@@ -558,6 +568,10 @@ def self_test!
     "setup-deleted-install" => valid_setup.sub(/^cargo install cargo-nextest.*\n/, ""),
     "setup-unlocked-install" => valid_setup.sub(" --locked --force", " --force"),
     "setup-wrong-version" => valid_setup.sub('REQUIRED_CARGO_NEXTEST_VERSION="0.9.140"', 'REQUIRED_CARGO_NEXTEST_VERSION="0.9.139"'),
+    "setup-random-installer-basename" => valid_setup.sub(
+      'rustup_init="${rustup_tmp_dir}/rustup-init"',
+      'rustup_init="$(mktemp)"'
+    ),
     "setup-extra-url" => "#{valid_setup}curl https://example.invalid/installer\n",
     "setup-extra-http-url" => "#{valid_setup}wget http://example.invalid/installer\n",
     "setup-extra-ftp-url" => "#{valid_setup}curl ftp://example.invalid/installer\n",
