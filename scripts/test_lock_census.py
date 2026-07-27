@@ -358,6 +358,76 @@ class HistoricalMapping(unittest.TestCase):
         matched, _ = match_historical(callsite, "my_test", [historical])
         self.assertIsNone(matched)
 
+    def test_archive_richer_evidence_beats_prior_placeholder(self):
+        """When committed-prior has a structural placeholder for the same
+        (file, fn_name) but the archive has hand-audited evidence, the archive
+        evidence must win."""
+        prior = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 50, "test_or_fn_name": "my_test",
+                 "evidence": "structural inspection of my_test", "class": "class2_runtime_config"},
+            ]
+        }
+        archive = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 48, "test_or_fn_name": "my_test",
+                 "evidence": "owner-audited: verifies from_env parsing of VOYAGE_API_KEY",
+                 "class": "class2_runtime_config"},
+            ]
+        }
+        callsite = {"file": "crates/foo/a.rs", "line": 50}
+        matched, label = match_historical(callsite, "my_test", [prior, archive])
+        self.assertIsNotNone(matched)
+        self.assertEqual(label, "archive_fallback",
+                         "archive must win over prior placeholder")
+        self.assertIn("owner-audited", matched["evidence"])
+
+    def test_prior_manual_evidence_beats_archive(self):
+        """When committed-prior has non-placeholder (manually edited) evidence
+        for the same (file, fn_name), it must be preferred over the archive
+        even if the archive also has evidence."""
+        prior = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 50, "test_or_fn_name": "my_test",
+                 "evidence": "manually reviewed in PR #999: confirms drift detection",
+                 "class": "class2_runtime_config"},
+            ]
+        }
+        archive = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 48, "test_or_fn_name": "my_test",
+                 "evidence": "original hand-audited evidence",
+                 "class": "class2_runtime_config"},
+            ]
+        }
+        callsite = {"file": "crates/foo/a.rs", "line": 50}
+        matched, label = match_historical(callsite, "my_test", [prior, archive])
+        self.assertIsNotNone(matched)
+        self.assertEqual(label, "committed_prior",
+                         "prior manual evidence must win over archive")
+        self.assertIn("manually reviewed", matched["evidence"])
+
+    def test_cross_function_invariant_under_evidence_preference(self):
+        """The evidence-preference logic must never attach a DIFFERENT
+        function's evidence, even when that function has richer evidence."""
+        prior = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 50, "test_or_fn_name": "other_fn",
+                 "evidence": "manually reviewed", "class": "class2_runtime_config"},
+            ]
+        }
+        archive = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 50, "test_or_fn_name": "other_fn",
+                 "evidence": "owner-audited", "class": "class2_runtime_config"},
+            ]
+        }
+        callsite = {"file": "crates/foo/a.rs", "line": 50}
+        # Looking for my_test but both sources only have other_fn — no match.
+        matched, _ = match_historical(callsite, "my_test", [prior, archive])
+        self.assertIsNone(matched,
+                          "must not match other_fn evidence to my_test callsite")
+
 
 # -- deletion_scope narrowing (Finding 4) ----------------------------------
 

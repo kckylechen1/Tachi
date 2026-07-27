@@ -1,7 +1,7 @@
 {
  "schema_version": "3",
- "generated_at": "2026-07-27T10:28:20Z",
- "generated_from_note": "Refreshed by scripts/lock_census.py regen against the current branch head. Fields: evidence/evidence_provenance preserved from historical Leaf-0 where (file, test_or_fn_name) matched; env_vars_touched re-derived; env_role and deletion_scope are new in schema v3 (Refs #1476).",
+ "generated_at": "2026-07-27T10:37:46Z",
+ "generated_from_note": "Refreshed by scripts/lock_census.py regen against the current branch head. Evidence selection: for the same (file, test_or_fn_name), non-placeholder evidence is preferred over placeholder evidence — committed-prior non-placeholder beats archive; archive non-placeholder beats committed-prior placeholder. This prevents structural placeholders from shadowing owner-audited archive evidence. env_vars_touched is re-derived; env_role and deletion_scope are new in schema v3 (Refs #1476). See historical_mapping.evidence_provenance_counts for the distribution.",
  "definitions": [
   {
    "file": "crates/tachi-llm/src/test_support.rs",
@@ -17,12 +17,12 @@
  "doc_comment_references_non_callsites": [
   "crates/tachi-llm/src/test_support.rs:63 (/// let _guard = crate::test_support::global_test_lock().lock();)",
   "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:12 (//! `global_test_lock()` because `DISPATCH_V2_ENABLED` / `TACHI_HOME` are)",
-  "crates/tachi-server/src/builtins/tests.rs:26 (/// `crate::utils::global_test_lock()` so a mutation here can never race a)",
-  "crates/tachi-server/src/test_support.rs:321 (/// Deliberately does NOT wrap the whole test in `global_test_lock()`:)",
   "crates/tachi-server/src/foundry_runtime_ops/daily_distill/tests.rs:486 (/// `crate::utils::global_test_lock()`, matching their convention, not a)",
+  "crates/tachi-server/src/test_support.rs:321 (/// Deliberately does NOT wrap the whole test in `global_test_lock()`:)",
+  "crates/tachi-server/src/builtins/tests.rs:26 (/// `crate::utils::global_test_lock()` so a mutation here can never race a)",
+  "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs:613 (// holds `crate::utils::global_test_lock()` for its lifetime (see)",
   "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1098 (// `global_test_lock()` is a process-wide `std::sync::Mutex<()>` (see)",
   "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1105 (// `global_test_lock()` acquisition on this async path — neither)",
-  "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs:613 (// holds `crate::utils::global_test_lock()` for its lifetime (see)",
   "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs:277 (// `global_test_lock()` with a `!Send`-guard-across-`.await` claim that)"
  ],
  "callsites": [
@@ -228,8 +228,8 @@
    "line": 142,
    "test_or_fn_name": "voyage_request_shape_unchanged",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of voyage_request_shape_unchanged",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "启动 voyage mock；取消设置 RERANK_PROVIDER/LOCAL_ENDPOINT，设置 RERANK_VOYAGE_ENDPOINT/VOYAGE_API_KEY，取消设置 VOYAGE_RERANK_API_KEY；断言 wire body 结构",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "RERANK_VOYAGE_ENDPOINT_ENV",
     "VOYAGE_API_KEY",
@@ -245,8 +245,8 @@
    "line": 210,
    "test_or_fn_name": "unknown_rerank_provider_fails_closed",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of unknown_rerank_provider_fails_closed",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 RERANK_PROVIDER_ENV=cohere，断言 RerankConfig 和 LlmClient::new 均拒绝未知 provider",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "RERANK_PROVIDER_ENV"
    ],
@@ -260,8 +260,8 @@
    "line": 227,
    "test_or_fn_name": "local_rerank_unconfigured_fails_at_construction",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of local_rerank_unconfigured_fails_at_construction",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 RERANK_PROVIDER_ENV=local，取消设置 RERANK_LOCAL_ENDPOINT_ENV，断言构建时失败",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "RERANK_LOCAL_ENDPOINT_ENV",
     "RERANK_PROVIDER_ENV"
@@ -276,8 +276,8 @@
    "line": 244,
    "test_or_fn_name": "local_rerank_unconfigured_does_not_fall_back_to_voyage",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of local_rerank_unconfigured_does_not_fall_back_to_voyage",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 RERANK_PROVIDER_ENV=local，取消设置 endpoint，设置 VOYAGE_API_KEY；断言不会静默回退到 voyage",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "RERANK_LOCAL_ENDPOINT_ENV",
     "RERANK_PROVIDER_ENV",
@@ -293,8 +293,8 @@
    "line": 362,
    "test_or_fn_name": "default_path_dispatches_to_voyage_arm",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of default_path_dispatches_to_voyage_arm",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "取消设置 RERANK_PROVIDER/LOCAL_ENDPOINT/VOYAGE_ENDPOINT/VOYAGE_API_KEY/VOYAGE_RERANK_API_KEY，断言默认路径进入 voyage arm",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "RERANK_LOCAL_ENDPOINT_ENV",
     "RERANK_PROVIDER_ENV",
@@ -391,8 +391,8 @@
    "line": 365,
    "test_or_fn_name": "materialize_provider_secrets_preserves_vault_alias_env",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of materialize_provider_secrets_preserves_vault_alias_env",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 VOYAGE_API_KEY=vault:... 别名，然后实例化 LlmClient 并调用 materialize_provider_secrets",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
@@ -404,8 +404,8 @@
    "line": 398,
    "test_or_fn_name": "materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 OPENAI_API_KEY 环境变量 secret，断言 vault 胜出且环境变量保留",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
@@ -744,8 +744,8 @@
    "line": 121,
    "test_or_fn_name": "fixture_replay_requires_explicit_env_opt_in",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of fixture_replay_requires_explicit_env_opt_in",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "在断言 replay 选择加入行为前，移除并设置 AGENT_EVAL_FIXTURE_ENV=1",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "AGENT_EVAL_FIXTURE_ENV"
    ],
@@ -759,8 +759,8 @@
    "line": 88,
    "test_or_fn_name": "arena_spawn_launches_opencode_dispatch_and_collects_result",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of arena_spawn_launches_opencode_dispatch_and_collects_result",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME + 前置 PATH 为伪造的 `opencode` bin，启动 opencode 分发并收集结果",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_DISPATCH_WATCHDOG_POLL_MS",
     "TACHI_HOME"
@@ -775,8 +775,8 @@
    "line": 259,
    "test_or_fn_name": "arena_opencode_executor_fallback_uses_glm_registry_model",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of arena_opencode_executor_fallback_uses_glm_registry_model",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME + 前置 PATH 为伪造的 `opencode` bin，断言执行器回退到 GLM 注册模型",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_DISPATCH_GLM_CODING_MODEL",
     "TACHI_DISPATCH_WATCHDOG_POLL_MS",
@@ -792,8 +792,8 @@
    "line": 436,
    "test_or_fn_name": "cli_named_project_forward_binds_daemon_session_for_write",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of cli_named_project_forward_binds_daemon_session_for_write",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME/TACHI_DISABLE_STDIO_PROXY/TACHI_DISABLE_AUTO_DAEMON/TACHI_DAEMON 以实现 F7 named-project 绑定",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1187,8 +1187,8 @@
    "line": 2178,
    "test_or_fn_name": "daily_distill_scheduler_stays_enabled_when_pipeline_is_disabled",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of daily_distill_scheduler_stays_enabled_when_pipeline_is_disabled",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 ENABLE_PIPELINE (移除) 并断言 daily distill scheduler 门控",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "ENABLE_PIPELINE"
    ],
@@ -1202,8 +1202,8 @@
    "line": 2206,
    "test_or_fn_name": "daily_distill_scheduler_requires_project_db",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of daily_distill_scheduler_requires_project_db",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 ENABLE_PIPELINE=true 并断言在没有 project db 时调度程序拒绝",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "ENABLE_PIPELINE"
    ],
@@ -1311,8 +1311,8 @@
    "line": 317,
    "test_or_fn_name": "stdio_proxy_call_writes_bound_project_via_global_only_daemon",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of stdio_proxy_call_writes_bound_project_via_global_only_daemon",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以演练全局仅 daemon 上的绑定项目写入",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1328,8 +1328,8 @@
    "line": 382,
    "test_or_fn_name": "stdio_proxy_same_db_alias_write_normalizes_to_bound_identity",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of stdio_proxy_same_db_alias_write_normalizes_to_bound_identity",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以实现 same-db-alias 规范化",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1345,8 +1345,8 @@
    "line": 470,
    "test_or_fn_name": "stdio_proxy_call_rejects_cross_project_override_before_daemon_write",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of stdio_proxy_call_rejects_cross_project_override_before_daemon_write",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以实现跨项目覆盖拒绝",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1362,8 +1362,8 @@
    "line": 549,
    "test_or_fn_name": "stdio_proxy_tachi_search_returns_global_and_bound_project_rows",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of stdio_proxy_tachi_search_returns_global_and_bound_project_rows",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行搜索全局+绑定项目行测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1379,8 +1379,8 @@
    "line": 650,
    "test_or_fn_name": "stdio_proxy_allows_explicit_cross_project_read",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of stdio_proxy_allows_explicit_cross_project_read",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行显式跨项目读取测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1396,8 +1396,8 @@
    "line": 758,
    "test_or_fn_name": "stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行并行转发测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1448,8 +1448,8 @@
    "line": 1081,
    "test_or_fn_name": "stdio_proxy_delete_and_archive_global_rows_with_bound_project",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of stdio_proxy_delete_and_archive_global_rows_with_bound_project",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行全局删除/归档测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1482,8 +1482,8 @@
    "line": 1920,
    "test_or_fn_name": "http_direct_connect_rejects_admin_profile_without_authorization_policy",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of http_direct_connect_rejects_admin_profile_without_authorization_policy",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行 admin-profile 拒绝测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1499,8 +1499,8 @@
    "line": 1957,
    "test_or_fn_name": "http_direct_connect_unbound_session_rejects_explicit_cross_project_write",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of http_direct_connect_unbound_session_rejects_explicit_cross_project_write",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行未绑定会话跨项目写入测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1516,8 +1516,8 @@
    "line": 2072,
    "test_or_fn_name": "http_direct_connect_initialize_advertises_http_guidance",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of http_direct_connect_initialize_advertises_http_guidance",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以实现初始化 HTTP 指导广播 (#732)",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1533,8 +1533,8 @@
    "line": 2107,
    "test_or_fn_name": "http_direct_connect_same_db_alias_write_normalizes_to_bound_identity",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of http_direct_connect_same_db_alias_write_normalizes_to_bound_identity",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行 HTTP 直连别名规范化测试 (#1061)",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1550,8 +1550,8 @@
    "line": 2205,
    "test_or_fn_name": "http_direct_connect_bound_session_rejects_cross_project_write",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of http_direct_connect_bound_session_rejects_cross_project_write",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行绑定会话写入拒绝测试 (#732/#737)",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
@@ -1809,8 +1809,8 @@
    "line": 401,
    "test_or_fn_name": "harness_probe_requires_password_for_opencode_api_attach_ready",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of harness_probe_requires_password_for_opencode_api_attach_ready",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "移除 OPENCODE_SERVER_PASSWORD，生成临时探针服务器，断言 attach_ready=false",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "OPENCODE_SERVER_PASSWORD"
    ],
@@ -1824,8 +1824,8 @@
    "line": 429,
    "test_or_fn_name": "harness_probe_reports_attach_ready_for_authenticated_opencode_schema",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of harness_probe_reports_attach_ready_for_authenticated_opencode_schema",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 OPENCODE_SERVER_PASSWORD=test-password，生成探针服务器，断言 attach_ready=true",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "OPENCODE_SERVER_PASSWORD"
    ],
@@ -1891,8 +1891,8 @@
    "line": 98,
    "test_or_fn_name": "generate_mcp_config_sets_owner_only_permissions",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of generate_mcp_config_sets_owner_only_permissions",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 HOME=temp_home，移除 TACHI_HOME，断言生成的 MCP 配置仅所有者权限",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
@@ -1907,8 +1907,8 @@
    "line": 162,
    "test_or_fn_name": "cp2_two_dispatches_on_same_profile_get_distinct_agent_seats",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of cp2_two_dispatches_on_same_profile_get_distinct_agent_seats",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 HOME，移除 TACHI_HOME，断言两个同 profile 分发获得不同的 agent 席位 (TACHI_AGENT_SEAT)",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
@@ -1973,8 +1973,8 @@
    "line": 435,
    "test_or_fn_name": "opencode_serve_preflight_uses_dispatch_credential_env",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of opencode_serve_preflight_uses_dispatch_credential_env",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME，移除 OPENCODE_SERVER_PASSWORD/USERNAME 以进行 preflight credential 测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "OPENCODE_SERVER_PASSWORD",
     "OPENCODE_SERVER_USERNAME",
@@ -2005,8 +2005,8 @@
    "line": 563,
    "test_or_fn_name": "v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME 以进行 v2 auto-stage 沙盒拒绝测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_HOME"
    ],
@@ -2020,8 +2020,8 @@
    "line": 616,
    "test_or_fn_name": "read_only_request_to_uncertified_backend_is_refused_before_run_dir_or_credentials",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of read_only_request_to_uncertified_backend_is_refused_before_run_dir_or_credentials",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME，断言对未认证后端的只读拒绝发生在 run-dir/credential 工作之前",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_HOME"
    ],
@@ -2035,8 +2035,8 @@
    "line": 662,
    "test_or_fn_name": "dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME 以进行 bare-cwd 拒绝测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_HOME"
    ],
@@ -2066,8 +2066,8 @@
    "line": 743,
    "test_or_fn_name": "dispatch_runs_root_uses_canonical_tachi_home_aliases",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of dispatch_runs_root_uses_canonical_tachi_home_aliases",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 HOME/SIGIL_HOME/TACHI_APP_HOME (自定义 TACHI_APP_HOME=~/custom-tachi)，断言运行根规范别名",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME",
     "SIGIL_HOME",
@@ -2084,8 +2084,8 @@
    "line": 808,
    "test_or_fn_name": "recover_orphaned_dispatch_runs_marks_working_runs_failed",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of recover_orphaned_dispatch_runs_marks_working_runs_failed",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 HOME，移除 TACHI_HOME 以进行孤儿恢复测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
@@ -2115,8 +2115,8 @@
    "line": 953,
    "test_or_fn_name": "dispatch_receipt_carries_the_effective_authority_contract",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of dispatch_receipt_carries_the_effective_authority_contract",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME 以进行 authority-contract 回执测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_HOME"
    ],
@@ -2175,8 +2175,8 @@
    "line": 1236,
    "test_or_fn_name": "recover_orphaned_dispatch_runs_honors_project_from_receipt",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of recover_orphaned_dispatch_runs_honors_project_from_receipt",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 HOME，移除 TACHI_HOME 以进行遵循回执的孤儿恢复测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
@@ -2191,8 +2191,8 @@
    "line": 1329,
    "test_or_fn_name": "global_dispatch_slot_blocks_duplicate_active_task_without_flow_id",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of global_dispatch_slot_blocks_duplicate_active_task_without_flow_id",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 HOME，移除 TACHI_HOME 以进行全局分发插槽重复阻塞测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
@@ -2207,8 +2207,8 @@
    "line": 1367,
    "test_or_fn_name": "flow_dispatch_slot_blocks_duplicate_active_task",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of flow_dispatch_slot_blocks_duplicate_active_task",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 HOME，移除 TACHI_HOME 以进行流分发插槽重复阻塞测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
@@ -2223,8 +2223,8 @@
    "line": 1415,
    "test_or_fn_name": "flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 HOME/TACHI_HOME，设置 TACHI_RUN_ROOT=runs_root 以进行陈旧插槽回收测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_RUN_ROOT"
    ],
@@ -2313,8 +2313,8 @@
    "line": 930,
    "test_or_fn_name": "write_keyword_enrichment_flag_defaults_off",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of write_keyword_enrichment_flag_defaults_off",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "移除 WRITE_ENRICH_KEYWORDS_ENV 然后设置 =true 以断言默认关闭行为",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "WRITE_ENRICH_KEYWORDS_ENV"
    ],
@@ -2328,8 +2328,8 @@
    "line": 1040,
    "test_or_fn_name": "write_side_keyword_enrichment_hits_search_via_synonym",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of write_side_keyword_enrichment_hits_search_via_synonym",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 WRITE_ENRICH_KEYWORDS_ENV=true，禁用持久化，设置 EXTRACT_BASE_URL/MODEL/API_KEY，运行 enrichment+search",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2367,8 +2367,8 @@
    "line": 1356,
    "test_or_fn_name": "write_side_keyword_enrichment_failure_leaves_save_intact",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of write_side_keyword_enrichment_failure_leaves_save_intact",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 WRITE_ENRICH_KEYWORDS_ENV=true，禁用持久化，设置 EXTRACT_BASE_URL/MODEL/API_KEY，断言 enrichment 失败时保存完好",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2386,8 +2386,8 @@
    "line": 1433,
    "test_or_fn_name": "write_side_keyword_enrichment_flag_off_is_noop",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of write_side_keyword_enrichment_flag_off_is_noop",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "移除 WRITE_ENRICH_KEYWORDS_ENV，禁用持久化，设置 EXTRACT_*，断言 no-op",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2405,8 +2405,8 @@
    "line": 1525,
    "test_or_fn_name": "write_side_keyword_enrichment_sanitizes_hostile_llm_keywords",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of write_side_keyword_enrichment_sanitizes_hostile_llm_keywords",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 WRITE_ENRICH_KEYWORDS_ENV=true，禁用持久化，设置 EXTRACT_*，断言 hostile 关键字被清洗",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2424,8 +2424,8 @@
    "line": 1662,
    "test_or_fn_name": "write_side_keyword_enrichment_scrubs_existing_keywords_in_prompt",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of write_side_keyword_enrichment_scrubs_existing_keywords_in_prompt",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 WRITE_ENRICH_KEYWORDS_ENV=true，禁用持久化，设置 EXTRACT_*，断言现有的 secret 关键字在 prompt 中被清洗",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2584,8 +2584,8 @@
    "line": 109,
    "test_or_fn_name": "repo_local_db_fixture_helper_avoids_linux_tmp_skip_semantics",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of repo_local_db_fixture_helper_avoids_linux_tmp_skip_semantics",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 CARGO_TARGET_DIR=/private/tmp/sigil-target-review-784 以进行 skip-path 语义测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "CARGO_TARGET_DIR"
    ],
@@ -2644,8 +2644,8 @@
    "line": 239,
    "test_or_fn_name": "single_db_mode_warns_when_workspace_local_db_exists_project_bound_does_not",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of single_db_mode_warns_when_workspace_local_db_exists_project_bound_does_not",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_PROJECT_ROOT=workspace，断言 single_db 模式警告 vs project-bound 不警告",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_PROJECT_ROOT"
    ],
@@ -2702,8 +2702,8 @@
    "line": 553,
    "test_or_fn_name": "resolve_effective_named_project_does_not_pick_single_available_project",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of resolve_effective_named_project_does_not_pick_single_available_project",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_HOME=temp_home 以进行 effective named project 解析测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_HOME"
    ],
@@ -2868,8 +2868,8 @@
    "line": 586,
    "test_or_fn_name": "materialize_provider_secrets_preserves_vault_alias_env",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of materialize_provider_secrets_preserves_vault_alias_env",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 VOYAGE_API_KEY=vault:... 别名，实例化 LlmClient，调用 materialize_provider_secrets",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "VOYAGE_API_KEY"
    ],
@@ -2883,8 +2883,8 @@
    "line": 616,
    "test_or_fn_name": "materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 OPENAI_API_KEY 环境变量 secret，断言 vault 胜出且环境变量保留",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "OPENAI_API_KEY"
    ],
@@ -2898,8 +2898,8 @@
    "line": 651,
    "test_or_fn_name": "materialize_provider_secrets_formats_missing_alias_remediation",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of materialize_provider_secrets_formats_missing_alias_remediation",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 VOYAGE_API_KEY=vault:MISSING_VOYAGE 并断言缺失别名的补救错误信息",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "ANTHROPIC_API_KEY"
    ],
@@ -3001,8 +3001,8 @@
    "line": 23,
    "test_or_fn_name": "superpowers_meta_skills_resolve_for_all_shell_stages",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of superpowers_meta_skills_resolve_for_all_shell_stages",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "通过 SkillsRootGuard 变更 TACHI_SKILLS_ROOT，断言所有 shell 阶段的 meta-skill 解析",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -3070,8 +3070,8 @@
    "line": 13,
    "test_or_fn_name": "vault_plaintext_duplicate_with_same_value_is_not_drift",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of vault_plaintext_duplicate_with_same_value_is_not_drift",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 VOYAGE_API_KEY=same-secret 以进行 vault 明文重复漂移检测测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "VOYAGE_API_KEY"
    ],
@@ -3164,8 +3164,8 @@
    "line": 194,
    "test_or_fn_name": "rotation_members_configure_their_logical_provider_key",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of rotation_members_configure_their_logical_provider_key",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "移除 VOYAGE_API_KEY，断言轮询成员配置逻辑 provider key",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "VOYAGE_API_KEY"
    ],
@@ -3179,8 +3179,8 @@
    "line": 447,
    "test_or_fn_name": "provider_probe_client_loads_target_db_key_health",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of provider_probe_client_loads_target_db_key_health",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=0 以进行 provider 探测 key 健康加载测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
    ],
@@ -3194,8 +3194,8 @@
    "line": 485,
    "test_or_fn_name": "model_lanes_reports_default_voyage_rerank_provider",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of model_lanes_reports_default_voyage_rerank_provider",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 RERANK_PROVIDER_ENV=''，移除 RERANK_LOCAL_ENDPOINT_ENV/RERANK_PROVIDER_ENV，断言默认 voyage rerank",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
@@ -3207,8 +3207,8 @@
    "line": 506,
    "test_or_fn_name": "model_lanes_reports_configured_local_rerank_provider",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of model_lanes_reports_configured_local_rerank_provider",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 RERANK_PROVIDER_ENV=local + RERANK_LOCAL_ENDPOINT_ENV=url，断言报告 local rerank",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
@@ -3220,8 +3220,8 @@
    "line": 97,
    "test_or_fn_name": "infer_provider_from_auth_error_maps_real_failures",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of infer_provider_from_auth_error_maps_real_failures",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "移除/设置 RERANK_PROVIDER_ENV + RERANK_LOCAL_ENDPOINT_ENV 以进行 provider 错误推断测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -3263,8 +3263,8 @@
    "line": 891,
    "test_or_fn_name": "cp2_tachi_profile_env_alone_no_longer_resolves_a_seat",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of cp2_tachi_profile_env_alone_no_longer_resolves_a_seat",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_PROFILE=standard，移除 TACHI_AGENT_SEAT，断言工具 profile 不会单独解析出一个席位",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_AGENT_SEAT",
     "TACHI_PROFILE"
@@ -3279,8 +3279,8 @@
    "line": 962,
    "test_or_fn_name": "cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_string",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_string",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_PROFILE=standard，移除 TACHI_AGENT_SEAT，断言 sticky_leave 使用席位而非 profile 字符串",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_AGENT_SEAT",
     "TACHI_PROFILE"
@@ -3295,8 +3295,8 @@
    "line": 1024,
    "test_or_fn_name": "cp2_round3_sticky_leave_from_agent_uses_seat_not_profile",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of cp2_round3_sticky_leave_from_agent_uses_seat_not_profile",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置不同的 TACHI_AGENT_SEAT 值，设置 TACHI_PROFILE=standard，断言不同的 from_agent",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_AGENT_SEAT",
     "TACHI_PROFILE"
@@ -3669,8 +3669,8 @@
    "line": 113,
    "test_or_fn_name": "dispatch_vault_env_injection_overrides_existing_env_when_all_configured",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of dispatch_vault_env_injection_overrides_existing_env_when_all_configured",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_VAULT_CHILD_ENV=all + TACHI_EXISTING_API_KEY，移除 TACHI_CHILD_ONLY_API_KEY/LONGPORT_APP_SECRET/NOT-A-SHELL-NAME，生成 `sh` 子进程",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "LONGPORT_APP_SECRET",
     "TACHI_CHILD_ONLY_API_KEY",
@@ -3733,8 +3733,8 @@
    "line": 422,
    "test_or_fn_name": "local_skill_discovery_scans_host_skill_dirs",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of local_skill_discovery_scans_host_skill_dirs",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "将 HOME 设置为 temp_home，断言本地技能发现扫描 host skill 目录",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME"
    ],
@@ -3748,8 +3748,8 @@
    "line": 466,
    "test_or_fn_name": "local_skill_discovery_expands_common_chinese_queries",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of local_skill_discovery_expands_common_chinese_queries",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "将 HOME 设置为 temp_home，断言中文查询扩展",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "HOME"
    ],
@@ -3763,8 +3763,8 @@
    "line": 44,
    "test_or_fn_name": "find_project_git_root_prefers_real_cwd_over_stale_pwd",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of find_project_git_root_prefers_real_cwd_over_stale_pwd",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "取消设置 TACHI_PROJECT_ROOT/TACHI_WORKSPACE_ROOT/PROJECT_ROOT/WORKSPACE_ROOT/WORKSPACE/PWD，set_current_dir + 设置 PWD 为陈旧的仓库 — 通过 EnvGuard/CwdGuard 在锁下变更 env 和 cwd",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "PWD"
    ],
@@ -3778,8 +3778,8 @@
    "line": 64,
    "test_or_fn_name": "find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "取消设置工作区 root 环境变量，设置 TACHI_PROJECT_ROOT=explicit-repo，set_current_dir=cwd-repo，设置 PWD 为陈旧仓库",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "PWD",
     "TACHI_PROJECT_ROOT"
@@ -3794,8 +3794,8 @@
    "line": 47,
    "test_or_fn_name": "auto_lock_clears_key_but_preserves_provider_secrets",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of auto_lock_clears_key_but_preserves_provider_secrets",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "移除 OPENAI_API_KEY，断言自动锁定清除 key 但保留 provider secrets",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "OPENAI_API_KEY"
    ],
@@ -3905,8 +3905,8 @@
    "line": 883,
    "test_or_fn_name": "vault_lock_clears_key_and_provider_secrets",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of vault_lock_clears_key_and_provider_secrets",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "移除 OPENAI_API_KEY，断言 vault_lock 清除 key 和 provider secrets",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "OPENAI_API_KEY"
    ],
@@ -3920,8 +3920,8 @@
    "line": 930,
    "test_or_fn_name": "autolock_disabled_when_env_zero",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of autolock_disabled_when_env_zero",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_VAULT_AUTOLOCK_SECS=0 + 移除 OPENAI_API_KEY，断言自动锁定禁用 (#400)",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_VAULT_AUTOLOCK_SECS"
@@ -3936,8 +3936,8 @@
    "line": 994,
    "test_or_fn_name": "autolock_disabled_reports_unlocked_in_runtime_status",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of autolock_disabled_reports_unlocked_in_runtime_status",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_VAULT_AUTOLOCK_SECS=0 + 移除 OPENAI_API_KEY，断言运行时状态报告未锁定",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_VAULT_AUTOLOCK_SECS"
@@ -3952,8 +3952,8 @@
    "line": 731,
    "test_or_fn_name": "status_sweep_state_recomputes_current_pending_after_threshold_change",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of status_sweep_state_recomputes_current_pending_after_threshold_change",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_VECTOR_SWEEP_PENDING_THRESHOLD=10 以进行阈值漂移重新计算测试",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_VECTOR_SWEEP_PENDING_THRESHOLD"
    ],
@@ -3967,8 +3967,8 @@
    "line": 533,
    "test_or_fn_name": "sweep_interval_allows_env_shortened_debounce_for_tests",
    "class": "class2_runtime_config",
-   "evidence": "structural inspection of sweep_interval_allows_env_shortened_debounce_for_tests",
-   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "evidence": "设置 TACHI_VECTOR_SWEEP_INTERVAL_SECS=1，断言 sweep_interval_secs()==1",
+   "evidence_provenance": "historical_leaf0 (archive_fallback)",
    "env_vars_touched": [
     "TACHI_VECTOR_SWEEP_INTERVAL_SECS"
    ],
@@ -4177,6 +4177,11 @@
     "test_or_fn_name": "with_env_lock (helper)"
    }
   ],
+  "evidence_provenance_counts": {
+   "historical_leaf0 (archive_fallback)": 73,
+   "historical_leaf0 (committed_prior)": 183
+  },
+  "source_preference": "For the same (file, test_or_fn_name), non-placeholder evidence is preferred over placeholder evidence. Committed-prior non-placeholder (manually edited) evidence beats archive; archive non-placeholder (hand-audited) evidence beats committed-prior placeholder. This prevents structural placeholders generated by a prior regen from shadowing richer owner-audited archive evidence.",
   "note": "Every original Leaf-0 archive row is accounted for. Matched by (file, test_or_fn_name) against the live callsite set; unmatched rows are callsites whose function was removed, renamed, or whose line drifted to a different function since the 2026-07-14 audit."
  },
  "stats": {

@@ -115,6 +115,10 @@ fixture and any classification changes in the same commit.
 | `deletion_scope=none` | 246 |
 | archive rows matched (of 142) | 107 |
 | archive rows unmatched | 35 |
+| evidence from `archive_fallback` (hand-audited, beat placeholder) | 73 |
+| evidence from `committed_prior` (manual or placeholder-only) | 183 |
+| total non-placeholder evidence | 115 |
+| total placeholder evidence | 141 |
 
 ## Migration candidate list — LOWER BOUND, not a safe migration list
 
@@ -147,15 +151,28 @@ pending a separate production-endpoint-injection leaf.
 The original Leaf-0 artifact (142 callsites, archived 2026-07-14 at
 `~/.cache/sigil-eval-archive/`) is preserved and accounted for:
 
-- `evidence` and `class` fields are carried forward from the archive wherever
-  a callsite matched by `(file, test_or_fn_name)` — never by nearest line to a
-  different function.
-- 107 of 142 archive rows matched a live callsite by function name.
-- 35 archive rows are unmatched (function removed, renamed, or line-drifted to
-  a different function) and listed in `historical_mapping.unmatched_entries`.
+- **Evidence source preference:** for the same `(file, test_or_fn_name)`,
+  non-placeholder evidence is preferred over placeholder evidence.
+  - Committed-prior **non-placeholder** (manually edited) evidence beats
+    archive evidence — it may contain review-round edits.
+  - Archive **non-placeholder** (hand-audited) evidence beats committed-prior
+    **placeholder** (`"structural inspection of <fn>"`) — this prevents a
+    prior regen's auto-generated placeholder from shadowing the richer
+    owner-audited archive row.
+  - This logic recovered **73 callsites** that were previously shadowed by
+    committed-prior placeholders and now carry hand-audited archive evidence.
+- `evidence` and `class` fields are carried forward from the selected source
+  wherever a callsite matched by `(file, test_or_fn_name)` — never by nearest
+  line to a different function.
+- 107 of 142 archive rows matched a live callsite by function name. **Not all
+  142 archive rows are injected into the live fixture**: 35 are unmatched
+  (function removed, renamed, or line-drifted to a different function) and are
+  listed in `historical_mapping.unmatched_entries` for traceability. Of the 107
+  matched archive rows, 73 contributed their hand-audited evidence (the other 34
+  were superseded by committed-prior non-placeholder evidence from a prior
+  review).
 - `env_vars_touched` is **re-derived** from current source, not preserved.
 - `secondary_classes_present` line references were refreshed: all historical
   references were stale against the current callsite set and dropped.
-- Schema version is `"3"` (v1 = original archive, v2 = first commit, v3 = this
-  follow-up with `evidence_provenance`, `historical_mapping`, corrected
-  `deletion_scope` narrowing, and `make_server` removal).
+- Schema version is `"3"`. Provenance counts are in
+  `historical_mapping.evidence_provenance_counts`.
