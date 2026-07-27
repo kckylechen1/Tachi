@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::{json, Value};
 
 // ─── Run-root resolution ─────────────────────────────────────────────────────
 
@@ -54,6 +55,118 @@ pub(crate) fn validate_flow_id(id: &str) -> Result<(), String> {
 pub(crate) fn run_dir_for_flow_id(flow_id: &str) -> Result<PathBuf, String> {
     validate_flow_id(flow_id)?;
     Ok(shell_runs_root().join(flow_id))
+}
+
+/// Cross-flow closure-debt scan. Walks every flow run dir and surfaces:
+///   - `unclosed_loop`: work produced a `result.md` but close_loop never ran
+///     (issue/PR not written back, lesson not sunk, spec drift not flagged), and
+///   - `spec_drift`: a flow that closed with an unresolved spec advisory
+///     (docs referenced but no spec recorded — the canonical spec may be stale).
+///
+/// This is the session-start safety net for an agent's cross-session
+/// forgetfulness: a per-flow briefing only sees the flow in scope, which is
+/// exactly when a reminder is NOT needed. Output is capped at `limit`; if more
+/// debt exists, a final summary item reports the overflow (never a silent cap).
+pub(crate) fn scan_open_loops(limit: usize) -> Vec<Value> {
+    let runs_root = shell_runs_root();
+    let Ok(entries) = std::fs::read_dir(&runs_root) else {
+        return Vec::new();
+    };
+    let mut debts = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let flow_id = entry.file_name().to_string_lossy().to_string();
+        let close_loop_path = dir.join("close_loop.json");
+        let has_close_loop = close_loop_path.exists();
+        if dir.join("result.md").exists() && !has_close_loop {
+            let status = read_status_for_briefing(&dir);
+            let Some(issue_ref) = status_string(&status, "issue_ref") else {
+                continue;
+            };
+            let pr_ref = status_string(&status, "pr_ref");
+            debts.push(json!({
+                "kind": "unclosed_loop",
+                "flow_id": flow_id,
+                "detail": "Flow produced a result but close_loop has not run: issue/PR not written back, lesson not sunk to wiki, spec drift not flagged.",
+                "action": close_loop_action_hint(&flow_id, &issue_ref, pr_ref.as_deref()),
+                "authority": "closure_debt",
+                "issue_ref": issue_ref,
+                "pr_ref": pr_ref,
+            }));
+        } else if has_close_loop {
+            let spec_unresolved = std::fs::read_to_string(&close_loop_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|v| {
+                    v.get("closure_actions")
+                        .and_then(|c| c.get("spec_advisory"))
+                        .and_then(|s| s.get("status"))
+                        .and_then(Value::as_str)
+                        .map(|status| status == "advisory")
+                })
+                .unwrap_or(false);
+            if spec_unresolved {
+                debts.push(json!({
+                    "kind": "spec_drift",
+                    "flow_id": flow_id,
+                    "detail": "Loop closed with docs referenced but no spec recorded — the canonical spec may be stale.",
+                    "action": "Update the canonical spec, then re-run close_loop with spec_paths once corrected.",
+                    "authority": "closure_debt",
+                }));
+            }
+        }
+    }
+    debts.sort_by(|a, b| {
+        let a_id = a.get("flow_id").and_then(Value::as_str).unwrap_or("");
+        let b_id = b.get("flow_id").and_then(Value::as_str).unwrap_or("");
+        a_id.cmp(b_id)
+    });
+    if debts.len() > limit {
+        let overflow = debts.len() - limit;
+        debts.truncate(limit);
+        debts.push(json!({
+            "kind": "more",
+            "detail": format!("{overflow} more closure-debt item(s) not shown (showing {limit})."),
+        }));
+    }
+    debts
+}
+
+fn status_string(status: &Value, key: &str) -> Option<String> {
+    status
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn close_loop_action_hint(flow_id: &str, issue_ref: &str, pr_ref: Option<&str>) -> String {
+    let mut hint = format!(
+        "tachi_task(action='close_loop', flow_id='{}', issue_ref='{}'",
+        pseudo_call_quote(flow_id),
+        pseudo_call_quote(issue_ref)
+    );
+    if let Some(pr_ref) = pr_ref {
+        hint.push_str(&format!(", pr_ref='{}'", pseudo_call_quote(pr_ref)));
+    }
+    hint.push(')');
+    hint
+}
+
+fn pseudo_call_quote(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn read_status_for_briefing(run_dir: &std::path::Path) -> Value {
+    let status_path = run_dir.join("status.json");
+    match std::fs::read_to_string(&status_path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| json!({})),
+        Err(_) => json!({}),
+    }
 }
 
 mod close_loop;

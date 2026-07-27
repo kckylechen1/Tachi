@@ -313,7 +313,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         &board,
         &memory_rows,
     );
-    let open_loops = crate::shell_ops::scan_open_loops(8);
+    let open_loops = crate::task_lifecycle::scan_open_loops(8);
     let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
     // #1001: presence 工位表 + advisory collision warnings. Read-only,
     // failure-safe (empty board on any storage error) — never fails briefing.

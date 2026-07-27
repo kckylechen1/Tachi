@@ -44,7 +44,7 @@ async fn scan_open_loops_flags_unclosed_and_spec_drift() {
     )
     .unwrap();
 
-    let debts = crate::shell_ops::scan_open_loops(8);
+    let debts = crate::task_lifecycle::scan_open_loops(8);
     let kind_for = |needle: &str| -> Option<String> {
         debts
             .iter()
