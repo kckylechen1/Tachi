@@ -442,7 +442,9 @@ mod tests {
     #[test]
     fn exposure_days_do_not_reach_the_promotion_gate_with_the_use_knob_on() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
-        store.upsert(&test_entry("shown-often")).expect("seed entry");
+        store
+            .upsert(&test_entry("shown-often"))
+            .expect("seed entry");
         for accessed_at in [
             "2026-07-01T08:00:00Z",
             "2026-07-02T08:00:00Z",
