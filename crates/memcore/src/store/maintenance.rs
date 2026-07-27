@@ -1,5 +1,6 @@
 //! Daily truth-maintenance helpers on [`MemoryStore`].
 
+use crate::db::AccessEventKind;
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,14 +112,24 @@ impl MemoryStore {
             .collect())
     }
 
-    /// Count the distinct days on which a memory was accessed.
-    pub fn distinct_access_days(&self, id: &str) -> Result<usize, MemoryError> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
-            rusqlite::params![id],
-            |row| row.get(0),
-        )?;
-        Ok(count as usize)
+    /// Count the distinct days on which a memory recorded an access event of
+    /// `kind` — the frequency input to the durable-promotion gate.
+    ///
+    /// Delegates to [`db::count_distinct_access_days`]. Until tachi#1446
+    /// lever 6 this method carried its own copy of that SQL, so the promotion
+    /// ratchet and the `db`-layer helper of the same name were two
+    /// independently editable statements that happened to agree; the live
+    /// pipeline read this copy, which is why fixing only the `db` one would
+    /// have changed nothing. One statement now, one place to get it wrong.
+    ///
+    /// Callers pick the arm with [`AccessEventKind::for_promotion`] rather
+    /// than naming a variant, so the knob is read in exactly one place.
+    pub fn distinct_access_days(
+        &self,
+        id: &str,
+        kind: AccessEventKind,
+    ) -> Result<usize, MemoryError> {
+        db::count_distinct_access_days(&self.conn, id, kind)
     }
 
     /// Pin importance and durable retention once a memory passes the
@@ -149,6 +160,7 @@ impl MemoryStore {
 mod tests {
     use serde_json::json;
 
+    use crate::db::AccessEventKind;
     use crate::types::MemoryEntry;
     use crate::MemoryStore;
 
@@ -379,10 +391,98 @@ mod tests {
         }
 
         assert_eq!(
-            store.distinct_access_days("tracked").expect("count days"),
+            store
+                .distinct_access_days("tracked", AccessEventKind::Display)
+                .expect("count days"),
             2
         );
-        assert_eq!(store.distinct_access_days("other").expect("count days"), 0);
+        assert_eq!(
+            store
+                .distinct_access_days("other", AccessEventKind::Display)
+                .expect("count days"),
+            0
+        );
+    }
+
+    /// tachi#1446 lever 6: the arm the promotion ratchet reads is decided by
+    /// `RecallConfig::use_provenance_recency`, and OFF is the default.
+    ///
+    /// This is the knob wiring under test in isolation, because the production
+    /// call site reads `RecallConfig::get()` — a process-wide `OnceLock` that
+    /// cannot be set per-test without cross-test interference.
+    #[test]
+    fn promotion_arm_follows_use_provenance_recency_and_defaults_to_display() {
+        let default_config = crate::RecallConfig::default();
+        assert!(
+            !default_config.use_provenance_recency,
+            "lever 6 shares the lever 2-5 knob, which must stay opt-in"
+        );
+        assert_eq!(
+            AccessEventKind::for_promotion(&default_config),
+            AccessEventKind::Display,
+            "at default config the promotion ratchet must read exactly the row \
+             set it read before tachi#1446"
+        );
+
+        let on = crate::RecallConfig {
+            use_provenance_recency: true,
+            ..crate::RecallConfig::default()
+        };
+        assert_eq!(
+            AccessEventKind::for_promotion(&on),
+            AccessEventKind::Use,
+            "with the knob on, only caller-initiated use days may feed an \
+             irreversible promotion"
+        );
+    }
+
+    /// tachi#1446 lever 6, end-to-end at the store layer: a memory the system
+    /// displayed on many distinct days contributes **zero** promotion days once
+    /// the knob is on, while the default arm is untouched by the split.
+    #[test]
+    fn exposure_days_do_not_reach_the_promotion_gate_with_the_use_knob_on() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store.upsert(&test_entry("shown-often")).expect("seed entry");
+        for accessed_at in [
+            "2026-07-01T08:00:00Z",
+            "2026-07-02T08:00:00Z",
+            "2026-07-03T08:00:00Z",
+            "2026-07-04T08:00:00Z",
+            "2026-07-05T08:00:00Z",
+            "2026-07-06T08:00:00Z",
+        ] {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO access_history (memory_id, accessed_at, event_kind)
+                     VALUES (?1, ?2, 'display')",
+                    ["shown-often", accessed_at],
+                )
+                .expect("insert display row");
+        }
+
+        let off = crate::RecallConfig::default();
+        let on = crate::RecallConfig {
+            use_provenance_recency: true,
+            ..crate::RecallConfig::default()
+        };
+
+        assert_eq!(
+            store
+                .distinct_access_days("shown-often", AccessEventKind::for_promotion(&off))
+                .expect("count days"),
+            6,
+            "default config keeps counting the six display days, unchanged"
+        );
+        assert_eq!(
+            store
+                .distinct_access_days("shown-often", AccessEventKind::for_promotion(&on))
+                .expect("count days"),
+            0,
+            "six displays are six displays — with the knob on, none of them is \
+             evidence anyone used this memory, so none of them may ratchet it \
+             to durable"
+        );
     }
 
     #[test]

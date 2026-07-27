@@ -284,9 +284,16 @@ async fn run_truth_maintenance_for_target(
     let promotion_candidates = store
         .promotion_candidate_entries(200)
         .map_err(|e| format!("scan promotion candidates {}: {e}", target.label))?;
+    // tachi#1446 lever 6. `promote_memory_to_durable` below is irreversible, so
+    // what feeds its score must not be the system's own display action. Read
+    // once outside the loop: the arm is a property of the configuration, not of
+    // the candidate, and re-resolving it per entry would let a mid-run config
+    // reload promote two candidates under two different rules.
+    let promotion_event_kind =
+        memcore::db::AccessEventKind::for_promotion(memcore::RecallConfig::get());
     for entry in &promotion_candidates {
         let access_days = store
-            .distinct_access_days(&entry.id)
+            .distinct_access_days(&entry.id, promotion_event_kind)
             .map_err(|e| format!("count access days for {}: {e}", entry.id))?;
         if crate::pipeline_ops::calculate_promotion_score(entry, access_days) < 0.60 {
             continue;

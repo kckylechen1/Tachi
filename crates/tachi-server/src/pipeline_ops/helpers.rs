@@ -224,7 +224,151 @@ pub(crate) fn build_ingest_entry(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_domain;
+    use super::{build_ingest_entry, calculate_promotion_score, resolve_domain};
+    use memcore::db::AccessEventKind;
+    use memcore::{MemoryEntry, MemoryStore, RecallConfig};
+    use serde_json::json;
+
+    /// The literal `daily_pipeline/maintenance.rs` compares
+    /// `calculate_promotion_score` against before calling
+    /// `promote_memory_to_durable`. Duplicated here rather than extracted into
+    /// a shared constant: tachi#1446 lever 6 is scoped to what *feeds* the
+    /// gate, and moving the threshold — even to an identical value in a new
+    /// place — is a separate judgement with its own evidence requirement.
+    const PROMOTION_THRESHOLD: f64 = 0.60;
+
+    fn promotion_fixture(id: &str) -> MemoryEntry {
+        let mut entry = build_ingest_entry(
+            id.to_string(),
+            "/test/promotion".to_string(),
+            "a memory the recall pipeline keeps showing".to_string(),
+            0.2,
+            "test".to_string(),
+            "general".to_string(),
+            json!({}),
+            None,
+            None,
+            false,
+        );
+        // `conceptual` saturates at five keywords; pinned so the only term that
+        // moves between the two arms below is `frequency`.
+        entry.keywords = ["alpha", "beta", "gamma", "delta", "epsilon"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        entry
+    }
+
+    fn seed_display_days(store: &MemoryStore, id: &str, days: &[&str]) {
+        for accessed_at in days {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO access_history (memory_id, accessed_at, query_hash, event_kind)
+                     VALUES (?1, ?2, 'q', 'display')",
+                    [id, *accessed_at],
+                )
+                .expect("insert display access row");
+        }
+    }
+
+    const SIX_EXPOSURE_DAYS: [&str; 6] = [
+        "2026-07-01T08:00:00Z",
+        "2026-07-02T08:00:00Z",
+        "2026-07-03T08:00:00Z",
+        "2026-07-04T08:00:00Z",
+        "2026-07-05T08:00:00Z",
+        "2026-07-06T08:00:00Z",
+    ];
+
+    /// tachi#1446 lever 6 — the durable-promotion ratchet, end to end.
+    ///
+    /// A memory that was displayed on six distinct days and used on none of
+    /// them clears the 0.60 promotion gate today. `promote_memory_to_durable`
+    /// pins `importance = 0.7` and `retention_policy = 'durable'` with no
+    /// inverse operation, so that is the system permanently rewarding a
+    /// memory for having been shown. With `use_provenance_recency` on, the
+    /// same six exposures contribute zero promotion days and the gate holds.
+    #[test]
+    fn exposure_alone_cannot_ratchet_a_memory_to_durable_with_the_use_knob_on() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let entry = promotion_fixture("shown-often");
+        store.upsert(&entry).expect("seed entry");
+        seed_display_days(&store, &entry.id, &SIX_EXPOSURE_DAYS);
+
+        let knob_off = RecallConfig::default();
+        let knob_on = RecallConfig {
+            use_provenance_recency: true,
+            ..RecallConfig::default()
+        };
+
+        let exposure_days = store
+            .distinct_access_days(&entry.id, AccessEventKind::for_promotion(&knob_off))
+            .expect("count days at default config");
+        let use_days = store
+            .distinct_access_days(&entry.id, AccessEventKind::for_promotion(&knob_on))
+            .expect("count days with the knob on");
+
+        assert_eq!(exposure_days, 6);
+        assert_eq!(use_days, 0, "nobody used this memory; it was only shown");
+
+        let score_from_exposure = calculate_promotion_score(&entry, exposure_days);
+        let score_from_use = calculate_promotion_score(&entry, use_days);
+
+        assert!(
+            score_from_exposure >= PROMOTION_THRESHOLD,
+            "the defect must still be reachable at default config or this test \
+             is not testing anything: got {score_from_exposure}"
+        );
+        assert!(
+            score_from_use < PROMOTION_THRESHOLD,
+            "with use provenance on, six displays must not be able to promote \
+             a memory to durable: got {score_from_use}"
+        );
+    }
+
+    /// tachi#1446 lever 6, the property that makes the change safe to land:
+    /// at default config the score the gate sees is bit-for-bit what it was
+    /// before the `event_kind` split.
+    ///
+    /// The reference value is computed from the literal pre-#1446 unfiltered
+    /// statement, not from a constant, so this fails if the filtered query ever
+    /// stops covering the legacy row set.
+    #[test]
+    fn default_config_promotion_score_is_unchanged_by_the_event_kind_split() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let entry = promotion_fixture("legacy-history");
+        store.upsert(&entry).expect("seed entry");
+        seed_display_days(&store, &entry.id, &SIX_EXPOSURE_DAYS);
+
+        let pre_1446_days: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
+                [entry.id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("unfiltered count");
+        let knob_off = RecallConfig::default();
+        let default_days = store
+            .distinct_access_days(&entry.id, AccessEventKind::for_promotion(&knob_off))
+            .expect("count days at default config");
+
+        assert_eq!(
+            default_days, pre_1446_days as usize,
+            "knob OFF must feed the gate the same day count the unfiltered \
+             query fed it"
+        );
+        // Bit-pattern equality, not `==` on f64: "byte-identical" is the
+        // literal claim being tested, and it dodges the float-comparison lint
+        // without weakening the assertion to a tolerance.
+        assert_eq!(
+            calculate_promotion_score(&entry, default_days).to_bits(),
+            calculate_promotion_score(&entry, pre_1446_days as usize).to_bits(),
+            "and therefore the same score, and therefore the same promotion \
+             decision"
+        );
+    }
 
     #[test]
     fn explicit_domain_wins() {

@@ -2,6 +2,8 @@ use rusqlite::{params, Connection};
 
 use crate::error::MemoryError;
 
+use super::AccessEventKind;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalEvidenceRow {
     pub id: String,
@@ -196,15 +198,42 @@ pub fn list_promotion_candidate_ids(
     Ok(out)
 }
 
+/// Distinct calendar days on which a memory recorded an access event of
+/// `kind` — the frequency input to `calculate_promotion_score`, i.e. tachi#1446
+/// **lever 6**.
+///
+/// `kind` is mandatory and there is no unfiltered variant, for the reason
+/// spelled out on `AccessEventKind::sql_predicate`: an unfiltered count is
+/// exactly the defect. Pick the arm with
+/// [`AccessEventKind::for_promotion`], never by hand.
+///
+/// * [`AccessEventKind::Display`] — the knob-OFF arm. Returns the same number
+///   the pre-#1446 unfiltered query returned for any history that contains no
+///   `use` rows, because `event_kind` is `NOT NULL DEFAULT 'display'`
+///   (`db/schema.rs`'s `ensure_column`, `db/schema/ddl.rs`'s
+///   `CREATE TABLE access_history`), so every legacy row and every row written
+///   by `record_access_with_updates` carries `display`.
+/// * [`AccessEventKind::Use`] — the knob-ON arm. Counts only days on which a
+///   caller-initiated save cited this memory, so being shown by the recall
+///   pipeline, however often, contributes nothing to the promotion score.
+///
+/// The `Display` arm is deliberately **filtered rather than left unfiltered**.
+/// `record_memory_use` writes `use` rows unconditionally — the knob governs
+/// reads, not that write — so an unfiltered count lets the new use signal add
+/// promotion days at default config, i.e. lets it drive an irreversible
+/// promotion through the very channel #1446 is repairing. Filtering restores
+/// the pre-#1446 number instead of preserving that leak.
 pub fn count_distinct_access_days(
     conn: &Connection,
     memory_id: &str,
+    kind: AccessEventKind,
 ) -> Result<usize, MemoryError> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
-        params![memory_id],
-        |row| row.get(0),
-    )?;
+    let kind_predicate = kind.sql_predicate();
+    let sql = format!(
+        "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history \
+         WHERE memory_id = ?1{kind_predicate}"
+    );
+    let count: i64 = conn.query_row(&sql, params![memory_id], |row| row.get(0))?;
     Ok(count as usize)
 }
 

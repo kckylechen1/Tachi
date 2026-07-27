@@ -113,7 +113,8 @@ fn count_distinct_access_days_returns_zero_for_missing_history() {
     let mut conn = make_conn();
     let entry = make_entry("no-access", "no access history");
     upsert(&mut conn, &entry, false).unwrap();
-    let days = count_distinct_access_days(&conn, "no-access").expect("access days");
+    let days =
+        count_distinct_access_days(&conn, "no-access", AccessEventKind::Display).expect("days");
     assert_eq!(days, 0);
 }
 
@@ -138,6 +139,114 @@ fn count_distinct_access_days_counts_unique_dates() {
     )
     .unwrap();
 
-    let days = count_distinct_access_days(&conn, "with-access").expect("access days");
+    let days =
+        count_distinct_access_days(&conn, "with-access", AccessEventKind::Display).expect("days");
     assert_eq!(days, 2);
+}
+
+/// tachi#1446 lever 6, requirement "knob OFF ⇒ byte-identical".
+///
+/// The assertion is deliberately *not* against a hand-written expected number:
+/// it runs the literal pre-#1446 unfiltered statement against the same
+/// connection and requires the `Display` arm to return that value. A future
+/// edit to the filtered query that changes the counted row set fails here even
+/// if someone updates the constant in the test above.
+#[test]
+fn display_arm_equals_the_pre_1446_unfiltered_count_on_display_only_history() {
+    let mut conn = make_conn();
+    let entry = make_entry("legacy", "history written before event_kind existed");
+    upsert(&mut conn, &entry, false).unwrap();
+    for (day, hash) in [
+        ("2026-07-01T10:00:00Z", "q1"),
+        ("2026-07-01T18:00:00Z", "q2"),
+        ("2026-07-02T09:00:00Z", "q3"),
+        ("2026-07-05T09:00:00Z", "q4"),
+    ] {
+        conn.execute(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, ?3)",
+            params!["legacy", day, hash],
+        )
+        .unwrap();
+    }
+
+    let unfiltered: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
+            params!["legacy"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let display =
+        count_distinct_access_days(&conn, "legacy", AccessEventKind::Display).expect("days");
+
+    assert_eq!(
+        display, unfiltered as usize,
+        "the knob-OFF arm must return exactly the number the pre-#1446 \
+         unfiltered query returned; `event_kind` is NOT NULL DEFAULT 'display' \
+         so every legacy row is inside the filter"
+    );
+    assert_eq!(display, 3);
+}
+
+/// tachi#1446 lever 6: exposure alone must contribute nothing on the ON arm.
+///
+/// Also pins the leak the OFF arm closes. `record_memory_use` writes `use`
+/// rows unconditionally (the knob governs reads), so before this change the
+/// unfiltered count let a use event add a promotion day at default config —
+/// the new signal driving the one irreversible action in the pipeline.
+#[test]
+fn use_arm_ignores_display_days_and_display_arm_ignores_use_days() {
+    let mut conn = make_conn();
+    let entry = make_entry("mixed", "display and use history");
+    upsert(&mut conn, &entry, false).unwrap();
+
+    // Three days of pure exposure: the recall pipeline showed this row.
+    for (day, hash) in [
+        ("2026-07-01T10:00:00Z", "q1"),
+        ("2026-07-02T10:00:00Z", "q2"),
+        ("2026-07-03T10:00:00Z", "q3"),
+    ] {
+        conn.execute(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash, event_kind)
+             VALUES (?1, ?2, ?3, 'display')",
+            params!["mixed", day, hash],
+        )
+        .unwrap();
+    }
+    // One day on which a caller-initiated save cited this memory, and on which
+    // it was never displayed.
+    conn.execute(
+        "INSERT INTO access_history (memory_id, accessed_at, query_hash, event_kind)
+         VALUES (?1, ?2, '', 'use')",
+        params!["mixed", "2026-07-09T10:00:00Z"],
+    )
+    .unwrap();
+
+    let display =
+        count_distinct_access_days(&conn, "mixed", AccessEventKind::Display).expect("days");
+    let used = count_distinct_access_days(&conn, "mixed", AccessEventKind::Use).expect("days");
+    let unfiltered: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
+            params!["mixed"],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(display, 3, "the OFF arm sees only the exposure days");
+    assert_eq!(
+        used, 1,
+        "the ON arm sees only the day a caller actually cited this memory"
+    );
+    assert_eq!(
+        unfiltered, 4,
+        "the pre-lever-6 query summed both provenances, so a use event could \
+         add a promotion day at default config"
+    );
+    assert!(
+        display < unfiltered as usize,
+        "the OFF arm is strictly more conservative than the unfiltered query \
+         it replaces — it can only ever withhold an irreversible promotion, \
+         never manufacture one"
+    );
 }
