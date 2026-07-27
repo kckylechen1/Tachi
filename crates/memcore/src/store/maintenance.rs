@@ -9,8 +9,21 @@ pub struct TierHealthCounts {
 }
 
 impl MemoryStore {
-    /// Archive low-importance memories that were never accessed and are older
-    /// than 60 days, sparing permanent/pinned/durable retention policies.
+    /// Archive low-importance memories that were never surfaced by search and
+    /// are older than 60 days, sparing permanent/pinned/durable retention
+    /// policies.
+    ///
+    /// tachi#1459: the `access_count = 0` predicate below observes the search
+    /// path only; reads through path-listing routes do not increment it. "Never
+    /// accessed" here means "`hybrid_search` never returned it", so a row read
+    /// constantly through `list_by_path` / `list_by_path_recent` /
+    /// `list_memories_by_path_prefix` still qualifies. The other predicates are
+    /// what currently keep that from destroying a live row: rows under
+    /// `/handoff*` and `/kanban*` with no policy of their own are backfilled to
+    /// `pinned`, and `/wiki*` / `/guide*` to `permanent`
+    /// (`backfill_retention_defaults` in `db/schema.rs`), and the retention
+    /// filter spares those — but that is a second mechanism doing the work, not
+    /// this predicate meaning what it reads like.
     pub fn archive_stale_low_value_memories(&self) -> Result<usize, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
@@ -47,6 +60,12 @@ impl MemoryStore {
     /// Promote raw memories that earned consolidation through repeated exact
     /// recall from diverse queries (the same gate as `record_access`); a raw
     /// note must not be promoted merely because it was accessed often.
+    ///
+    /// tachi#1459: both counters this gate reads observe the search path only;
+    /// reads through path-listing routes do not increment them. This is the
+    /// batch twin of the inline gate in `db::record_access_with_updates` and it
+    /// inherits the same partial view — it can only fail to promote a
+    /// path-listed memory, never promote one on evidence it did not earn.
     pub fn promote_diversely_recalled_raw_memories(&self) -> Result<usize, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
@@ -92,6 +111,11 @@ impl MemoryStore {
     }
 
     /// Load the most-accessed active entries eligible for durable promotion.
+    ///
+    /// tachi#1459: the `access_count DESC` ordering observes the search path
+    /// only; reads through path-listing routes do not increment it. This ranks
+    /// by how often search has shown a memory, so a memory reached only by path
+    /// listing sorts to the bottom of this list however heavily it is read.
     pub fn promotion_candidate_entries(
         &self,
         limit: usize,

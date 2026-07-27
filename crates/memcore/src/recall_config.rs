@@ -51,7 +51,8 @@ pub struct RecallConfig {
     /// `MemoryEntry::last_use_at` instead of `MemoryEntry::last_access`.
     ///
     /// `last_access` is written by the search path for every row it returns
-    /// (`db/memory_crud/access.rs:112-117`), so with this off the act of
+    /// (`record_access_with_updates` in `db/memory_crud/access.rs`), so with
+    /// this off the act of
     /// displaying a result set resets every displayed row's age to zero at
     /// once — measured effect is not inflation but range collapse: the decay
     /// channel stops discriminating between candidates (see
@@ -70,6 +71,11 @@ pub struct RecallConfig {
     /// reconsideration whenever the bounded candidate scan selects it), but
     /// anyone flipping this is changing retention, not only rank order, and
     /// should read that function's rationale first.
+    ///
+    /// tachi#1459: "written by the search path" is the whole of it — that
+    /// column observes the search path only; reads through path-listing routes
+    /// do not update it. So this knob chooses between two partial views, not
+    /// between a partial one and a complete one.
     pub use_provenance_recency: bool,
 }
 

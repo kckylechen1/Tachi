@@ -363,6 +363,13 @@ pub fn snapshot_endpoint(entry: &MemoryEntry) -> LifecycleEndpointSnapshot {
     }
 }
 
+/// tachi#1459, on the three counters bound below as archive / promote
+/// eligibility evidence: they observe the search path only; reads through
+/// path-listing routes do not increment them. The snapshot is a drift guard —
+/// it pins the numbers a reviewer approved so apply can refuse if they moved —
+/// and that job is unaffected. What is affected is how the pinned numbers read:
+/// `eligibility_access_count = 0` records "search had never returned this row",
+/// not "nothing had read it".
 fn bind_action_eligibility(
     snapshot: &mut LifecycleEndpointSnapshot,
     action: &str,

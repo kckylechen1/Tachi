@@ -2478,7 +2478,19 @@ fn upsert_prepared_within_tx(
         }
     }
 
-    // Write to main table
+    // Write to main table.
+    //
+    // tachi#1459, for anyone enumerating writers of the access counters: this
+    // statement carries the caller's `MemoryEntry` values through, and on
+    // conflict `access_count` / `last_access` take the incoming value rather
+    // than the stored one. It is a carry-through, not an observation of a read
+    // — the only production code that *earns* those counters is
+    // `record_access_with_updates`, reached only from `hybrid_search`. A caller
+    // that re-saves an existing id from a default-constructed entry therefore
+    // resets the counter to that entry's value; `tier` below is deliberately
+    // guarded against exactly that kind of downgrade, and these two are not.
+    // `recall_count` / `query_diversity` are set on insert and left alone on
+    // conflict — they appear in the column list but not in the update set.
     let rows_written = tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,

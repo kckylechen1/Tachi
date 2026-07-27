@@ -127,6 +127,15 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             archived     INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL DEFAULT '',
             updated_at   TEXT NOT NULL DEFAULT '',
+                -- tachi#1459: these two observe the search path only; reads
+                -- through path-listing routes do not increment or update them.
+                -- Their sole production writer is `record_access_with_updates`,
+                -- reached only from `search.rs`'s `hybrid_search`, so
+                -- `access_count = 0` means "never surfaced by search", NOT
+                -- "never retrieved" — a row served only by `list_by_path` /
+                -- `list_by_path_recent` / `list_memories_by_path_prefix`
+                -- (kanban, handoffs, briefings, cards mirror, GC scans) reads
+                -- zero here no matter how often it is read.
                 access_count    INTEGER NOT NULL DEFAULT 0,
                 last_access     TEXT,
                 -- tachi#1446: exposure-free recency reference. Nothing writes
@@ -137,6 +146,12 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
                 metadata        TEXT NOT NULL DEFAULT '{}',
                 superseded_by   TEXT,
                 idless_identity TEXT,
+                -- tachi#1459: same blind spot as `access_count` above, and these
+                -- two are the tier-promotion gate. `recall_count` moves only for
+                -- the FTS-matched subset of a search's results; `query_diversity`
+                -- is derived from `access_history` rows carrying a query hash,
+                -- which only the search path writes. The gate therefore rests on
+                -- a search-only view of a memory's use.
                 recall_count    INTEGER NOT NULL DEFAULT 0,
                 query_diversity INTEGER NOT NULL DEFAULT 0,
                 tier            TEXT NOT NULL DEFAULT 'raw'
