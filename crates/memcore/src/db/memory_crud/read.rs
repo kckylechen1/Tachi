@@ -149,13 +149,14 @@ pub fn find_exact_path_text_id(
 ///
 /// tachi#1459: this route records nothing. `access_count`, `last_access`,
 /// `recall_count` and `query_diversity` observe the search path only — they are
-/// written solely by `record_access_with_updates` from `hybrid_search` — so
-/// every row returned here is read without any counter moving. That is the
-/// existing behaviour and this note does not change it; it is written down
-/// because those counters are read downstream as evidence that a memory is
-/// unused (archive sweeps, tier promotion, the `overlooked` scoring lever), and
-/// callers of this function are exactly the population that evidence cannot
-/// see.
+/// earned by `record_access_with_updates` from `hybrid_search`.
+/// `gc_tables` can reconcile `query_diversity` from the search-written history,
+/// but adds no non-search observation. Every row returned here is therefore
+/// read without recording use. That is the existing behaviour and this note
+/// does not change it; it is written down because those counters are read
+/// downstream as evidence that a memory is unused (archive sweeps, tier
+/// promotion, the `overlooked` scoring lever), and callers of this function are
+/// exactly the population that evidence cannot see.
 pub fn list_by_path(
     conn: &Connection,
     path_prefix: &str,
