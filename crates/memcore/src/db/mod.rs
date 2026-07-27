@@ -170,9 +170,7 @@ pub use state::{
     list_derived_by_source, list_state, reap_expired_state, save_derived, save_derived_with_id,
     set_state, set_state_if_version, StateRow,
 };
-pub use stats_gc::{
-    archive_stale_memories, gc_tables, stats, GC_MEMORY_ARCHIVED_EVENT_TYPE,
-};
+pub use stats_gc::{archive_stale_memories, gc_tables, stats, GC_MEMORY_ARCHIVED_EVENT_TYPE};
 #[cfg(feature = "admin")]
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,
