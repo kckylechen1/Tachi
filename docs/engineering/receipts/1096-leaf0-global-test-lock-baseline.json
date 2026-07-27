@@ -1,7 +1,7 @@
 {
- "schema_version": "2",
- "generated_at": "2026-07-27T10:11:43Z",
- "generated_from_note": "Refreshed by scripts/lock_census.py regen against the current branch head.",
+ "schema_version": "3",
+ "generated_at": "2026-07-27T10:28:20Z",
+ "generated_from_note": "Refreshed by scripts/lock_census.py regen against the current branch head. Fields: evidence/evidence_provenance preserved from historical Leaf-0 where (file, test_or_fn_name) matched; env_vars_touched re-derived; env_role and deletion_scope are new in schema v3 (Refs #1476).",
  "definitions": [
   {
    "file": "crates/tachi-llm/src/test_support.rs",
@@ -16,14 +16,14 @@
  ],
  "doc_comment_references_non_callsites": [
   "crates/tachi-llm/src/test_support.rs:63 (/// let _guard = crate::test_support::global_test_lock().lock();)",
-  "crates/tachi-server/src/foundry_runtime_ops/daily_distill/tests.rs:486 (/// `crate::utils::global_test_lock()`, matching their convention, not a)",
   "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:12 (//! `global_test_lock()` because `DISPATCH_V2_ENABLED` / `TACHI_HOME` are)",
-  "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs:613 (// holds `crate::utils::global_test_lock()` for its lifetime (see)",
-  "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs:277 (// `global_test_lock()` with a `!Send`-guard-across-`.await` claim that)",
   "crates/tachi-server/src/builtins/tests.rs:26 (/// `crate::utils::global_test_lock()` so a mutation here can never race a)",
   "crates/tachi-server/src/test_support.rs:321 (/// Deliberately does NOT wrap the whole test in `global_test_lock()`:)",
+  "crates/tachi-server/src/foundry_runtime_ops/daily_distill/tests.rs:486 (/// `crate::utils::global_test_lock()`, matching their convention, not a)",
   "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1098 (// `global_test_lock()` is a process-wide `std::sync::Mutex<()>` (see)",
-  "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1105 (// `global_test_lock()` acquisition on this async path — neither)"
+  "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1105 (// `global_test_lock()` acquisition on this async path — neither)",
+  "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs:613 (// holds `crate::utils::global_test_lock()` for its lifetime (see)",
+  "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs:277 (// `global_test_lock()` with a `!Send`-guard-across-`.await` claim that)"
  ],
  "callsites": [
   {
@@ -32,7 +32,9 @@
    "test_or_fn_name": "from_env",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of from_env",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: from_env()",
    "deletion_scope": "none"
@@ -43,12 +45,14 @@
    "test_or_fn_name": "ambient_proxy_cannot_receive_probe_bearer_or_own_transport",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of ambient_proxy_cannot_receive_probe_bearer_or_own_transport",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "ALL_PROXY",
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -59,6 +63,7 @@
    "test_or_fn_name": "foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured",
    "class": "class2_runtime_config",
    "evidence": "取消设置 ~22 个 DISTILL/REASONING/ZAI/BIGMODEL/EXTRACT/SILICONFLOW/DEEPSEEK key+base_url+model+tier 环境变量，设置 DEEPSEEK_API_KEY 和过时的 REASONING_*，断言 lane 默认值",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "BIGMODEL_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -84,6 +89,7 @@
     "TACHI_BACKEND_REASONING_TIER",
     "ZAI_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -94,6 +100,7 @@
    "test_or_fn_name": "from_env_golden_values",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of from_env_golden_values",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "BIGMODEL_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -128,6 +135,7 @@
     "TACHI_BACKEND_SUMMARY_TIER",
     "ZAI_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: from_env()",
    "deletion_scope": "none"
@@ -138,6 +146,7 @@
    "test_or_fn_name": "lane_fallback_config_from_env_resolves_deepseek_default_for_extract",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of lane_fallback_config_from_env_resolves_deepseek_default_for_extract",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
@@ -158,6 +167,7 @@
     "SUMMARY_FALLBACK_BASE_URL",
     "SUMMARY_FALLBACK_MODEL"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: from_env()",
    "deletion_scope": "none"
@@ -168,6 +178,7 @@
    "test_or_fn_name": "lane_fallback_config_from_env_is_none_when_no_fallback_key_configured",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of lane_fallback_config_from_env_is_none_when_no_fallback_key_configured",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "DEEPSEEK_API_KEY",
     "DISTILL_FALLBACK_API_KEY",
@@ -176,6 +187,7 @@
     "SILICONFLOW_API_KEY",
     "SUMMARY_FALLBACK_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: from_env()",
    "deletion_scope": "none"
@@ -186,10 +198,12 @@
    "test_or_fn_name": "default_rerank_provider_is_voyage",
    "class": "class2_runtime_config",
    "evidence": "取消设置 RERANK_PROVIDER_ENV 和 RERANK_LOCAL_ENDPOINT_ENV，断言默认 rerank provider=voyage",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "RERANK_LOCAL_ENDPOINT_ENV",
     "RERANK_PROVIDER_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: from_env()",
    "deletion_scope": "none"
@@ -200,9 +214,11 @@
    "test_or_fn_name": "voyage_provider_selected_explicitly",
    "class": "class2_runtime_config",
    "evidence": "设置 RERANK_PROVIDER_ENV=voyage，断言 config 解析为 voyage",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "RERANK_PROVIDER_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: from_env()",
    "deletion_scope": "none"
@@ -213,11 +229,13 @@
    "test_or_fn_name": "voyage_request_shape_unchanged",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of voyage_request_shape_unchanged",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "RERANK_VOYAGE_ENDPOINT_ENV",
     "VOYAGE_API_KEY",
     "VOYAGE_RERANK_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "incidental_delivery",
    "env_role_evidence": "injection constructors: new_with_config(",
    "deletion_scope": "none"
@@ -228,9 +246,11 @@
    "test_or_fn_name": "unknown_rerank_provider_fails_closed",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of unknown_rerank_provider_fails_closed",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "RERANK_PROVIDER_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(, from_env()",
    "deletion_scope": "none"
@@ -241,10 +261,12 @@
    "test_or_fn_name": "local_rerank_unconfigured_fails_at_construction",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of local_rerank_unconfigured_fails_at_construction",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "RERANK_LOCAL_ENDPOINT_ENV",
     "RERANK_PROVIDER_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(, from_env()",
    "deletion_scope": "none"
@@ -255,11 +277,13 @@
    "test_or_fn_name": "local_rerank_unconfigured_does_not_fall_back_to_voyage",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of local_rerank_unconfigured_does_not_fall_back_to_voyage",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "RERANK_LOCAL_ENDPOINT_ENV",
     "RERANK_PROVIDER_ENV",
     "VOYAGE_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -270,6 +294,7 @@
    "test_or_fn_name": "default_path_dispatches_to_voyage_arm",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of default_path_dispatches_to_voyage_arm",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "RERANK_LOCAL_ENDPOINT_ENV",
     "RERANK_PROVIDER_ENV",
@@ -277,6 +302,7 @@
     "VOYAGE_API_KEY",
     "VOYAGE_RERANK_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -287,9 +313,11 @@
    "test_or_fn_name": "provider_key_health_blocking_persist_honors_test_disable_env",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=1 并断言没有创建 vault DB",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "incidental_delivery",
    "env_role_evidence": "injection constructors: new_with_vault_db(",
    "deletion_scope": "none"
@@ -300,9 +328,11 @@
    "test_or_fn_name": "provider_key_health_persists_off_async_runtime_thread",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=0 并轮询异步持久化到 vault DB",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "incidental_delivery",
    "env_role_evidence": "injection constructors: new_with_vault_db(",
    "deletion_scope": "none"
@@ -313,9 +343,11 @@
    "test_or_fn_name": "provider_key_health_persist_errors_are_visible_in_status",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=0，指向缺失的父路径 db_path，断言持久化错误显示",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "incidental_delivery",
    "env_role_evidence": "injection constructors: new_with_vault_db(",
    "deletion_scope": "none"
@@ -326,9 +358,11 @@
    "test_or_fn_name": "provider_key_health_reload_clears_local_cooldown_on_external_success",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=1 以在进行外部 DB 成功测试时抑制本地异步写入",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "incidental_delivery",
    "env_role_evidence": "injection constructors: new_with_vault_db(",
    "deletion_scope": "none"
@@ -339,6 +373,7 @@
    "test_or_fn_name": "recall_pool_streak_counts_header_then_stall_as_timeout_not_success",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=1，然后运行 header-then-stall mock provider 以验证 pool streak 计算逻辑",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_RECALL_PROVIDER_ATTEMPTS",
     "TACHI_RECALL_PROVIDER_TIMEOUT_SECS",
@@ -346,6 +381,7 @@
     "VOYAGE_API_KEY",
     "VOYAGE_BASE_URL"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -356,7 +392,9 @@
    "test_or_fn_name": "materialize_provider_secrets_preserves_vault_alias_env",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_preserves_vault_alias_env",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -367,7 +405,9 @@
    "test_or_fn_name": "materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -378,7 +418,9 @@
    "test_or_fn_name": "materialize_provider_secrets_does_not_report_same_value_as_bypassed",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_does_not_report_same_value_as_bypassed",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -389,7 +431,9 @@
    "test_or_fn_name": "materialize_provider_secrets_skips_missing_alias_without_aborting",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_skips_missing_alias_without_aborting",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -400,7 +444,9 @@
    "test_or_fn_name": "materialize_provider_secrets_removes_same_named_stale_pool_for_missing_alias",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_removes_same_named_stale_pool_for_missing_alias",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -411,7 +457,9 @@
    "test_or_fn_name": "materialize_provider_secrets_preserves_unrelated_pools_when_removing_stale_alias_pool",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_preserves_unrelated_pools_when_removing_stale_alias_pool",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -422,7 +470,9 @@
    "test_or_fn_name": "materialize_provider_secrets_isolates_one_bad_alias_from_good_ones",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_isolates_one_bad_alias_from_good_ones",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -433,7 +483,9 @@
    "test_or_fn_name": "materialize_provider_secrets_rejects_malformed_alias_name",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_rejects_malformed_alias_name",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -444,7 +496,9 @@
    "test_or_fn_name": "materialize_provider_secrets_rejects_oversized_alias_name",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_rejects_oversized_alias_name",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -455,7 +509,9 @@
    "test_or_fn_name": "malformed_alias_refresh_retains_last_known_good_cache_and_sanitizes_error",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of malformed_alias_refresh_retains_last_known_good_cache_and_sanitizes_error",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -466,7 +522,9 @@
    "test_or_fn_name": "later_alias_failure_exposes_no_partial_pool_and_retains_old_cache",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of later_alias_failure_exposes_no_partial_pool_and_retains_old_cache",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -477,7 +535,9 @@
    "test_or_fn_name": "successful_refresh_atomically_replaces_complete_provider_cache",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of successful_refresh_atomically_replaces_complete_provider_cache",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -488,7 +548,9 @@
    "test_or_fn_name": "poisoned_materialization_lock_refuses_refresh_and_clear_loudly",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of poisoned_materialization_lock_refuses_refresh_and_clear_loudly",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -499,7 +561,9 @@
    "test_or_fn_name": "missing_alias_retains_existing_logical_pool_and_reports_key_only",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of missing_alias_retains_existing_logical_pool_and_reports_key_only",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -510,7 +574,9 @@
    "test_or_fn_name": "missing_alias_without_existing_pool_stays_absent_and_loudly_skipped",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of missing_alias_without_existing_pool_stays_absent_and_loudly_skipped",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -521,9 +587,11 @@
    "test_or_fn_name": "degraded_refresh_retains_only_skipped_configured_key_and_adds_valid_new_key",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of degraded_refresh_retains_only_skipped_configured_key_and_adds_valid_new_key",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_FRESH_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -534,7 +602,9 @@
    "test_or_fn_name": "missing_alias_outranks_canonical_same_key_and_retains_old_logical_pool",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of missing_alias_outranks_canonical_same_key_and_retains_old_logical_pool",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -545,7 +615,9 @@
    "test_or_fn_name": "missing_alias_outranks_canonical_same_key_without_old_pool",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of missing_alias_outranks_canonical_same_key_without_old_pool",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -556,7 +628,9 @@
    "test_or_fn_name": "existing_alias_target_outranks_canonical_same_key_pool",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of existing_alias_target_outranks_canonical_same_key_pool",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -567,7 +641,9 @@
    "test_or_fn_name": "retained_pool_preserves_index_and_cooldown_while_new_pool_resets_state",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of retained_pool_preserves_index_and_cooldown_while_new_pool_resets_state",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -578,7 +654,9 @@
    "test_or_fn_name": "retained_cooldown_does_not_block_fresh_pool_with_same_member_id",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of retained_cooldown_does_not_block_fresh_pool_with_same_member_id",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -589,7 +667,9 @@
    "test_or_fn_name": "concurrent_refresh_cannot_overwrite_newer_cache_from_stale_alias_snapshot",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of concurrent_refresh_cannot_overwrite_newer_cache_from_stale_alias_snapshot",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -600,7 +680,9 @@
    "test_or_fn_name": "explicit_clear_finishes_after_inflight_stale_materialization",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of explicit_clear_finishes_after_inflight_stale_materialization",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -611,7 +693,9 @@
    "test_or_fn_name": "replacement_clears_stale_health_but_retained_pool_keeps_composite_health_state",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of replacement_clears_stale_health_but_retained_pool_keeps_composite_health_state",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -622,7 +706,9 @@
    "test_or_fn_name": "readable_vault_drops_the_cached_pool_when_the_alias_target_is_gone",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of readable_vault_drops_the_cached_pool_when_the_alias_target_is_gone",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -633,7 +719,9 @@
    "test_or_fn_name": "locked_vault_retains_the_cached_pool_for_the_same_missing_alias",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of locked_vault_retains_the_cached_pool_for_the_same_missing_alias",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -644,7 +732,9 @@
    "test_or_fn_name": "skip_reason_names_which_of_the_two_conditions_occurred",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of skip_reason_names_which_of_the_two_conditions_occurred",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -655,9 +745,11 @@
    "test_or_fn_name": "fixture_replay_requires_explicit_env_opt_in",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of fixture_replay_requires_explicit_env_opt_in",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "AGENT_EVAL_FIXTURE_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -668,9 +760,12 @@
    "test_or_fn_name": "arena_spawn_launches_opencode_dispatch_and_collects_result",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of arena_spawn_launches_opencode_dispatch_and_collects_result",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
-    "TACHI_DISPATCH_WATCHDOG_POLL_MS"
+    "TACHI_DISPATCH_WATCHDOG_POLL_MS",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
@@ -681,10 +776,13 @@
    "test_or_fn_name": "arena_opencode_executor_fallback_uses_glm_registry_model",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of arena_opencode_executor_fallback_uses_glm_registry_model",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_DISPATCH_GLM_CODING_MODEL",
-    "TACHI_DISPATCH_WATCHDOG_POLL_MS"
+    "TACHI_DISPATCH_WATCHDOG_POLL_MS",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
@@ -695,15 +793,18 @@
    "test_or_fn_name": "cli_named_project_forward_binds_daemon_session_for_write",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of cli_named_project_forward_binds_daemon_session_for_write",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
     "TACHI_DAEMON",
-    "TACHI_DISABLE_AUTO_DAEMON"
+    "TACHI_DISABLE_AUTO_DAEMON",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
@@ -711,15 +812,18 @@
    "test_or_fn_name": "remember_named_project_forward_binds_daemon_session_without_project_db",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of remember_named_project_forward_binds_daemon_session_without_project_db",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
     "TACHI_DAEMON",
-    "TACHI_DISABLE_AUTO_DAEMON"
+    "TACHI_DISABLE_AUTO_DAEMON",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
@@ -727,15 +831,18 @@
    "test_or_fn_name": "wiki_write_named_project_forward_binds_daemon_session_without_project_db",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of wiki_write_named_project_forward_binds_daemon_session_without_project_db",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
     "TACHI_DAEMON",
-    "TACHI_DISABLE_AUTO_DAEMON"
+    "TACHI_DISABLE_AUTO_DAEMON",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
@@ -743,13 +850,16 @@
    "test_or_fn_name": "daemon_call_rejects_nonexistent_ascii_project_name_binding",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of daemon_call_rejects_nonexistent_ascii_project_name_binding",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
@@ -757,13 +867,16 @@
    "test_or_fn_name": "non_ascii_project_binding_fails_closed_before_tool_execution",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of non_ascii_project_binding_fails_closed_before_tool_execution",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
@@ -771,13 +884,16 @@
    "test_or_fn_name": "daemon_call_accepts_project_name_with_space_then_fails_as_unknown_project",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of daemon_call_accepts_project_name_with_space_then_fails_as_unknown_project",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
@@ -785,13 +901,16 @@
    "test_or_fn_name": "daemon_call_with_empty_project_name_fails_closed",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of daemon_call_with_empty_project_name_fails_closed",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
@@ -799,13 +918,16 @@
    "test_or_fn_name": "non_ascii_only_and_ambiguous_unnamed_project_names_fail_closed",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of non_ascii_only_and_ambiguous_unnamed_project_names_fail_closed",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/manifest_cli.rs",
@@ -813,7 +935,9 @@
    "test_or_fn_name": "doctor_run_daily_requires_flag_to_migrate_stamped_older_global_db",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of doctor_run_daily_requires_flag_to_migrate_stamped_older_global_db",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -824,13 +948,16 @@
    "test_or_fn_name": "distill_db_override_dangling_symlink_refuses_before_side_effects",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of distill_db_override_dangling_symlink_refuses_before_side_effects",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -838,13 +965,16 @@
    "test_or_fn_name": "distill_db_override_wrong_symlink_refuses_without_external_mutation",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of distill_db_override_wrong_symlink_refuses_without_external_mutation",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -852,13 +982,16 @@
    "test_or_fn_name": "distill_db_override_symlink_loop_refuses_before_side_effects",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of distill_db_override_symlink_loop_refuses_before_side_effects",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -866,13 +999,16 @@
    "test_or_fn_name": "distill_db_override_regular_file_opens_normally",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of distill_db_override_regular_file_opens_normally",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -880,13 +1016,16 @@
    "test_or_fn_name": "startup_canonical_db_dangling_symlink_refuses_before_side_effects",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of startup_canonical_db_dangling_symlink_refuses_before_side_effects",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -894,13 +1033,16 @@
    "test_or_fn_name": "startup_canonical_db_wrong_target_symlink_refuses_before_side_effects",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of startup_canonical_db_wrong_target_symlink_refuses_before_side_effects",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -908,13 +1050,16 @@
    "test_or_fn_name": "startup_canonical_db_symlink_loop_refuses_before_side_effects",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of startup_canonical_db_symlink_loop_refuses_before_side_effects",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -922,13 +1067,16 @@
    "test_or_fn_name": "startup_canonical_db_normal_absence_keeps_plan_c_alias_and_opens_regular_db",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of startup_canonical_db_normal_absence_keeps_plan_c_alias_and_opens_regular_db",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -936,13 +1084,16 @@
    "test_or_fn_name": "startup_canonical_db_regular_file_keeps_plan_c_alias_and_opens",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of startup_canonical_db_regular_file_keeps_plan_c_alias_and_opens",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -950,13 +1101,16 @@
    "test_or_fn_name": "startup_plan_c_alias_refusal_precedes_legacy_copy_for_regular_file",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of startup_plan_c_alias_refusal_precedes_legacy_copy_for_regular_file",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -964,13 +1118,16 @@
    "test_or_fn_name": "startup_plan_c_alias_refusal_precedes_legacy_copy_for_wrong_symlink",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of startup_plan_c_alias_refusal_precedes_legacy_copy_for_wrong_symlink",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -978,13 +1135,16 @@
    "test_or_fn_name": "remember_cli_requires_flag_to_migrate_stamped_older_db_in_process",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of remember_cli_requires_flag_to_migrate_stamped_older_db_in_process",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -992,13 +1152,16 @@
    "test_or_fn_name": "backfill_fts_cli_requires_flag_to_migrate_stamped_older_db_in_process",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of backfill_fts_cli_requires_flag_to_migrate_stamped_older_db_in_process",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -1006,15 +1169,18 @@
    "test_or_fn_name": "vault_exec_does_not_create_project_alias_from_cwd",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of vault_exec_does_not_create_project_alias_from_cwd",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "MEMORY_DB_PATH",
     "SIGIL_HOME",
     "TACHI_APP_HOME",
+    "TACHI_HOME",
     "TACHI_ROOT"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -1022,12 +1188,14 @@
    "test_or_fn_name": "daily_distill_scheduler_stays_enabled_when_pipeline_is_disabled",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of daily_distill_scheduler_stays_enabled_when_pipeline_is_disabled",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "ENABLE_PIPELINE"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -1035,12 +1203,14 @@
    "test_or_fn_name": "daily_distill_scheduler_requires_project_db",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of daily_distill_scheduler_requires_project_db",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "ENABLE_PIPELINE"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve.rs",
@@ -1048,10 +1218,12 @@
    "test_or_fn_name": "new",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of new",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/background.rs",
@@ -1059,10 +1231,14 @@
    "test_or_fn_name": "wal_checkpoint_scoped_to_active_dbs_does_not_attach_named_projects",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of wal_checkpoint_scoped_to_active_dbs_does_not_attach_named_projects",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/background.rs",
@@ -1070,10 +1246,14 @@
    "test_or_fn_name": "background_checkpoint_enumerates_server_home_after_environment_drift",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of background_checkpoint_enumerates_server_home_after_environment_drift",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/background.rs",
@@ -1081,10 +1261,14 @@
    "test_or_fn_name": "wal_checkpoint_reaps_named_project_hard_state_only_when_maintenance_enabled",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of wal_checkpoint_reaps_named_project_hard_state_only_when_maintenance_enabled",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1092,13 +1276,16 @@
    "test_or_fn_name": "with_tachi_home",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_tachi_home",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1106,15 +1293,18 @@
    "test_or_fn_name": "ensure_stdio_proxy_accepts_global_only_daemon_for_project_client",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_HOME，取消设置 SIGIL_HOME/TACHI_APP_HOME/TACHI_DISABLE_STDIO_PROXY，设置 TACHI_DISABLE_AUTO_DAEMON=1，写入 pid 文件，断言 proxy 接收",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
     "TACHI_DISABLE_AUTO_DAEMON",
-    "TACHI_DISABLE_STDIO_PROXY"
+    "TACHI_DISABLE_STDIO_PROXY",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1122,13 +1312,16 @@
    "test_or_fn_name": "stdio_proxy_call_writes_bound_project_via_global_only_daemon",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_call_writes_bound_project_via_global_only_daemon",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1136,13 +1329,16 @@
    "test_or_fn_name": "stdio_proxy_same_db_alias_write_normalizes_to_bound_identity",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_same_db_alias_write_normalizes_to_bound_identity",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1150,13 +1346,16 @@
    "test_or_fn_name": "stdio_proxy_call_rejects_cross_project_override_before_daemon_write",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_call_rejects_cross_project_override_before_daemon_write",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1164,13 +1363,16 @@
    "test_or_fn_name": "stdio_proxy_tachi_search_returns_global_and_bound_project_rows",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_tachi_search_returns_global_and_bound_project_rows",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1178,13 +1380,16 @@
    "test_or_fn_name": "stdio_proxy_allows_explicit_cross_project_read",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_allows_explicit_cross_project_read",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1192,14 +1397,17 @@
    "test_or_fn_name": "stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
+    "TACHI_HOME",
     "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1207,13 +1415,16 @@
    "test_or_fn_name": "stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1221,13 +1432,16 @@
    "test_or_fn_name": "stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1235,13 +1449,16 @@
    "test_or_fn_name": "stdio_proxy_delete_and_archive_global_rows_with_bound_project",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of stdio_proxy_delete_and_archive_global_rows_with_bound_project",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1249,13 +1466,16 @@
    "test_or_fn_name": "http_direct_connect_header_identity_binds_profile_and_project",
    "class": "class2_runtime_config",
    "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行未绑定会话跨项目写入测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1263,13 +1483,16 @@
    "test_or_fn_name": "http_direct_connect_rejects_admin_profile_without_authorization_policy",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of http_direct_connect_rejects_admin_profile_without_authorization_policy",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1277,13 +1500,16 @@
    "test_or_fn_name": "http_direct_connect_unbound_session_rejects_explicit_cross_project_write",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of http_direct_connect_unbound_session_rejects_explicit_cross_project_write",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1291,13 +1517,16 @@
    "test_or_fn_name": "http_direct_connect_initialize_advertises_http_guidance",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of http_direct_connect_initialize_advertises_http_guidance",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1305,13 +1534,16 @@
    "test_or_fn_name": "http_direct_connect_same_db_alias_write_normalizes_to_bound_identity",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of http_direct_connect_same_db_alias_write_normalizes_to_bound_identity",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
@@ -1319,13 +1551,16 @@
    "test_or_fn_name": "http_direct_connect_bound_session_rejects_cross_project_write",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of http_direct_connect_bound_session_rejects_cross_project_write",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/bootstrap/vault_cli/exec_actions.rs",
@@ -1333,7 +1568,9 @@
    "test_or_fn_name": "exec_requires_missing_name_before_spawning",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of exec_requires_missing_name_before_spawning",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1344,10 +1581,12 @@
    "test_or_fn_name": "exec_preserves_caller_environment_over_vault_value",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of exec_preserves_caller_environment_over_vault_value",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_VAULT_CHILD_ENV",
     "TACHI_VAULT_EXEC_FILL_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1358,7 +1597,9 @@
    "test_or_fn_name": "exec_locked_vault_refuses_required_name_before_spawning",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of exec_locked_vault_refuses_required_name_before_spawning",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1369,7 +1610,9 @@
    "test_or_fn_name": "exec_env_load_failure_refuses_spawn_by_default",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of exec_env_load_failure_refuses_spawn_by_default",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1380,7 +1623,9 @@
    "test_or_fn_name": "exec_allow_unauthenticated_runs_inherited_on_env_load_failure",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of exec_allow_unauthenticated_runs_inherited_on_env_load_failure",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1391,7 +1636,9 @@
    "test_or_fn_name": "exec_action_unlock_failure_refuses_spawn_by_default",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of exec_action_unlock_failure_refuses_spawn_by_default",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1402,9 +1649,11 @@
    "test_or_fn_name": "exec_action_unlock_failure_allow_unauthenticated_runs_inherited",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of exec_action_unlock_failure_allow_unauthenticated_runs_inherited",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_VAULT_EXEC_ACTION_INHERITED"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1415,9 +1664,11 @@
    "test_or_fn_name": "providers_doctor_leaves_opencode_and_vault_db_byte_identical_read_only",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of providers_doctor_leaves_opencode_and_vault_db_byte_identical_read_only",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_R11_DOCTOR_FIXTURE_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1428,9 +1679,11 @@
    "test_or_fn_name": "read_vault_password_reports_no_tty_hint_instead_of_os_error",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of read_vault_password_reports_no_tty_hint_instead_of_os_error",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_FORCE_NO_TTY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1441,9 +1694,11 @@
    "test_or_fn_name": "read_vault_init_password_reports_no_tty_hint_instead_of_os_error",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of read_vault_init_password_reports_no_tty_hint_instead_of_os_error",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_FORCE_NO_TTY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1454,7 +1709,9 @@
    "test_or_fn_name": "acquire",
    "class": "class2_runtime_config",
    "evidence": "在变更 TACHI_SKILLS_ROOT 时获取锁并保持 guard 有效期的 RAII guard 构造函数",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1465,7 +1722,9 @@
    "test_or_fn_name": "builtin_waza_and_superpowers_seed_successfully_regardless_of_library_state",
    "class": "class2_runtime_config",
    "evidence": "获取锁 (与 shell_ops TACHI_SKILLS_ROOT 变更器共享)，断言无论库状态如何，内置种子均成功",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1476,7 +1735,9 @@
    "test_or_fn_name": "builtin_skill_definitions_keep_runtime_paths_out_of_scored_content",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of builtin_skill_definitions_keep_runtime_paths_out_of_scored_content",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1487,9 +1748,11 @@
    "test_or_fn_name": "reseeding_changed_builtin_definition_preserves_operational_ranking_state",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of reseeding_changed_builtin_definition_preserves_operational_ranking_state",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -1498,10 +1761,13 @@
    "test_or_fn_name": "transport_concurrency_receipt_serial_and_burst",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of transport_concurrency_receipt_serial_and_burst",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: tachi_home(",
    "deletion_scope": "none"
@@ -1512,11 +1778,13 @@
    "test_or_fn_name": "with_named_project_env",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_named_project_env",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1527,9 +1795,13 @@
    "test_or_fn_name": "wiki_and_guide_visibility_use_server_home_after_environment_drift",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of wiki_and_guide_visibility_use_server_home_after_environment_drift",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -1538,9 +1810,11 @@
    "test_or_fn_name": "harness_probe_requires_password_for_opencode_api_attach_ready",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of harness_probe_requires_password_for_opencode_api_attach_ready",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENCODE_SERVER_PASSWORD"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1551,9 +1825,11 @@
    "test_or_fn_name": "harness_probe_reports_attach_ready_for_authenticated_opencode_schema",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of harness_probe_reports_attach_ready_for_authenticated_opencode_schema",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENCODE_SERVER_PASSWORD"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1564,10 +1840,12 @@
    "test_or_fn_name": "explicit_sandbox_cannot_shadow_the_operator_bypass_check_at_the_entry_point",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE=true (FullPermissionOptIn)；profile 解析读取 TACHI_OPENCODE_* 环境变量",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/authority.rs",
@@ -1575,10 +1853,12 @@
    "test_or_fn_name": "write_intent_skill_is_dropped_from_a_read_only_mount",
    "class": "class2_runtime_config",
    "evidence": "codex_55_review 解析读取 TACHI_OPENCODE_* 环境变量 (OpenCode 适配器)；锁序列化这些变量",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/authority.rs",
@@ -1586,10 +1866,12 @@
    "test_or_fn_name": "shell_capable_read_only_lane_on_an_uncertified_backend_is_refused",
    "class": "class2_runtime_config",
    "evidence": "deepseek_explore 解析通过读取 TACHI_OPENCODE_* 环境变量的 OpenCode 适配器",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/authority.rs",
@@ -1597,10 +1879,12 @@
    "test_or_fn_name": "primitive_less_backend_gets_no_sandbox_flag_and_an_advisory_receipt",
    "class": "class2_runtime_config",
    "evidence": "opencode_builder profile 解析读取 TACHI_OPENCODE_* 环境变量",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1608,13 +1892,15 @@
    "test_or_fn_name": "generate_mcp_config_sets_owner_only_permissions",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of generate_mcp_config_sets_owner_only_permissions",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1622,13 +1908,15 @@
    "test_or_fn_name": "cp2_two_dispatches_on_same_profile_get_distinct_agent_seats",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of cp2_two_dispatches_on_same_profile_get_distinct_agent_seats",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1636,12 +1924,15 @@
    "test_or_fn_name": "dispatch_depth_child_env_is_parent_plus_one",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of dispatch_depth_child_env_is_parent_plus_one",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
+    "HOME",
     "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1649,12 +1940,15 @@
    "test_or_fn_name": "handle_tachi_dispatch_refuses_at_max_depth_from_session",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of handle_tachi_dispatch_refuses_at_max_depth_from_session",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
+    "HOME",
     "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1662,14 +1956,17 @@
    "test_or_fn_name": "opencode_serve_dispatch_fails_fast_when_probe_auth_fails",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_HOME，移除 OPENCODE_SERVER_PASSWORD/USERNAME 以进行 preflight credential 测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENCODE_SERVER_PASSWORD",
     "OPENCODE_SERVER_USERNAME",
+    "TACHI_HOME",
     "TACHI_HOST_PROFILE"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1677,13 +1974,16 @@
    "test_or_fn_name": "opencode_serve_preflight_uses_dispatch_credential_env",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of opencode_serve_preflight_uses_dispatch_credential_env",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENCODE_SERVER_PASSWORD",
-    "OPENCODE_SERVER_USERNAME"
+    "OPENCODE_SERVER_USERNAME",
+    "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1691,10 +1991,14 @@
    "test_or_fn_name": "opencode_agent_missing_command_keeps_vocabulary_through_full_dispatch",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of opencode_agent_missing_command_keeps_vocabulary_through_full_dispatch",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1702,10 +2006,14 @@
    "test_or_fn_name": "v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1713,10 +2021,14 @@
    "test_or_fn_name": "read_only_request_to_uncertified_backend_is_refused_before_run_dir_or_credentials",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of read_only_request_to_uncertified_backend_is_refused_before_run_dir_or_credentials",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1724,10 +2036,14 @@
    "test_or_fn_name": "dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1735,12 +2051,15 @@
    "test_or_fn_name": "dispatch_rejects_level_above_host_profile_before_workspace_creation",
    "class": "class2_runtime_config",
    "evidence": "设置 HOME，移除 TACHI_HOME 以进行孤儿恢复测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
+    "TACHI_HOME",
     "TACHI_HOST_PROFILE"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1748,15 +2067,17 @@
    "test_or_fn_name": "dispatch_runs_root_uses_canonical_tachi_home_aliases",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of dispatch_runs_root_uses_canonical_tachi_home_aliases",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME",
     "SIGIL_HOME",
     "TACHI_APP_HOME",
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1764,13 +2085,15 @@
    "test_or_fn_name": "recover_orphaned_dispatch_runs_marks_working_runs_failed",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of recover_orphaned_dispatch_runs_marks_working_runs_failed",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1778,10 +2101,14 @@
    "test_or_fn_name": "named_project_dispatch_receipt_carries_project_field",
    "class": "class2_runtime_config",
    "evidence": "设置 HOME，移除 TACHI_HOME 以进行遵循回执的孤儿恢复测试",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1789,10 +2116,14 @@
    "test_or_fn_name": "dispatch_receipt_carries_the_effective_authority_contract",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of dispatch_receipt_carries_the_effective_authority_contract",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1800,10 +2131,14 @@
    "test_or_fn_name": "canonical_external_staffing_start_and_terminal_receipt_share_one_run_dir",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of canonical_external_staffing_start_and_terminal_receipt_share_one_run_dir",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1811,10 +2146,14 @@
    "test_or_fn_name": "dispatch_response_default_omits_fat_routing_card",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of dispatch_response_default_omits_fat_routing_card",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1822,10 +2161,14 @@
    "test_or_fn_name": "dispatch_response_verbose_true_restores_full_routing_card",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of dispatch_response_verbose_true_restores_full_routing_card",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
-   "deletion_scope": "1319"
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1833,13 +2176,15 @@
    "test_or_fn_name": "recover_orphaned_dispatch_runs_honors_project_from_receipt",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of recover_orphaned_dispatch_runs_honors_project_from_receipt",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: tachi_home(",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1847,13 +2192,15 @@
    "test_or_fn_name": "global_dispatch_slot_blocks_duplicate_active_task_without_flow_id",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of global_dispatch_slot_blocks_duplicate_active_task_without_flow_id",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1861,13 +2208,15 @@
    "test_or_fn_name": "flow_dispatch_slot_blocks_duplicate_active_task",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of flow_dispatch_slot_blocks_duplicate_active_task",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME",
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
@@ -1875,12 +2224,14 @@
    "test_or_fn_name": "flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_RUN_ROOT"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_ops/dispatch_v2.rs",
@@ -1888,10 +2239,12 @@
    "test_or_fn_name": "call_plan_llm_never_reaches_cli_binary_resolver",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of call_plan_llm_never_reaches_cli_binary_resolver",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "CLAUDE_BIN",
     "TACHI_CLAUDE_POOL_PROVIDER_FIRST"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1902,12 +2255,14 @@
    "test_or_fn_name": "over_budget_skill_contracts_keep_references_without_raw_bodies",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of over_budget_skill_contracts_keep_references_without_raw_bodies",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SKILL_TEXT_BUDGET_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
-   "deletion_scope": "1319"
+   "deletion_scope": "none"
   },
   {
    "file": "crates/tachi-server/src/dispatch_profile/tests/opencode_transport.rs",
@@ -1915,10 +2270,12 @@
    "test_or_fn_name": "recommendation_transport_reports_opencode_serve_fallback",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_OPENCODE_TRANSPORT=serve + TACHI_OPENCODE_SERVER_URL 以进行 serve-fallback 推荐测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_OPENCODE_SERVER_URL",
     "TACHI_OPENCODE_TRANSPORT"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1929,9 +2286,11 @@
    "test_or_fn_name": "custom_profile_can_attach_to_opencode_serve",
    "class": "class2_runtime_config",
    "evidence": "设置 OPENCODE_SERVER_PASSWORD，生成探针服务器，断言 opencode_serve 附加",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENCODE_SERVER_PASSWORD"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1942,7 +2301,9 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "doctor 测试设置 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 的辅助函数",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1953,9 +2314,11 @@
    "test_or_fn_name": "write_keyword_enrichment_flag_defaults_off",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of write_keyword_enrichment_flag_defaults_off",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "WRITE_ENRICH_KEYWORDS_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -1966,6 +2329,7 @@
    "test_or_fn_name": "write_side_keyword_enrichment_hits_search_via_synonym",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of write_side_keyword_enrichment_hits_search_via_synonym",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -1973,8 +2337,9 @@
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
     "WRITE_ENRICH_KEYWORDS_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: LlmClient::new(, make_server(",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
   },
   {
@@ -1983,6 +2348,7 @@
    "test_or_fn_name": "enrichment_flush_keyword_write_back_busts_a_warm_recall_cache",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of enrichment_flush_keyword_write_back_busts_a_warm_recall_cache",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -1991,8 +2357,9 @@
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
     "WRITE_ENRICH_KEYWORDS_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: LlmClient::new(, make_server(",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
   },
   {
@@ -2001,6 +2368,7 @@
    "test_or_fn_name": "write_side_keyword_enrichment_failure_leaves_save_intact",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of write_side_keyword_enrichment_failure_leaves_save_intact",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2008,8 +2376,9 @@
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
     "WRITE_ENRICH_KEYWORDS_ENV"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2018,6 +2387,7 @@
    "test_or_fn_name": "write_side_keyword_enrichment_flag_off_is_noop",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of write_side_keyword_enrichment_flag_off_is_noop",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2025,8 +2395,9 @@
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
     "WRITE_ENRICH_KEYWORDS_ENV"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2035,6 +2406,7 @@
    "test_or_fn_name": "write_side_keyword_enrichment_sanitizes_hostile_llm_keywords",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of write_side_keyword_enrichment_sanitizes_hostile_llm_keywords",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2042,8 +2414,9 @@
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
     "WRITE_ENRICH_KEYWORDS_ENV"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: LlmClient::new(, make_server(",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
   },
   {
@@ -2052,6 +2425,7 @@
    "test_or_fn_name": "write_side_keyword_enrichment_scrubs_existing_keywords_in_prompt",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of write_side_keyword_enrichment_scrubs_existing_keywords_in_prompt",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "EXTRACT_API_KEY",
     "EXTRACT_BASE_URL",
@@ -2059,8 +2433,9 @@
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
     "WRITE_ENRICH_KEYWORDS_ENV"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2069,7 +2444,9 @@
    "test_or_fn_name": "provision_writer_persists_canonical_path_for_post_delete_reclaim",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of provision_writer_persists_canonical_path_for_post_delete_reclaim",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2080,7 +2457,11 @@
    "test_or_fn_name": "daily_distill_enumerates_server_home_after_environment_drift",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of daily_distill_enumerates_server_home_after_environment_drift",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2091,10 +2472,12 @@
    "test_or_fn_name": "call_claude_batch_never_reaches_cli_binary_resolver",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of call_claude_batch_never_reaches_cli_binary_resolver",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "CLAUDE_BIN",
     "TACHI_CLAUDE_POOL_PROVIDER_FIRST"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2105,11 +2488,13 @@
    "test_or_fn_name": "short_voyage_batch_response_is_rejected_not_silently_truncated",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of short_voyage_batch_response_is_rejected_not_silently_truncated",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_RECALL_PROVIDER_ATTEMPTS",
     "VOYAGE_API_KEY",
     "VOYAGE_BASE_URL"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -2120,7 +2505,9 @@
    "test_or_fn_name": "tachi_home_test_lock",
    "class": "class2_runtime_config",
    "evidence": "包装器返回 crate::utils::global_test_lock()；供该模块中变更 TACHI_HOME 的测试使用",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2131,9 +2518,11 @@
    "test_or_fn_name": "classify_route_recognizes_plan_c_symlink_target",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_HOME=tmp/home，建立 plan-C 符号链接，断言 NamedProject 路由",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2144,9 +2533,11 @@
    "test_or_fn_name": "supersede_close_actually_executes_in_normal_flow",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of supersede_close_actually_executes_in_normal_flow",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2155,9 +2546,11 @@
    "test_or_fn_name": "supersede_refuses_non_handoff_labeled_target_with_zero_mutation",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of supersede_refuses_non_handoff_labeled_target_with_zero_mutation",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2166,9 +2559,11 @@
    "test_or_fn_name": "supersede_refuses_closed_target_with_zero_mutation",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of supersede_refuses_closed_target_with_zero_mutation",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2177,7 +2572,9 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "alias-drift 测试设置 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 的辅助函数",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2188,9 +2585,11 @@
    "test_or_fn_name": "repo_local_db_fixture_helper_avoids_linux_tmp_skip_semantics",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of repo_local_db_fixture_helper_avoids_linux_tmp_skip_semantics",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "CARGO_TARGET_DIR"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2201,7 +2600,11 @@
    "test_or_fn_name": "runtime_info_alias_health_stays_bound_after_environment_drift",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of runtime_info_alias_health_stays_bound_after_environment_drift",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2212,11 +2615,13 @@
    "test_or_fn_name": "auto_link_supersede_busts_a_warm_recall_cache",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of auto_link_supersede_busts_a_warm_recall_cache",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_ENABLE_RECALL_CACHE"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2225,11 +2630,13 @@
    "test_or_fn_name": "spawn_queue_wait_measures_dispatch_delay_under_worker_contention",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of spawn_queue_wait_measures_dispatch_delay_under_worker_contention",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_AUTO_LINK_PHASE_RECEIPTS"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2238,7 +2645,11 @@
    "test_or_fn_name": "single_db_mode_warns_when_workspace_local_db_exists_project_bound_does_not",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of single_db_mode_warns_when_workspace_local_db_exists_project_bound_does_not",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_PROJECT_ROOT"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2249,7 +2660,9 @@
    "test_or_fn_name": "enrichment_work_pending_when_metadata_missing",
    "class": "class2_runtime_config",
    "evidence": "移除 WRITE_ENRICH_KEYWORDS_ENV 以断言缺失元数据时的 pending 状态",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2260,7 +2673,9 @@
    "test_or_fn_name": "enrichment_work_pending_when_keyword_flag_on",
    "class": "class2_runtime_config",
    "evidence": "设置 WRITE_ENRICH_KEYWORDS_ENV=true 以断言 pending 状态行为",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2271,11 +2686,13 @@
    "test_or_fn_name": "outer_write_gate_keeps_two_servers_routing_configs_separate",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of outer_write_gate_keeps_two_servers_routing_configs_separate",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
     "TACHI_APP_HOME",
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2286,7 +2703,11 @@
    "test_or_fn_name": "resolve_effective_named_project_does_not_pick_single_available_project",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of resolve_effective_named_project_does_not_pick_single_available_project",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2297,10 +2718,13 @@
    "test_or_fn_name": "cache_generation_through_plan_c_alias_tracks_canonical_bound_project_writes",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of cache_generation_through_plan_c_alias_tracks_canonical_bound_project_writes",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2311,7 +2735,9 @@
    "test_or_fn_name": "write_through_is_safe_when_no_invalidation_landed_since_snapshot",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of write_through_is_safe_when_no_invalidation_landed_since_snapshot",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2322,11 +2748,13 @@
    "test_or_fn_name": "write_through_is_rejected_after_a_concurrent_invalidation_bumped_the_epoch",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of write_through_is_rejected_after_a_concurrent_invalidation_bumped_the_epoch",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_ENABLE_RECALL_CACHE"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2335,11 +2763,13 @@
    "test_or_fn_name": "locked_write_through_rejects_a_write_snapshotted_before_invalidation_completed",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of locked_write_through_rejects_a_write_snapshotted_before_invalidation_completed",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_ENABLE_RECALL_CACHE"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2348,7 +2778,9 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "测试使用的共享辅助函数，既变更 env (TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME) 又调用 set_current_dir — 锁同时序列化了两者",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2359,7 +2791,11 @@
    "test_or_fn_name": "async_heartbeat_uses_server_home_after_environment_drift",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of async_heartbeat_uses_server_home_after_environment_drift",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2370,9 +2806,11 @@
    "test_or_fn_name": "blank_or_absent_domain_falls_back_to_general_never_tachi_domain_env",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of blank_or_absent_domain_falls_back_to_general_never_tachi_domain_env",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_DOMAIN"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2383,10 +2821,13 @@
    "test_or_fn_name": "with_test_home",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_test_home",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2397,12 +2838,16 @@
    "test_or_fn_name": "rejects_path_outside_git_repo_when_cargo_target_dir_is_in_a_git_repo",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of rejects_path_outside_git_repo_when_cargo_target_dir_is_in_a_git_repo",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
+    "CARGO_TARGET_DIR",
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2411,7 +2856,9 @@
    "test_or_fn_name": "collect_config_env_values_unions_in_resolved_home",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of collect_config_env_values_unions_in_resolved_home",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: collect_config_env_values(",
    "deletion_scope": "none"
@@ -2422,9 +2869,11 @@
    "test_or_fn_name": "materialize_provider_secrets_preserves_vault_alias_env",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_preserves_vault_alias_env",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "VOYAGE_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -2435,9 +2884,11 @@
    "test_or_fn_name": "materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -2448,9 +2899,11 @@
    "test_or_fn_name": "materialize_provider_secrets_formats_missing_alias_remediation",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of materialize_provider_secrets_formats_missing_alias_remediation",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "ANTHROPIC_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: LlmClient::new(",
    "deletion_scope": "none"
@@ -2461,9 +2914,11 @@
    "test_or_fn_name": "r11_plan_c_split_brain_merges_alias_and_relinks_symlink",
    "class": "class2_runtime_config",
    "evidence": "在断言 plan-C 别名合并前设置 TACHI_HOME=tempdir",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2474,7 +2929,9 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_env_lock",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2485,9 +2942,11 @@
    "test_or_fn_name": "refresh_from_vault_emits_bypassed_env_warning_via_real_emission_path",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of refresh_from_vault_emits_bypassed_env_warning_via_real_emission_path",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2496,10 +2955,13 @@
    "test_or_fn_name": "memory_server_tachi_home_dir_matches_canonical_resolution",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of memory_server_tachi_home_dir_matches_canonical_resolution",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: tachi_home(",
    "deletion_scope": "none"
@@ -2510,10 +2972,13 @@
    "test_or_fn_name": "with_test_home",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_test_home",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2524,7 +2989,9 @@
    "test_or_fn_name": "tachi_run_root_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of tachi_run_root_env_lock",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
@@ -2535,7 +3002,9 @@
    "test_or_fn_name": "superpowers_meta_skills_resolve_for_all_shell_stages",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of superpowers_meta_skills_resolve_for_all_shell_stages",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
@@ -2546,7 +3015,9 @@
    "test_or_fn_name": "acquire",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of acquire",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2557,7 +3028,11 @@
    "test_or_fn_name": "snapshot_alias_health_stays_bound_after_environment_drift",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of snapshot_alias_health_stays_bound_after_environment_drift",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2568,7 +3043,9 @@
    "test_or_fn_name": "reap_stdio_defaults_are_conservative",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of reap_stdio_defaults_are_conservative",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2579,9 +3056,11 @@
    "test_or_fn_name": "reap_stdio_parent_cap_rejects_zero_and_garbage",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of reap_stdio_parent_cap_rejects_zero_and_garbage",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_REAP_STDIO_PARENT_CAP"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2592,9 +3071,11 @@
    "test_or_fn_name": "vault_plaintext_duplicate_with_same_value_is_not_drift",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of vault_plaintext_duplicate_with_same_value_is_not_drift",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "VOYAGE_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
    "deletion_scope": "none"
@@ -2605,9 +3086,11 @@
    "test_or_fn_name": "vault_plaintext_duplicate_with_different_value_is_drift",
    "class": "class2_runtime_config",
    "evidence": "设置 VOYAGE_API_KEY=same-secret 以进行 vault 明文重复漂移检测测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "VOYAGE_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
    "deletion_scope": "none"
@@ -2618,9 +3101,11 @@
    "test_or_fn_name": "vault_plaintext_duplicate_without_decrypted_value_is_unverified_not_drift",
    "class": "class2_runtime_config",
    "evidence": "设置 VOYAGE_API_KEY=env-secret 以进行漂移检测测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "VOYAGE_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
    "deletion_scope": "none"
@@ -2631,9 +3116,11 @@
    "test_or_fn_name": "deprecated_configured_key_reports_canonical_cleanup_hint",
    "class": "class2_runtime_config",
    "evidence": "设置 VOYAGE_API_KEY=env-secret 以进行未验证非漂移测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "MINIMAX_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
    "deletion_scope": "none"
@@ -2644,10 +3131,12 @@
    "test_or_fn_name": "live_lane_keys_are_not_deprecated_or_remove_migrate_targets",
    "class": "class2_runtime_config",
    "evidence": "设置 REASONING_API_KEY=legacy-secret，断言已废弃 key 的清理提示",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "DISTILL_API_KEY",
     "REASONING_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
    "deletion_scope": "none"
@@ -2658,12 +3147,14 @@
    "test_or_fn_name": "unset_live_lane_keys_are_missing_not_deprecated",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of unset_live_lane_keys_are_missing_not_deprecated",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "BIGMODEL_API_KEY",
     "DISTILL_API_KEY",
     "REASONING_API_KEY",
     "ZAI_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
    "deletion_scope": "none"
@@ -2674,9 +3165,11 @@
    "test_or_fn_name": "rotation_members_configure_their_logical_provider_key",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of rotation_members_configure_their_logical_provider_key",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "VOYAGE_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
    "deletion_scope": "none"
@@ -2687,9 +3180,11 @@
    "test_or_fn_name": "provider_probe_client_loads_target_db_key_health",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of provider_probe_client_loads_target_db_key_health",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "incidental_delivery",
    "env_role_evidence": "injection constructors: new_with_vault_db(",
    "deletion_scope": "none"
@@ -2700,7 +3195,9 @@
    "test_or_fn_name": "model_lanes_reports_default_voyage_rerank_provider",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of model_lanes_reports_default_voyage_rerank_provider",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: model_lanes_json(",
    "deletion_scope": "none"
@@ -2711,7 +3208,9 @@
    "test_or_fn_name": "model_lanes_reports_configured_local_rerank_provider",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of model_lanes_reports_configured_local_rerank_provider",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "behavior_under_test",
    "env_role_evidence": "env-reading constructors: model_lanes_json(",
    "deletion_scope": "none"
@@ -2722,7 +3221,9 @@
    "test_or_fn_name": "infer_provider_from_auth_error_maps_real_failures",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of infer_provider_from_auth_error_maps_real_failures",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2733,9 +3234,11 @@
    "test_or_fn_name": "collect_snapshot_surfaces_plan_c_split_brain_warning",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_HOME=app_home 以进行 plan-C split-brain 快照警告测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2746,9 +3249,11 @@
    "test_or_fn_name": "with_tachi_agent_seat_env",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_tachi_agent_seat_env",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_AGENT_SEAT"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2759,10 +3264,12 @@
    "test_or_fn_name": "cp2_tachi_profile_env_alone_no_longer_resolves_a_seat",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of cp2_tachi_profile_env_alone_no_longer_resolves_a_seat",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_AGENT_SEAT",
     "TACHI_PROFILE"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2773,10 +3280,12 @@
    "test_or_fn_name": "cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_string",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_string",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_AGENT_SEAT",
     "TACHI_PROFILE"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2787,10 +3296,12 @@
    "test_or_fn_name": "cp2_round3_sticky_leave_from_agent_uses_seat_not_profile",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of cp2_round3_sticky_leave_from_agent_uses_seat_not_profile",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_AGENT_SEAT",
     "TACHI_PROFILE"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2801,10 +3312,13 @@
    "test_or_fn_name": "with_tachi_home",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_tachi_home",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "SIGIL_HOME",
-    "TACHI_APP_HOME"
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2815,7 +3329,11 @@
    "test_or_fn_name": "relative_cargo_target_dir_resolving_inside_a_git_repo_is_rejected",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of relative_cargo_target_dir_resolving_inside_a_git_repo_is_rejected",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "CARGO_TARGET_DIR"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2826,11 +3344,14 @@
    "test_or_fn_name": "plan_stage_failure_closes_both_status_and_kanban_row",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_HOME + CLAUDE_BIN=fake-claude + TACHI_CLAUDE_SKIP_PERMISSIONS + DISPATCH_V2_PLAN_REVIEW=false",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
-    "DISPATCH_V2_PLAN_REVIEW"
+    "DISPATCH_V2_PLAN_REVIEW",
+    "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
   },
   {
@@ -2839,11 +3360,14 @@
    "test_or_fn_name": "successful_dispatch_seeds_status_and_kanban_before_plan_completes",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of successful_dispatch_seeds_status_and_kanban_before_plan_completes",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
-    "DISPATCH_V2_PLAN_REVIEW"
+    "DISPATCH_V2_PLAN_REVIEW",
+    "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
   },
   {
@@ -2852,11 +3376,14 @@
    "test_or_fn_name": "plan_review_pending_response_projects_input_required_kanban_state",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of plan_review_pending_response_projects_input_required_kanban_state",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
-    "DISPATCH_V2_PLAN_REVIEW"
+    "DISPATCH_V2_PLAN_REVIEW",
+    "TACHI_HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
   },
   {
@@ -2865,9 +3392,13 @@
    "test_or_fn_name": "v1_dispatch_status_and_kanban_unaffected_by_reorder",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of v1_dispatch_status_and_kanban_unaffected_by_reorder",
-   "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
   },
   {
@@ -2876,9 +3407,11 @@
    "test_or_fn_name": "over_budget_memory_context_keeps_paired_untrusted_boundary",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of over_budget_memory_context_keeps_paired_untrusted_boundary",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
   },
   {
@@ -2887,9 +3420,11 @@
    "test_or_fn_name": "tachi_task_close_loop_writes_wiki_with_references",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_HOME + TACHI_RUN_ROOT，以便非隔离的 make_server() 在此测试期间读取稳定的 HOME",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "1319"
   },
   {
@@ -2898,7 +3433,11 @@
    "test_or_fn_name": "briefing_checkpoints_use_server_home_after_environment_drift",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of briefing_checkpoints_use_server_home_after_environment_drift",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -2909,9 +3448,11 @@
    "test_or_fn_name": "tachi_memory_ask_synthesis_call_site_threads_missing_anchor_cap",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of tachi_memory_ask_synthesis_call_site_threads_missing_anchor_cap",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2920,9 +3461,11 @@
    "test_or_fn_name": "gh_comment_uses_body_file_not_inline_body",
    "class": "class2_runtime_config",
    "evidence": "写入伪造的 `gh` 可执行文件，通过 PathEnvGuard 前置 PATH，断言 --body-file 的用法",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2931,11 +3474,13 @@
    "test_or_fn_name": "w5_auto_link_latency_under_saturation",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of w5_auto_link_latency_under_saturation",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_AUTO_LINK_PHASE_RECEIPTS"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2944,9 +3489,11 @@
    "test_or_fn_name": "new_save_is_visible_immediately_even_behind_a_warm_recall_cache",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of new_save_is_visible_immediately_even_behind_a_warm_recall_cache",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2955,9 +3502,11 @@
    "test_or_fn_name": "save_then_immediate_search_hits_and_receipt_declares_lexical_immediate",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of save_then_immediate_search_hits_and_receipt_declares_lexical_immediate",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2966,9 +3515,11 @@
    "test_or_fn_name": "exact_duplicate_save_does_not_bust_the_recall_cache",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of exact_duplicate_save_does_not_bust_the_recall_cache",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2977,9 +3528,11 @@
    "test_or_fn_name": "successful_save_receipt_recall_fence_is_cleared",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of successful_save_receipt_recall_fence_is_cleared",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2988,9 +3541,11 @@
    "test_or_fn_name": "delete_memory_clears_recall_cache_after_commit",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of delete_memory_clears_recall_cache_after_commit",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -2999,9 +3554,11 @@
    "test_or_fn_name": "archive_memory_clears_recall_cache_after_commit",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of archive_memory_clears_recall_cache_after_commit",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3010,9 +3567,11 @@
    "test_or_fn_name": "memory_gc_clears_recall_cache_after_commit",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of memory_gc_clears_recall_cache_after_commit",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3021,9 +3580,11 @@
    "test_or_fn_name": "consolidate_lifecycle_clears_recall_cache_after_commit",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of consolidate_lifecycle_clears_recall_cache_after_commit",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3032,9 +3593,11 @@
    "test_or_fn_name": "approve_merge_uses_explicit_cleaner_binary_override",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_CLEAN_BIN=/tmp/custom-tachi-clean 以进行 cleaner-binary 覆盖测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_CLEAN_BIN"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3045,7 +3608,9 @@
    "test_or_fn_name": "home_test_lock",
    "class": "class2_runtime_config",
    "evidence": "返回 crate::utils::global_test_lock() 的包装器；支持 TempHomeGuard (HOME/TACHI_HOME/TACHI_RUN_ROOT/SIGIL_HOME) 和 acquire_real_home_lock",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3056,11 +3621,13 @@
    "test_or_fn_name": "tachi_skill_discover_prefers_hub_waza_skill_over_host_duplicate",
    "class": "class2_runtime_config",
    "evidence": "设置 HOME=temp_home 以进行技能发现去重测试",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3069,14 +3636,16 @@
    "test_or_fn_name": "dispatch_vault_env_injection_does_not_export_all_secrets_by_default",
    "class": "class2_runtime_config",
    "evidence": "移除 TACHI_CHILD_ONLY_API_KEY/LONGPORT_APP_SECRET/TACHI_VAULT_CHILD_ENV，设置 TACHI_EXISTING_API_KEY=env-value，生成 `sh` 子进程以读取注入的 env",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "LONGPORT_APP_SECRET",
     "TACHI_CHILD_ONLY_API_KEY",
     "TACHI_EXISTING_API_KEY",
     "TACHI_VAULT_CHILD_ENV"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3085,12 +3654,14 @@
    "test_or_fn_name": "default_and_fill_missing_preserve_inherited_openai_api_key",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_VAULT_CHILD_ENV=all + TACHI_EXISTING_API_KEY，移除 TACHI_CHILD_ONLY_API_KEY/LONGPORT_APP_SECRET/NOT-A-SHELL-NAME，生成 `sh` 子进程",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_VAULT_CHILD_ENV"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3099,6 +3670,7 @@
    "test_or_fn_name": "dispatch_vault_env_injection_overrides_existing_env_when_all_configured",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of dispatch_vault_env_injection_overrides_existing_env_when_all_configured",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "LONGPORT_APP_SECRET",
     "TACHI_CHILD_ONLY_API_KEY",
@@ -3108,8 +3680,9 @@
     "TACHI_FILL_LONGPORT_APP_SECRET",
     "TACHI_VAULT_CHILD_ENV"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3118,13 +3691,15 @@
    "test_or_fn_name": "dispatch_env_injection_uses_logical_rotation_key_not_member_names",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of dispatch_env_injection_uses_logical_rotation_key_not_member_names",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TAVILY_API_KEY",
     "TAVILY_API_KEY_1",
     "TAVILY_API_KEY_2"
    ],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3133,9 +3708,11 @@
    "test_or_fn_name": "provider_pool_materialization_touches_each_successful_concrete_key_exactly_once",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of provider_pool_materialization_touches_each_successful_concrete_key_exactly_once",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3144,9 +3721,11 @@
    "test_or_fn_name": "later_member_decrypt_failure_leaves_every_pool_member_untouched",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of later_member_decrypt_failure_leaves_every_pool_member_untouched",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [],
-   "env_role": "behavior_under_test",
-   "env_role_evidence": "env-reading constructors: make_server(",
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   },
   {
@@ -3155,9 +3734,11 @@
    "test_or_fn_name": "local_skill_discovery_scans_host_skill_dirs",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of local_skill_discovery_scans_host_skill_dirs",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3168,9 +3749,11 @@
    "test_or_fn_name": "local_skill_discovery_expands_common_chinese_queries",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of local_skill_discovery_expands_common_chinese_queries",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "HOME"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3181,7 +3764,11 @@
    "test_or_fn_name": "find_project_git_root_prefers_real_cwd_over_stale_pwd",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of find_project_git_root_prefers_real_cwd_over_stale_pwd",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "PWD"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3192,7 +3779,12 @@
    "test_or_fn_name": "find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd",
-   "env_vars_touched": [],
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
+   "env_vars_touched": [
+    "PWD",
+    "TACHI_PROJECT_ROOT"
+   ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3203,9 +3795,11 @@
    "test_or_fn_name": "auto_lock_clears_key_but_preserves_provider_secrets",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of auto_lock_clears_key_but_preserves_provider_secrets",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3216,9 +3810,11 @@
    "test_or_fn_name": "explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3229,11 +3825,13 @@
    "test_or_fn_name": "locked_provider_refresh_auto_unlocks_once_without_recursive_materialization",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of locked_provider_refresh_auto_unlocks_once_without_recursive_materialization",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK",
     "TACHI_TEST_KEYCHAIN_PASSWORD"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3244,11 +3842,13 @@
    "test_or_fn_name": "failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK",
     "TACHI_TEST_KEYCHAIN_PASSWORD"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3259,11 +3859,13 @@
    "test_or_fn_name": "bootstrap_auto_unlock_owns_one_provider_refresh",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of bootstrap_auto_unlock_owns_one_provider_refresh",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK",
     "TACHI_TEST_KEYCHAIN_PASSWORD"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3274,9 +3876,11 @@
    "test_or_fn_name": "vault_unlock_use_keychain_succeeds_via_injected_password",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of vault_unlock_use_keychain_succeeds_via_injected_password",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_KEYCHAIN_PASSWORD"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3287,9 +3891,11 @@
    "test_or_fn_name": "vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_TEST_FORCE_KEYCHAIN_MISSING"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3300,9 +3906,11 @@
    "test_or_fn_name": "vault_lock_clears_key_and_provider_secrets",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of vault_lock_clears_key_and_provider_secrets",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3313,10 +3921,12 @@
    "test_or_fn_name": "autolock_disabled_when_env_zero",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of autolock_disabled_when_env_zero",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_VAULT_AUTOLOCK_SECS"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3327,10 +3937,12 @@
    "test_or_fn_name": "autolock_disabled_reports_unlocked_in_runtime_status",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of autolock_disabled_reports_unlocked_in_runtime_status",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_VAULT_AUTOLOCK_SECS"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3341,9 +3953,11 @@
    "test_or_fn_name": "status_sweep_state_recomputes_current_pending_after_threshold_change",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of status_sweep_state_recomputes_current_pending_after_threshold_change",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_VECTOR_SWEEP_PENDING_THRESHOLD"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3354,9 +3968,11 @@
    "test_or_fn_name": "sweep_interval_allows_env_shortened_debounce_for_tests",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of sweep_interval_allows_env_shortened_debounce_for_tests",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
     "TACHI_VECTOR_SWEEP_INTERVAL_SECS"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
@@ -3367,14 +3983,202 @@
    "test_or_fn_name": "admits_union_of_all_three_home_env_roots",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of admits_union_of_all_three_home_env_roots",
+   "evidence_provenance": "historical_leaf0 (committed_prior)",
    "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_HOME",
     "TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE"
    ],
+   "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
    "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
    "deletion_scope": "none"
   }
  ],
+ "historical_mapping": {
+  "archive_total_entries": 142,
+  "archive_matched": 107,
+  "archive_unmatched": 35,
+  "unmatched_entries": [
+   {
+    "file": "crates/tachi-llm/src/claude_pool/tests.rs",
+    "line": 383,
+    "test_or_fn_name": "foundry_runs_dir_honors_tachi_home"
+   },
+   {
+    "file": "crates/tachi-llm/src/provider_materialization.rs",
+    "line": 241,
+    "test_or_fn_name": "materialize_provider_secrets_reports_neutral_missing_alias"
+   },
+   {
+    "file": "crates/tachi-llm/src/llm/provider_health/config.rs",
+    "line": 278,
+    "test_or_fn_name": "LlmClient::new (#[cfg(test)] acquire inside ctor)"
+   },
+   {
+    "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+    "line": 64,
+    "test_or_fn_name": "generate_summary_propagates_llm_failures"
+   },
+   {
+    "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+    "line": 94,
+    "test_or_fn_name": "chat_lane_reports_response_body_read_errors"
+   },
+   {
+    "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+    "line": 143,
+    "test_or_fn_name": "chat_lane_waits_for_temporarily_unavailable_pool_key"
+   },
+   {
+    "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+    "line": 204,
+    "test_or_fn_name": "chat_lane_records_success_usage_to_vault_db"
+   },
+   {
+    "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+    "line": 327,
+    "test_or_fn_name": "chat_lane_marks_insufficient_balance_as_exhausted"
+   },
+   {
+    "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+    "line": 406,
+    "test_or_fn_name": "chat_lane_retries_with_next_pool_key_after_429"
+   },
+   {
+    "file": "crates/tachi-llm/src/llm/tests/embedding_rerank.rs",
+    "line": 235,
+    "test_or_fn_name": "local_rerank_hits_configured_endpoint"
+   },
+   {
+    "file": "crates/tachi-server/src/shell_ops/flow.rs",
+    "line": 386,
+    "test_or_fn_name": "tachi_run_root_env_lock (wrapper fn)"
+   },
+   {
+    "file": "crates/tachi-server/src/shell_ops/tests/instructions.rs",
+    "line": 29,
+    "test_or_fn_name": "SkillsRootGuard::acquire"
+   },
+   {
+    "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+    "line": 16,
+    "test_or_fn_name": "with_tachi_home (helper)"
+   },
+   {
+    "file": "crates/tachi-server/src/path_utils/tests.rs",
+    "line": 5,
+    "test_or_fn_name": "with_env_lock (helper)"
+   },
+   {
+    "file": "crates/tachi-server/src/complete_ops/dispatch_outcome.rs",
+    "line": 848,
+    "test_or_fn_name": "with_tachi_home (helper)"
+   },
+   {
+    "file": "crates/tachi-server/src/complete_ops/dispatch_outcome.rs",
+    "line": 1489,
+    "test_or_fn_name": "with_named_project_env (helper)"
+   },
+   {
+    "file": "crates/tachi-server/src/session_identity.rs",
+    "line": 301,
+    "test_or_fn_name": "with_test_home (helper)"
+   },
+   {
+    "file": "crates/tachi-server/src/bootstrap/serve.rs",
+    "line": 958,
+    "test_or_fn_name": "HostProfileEnvFixture::new"
+   },
+   {
+    "file": "crates/tachi-server/src/foundry_runtime_ops/tests.rs",
+    "line": 20,
+    "test_or_fn_name": "tachi_home_test_lock (wrapper fn)"
+   },
+   {
+    "file": "crates/tachi-server/src/tests/dispatch_tests/board_first.rs",
+    "line": 216,
+    "test_or_fn_name": "(plan-stage success path test)"
+   },
+   {
+    "file": "crates/tachi-server/src/tests/dispatch_tests/board_first.rs",
+    "line": 329,
+    "test_or_fn_name": "(plan_review v2 path test)"
+   },
+   {
+    "file": "crates/tachi-server/src/tests/dispatch_tests/board_first.rs",
+    "line": 414,
+    "test_or_fn_name": "(fourth board_first dispatch test)"
+   },
+   {
+    "file": "crates/tachi-server/src/manifest/tests/alias_drift.rs",
+    "line": 21,
+    "test_or_fn_name": "with_env_lock (helper)"
+   },
+   {
+    "file": "crates/tachi-server/src/tests/dispatch_tests/completion_eval/completion_record/precedent_capture.rs",
+    "line": 675,
+    "test_or_fn_name": "CaptureGateEnforceGuard::new"
+   },
+   {
+    "file": "crates/tachi-server/src/doctor/tests.rs",
+    "line": 6,
+    "test_or_fn_name": "with_env_lock (helper)"
+   },
+   {
+    "file": "crates/tachi-server/src/tests/mod.rs",
+    "line": 35,
+    "test_or_fn_name": "home_test_lock (wrapper fn)"
+   },
+   {
+    "file": "crates/tachi-server/src/builtins/tests.rs",
+    "line": 35,
+    "test_or_fn_name": "SkillsRootGuard::acquire"
+   },
+   {
+    "file": "crates/tachi-server/src/vault_ops/tests.rs",
+    "line": 152,
+    "test_or_fn_name": "read_unlock_password_fifo_reads_secure_runtime_fifo"
+   },
+   {
+    "file": "crates/tachi-server/src/vault_ops/tests.rs",
+    "line": 193,
+    "test_or_fn_name": "read_unlock_password_fifo_rejects_regular_file_without_removing_it"
+   },
+   {
+    "file": "crates/tachi-server/src/sticky_ops/tests.rs",
+    "line": 713,
+    "test_or_fn_name": "with_tachi_agent_seat_env (helper)"
+   },
+   {
+    "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+    "line": 152,
+    "test_or_fn_name": "deprecated_unset_key_has_no_cleanup_hint"
+   },
+   {
+    "file": "crates/tachi-server/src/status_ops/tests/daemon_manifest.rs",
+    "line": 5,
+    "test_or_fn_name": "orphan_classification_matches_scheduler_routing"
+   },
+   {
+    "file": "crates/tachi-server/src/foundry_scheduler.rs",
+    "line": 95,
+    "test_or_fn_name": "classify_route_recognizes_named_project"
+   },
+   {
+    "file": "crates/tachi-server/src/foundry_scheduler.rs",
+    "line": 188,
+    "test_or_fn_name": "named_project_extracted_from_canonical_layout"
+   },
+   {
+    "file": "crates/tachi-server/src/server_methods/db.rs",
+    "line": 323,
+    "test_or_fn_name": "with_env_lock (helper)"
+   }
+  ],
+  "note": "Every original Leaf-0 archive row is accounted for. Matched by (file, test_or_fn_name) against the live callsite set; unmatched rows are callsites whose function was removed, renamed, or whose line drifted to a different function since the 2026-07-14 audit."
+ },
  "stats": {
   "total_rg_hits": 267,
   "definitions_and_reexports": 2,
@@ -3388,31 +4192,16 @@
    "class5_product_concurrency": 0,
    "unexplained": 0
   },
-  "secondary_classes_present": {
-   "class3_fs_identity": [
-    "crates/tachi-server/src/path_utils/tests.rs:5",
-    "crates/tachi-server/src/bootstrap/serve.rs:958",
-    "crates/tachi-server/src/utils/tests.rs:81",
-    "crates/tachi-server/src/utils/tests.rs:101"
-   ],
-   "class4_harness": [
-    "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:160",
-    "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:216",
-    "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:329",
-    "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:414",
-    "crates/tachi-server/src/arena_ops/tests/harness.rs:114",
-    "crates/tachi-server/src/arena_ops/tests/harness.rs:270",
-    "crates/tachi-server/src/tests/gh_comment_tests.rs:94"
-   ]
-  },
+  "secondary_classes_present": {},
+  "secondary_classes_note": "Refreshed: stale line references dropped. Only entries whose (file, line) is still a live callsite are retained.",
   "per_env_role": {
-   "behavior_under_test": 114,
+   "behavior_under_test": 59,
    "incidental_delivery": 6,
-   "unknown": 136
+   "unknown": 191
   },
   "per_deletion_scope": {
-   "1319": 82,
-   "none": 174
+   "1319": 10,
+   "none": 246
   }
  }
 }

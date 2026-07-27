@@ -4,25 +4,31 @@
 Subcommands:
   regen     — discover every live ``global_test_lock`` callsite, classify
               ``env_role`` by inspecting the constructor/function under test,
-              preserve historical Leaf-0 evidence, and emit the refreshed
-              JSON artifact.  Run manually after the callsite set changes.
+              preserve historical Leaf-0 evidence (matched by file + function
+              name, not nearest line), and emit the refreshed JSON artifact.
+              Run manually after the callsite set changes.
   validate  — re-derive the live callsite set and diff it against the
               committed fixture.  Exits nonzero on missing/stale/duplicate/
               invalid-enum/count drift.  Does NOT rewrite the fixture.
 
 The classification heuristic is structural and deterministic: it reads the
 enclosing function body and pattern-matches for env-reading constructors
-(``from_env``, ``LlmClient::new``, ``make_server``, ``tachi_home`` …) versus
-injection constructors (``new_with_config``, ``new_with_home_for_test``,
-``make_server_with_temp_home`` …).  ``unknown`` is emitted when neither is
-found — never inferred from env-var names alone (Refs #1476).
+(``from_env``, ``LlmClient::new``, ``tachi_home``, ``model_lanes_json`` …)
+versus injection constructors (``new_with_config``,
+``new_with_home_for_test``, ``make_server_with_temp_home`` …).
+
+``make_server()`` is intentionally NOT an env-reading pattern — it is a
+generic test-server/temp-DB factory, not proof that env parsing is the
+behavior under test.
+
+``unknown`` is emitted when neither family is found — never inferred from
+env-var names alone (Refs #1476).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -39,23 +45,30 @@ ARCHIVE_FALLBACK = Path.home() / ".cache/sigil-eval-archive/1096-leaf0-global-te
 VALID_ENV_ROLES = {"behavior_under_test", "incidental_delivery", "mixed", "unknown"}
 VALID_DELETION_SCOPES = {"none", "1319"}
 
-# #1319 contraction-umbrella deletion targets (Shell, Arena, Task-dispatch).
+# #1319 contraction-umbrella deletion targets — ONLY source paths directly
+# authorized for physical deletion by #1319:
+#   - Shell tests (Leaf B deletes shell_ops)
+#   - Arena tests (Leaf D deletes arena_ops)
+#   - Task-dispatch facade tests (Leaf C deletes the typed task dispatch action)
+# Surviving dispatch kernel (dispatch_ops/dispatch/), prompt, bootstrap/serve,
+# and cli_tool/tool_dispatch are NOT blanket-marked — their roots survive #1319.
 DELETION_PATH_FRAGMENTS = [
     "tests/dispatch_tests/",
     "/arena_ops/",
     "/shell_ops/",
-    "bootstrap/serve",
-    "dispatch_ops/dispatch/",
-    "dispatch_ops/prompt",
-    "bootstrap/cli_tool/tool_dispatch",
 ]
 
 # Env-reading constructors: calling these in the function body is evidence that
 # the test's contract is env parsing / default resolution / fail-closed.
+#
+# NOTE: bare ``make_server()`` is deliberately ABSENT.  It is a generic
+# test-server/temp-DB factory (creates a MemoryServer from the default home),
+# not proof that env is the behavior under test.  A test calling make_server()
+# to get a server instance, while mutating env for unrelated setup, must NOT
+# be classified behavior_under_test on that basis alone.
 ENV_READING_PATTERNS = [
     re.compile(r"\bfrom_env\s*\(\s*\)"),
     re.compile(r"\bLlmClient::new\s*\("),         # bare new(), not new_with_*
-    re.compile(r"\bmake_server\s*\("),             # bare make_server(), not _with_*
     re.compile(r"\btachi_home\s*\("),
     re.compile(r"\bcollect_api_key_status_from_sources\s*\("),
     re.compile(r"\bcollect_api_key_status\s*\("),
@@ -73,13 +86,15 @@ INJECTION_PATTERNS = [
     re.compile(r"\bnew_with_vault_db\s*\("),
 ]
 
-# Env-var mutation extraction: capture quoted env-var names from mutation calls.
-ENV_SET_RE = re.compile(
-    r'(?:EnvRestore::(?:set|unset|remove)|std::env::(?:set_var|remove_var))'
+# Env-var mutation extraction: capture env-var names from mutation calls.
+# Covers EnvRestore::set/unset/remove/set_path and std::env::set_var/remove_var,
+# for both quoted-string and bare-const first arguments.
+ENV_SET_QUOTED_RE = re.compile(
+    r'(?:EnvRestore::(?:set|unset|remove|set_path)|std::env::(?:set_var|remove_var))'
     r'\s*\(\s*"([A-Z_][A-Z0-9_]*)"'
 )
 ENV_SET_BARE_RE = re.compile(
-    r'(?:EnvRestore::(?:set|unset|remove))\s*\(\s*([A-Z_]{3,}[A-Z0-9_]*)\s*[,)]'
+    r'(?:EnvRestore::(?:set|unset|remove|set_path))\s*\(\s*([A-Z_]{3,}[A-Z0-9_]*)\s*[,)]'
 )
 
 FN_NAME_RE = re.compile(r"\b(?:async\s+)?fn\s+(\w+)")
@@ -143,7 +158,6 @@ def find_enclosing_function(file_path: Path, callsite_line: int) -> tuple[str, l
     except (OSError, UnicodeDecodeError):
         return ("unknown", [])
 
-    # Scan backwards from callsite for the enclosing fn.
     fn_line_idx = None
     fn_name = "unknown"
     for idx in range(min(callsite_line - 1, len(lines) - 1), -1, -1):
@@ -156,13 +170,11 @@ def find_enclosing_function(file_path: Path, callsite_line: int) -> tuple[str, l
     if fn_line_idx is None:
         return ("unknown", [])
 
-    # Brace-match from the fn declaration to find the function end.
     depth = 0
     started = False
     end_idx = fn_line_idx
     for idx in range(fn_line_idx, min(fn_line_idx + 200, len(lines))):
-        line = lines[idx]
-        for ch in line:
+        for ch in lines[idx]:
             if ch == "{":
                 depth += 1
                 started = True
@@ -175,7 +187,6 @@ def find_enclosing_function(file_path: Path, callsite_line: int) -> tuple[str, l
             end_idx = idx
             break
     else:
-        # Fell through without matching: use a generous fallback.
         end_idx = min(fn_line_idx + 120, len(lines) - 1)
 
     body = lines[fn_line_idx : end_idx + 1]
@@ -225,13 +236,12 @@ def classify_env_role(body_lines: list[str]) -> tuple[str, str]:
 
 
 def extract_env_vars(body_lines: list[str]) -> list[str]:
-    """Extract env-var names mutated in the function body."""
+    """Extract env-var names mutated in the function body (re-derived, not preserved)."""
     body_text = "\n".join(body_lines)
     found: set[str] = set()
-    for m in ENV_SET_RE.finditer(body_text):
+    for m in ENV_SET_QUOTED_RE.finditer(body_text):
         found.add(m.group(1))
     for m in ENV_SET_BARE_RE.finditer(body_text):
-        # Filter out Rust keywords/constants that aren't env vars.
         name = m.group(1)
         if name not in {"true", "false", "None", "Some"}:
             found.add(name)
@@ -239,40 +249,87 @@ def extract_env_vars(body_lines: list[str]) -> list[str]:
 
 
 def deletion_scope_for(file_path: str) -> str:
-    """Return '1319' if the file is in #1319 deletion scope, else 'none'."""
+    """Return '1319' if the file is in a #1319 deletion-scope path, else 'none'."""
     return "1319" if any(frag in file_path for frag in DELETION_PATH_FRAGMENTS) else "none"
 
 
-# -- historical evidence preservation --------------------------------------
+# -- historical evidence mapping -------------------------------------------
+
+def load_committed_prior(fixture_path: Path) -> dict | None:
+    """Load the committed prior fixture (preferred historical source)."""
+    if fixture_path.exists():
+        try:
+            return json.loads(fixture_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return None
+
 
 def load_archive() -> dict | None:
-    """Load the historical Leaf-0 archive for evidence preservation."""
-    for path in [ARCHIVE_FALLBACK]:
-        if path.exists():
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                pass
+    """Load the original Leaf-0 archive (fallback historical source)."""
+    if ARCHIVE_FALLBACK.exists():
+        try:
+            return json.loads(ARCHIVE_FALLBACK.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
     return None
 
 
-def match_historical(callsite: dict, archive: dict | None) -> dict | None:
-    """Find the historical entry matching this callsite (by file + nearby line).
+def match_historical(
+    callsite: dict,
+    fn_name: str,
+    historical_sources: list[dict],
+) -> tuple[dict | None, str]:
+    """Match by (file, test_or_fn_name) first; line only disambiguates.
 
-    Line numbers drift; match by file and nearest line within a window.
+    Returns (matched_entry_or_None, source_label).
+    Never nearest-line attach evidence to a DIFFERENT function.
     """
-    if not archive:
-        return None
     f = callsite["file"]
-    ln = callsite["line"]
-    candidates = [c for c in archive.get("callsites", []) if c.get("file") == f]
-    if not candidates:
-        return None
-    # Nearest line within ±5.
-    nearest = min(candidates, key=lambda c: abs(c.get("line", 0) - ln))
-    if abs(nearest.get("line", 0) - ln) <= 5:
-        return nearest
-    return None
+    for idx, source in enumerate(historical_sources):
+        if not source:
+            continue
+        label = "committed_prior" if idx == 0 else "archive_fallback"
+        candidates = [
+            c for c in source.get("callsites", [])
+            if c.get("file") == f and c.get("test_or_fn_name") == fn_name
+        ]
+        if candidates:
+            # Same file + same function name: use nearest line to pick the
+            # right one if there are multiple (e.g., a helper called from
+            # several tests in the same file).  This never attaches a
+            # different function's evidence.
+            best = min(candidates, key=lambda c: abs(c.get("line", 0) - callsite["line"]))
+            return (best, label)
+    return (None, "")
+
+
+def refresh_secondary_classes(
+    historical_secondary: dict,
+    live_callsite_pairs: set[tuple[str, int]],
+) -> dict:
+    """Drop stale line references from secondary_classes_present.
+
+    Only keep entries whose (file, line) is still a live callsite.
+    """
+    refreshed = {}
+    for cls, refs in historical_secondary.items():
+        kept = []
+        for ref in refs:
+            # ref format: "path/to/file.rs:LINE"
+            parts = ref.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            f, ln_s = parts
+            try:
+                ln = int(ln_s)
+            except ValueError:
+                continue
+            if (f, ln) in live_callsite_pairs:
+                kept.append(ref)
+        if kept:
+            refreshed[cls] = kept
+    return refreshed
 
 
 # -- regen ------------------------------------------------------------------
@@ -281,7 +338,11 @@ def regenerate(fixture_path: Path) -> dict:
     """Produce the refreshed fixture and write it to *fixture_path*."""
     hits = discover_raw_hits()
     definitions, reexports, docrefs, raw_callsites = classify_raw_hits(hits)
+
+    # Historical sources: committed prior first, archive fallback.
+    prior_committed = load_committed_prior(fixture_path)
     archive = load_archive()
+    historical_sources = [s for s in [prior_committed, archive] if s]
 
     callsite_entries = []
     for cs in raw_callsites:
@@ -291,13 +352,15 @@ def regenerate(fixture_path: Path) -> dict:
         env_vars = extract_env_vars(body)
         del_scope = deletion_scope_for(cs["file"])
 
-        historical = match_historical(cs, archive)
-        evidence = (
-            historical.get("evidence", "")
-            if historical
-            else f"structural inspection of {fn_name}"
-        )
-        hist_class = historical.get("class", "class2_runtime_config") if historical else "class2_runtime_config"
+        historical, hist_source = match_historical(cs, fn_name, historical_sources)
+        if historical:
+            evidence = historical.get("evidence", "")
+            evidence_provenance = f"historical_leaf0 ({hist_source})"
+            hist_class = historical.get("class", "class2_runtime_config")
+        else:
+            evidence = f"structural inspection of {fn_name}"
+            evidence_provenance = "regenerated_structural"
+            hist_class = "class2_runtime_config"
 
         callsite_entries.append({
             "file": cs["file"],
@@ -305,31 +368,74 @@ def regenerate(fixture_path: Path) -> dict:
             "test_or_fn_name": fn_name,
             "class": hist_class,
             "evidence": evidence,
+            "evidence_provenance": evidence_provenance,
             "env_vars_touched": env_vars,
+            "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
             "env_role": env_role,
             "env_role_evidence": env_role_evidence,
             "deletion_scope": del_scope,
         })
 
-    # Sort for deterministic output.
     callsite_entries.sort(key=lambda c: (c["file"], c["line"]))
+
+    # Historical mapping accounting: specifically account for every row in the
+    # original audited archive (the 142-entry hand-audited Leaf-0), NOT the
+    # intermediate prior fixture.  Match by (file, test_or_fn_name).
+    archive_entries = archive.get("callsites", []) if archive else []
+    live_fn_pairs = {(c["file"], c["test_or_fn_name"]) for c in callsite_entries}
+    archive_unmatched_list = []
+    archive_matched = 0
+    for ae in archive_entries:
+        key = (ae.get("file", ""), ae.get("test_or_fn_name", ""))
+        if key in live_fn_pairs:
+            archive_matched += 1
+        else:
+            archive_unmatched_list.append({
+                "file": ae.get("file", ""),
+                "line": ae.get("line", 0),
+                "test_or_fn_name": ae.get("test_or_fn_name", ""),
+            })
+    archive_total = len(archive_entries)
+    archive_unmatched_n = len(archive_unmatched_list)
 
     # Stats
     per_env_role = Counter(c["env_role"] for c in callsite_entries)
     per_deletion = Counter(c["deletion_scope"] for c in callsite_entries)
 
-    # Preserve historical secondary classes where available.
-    secondary = {}
-    if archive and "stats" in archive:
-        secondary = archive["stats"].get("secondary_classes_present", {})
+    live_pairs = {(c["file"], c["line"]) for c in callsite_entries}
+
+    # Refresh secondary classes (drop stale line references).
+    hist_secondary = {}
+    for s in historical_sources:
+        if s and "stats" in s:
+            hist_secondary = s["stats"].get("secondary_classes_present", {})
+            break
+    refreshed_secondary = refresh_secondary_classes(hist_secondary, live_pairs)
 
     fixture = {
-        "schema_version": "2",
+        "schema_version": "3",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "generated_from_note": "Refreshed by scripts/lock_census.py regen against the current branch head.",
+        "generated_from_note": (
+            "Refreshed by scripts/lock_census.py regen against the current branch head. "
+            "Fields: evidence/evidence_provenance preserved from historical Leaf-0 where "
+            "(file, test_or_fn_name) matched; env_vars_touched re-derived; env_role and "
+            "deletion_scope are new in schema v3 (Refs #1476)."
+        ),
         "definitions": definitions,
         "doc_comment_references_non_callsites": docrefs,
         "callsites": callsite_entries,
+        "historical_mapping": {
+            "archive_total_entries": archive_total,
+            "archive_matched": archive_matched,
+            "archive_unmatched": archive_unmatched_n,
+            "unmatched_entries": archive_unmatched_list,
+            "note": (
+                "Every original Leaf-0 archive row is accounted for. "
+                "Matched by (file, test_or_fn_name) against the live callsite set; "
+                "unmatched rows are callsites whose function was removed, renamed, "
+                "or whose line drifted to a different function since the 2026-07-14 audit."
+            ),
+        },
         "stats": {
             "total_rg_hits": len(hits),
             "definitions_and_reexports": len(definitions) + len(reexports),
@@ -343,7 +449,11 @@ def regenerate(fixture_path: Path) -> dict:
                 "class5_product_concurrency": 0,
                 "unexplained": 0,
             },
-            "secondary_classes_present": secondary,
+            "secondary_classes_present": refreshed_secondary,
+            "secondary_classes_note": (
+                "Refreshed: stale line references dropped. Only entries whose "
+                "(file, line) is still a live callsite are retained."
+            ),
             "per_env_role": dict(sorted(per_env_role.items())),
             "per_deletion_scope": dict(sorted(per_deletion.items())),
         },
@@ -365,19 +475,17 @@ def validate_census(fixture: dict, live_callsites: list[tuple[str, int]]) -> lis
     """
     errors: list[str] = []
 
-    # 1. Check every live callsite appears in fixture (missing detection).
+    # 1. Every live callsite appears in fixture (missing detection).
     fixture_pairs = {(c["file"], c["line"]) for c in fixture.get("callsites", [])}
     live_set = set(live_callsites)
-    missing = live_set - fixture_pairs
-    for f, ln in sorted(missing):
+    for f, ln in sorted(live_set - fixture_pairs):
         errors.append(f"missing: live callsite {f}:{ln} not in fixture")
 
-    # 2. Check no fixture callsite is stale (not in live set).
-    stale = fixture_pairs - live_set
-    for f, ln in sorted(stale):
+    # 2. No fixture callsite is stale (not in live set).
+    for f, ln in sorted(fixture_pairs - live_set):
         errors.append(f"stale: fixture callsite {f}:{ln} not in live code")
 
-    # 3. Check for duplicate identities.
+    # 3. No duplicate identities.
     seen: dict[tuple, int] = {}
     for c in fixture.get("callsites", []):
         key = (c["file"], c["line"])
@@ -386,7 +494,7 @@ def validate_census(fixture: dict, live_callsites: list[tuple[str, int]]) -> lis
         if count > 1:
             errors.append(f"duplicate: {key[0]}:{key[1]} appears {count} times")
 
-    # 4. Validate enum values.
+    # 4. Valid enum values.
     for c in fixture.get("callsites", []):
         role = c.get("env_role", "")
         if role not in VALID_ENV_ROLES:
@@ -395,9 +503,11 @@ def validate_census(fixture: dict, live_callsites: list[tuple[str, int]]) -> lis
         if scope not in VALID_DELETION_SCOPES:
             errors.append(f"invalid deletion_scope '{scope}' at {c['file']}:{c['line']}")
 
-    # 5. Validate summary counts.
+    # 5. Summary count integrity.
     stats = fixture.get("stats", {})
-    expected_total = len(fixture.get("callsites", []))
+    callsites = fixture.get("callsites", [])
+
+    expected_total = len(callsites)
     actual_total = stats.get("total_callsites", -1)
     if actual_total != expected_total:
         errors.append(
@@ -406,11 +516,20 @@ def validate_census(fixture: dict, live_callsites: list[tuple[str, int]]) -> lis
 
     per_role = stats.get("per_env_role", {})
     for role in VALID_ENV_ROLES:
-        expected = sum(1 for c in fixture.get("callsites", []) if c.get("env_role") == role)
+        expected = sum(1 for c in callsites if c.get("env_role") == role)
         actual = per_role.get(role, 0)
         if expected != actual:
             errors.append(
                 f"count drift: stats.per_env_role.{role}={actual} but actual={expected}"
+            )
+
+    per_del = stats.get("per_deletion_scope", {})
+    for scope in VALID_DELETION_SCOPES:
+        expected = sum(1 for c in callsites if c.get("deletion_scope") == scope)
+        actual = per_del.get(scope, 0)
+        if expected != actual:
+            errors.append(
+                f"count drift: stats.per_deletion_scope.{scope}={actual} but actual={expected}"
             )
 
     return errors
@@ -452,13 +571,15 @@ def main() -> int:
     p_val.add_argument("--fixture", default=str(DEFAULT_FIXTURE))
 
     args = parser.parse_args()
-
     fixture_path = Path(args.fixture)
 
     if args.cmd == "regen":
         fixture = regenerate(fixture_path)
         n = len(fixture["callsites"])
+        hm = fixture.get("historical_mapping", {})
         print(f"regen: wrote {n} callsites to {fixture_path}")
+        print(f"  historical: matched={hm.get('archive_matched',0)}/{hm.get('archive_total_entries',0)} "
+              f"unmatched={hm.get('archive_unmatched',0)}")
         return 0
     elif args.cmd == "validate":
         return validate_command(fixture_path)
