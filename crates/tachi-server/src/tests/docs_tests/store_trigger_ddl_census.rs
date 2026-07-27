@@ -468,6 +468,13 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         },
         sites: &[
             Site {
+                symbol:
+                    "stamped_current_with_missing_search_generation_trigger_is_refused_without_repair",
+                trigger: "MEMORY_SEARCH_GENERATION_AFTER_UPDATE",
+                ddl: "d232a9fb5db0971e",
+                occurrences: 1,
+            },
+            Site {
                 symbol: "stamped_v23_with_missing_guards_is_refused_even_with_migration_authority",
                 trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
                 ddl: "bb3d35f8dd48927f",
@@ -477,13 +484,6 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 symbol: "stamped_v23_with_missing_guards_is_refused_even_with_migration_authority",
                 trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
                 ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-            Site {
-                symbol:
-                    "stamped_current_with_missing_search_generation_trigger_is_refused_without_repair",
-                trigger: "MEMORY_SEARCH_GENERATION_AFTER_UPDATE",
-                ddl: "d232a9fb5db0971e",
                 occurrences: 1,
             },
             Site {
