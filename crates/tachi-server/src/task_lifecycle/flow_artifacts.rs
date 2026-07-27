@@ -164,8 +164,24 @@ fn pseudo_call_quote(value: &str) -> String {
 fn read_status_for_briefing(run_dir: &std::path::Path) -> Value {
     let status_path = run_dir.join("status.json");
     match std::fs::read_to_string(&status_path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| json!({})),
-        Err(_) => json!({}),
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|err| {
+            tracing::warn!(
+                path = %status_path.display(),
+                error = %err,
+                "shell status JSON parse failed; continuing with empty status"
+            );
+            json!({})
+        }),
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %status_path.display(),
+                    error = %err,
+                    "shell status read failed; continuing with empty status"
+                );
+            }
+            json!({})
+        }
     }
 }
 
