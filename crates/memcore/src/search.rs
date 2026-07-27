@@ -315,8 +315,9 @@ pub struct AccessRecordingPhaseReceipt {
     /// Read off a value the search already had — it adds **no extra DB query**
     /// (that is the mechanism; it is not a claim that reading it is free):
     /// this is `record_access_with_updates(...).len()` — the number of existing
-    /// memory rows whose `access_count`/`recall_count`/`query_diversity`
-    /// were bumped (that function returns the map; we read `.len()` on it).
+    /// memory rows whose `access_count` was bumped. `recall_count` and
+    /// `query_diversity` may also change under their separate gates (that
+    /// function returns the map; we read `.len()` on it).
     /// **No new counter logic is added on the access-recording boundary.**
     ///
     /// tachi#1459: those counters observe the search path only; reads through

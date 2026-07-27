@@ -137,8 +137,8 @@ pub(crate) fn record_access(
     record_access_with_updates(conn, ids, fts_hits, query).map(|_| ())
 }
 
-/// Bump `access_count` and `last_access` for a list of IDs (called after every
-/// search).
+/// Bump `access_count` and `last_access` for a list of IDs after a non-empty
+/// search when `SearchOptions::record_access` is enabled.
 /// `fts_hits` are the IDs matched by the FTS channel (get `recall_count` incremented).
 /// `query` is the raw query string; its FNV-1a hash is stored in `access_history` and
 /// used to compute `query_diversity` (distinct queries that reached this memory).
@@ -153,10 +153,11 @@ pub(crate) fn record_access(
 /// path-listing routes do not increment them — `list_by_path`,
 /// `list_by_path_recent` and `list_memories_by_path_prefix` return rows without
 /// coming through here, so kanban, handoffs, briefing projections, the cards
-/// mirror and GC candidate scans can read a memory constantly while every
-/// counter below stays at zero. `access_count = 0` means "never surfaced by
-/// `hybrid_search`", never "never retrieved", and every downstream predicate
-/// that treats zero as evidence of low value inherits that gap.
+/// mirror and GC candidate scans can read a memory constantly without changing
+/// any counter below. `access_count = 0` means there is currently no retained
+/// access-count evidence; it does not prove that no search or other read ever
+/// returned the row. Every downstream predicate that treats zero as evidence
+/// of low value inherits that gap.
 ///
 /// Two further narrowings inside the search path itself: `hybrid_search` skips
 /// this call entirely when `SearchOptions::record_access` is false (the
@@ -493,11 +494,11 @@ const ACCESS_TIMES_MAX_PER_MEMORY: i64 = 256;
 /// floor at default config, i.e. the new signal would leak into the exact
 /// channel #1446 is repairing. The on arm is [`get_use_access_times`].
 ///
-/// tachi#1459: the `display` rows this reads observe the search path only;
-/// reads through path-listing routes do not write them. An empty vector here
-/// means "`hybrid_search` never returned this memory", not "nothing ever read
-/// it", so the ACT-R floor this feeds is silent about any memory whose only
-/// consumer is `list_by_path` / `list_by_path_recent` /
+/// tachi#1459: the `display` rows this reads observe recorded search-path
+/// accesses only; reads through path-listing routes do not write them. An empty
+/// vector here means no retained `display` event exists, not that nothing ever
+/// read or returned the memory. The ACT-R floor this feeds is therefore silent
+/// about any memory whose only consumer is `list_by_path` / `list_by_path_recent` /
 /// `list_memories_by_path_prefix`.
 pub fn get_access_times(
     conn: &Connection,

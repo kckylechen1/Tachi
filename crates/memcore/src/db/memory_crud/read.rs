@@ -217,9 +217,8 @@ pub fn list_by_path(
 /// recency-first view over a path prefix (recent checkpoints, recent kanban
 /// entries, etc.) should use this instead of `list_by_path`.
 ///
-/// tachi#1459: like [`list_by_path`], this route records nothing — the access
-/// counters observe the search path only, so reads through here leave them at
-/// whatever the search path last left them.
+/// tachi#1459: like [`list_by_path`], this route records nothing, so reads
+/// through here leave the access counters and retained history unchanged.
 pub fn list_by_path_recent(
     conn: &Connection,
     path_prefix: &str,
