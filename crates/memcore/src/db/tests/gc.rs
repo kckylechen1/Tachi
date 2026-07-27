@@ -307,7 +307,11 @@ fn gc_archival_writes_a_receipt_naming_rows_predicate_and_threshold() {
          a bare count into stderr is what made proving GC's history a forensic exercise"
     );
     let payload = &events[0].payload;
-    assert_eq!(payload["stale_days"], json!(90), "the receipt must name the threshold it applied");
+    assert_eq!(
+        payload["stale_days"],
+        json!(90),
+        "the receipt must name the threshold it applied"
+    );
     assert_eq!(payload["archived_total"], json!(1));
 
     let passes = payload["passes"].as_array().expect("passes array");
@@ -315,8 +319,15 @@ fn gc_archival_writes_a_receipt_naming_rows_predicate_and_threshold() {
         .iter()
         .filter(|pass| pass["archived_count"].as_u64() == Some(1))
         .collect();
-    assert_eq!(fired.len(), 1, "exactly one predicate should have claimed the row");
-    assert_eq!(fired[0]["predicate"], json!("durable_never_accessed_by_timestamp"));
+    assert_eq!(
+        fired.len(),
+        1,
+        "exactly one predicate should have claimed the row"
+    );
+    assert_eq!(
+        fired[0]["predicate"],
+        json!("durable_never_accessed_by_timestamp")
+    );
     assert_eq!(fired[0]["recency_column"], json!("timestamp"));
     assert_eq!(fired[0]["importance_below"], json!(0.3));
     assert_eq!(
@@ -381,7 +392,8 @@ fn gc_archival_moves_updated_at_off_its_pre_sweep_value() {
     );
     let receipt = gc_archival_receipts(&conn);
     assert_eq!(
-        receipt[0].payload["archived_at"], json!(after),
+        receipt[0].payload["archived_at"],
+        json!(after),
         "the receipt's archival time must be the same instant stamped on the rows"
     );
 }
@@ -440,7 +452,11 @@ fn gc_archival_receipt_attributes_each_row_to_the_predicate_that_took_it() {
     assert_eq!(archive_stale_memories(&conn, 90).unwrap(), 2);
 
     let events = gc_archival_receipts(&conn);
-    assert_eq!(events.len(), 1, "one sweep writes one receipt covering every pass");
+    assert_eq!(
+        events.len(),
+        1,
+        "one sweep writes one receipt covering every pass"
+    );
     let passes = events[0].payload["passes"].as_array().unwrap();
     let ids_for = |name: &str| -> serde_json::Value {
         passes
@@ -449,8 +465,14 @@ fn gc_archival_receipt_attributes_each_row_to_the_predicate_that_took_it() {
             .unwrap_or_else(|| panic!("receipt must carry a `{name}` pass"))["memory_ids"]
             .clone()
     };
-    assert_eq!(ids_for("ephemeral_stale_by_last_access"), json!(["gc-arch-ephemeral"]));
-    assert_eq!(ids_for("durable_never_accessed_by_timestamp"), json!(["gc-arch-durable"]));
+    assert_eq!(
+        ids_for("ephemeral_stale_by_last_access"),
+        json!(["gc-arch-ephemeral"])
+    );
+    assert_eq!(
+        ids_for("durable_never_accessed_by_timestamp"),
+        json!(["gc-arch-durable"])
+    );
     assert_eq!(
         ids_for("durable_stale_by_last_access"),
         json!([]),
