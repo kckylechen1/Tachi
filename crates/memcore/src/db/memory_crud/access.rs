@@ -49,11 +49,10 @@ impl AccessEventKind {
     /// unchanged, so the two arms of `get_access_times_of_kind` differ in
     /// exactly one literal and cannot drift apart in placeholder arithmetic.
     ///
-    /// **There is deliberately no unfiltered variant.** Before tachi#1446
-    /// every row in `access_history` was a display record, so the `Display`
-    /// arm returns exactly the row set the pre-#1446 unfiltered query returned
-    /// — which is what makes the knob-OFF path byte-identical — while making
-    /// it impossible for a `use` row to reach the default scorer by omission.
+    /// There is deliberately no unfiltered *event kind*: callers that select a
+    /// provenance must name one. The promotion query represents its frozen
+    /// knob-OFF path as `None`, because that path must preserve the literal
+    /// pre-#1446 unfiltered row set even after `use` rows begin to exist.
     ///
     /// Two readers now share this fragment: `get_access_times_of_kind` below
     /// (lever 5, ranking) and `db::daily_pipeline::count_distinct_access_days`
@@ -95,16 +94,15 @@ impl AccessEventKind {
     /// 3. It is one defect with one substrate (`access_history.event_kind`).
     ///    Two knobs over one column is how the two halves drift apart.
     ///
-    /// The residual case where ON *raises* the count is a memory with `use`
-    /// days on dates it was never displayed. That is bounded by how rarely
-    /// `record_memory_use` fires, and it is the intended semantics: a memory a
-    /// caller actually cited earning durable retention is the behaviour this
-    /// gate was supposed to have all along.
-    pub fn for_promotion(recall_config: &crate::RecallConfig) -> Self {
+    /// The ON row set is a strict subset of the OFF row set, so enabling the
+    /// knob can only preserve or lower the count. A caller-cited memory can
+    /// still earn durable retention from its `use` days; display-only days no
+    /// longer help it cross the gate.
+    pub fn for_promotion(recall_config: &crate::RecallConfig) -> Option<Self> {
         if recall_config.use_provenance_recency {
-            Self::Use
+            Some(Self::Use)
         } else {
-            Self::Display
+            None
         }
     }
 

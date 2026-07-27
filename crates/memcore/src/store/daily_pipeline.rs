@@ -41,5 +41,6 @@ impl MemoryStore {
     // callers, and two store-level names for one query is how the promotion
     // ratchet came to be fixable in a place the live pipeline does not read.
     // `MemoryStore::distinct_access_days` is the single store-level entry
-    // point; it takes an `AccessEventKind`.
+    // point; it takes an optional `AccessEventKind`, with `None` reserved for
+    // the frozen unfiltered knob-OFF promotion path.
 }
