@@ -33,6 +33,92 @@ AUDITED_CARGO_INSTALLS = {
 
 IMMUTABLE_IMAGE = /\A[^@[:space:]]+@sha256:[0-9a-f]{64}\z/
 
+class SetupPolicy
+  REQUIRED_LINES = [
+    'readonly REQUIRED_CARGO_NEXTEST_VERSION="0.9.140"',
+    'readonly REQUIRED_CARGO_AUDIT_VERSION="0.22.2"',
+    'readonly RUSTUP_VERSION="1.28.2"',
+    'readonly RUSTUP_HOST="x86_64-unknown-linux-gnu"',
+    'readonly RUSTUP_INIT_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"'
+  ].freeze
+  APPROVED_URL = 'https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_HOST}/rustup-init'
+  APPROVED_DOWNLOAD = <<~'BASH'.strip
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        --output "${rustup_init}" "${rustup_url}"
+  BASH
+  APPROVED_CHECKSUM = <<~'BASH'.strip
+    printf '%s  %s\n' "${RUSTUP_INIT_SHA256}" "${rustup_init}" | sha256sum --check --status
+  BASH
+  APPROVED_CHMOD = 'chmod +x "${rustup_init}"'
+  APPROVED_RUSTUP_INIT = '"${rustup_init}" -y --no-modify-path --profile minimal --default-toolchain none'
+  APPROVED_RUSTUP_INSTALL = <<~'BASH'.strip
+    rustup toolchain install "${REQUIRED_RUST_VERSION}" --profile minimal \
+      --component clippy --component rustfmt --no-self-update
+  BASH
+  APPROVED_CARGO_INSTALLS = [
+    'cargo install cargo-nextest --version "${REQUIRED_CARGO_NEXTEST_VERSION}" --locked --force',
+    'cargo install cargo-audit --version "${REQUIRED_CARGO_AUDIT_VERSION}" --locked --force'
+  ].freeze
+
+  def validate!(source)
+    lines = source.lines.map { |line| line.chomp.strip }
+    REQUIRED_LINES.each do |required|
+      count = lines.count(required)
+      raise PolicyError, "setup pin count must be one: #{required}" unless count == 1
+    end
+
+    urls = source.scan(%r{\b[a-zA-Z][a-zA-Z0-9+.-]*://[^"'[:space:]]+})
+    raise PolicyError, "setup contains an unapproved download URL: #{urls.inspect}" unless urls == [APPROVED_URL]
+
+    normalize = ->(command) { command.lines.map(&:strip).join("\n") }
+    downloads = source.scan(/^[ \t]*(?:curl|wget)[ \t]+[^\n]*\\\n[ \t]+[^\n]*/)
+    unless downloads.map(&normalize) == [normalize.call(APPROVED_DOWNLOAD)]
+      raise PolicyError, "setup download command must match the approved pinned rustup fetch"
+    end
+    executable_lines = lines.reject { |line| line.empty? || line.start_with?("#") }
+    downloader_lines = executable_lines.grep(%r{\A(?:(?:command|env)[[:space:]]+)?(?:[^;&|[:space:]]*/)?(?:curl|wget)(?:[;&|[:space:]]|\z)})
+    unless downloader_lines == [APPROVED_DOWNLOAD.lines.first.strip]
+      raise PolicyError, "setup contains an unapproved downloader command"
+    end
+
+    approved_bootstrap_lines = [
+      APPROVED_DOWNLOAD.lines.first.strip,
+      APPROVED_DOWNLOAD.lines.fetch(1).strip,
+      APPROVED_CHECKSUM,
+      APPROVED_CHMOD,
+      APPROVED_RUSTUP_INIT
+    ]
+    bootstrap_starts = lines.each_index.select { |index| lines[index] == approved_bootstrap_lines.first }
+    unless bootstrap_starts.length == 1 && lines[bootstrap_starts.first, approved_bootstrap_lines.length] == approved_bootstrap_lines
+      raise PolicyError, "setup must use the exact adjacent download, verify, chmod, execute block"
+    end
+
+    rustup_installs = source.scan(/^[ \t]*rustup[ \t]+toolchain[ \t]+install[^\n]*\\\n[ \t]+[^\n]*/)
+    unless rustup_installs.map(&normalize) == [normalize.call(APPROVED_RUSTUP_INSTALL)]
+      raise PolicyError, "setup rustup install command is not approved"
+    end
+    if source.match?(/^[[:space:]]*rustup[[:space:]]+component[[:space:]]+add/)
+      raise PolicyError, "setup must install Rust components through the approved toolchain command"
+    end
+    rustup_commands = lines.grep(/\Arustup[[:space:]]+/)
+    approved_rustup_commands = [
+      "rustup toolchain install \"${REQUIRED_RUST_VERSION}\" --profile minimal \\",
+      'rustup default "${REQUIRED_RUST_VERSION}"'
+    ]
+    unless rustup_commands == approved_rustup_commands
+      raise PolicyError, "setup contains an unapproved rustup command"
+    end
+
+    cargo_installs = lines.grep(/\Acargo[[:space:]]+install[[:space:]]/)
+    unless cargo_installs == APPROVED_CARGO_INSTALLS
+      raise PolicyError, "setup cargo install commands are not the two approved locked pins"
+    end
+    if source.match?(/https:\/\/sh\.rustup\.rs|\|[[:space:]]*(?:ba)?sh\b|\beval[[:space:]]/)
+      raise PolicyError, "setup contains a moving or shell-evaluated installer"
+    end
+  end
+end
+
 class RepoInventory
   attr_reader :root, :tracked_files
 
@@ -448,6 +534,58 @@ def self_test!
   root = ".github/workflows/root.yml"
   action = "custom/action/action.yml"
 
+  valid_setup = <<~'BASH'
+    readonly REQUIRED_CARGO_NEXTEST_VERSION="0.9.140"
+    readonly REQUIRED_CARGO_AUDIT_VERSION="0.22.2"
+    readonly RUSTUP_VERSION="1.28.2"
+    readonly RUSTUP_HOST="x86_64-unknown-linux-gnu"
+    readonly RUSTUP_INIT_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+    readonly rustup_url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_HOST}/rustup-init"
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+      --output "${rustup_init}" "${rustup_url}"
+    printf '%s  %s\n' "${RUSTUP_INIT_SHA256}" "${rustup_init}" | sha256sum --check --status
+    chmod +x "${rustup_init}"
+    "${rustup_init}" -y --no-modify-path --profile minimal --default-toolchain none
+    rustup toolchain install "${REQUIRED_RUST_VERSION}" --profile minimal \
+      --component clippy --component rustfmt --no-self-update
+    rustup default "${REQUIRED_RUST_VERSION}"
+    cargo install cargo-nextest --version "${REQUIRED_CARGO_NEXTEST_VERSION}" --locked --force
+    cargo install cargo-audit --version "${REQUIRED_CARGO_AUDIT_VERSION}" --locked --force
+  BASH
+  SetupPolicy.new.validate!(valid_setup)
+  puts "fixture ACCEPTED setup exact-pins checksum locked-installs"
+  {
+    "setup-deleted-install" => valid_setup.sub(/^cargo install cargo-nextest.*\n/, ""),
+    "setup-unlocked-install" => valid_setup.sub(" --locked --force", " --force"),
+    "setup-wrong-version" => valid_setup.sub('REQUIRED_CARGO_NEXTEST_VERSION="0.9.140"', 'REQUIRED_CARGO_NEXTEST_VERSION="0.9.139"'),
+    "setup-extra-url" => "#{valid_setup}curl https://example.invalid/installer\n",
+    "setup-extra-http-url" => "#{valid_setup}wget http://example.invalid/installer\n",
+    "setup-extra-ftp-url" => "#{valid_setup}curl ftp://example.invalid/installer\n",
+    "setup-extra-rustup-command" => "#{valid_setup}rustup update\n",
+    "setup-commented-checksum" => valid_setup.sub(
+      "printf '%s  %s\\n' \"${RUSTUP_INIT_SHA256}\" \"${rustup_init}\" | sha256sum --check --status",
+      "# printf '%s  %s\\n' \"${RUSTUP_INIT_SHA256}\" \"${rustup_init}\" | sha256sum --check --status"
+    ),
+    "setup-commented-chmod" => valid_setup.sub(
+      'chmod +x "${rustup_init}"',
+      '# chmod +x "${rustup_init}"'
+    ),
+    "setup-overwrite-after-checksum" => valid_setup.sub(
+      'chmod +x "${rustup_init}"',
+      "cat /etc/passwd >\"${rustup_init}\"\nchmod +x \"${rustup_init}\""
+    ),
+    "setup-checksum-after-exec" => valid_setup.sub(
+      "printf '%s  %s\\n' \"${RUSTUP_INIT_SHA256}\" \"${rustup_init}\" | sha256sum --check --status\n",
+      ""
+    ).sub(
+      '"${rustup_init}" -y --no-modify-path --profile minimal --default-toolchain none',
+      '"${rustup_init}" -y --no-modify-path --profile minimal --default-toolchain none' \
+        "\nprintf '%s  %s\\n' \"${RUSTUP_INIT_SHA256}\" \"${rustup_init}\" | sha256sum --check --status"
+    )
+  }.each do |name, source|
+    expect_rejected(name) { SetupPolicy.new.validate!(source) }
+  end
+
   expect_rejected("local-missing") do
     validate_virtual(root => "uses: ./missing\n")
   end
@@ -598,6 +736,7 @@ self_test! if run_self_test
 raise PolicyError, "no policy roots supplied" if ARGV.empty?
 
 inventory = RepoInventory.actual(repo_root)
+SetupPolicy.new.validate!(inventory.read(".agents/setup"))
 policy = ActionPolicy.new(inventory)
 policy.validate_roots(ARGV)
 policy.finish!

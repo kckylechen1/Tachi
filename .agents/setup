@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Amp orb readiness check for the cloud build/test/review seat.
-#
-# This hook intentionally provisions nothing. A mutable bootstrap cannot prove
-# what toolchain ran a mission, and a seat that lacks a required tool must fail
-# before it can produce a review-shaped but unverified result. The orb image
-# must provide these command-line tools before this hook is invoked.
+# Provision and verify the pinned toolchain for Amp's cloud build/test seat.
 set -euo pipefail
 
-export PATH="${PATH}:${CARGO_HOME:-${HOME}/.cargo}/bin"
+export CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+export PATH="${CARGO_HOME}/bin:${PATH}"
 export RUSTUP_AUTO_INSTALL=0
 
-readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3 node npm)
+readonly REQUIRED_TOOLS=(rustup cargo rustc cargo-nextest cargo-audit python3 node npm)
 readonly REQUIRED_RUST_COMPONENTS=(clippy rustfmt)
+readonly REQUIRED_CARGO_NEXTEST_VERSION="0.9.140"
 readonly REQUIRED_CARGO_AUDIT_VERSION="0.22.2"
+readonly RUSTUP_VERSION="1.28.2"
+readonly RUSTUP_HOST="x86_64-unknown-linux-gnu"
+readonly RUSTUP_INIT_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
 setup_source="${BASH_SOURCE[0]}"
 setup_parent="${setup_source%/*}"
 if [[ "${setup_parent}" == "${setup_source}" ]]; then
@@ -36,6 +37,96 @@ if ((${#toolchain_channels[@]} != 1)); then
 fi
 readonly REQUIRED_RUST_VERSION="${toolchain_channels[0]}"
 
+rustup_version() {
+  local version_output name actual
+  if ! command -v rustup >/dev/null 2>&1; then
+    return 1
+  fi
+  version_output="$(rustup --version 2>/dev/null | head -n 1)"
+  read -r name actual _ <<<"${version_output}"
+  if [[ "${name:-}" != rustup ]]; then
+    return 1
+  fi
+  printf '%s\n' "${actual:-}"
+}
+
+if [[ "$(rustup_version || true)" != "${RUSTUP_VERSION}" ]]; then
+  if [[ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]]; then
+    printf 'setup: FAILED -- automatic rustup provisioning supports only Amp orb Linux-x86_64\n' >&2
+    exit 1
+  fi
+  for bootstrap_tool in curl sha256sum mktemp; do
+    if ! command -v "${bootstrap_tool}" >/dev/null 2>&1; then
+      printf 'setup: FAILED -- rustup bootstrap requires %s\n' "${bootstrap_tool}" >&2
+      exit 1
+    fi
+  done
+
+  rustup_init="$(mktemp)"
+  trap 'rm -f -- "${rustup_init}"' EXIT
+  readonly rustup_url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_HOST}/rustup-init"
+  printf 'setup: installing rustup %s from pinned archive\n' "${RUSTUP_VERSION}"
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+    --output "${rustup_init}" "${rustup_url}"
+  printf '%s  %s\n' "${RUSTUP_INIT_SHA256}" "${rustup_init}" | sha256sum --check --status
+  chmod +x "${rustup_init}"
+  "${rustup_init}" -y --no-modify-path --profile minimal --default-toolchain none
+  rm -f -- "${rustup_init}"
+  trap - EXIT
+fi
+
+if [[ "$(rustup_version || true)" != "${RUSTUP_VERSION}" ]]; then
+  printf 'setup: FAILED -- rustup=%s(required:%s)\n' \
+    "$(rustup_version || printf unknown)" "${RUSTUP_VERSION}" >&2
+  exit 1
+fi
+
+rustup toolchain install "${REQUIRED_RUST_VERSION}" --profile minimal \
+  --component clippy --component rustfmt --no-self-update
+rustup default "${REQUIRED_RUST_VERSION}"
+
+cargo_tool_version() {
+  local tool="$1"
+  local version_output name actual
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    return 1
+  fi
+  version_output="$("${tool}" --version 2>/dev/null | head -n 1)"
+  read -r name actual _ <<<"${version_output}"
+  if [[ "${name:-}" != "${tool}" ]]; then
+    return 1
+  fi
+  printf '%s\n' "${actual:-}"
+}
+
+if [[ "$(cargo_tool_version cargo-nextest || true)" != "${REQUIRED_CARGO_NEXTEST_VERSION}" ]]; then
+  cargo install cargo-nextest --version "${REQUIRED_CARGO_NEXTEST_VERSION}" --locked --force
+fi
+if [[ "$(cargo_tool_version cargo-audit || true)" != "${REQUIRED_CARGO_AUDIT_VERSION}" ]]; then
+  cargo install cargo-audit --version "${REQUIRED_CARGO_AUDIT_VERSION}" --locked --force
+fi
+
+readonly PROFILE_MARKER="# Sigil orb Rust toolchain"
+readonly PROFILE_EXPORT="export PATH=\"${CARGO_HOME}/bin:\$PATH\""
+if [[ -f "${HOME}/.bash_profile" ]]; then
+  readonly LOGIN_PROFILE="${HOME}/.bash_profile"
+elif [[ -f "${HOME}/.bash_login" ]]; then
+  readonly LOGIN_PROFILE="${HOME}/.bash_login"
+else
+  readonly LOGIN_PROFILE="${HOME}/.profile"
+fi
+touch "${LOGIN_PROFILE}"
+profile_marker_count="$(grep -Fxc "${PROFILE_MARKER}" "${LOGIN_PROFILE}" || true)"
+profile_export_count="$(grep -Fxc "${PROFILE_EXPORT}" "${LOGIN_PROFILE}" || true)"
+case "${profile_marker_count}:${profile_export_count}" in
+  0:0) printf '\n%s\n%s\n' "${PROFILE_MARKER}" "${PROFILE_EXPORT}" >>"${LOGIN_PROFILE}" ;;
+  1:1) ;;
+  *)
+    printf 'setup: FAILED -- inconsistent Sigil PATH block in %s\n' "${LOGIN_PROFILE}" >&2
+    exit 1
+    ;;
+esac
+
 missing=()
 
 for tool in "${REQUIRED_TOOLS[@]}"; do
@@ -57,6 +148,13 @@ if command -v cargo-audit >/dev/null 2>&1; then
   read -r cargo_audit_name cargo_audit_actual _ <<<"${cargo_audit_version}"
   if [[ "${cargo_audit_name:-}" != cargo-audit || "${cargo_audit_actual:-}" != "${REQUIRED_CARGO_AUDIT_VERSION}" ]]; then
     missing+=("cargo-audit=${cargo_audit_actual:-unknown}(required:${REQUIRED_CARGO_AUDIT_VERSION})")
+  fi
+fi
+
+if command -v cargo-nextest >/dev/null 2>&1; then
+  cargo_nextest_actual="$(cargo_tool_version cargo-nextest || true)"
+  if [[ "${cargo_nextest_actual}" != "${REQUIRED_CARGO_NEXTEST_VERSION}" ]]; then
+    missing+=("cargo-nextest=${cargo_nextest_actual:-unknown}(required:${REQUIRED_CARGO_NEXTEST_VERSION})")
   fi
 fi
 
@@ -92,8 +190,7 @@ if command -v cargo >/dev/null 2>&1; then
 fi
 
 if ((${#missing[@]})); then
-  printf 'setup: FAILED -- missing or unusable preinstalled CI tools: %s\n' "${missing[*]}" >&2
-  printf 'setup: refusing readiness; provision the orb image, then rerun this check.\n' >&2
+  printf 'setup: FAILED -- provisioning did not produce required tools: %s\n' "${missing[*]}" >&2
   exit 1
 fi
 

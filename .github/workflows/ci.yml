@@ -17,7 +17,7 @@ jobs:
   build-seat-setup:
     name: Build seat setup policy
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -25,12 +25,8 @@ jobs:
       - name: Validate setup and CI supply-chain policy
         run: |
           bash -n .agents/setup
-          if grep -Eq '(^|[[:space:]])(curl|wget)[[:space:]]|cargo[[:space:]]+(install|fetch)|rustup[[:space:]]+(toolchain|component)[[:space:]]+(install|add)' .agents/setup; then
-            echo 'build-seat setup must not bootstrap mutable tools' >&2
-            exit 1
-          fi
           if grep -Eq 'CARGO_NET_OFFLINE|dependency cache|advisory (database|DB)' .agents/setup; then
-            echo 'build-seat setup verifies tools, not dependency or advisory data readiness' >&2
+            echo 'build-seat setup provisions tools, not dependency or advisory data readiness' >&2
             exit 1
           fi
 
@@ -97,12 +93,21 @@ jobs:
           setup_test_root="$(mktemp -d)"
           trap 'rm -rf -- "${setup_test_root}"' EXIT
           setup_stub_dir="${setup_test_root}/bin"
-          mkdir -p "${setup_stub_dir}"
-          required_tools=(cargo rustc cargo-nextest cargo-audit python3 node npm)
+          setup_fake_home="${setup_test_root}/home"
+          mkdir -p "${setup_stub_dir}" "${setup_fake_home}"
+          printf 'export SETUP_PROFILE_SENTINEL=preserved\n' >"${setup_fake_home}/.profile"
+          required_tools=(rustup cargo rustc cargo-nextest cargo-audit python3 node npm)
+          missing_tool_cases=(python3 node npm)
 
           for tool in "${required_tools[@]}"; do
             printf '#!/bin/sh\nexit 0\n' >"${setup_stub_dir}/${tool}"
           done
+          for setup_utility in grep head touch; do
+            ln -s "$(command -v "${setup_utility}")" "${setup_stub_dir}/${setup_utility}"
+          done
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'if [ "${1:-}" = --version ]; then printf "rustup %s (fake)\n" "${SIMULATE_RUSTUP_VERSION:-1.28.2}"; fi' >"${setup_stub_dir}/rustup"
           printf '%s\n' \
             '#!/bin/sh' \
             'case "${1:-}" in' \
@@ -121,6 +126,9 @@ jobs:
             'printf "cargo-audit %s (fake)\n" "${SIMULATE_CARGO_AUDIT_VERSION:-0.22.2}"' >"${setup_stub_dir}/cargo-audit"
           printf '%s\n' \
             '#!/bin/sh' \
+            'printf "cargo-nextest %s (fake)\n" "${SIMULATE_CARGO_NEXTEST_VERSION:-0.9.140}"' >"${setup_stub_dir}/cargo-nextest"
+          printf '%s\n' \
+            '#!/bin/sh' \
             'printf "%s\n" "${SIMULATE_NODE_VERSION:-v20.0.0}"' >"${setup_stub_dir}/node"
           chmod +x "${setup_stub_dir}"/*
 
@@ -130,16 +138,37 @@ jobs:
               SIMULATE_RUSTC_VERSION="${3:-1.97.0}" \
               SIMULATE_CARGO_VERSION="${4:-1.97.0}" \
               SIMULATE_CARGO_AUDIT_VERSION="${5:-0.22.2}" \
+              SIMULATE_CARGO_NEXTEST_VERSION="${6:-0.9.140}" \
+              HOME="${setup_fake_home}" \
               CARGO_HOME="${setup_test_root}/cargo-home" \
+              RUSTUP_HOME="${setup_test_root}/rustup-home" \
               PATH="${setup_stub_dir}" \
               /bin/bash .agents/setup >"${setup_test_root}/output" 2>&1
           }
 
           run_fake_setup
-          for tool in "${required_tools[@]}"; do
+          run_fake_setup
+          if [[ -e "${setup_fake_home}/.bash_profile" ]] \
+            || [[ "$(grep -Fxc '# Sigil orb Rust toolchain' "${setup_fake_home}/.profile")" != 1 ]] \
+            || [[ "$(grep -Ec '^export PATH="[^"]+/bin:\$PATH"$' "${setup_fake_home}/.profile")" != 1 ]] \
+            || ! grep -Fqx 'export SETUP_PROFILE_SENTINEL=preserved' "${setup_fake_home}/.profile"; then
+            echo 'setup did not persist the cargo path idempotently' >&2
+            exit 1
+          fi
+          printf '%s\n%s\n' \
+            'export SETUP_PROFILE_SENTINEL=preserved' \
+            '# Sigil orb Rust toolchain' >"${setup_fake_home}/.profile"
+          if run_fake_setup; then
+            echo 'setup accepted a marker-only PATH block' >&2
+            exit 1
+          fi
+          grep -F 'inconsistent Sigil PATH block' "${setup_test_root}/output"
+          printf '%s\n' 'export SETUP_PROFILE_SENTINEL=preserved' >"${setup_fake_home}/.profile"
+          run_fake_setup
+          for tool in "${missing_tool_cases[@]}"; do
             mv "${setup_stub_dir}/${tool}" "${setup_stub_dir}/${tool}.disabled"
             if run_fake_setup; then
-              echo "setup accepted missing required tool: ${tool}" >&2
+              echo "setup accepted a tool that provisioning failed to produce: ${tool}" >&2
               exit 1
             fi
             grep -F "${tool}" "${setup_test_root}/output"
@@ -180,6 +209,51 @@ jobs:
             exit 1
           fi
           grep -F 'cargo-audit=0.22.1(required:0.22.2)' "${setup_test_root}/output"
+          if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.9.139; then
+            echo 'setup accepted a mismatched cargo-nextest' >&2
+            exit 1
+          fi
+          grep -F 'cargo-nextest=0.9.139(required:0.9.140)' "${setup_test_root}/output"
+
+      - name: Exercise fresh build-seat provisioning
+        run: |
+          set -euo pipefail
+          provision_home="${RUNNER_TEMP}/sigil-orb-setup-home"
+          trap 'rm -rf -- "${provision_home}"' EXIT
+          rm -rf -- "${provision_home}"
+          mkdir -p "${provision_home}"
+
+          run_setup() {
+            HOME="${provision_home}" \
+              CARGO_HOME="${provision_home}/.cargo" \
+              RUSTUP_HOME="${provision_home}/.rustup" \
+              bash .agents/setup
+          }
+
+          run_setup
+          run_setup
+          test ! -e "${provision_home}/.bash_profile"
+          test "$(grep -Fxc '# Sigil orb Rust toolchain' "${provision_home}/.profile")" -eq 1
+
+          env -i \
+            HOME="${provision_home}" \
+            USER=runner \
+            LOGNAME=runner \
+            SHELL=/bin/bash \
+            PATH=/usr/bin:/bin \
+            REPO_ROOT="${GITHUB_WORKSPACE}" \
+            /bin/bash -lc '
+              cd -- "${REPO_ROOT}"
+              command -v cargo
+              [[ "$(rustup --version)" == "rustup 1.28.2 "* ]]
+              [[ "$(cargo --version)" == "cargo 1.97.0 "* ]]
+              [[ "$(rustc --version)" == "rustc 1.97.0 "* ]]
+              [[ "$(cargo-nextest --version | head -n 1)" == "cargo-nextest 0.9.140 "* ]]
+              [[ "$(cargo-audit --version)" == "cargo-audit 0.22.2" ]]
+              cargo clippy --version
+              cargo fmt --version
+            '
+          run_setup
 
   rust:
     name: Rust workspace
