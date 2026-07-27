@@ -112,8 +112,9 @@ impl MemoryStore {
             .collect())
     }
 
-    /// Count the distinct days on which a memory recorded an access event of
-    /// `kind` — the frequency input to the durable-promotion gate.
+    /// Count the distinct days feeding the durable-promotion gate. `None`
+    /// preserves the pre-#1446 unfiltered knob-OFF query; `Some(kind)` selects
+    /// one provenance.
     ///
     /// Delegates to [`db::count_distinct_access_days`]. Until tachi#1446
     /// lever 6 this method carried its own copy of that SQL, so the promotion
@@ -127,7 +128,7 @@ impl MemoryStore {
     pub fn distinct_access_days(
         &self,
         id: &str,
-        kind: AccessEventKind,
+        kind: Option<AccessEventKind>,
     ) -> Result<usize, MemoryError> {
         db::count_distinct_access_days(&self.conn, id, kind)
     }
@@ -392,13 +393,13 @@ mod tests {
 
         assert_eq!(
             store
-                .distinct_access_days("tracked", AccessEventKind::Display)
+                .distinct_access_days("tracked", Some(AccessEventKind::Display))
                 .expect("count days"),
             2
         );
         assert_eq!(
             store
-                .distinct_access_days("other", AccessEventKind::Display)
+                .distinct_access_days("other", Some(AccessEventKind::Display))
                 .expect("count days"),
             0
         );
@@ -419,7 +420,7 @@ mod tests {
         );
         assert_eq!(
             AccessEventKind::for_promotion(&default_config),
-            AccessEventKind::Display,
+            None,
             "at default config the promotion ratchet must read exactly the row \
              set it read before tachi#1446"
         );
@@ -430,7 +431,7 @@ mod tests {
         };
         assert_eq!(
             AccessEventKind::for_promotion(&on),
-            AccessEventKind::Use,
+            Some(AccessEventKind::Use),
             "with the knob on, only caller-initiated use days may feed an \
              irreversible promotion"
         );
