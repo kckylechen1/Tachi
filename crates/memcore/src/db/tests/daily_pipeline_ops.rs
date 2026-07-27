@@ -113,8 +113,7 @@ fn count_distinct_access_days_returns_zero_for_missing_history() {
     let mut conn = make_conn();
     let entry = make_entry("no-access", "no access history");
     upsert(&mut conn, &entry, false).unwrap();
-    let days = count_distinct_access_days(&conn, "no-access", Some(AccessEventKind::Display))
-        .expect("days");
+    let days = count_distinct_access_days(&conn, "no-access").expect("days");
     assert_eq!(days, 0);
 }
 
@@ -139,8 +138,7 @@ fn count_distinct_access_days_counts_unique_dates() {
     )
     .unwrap();
 
-    let days = count_distinct_access_days(&conn, "with-access", Some(AccessEventKind::Display))
-        .expect("days");
+    let days = count_distinct_access_days(&conn, "with-access").expect("days");
     assert_eq!(days, 2);
 }
 
@@ -176,12 +174,8 @@ fn off_arm_equals_the_pre_1446_unfiltered_count_on_display_only_history() {
             |row| row.get(0),
         )
         .unwrap();
-    let off = count_distinct_access_days(
-        &conn,
-        "legacy",
-        AccessEventKind::for_promotion(&crate::RecallConfig::default()),
-    )
-    .expect("days");
+    let off = count_distinct_promotion_days(&conn, "legacy", &crate::RecallConfig::default())
+        .expect("days");
 
     assert_eq!(
         off, unfiltered as usize,
@@ -223,15 +217,12 @@ fn use_arm_ignores_display_days_and_off_arm_preserves_mixed_history() {
     .unwrap();
 
     let display =
-        count_distinct_access_days(&conn, "mixed", Some(AccessEventKind::Display)).expect("days");
-    let used =
-        count_distinct_access_days(&conn, "mixed", Some(AccessEventKind::Use)).expect("days");
-    let off = count_distinct_access_days(
-        &conn,
-        "mixed",
-        AccessEventKind::for_promotion(&crate::RecallConfig::default()),
-    )
-    .expect("days");
+        count_distinct_access_days_of_kind(&conn, "mixed", Some(AccessEventKind::Display))
+            .expect("days");
+    let used = count_distinct_access_days_of_kind(&conn, "mixed", Some(AccessEventKind::Use))
+        .expect("days");
+    let off = count_distinct_promotion_days(&conn, "mixed", &crate::RecallConfig::default())
+        .expect("days");
     let unfiltered: i64 = conn
         .query_row(
             "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",

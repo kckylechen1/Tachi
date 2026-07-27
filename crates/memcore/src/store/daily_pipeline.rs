@@ -35,12 +35,7 @@ impl MemoryStore {
         db::list_promotion_candidate_ids(&self.conn, limit)
     }
 
-    // tachi#1446 lever 6: `count_distinct_access_days` used to be re-exported
-    // here as a second `MemoryStore` method with the same body as
-    // `MemoryStore::distinct_access_days` in `store/maintenance.rs`. It had no
-    // callers, and two store-level names for one query is how the promotion
-    // ratchet came to be fixable in a place the live pipeline does not read.
-    // `MemoryStore::distinct_access_days` is the single store-level entry
-    // point; it takes an optional `AccessEventKind`, with `None` reserved for
-    // the frozen unfiltered knob-OFF promotion path.
+    pub fn count_distinct_access_days(&self, memory_id: &str) -> Result<usize, MemoryError> {
+        db::count_distinct_access_days(&self.conn, memory_id)
+    }
 }

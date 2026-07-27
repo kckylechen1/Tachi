@@ -50,9 +50,9 @@ pub(crate) use common::normalize_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
 pub use daily_pipeline::{
     collect_daily_health_snapshot, count_active_memories, count_consolidated_active_memories,
-    count_distinct_access_days, list_eval_evidence, list_memory_ids_needing_embedding,
-    list_promotion_candidate_ids, promote_memory_to_durable, CategorySourceGroup,
-    DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
+    count_distinct_access_days, count_distinct_promotion_days, list_eval_evidence,
+    list_memory_ids_needing_embedding, list_promotion_candidate_ids, promote_memory_to_durable,
+    CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
 };
 #[cfg(feature = "admin")]
 pub use dispatch_adjudications::{

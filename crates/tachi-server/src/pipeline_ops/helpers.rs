@@ -225,7 +225,6 @@ pub(crate) fn build_ingest_entry(
 #[cfg(test)]
 mod tests {
     use super::{build_ingest_entry, calculate_promotion_score, resolve_domain};
-    use memcore::db::AccessEventKind;
     use memcore::{MemoryEntry, MemoryStore, RecallConfig};
     use serde_json::json;
 
@@ -303,10 +302,10 @@ mod tests {
         };
 
         let exposure_days = store
-            .distinct_access_days(&entry.id, AccessEventKind::for_promotion(&knob_off))
+            .distinct_promotion_days(&entry.id, &knob_off)
             .expect("count days at default config");
         let use_days = store
-            .distinct_access_days(&entry.id, AccessEventKind::for_promotion(&knob_on))
+            .distinct_promotion_days(&entry.id, &knob_on)
             .expect("count days with the knob on");
 
         assert_eq!(exposure_days, 6);
@@ -351,7 +350,7 @@ mod tests {
             .expect("unfiltered count");
         let knob_off = RecallConfig::default();
         let default_days = store
-            .distinct_access_days(&entry.id, AccessEventKind::for_promotion(&knob_off))
+            .distinct_promotion_days(&entry.id, &knob_off)
             .expect("count days at default config");
 
         assert_eq!(
