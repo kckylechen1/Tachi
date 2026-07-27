@@ -28,7 +28,7 @@ impl MemoryStore {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let tx = self.conn.unchecked_transaction()?;
-        let archived_at = chrono::Utc::now().to_rfc3339();
+        let archived_at = db::now_utc_iso();
         let mut stmt = tx.prepare(
             "UPDATE memories
              SET archived = 1, updated_at = ?1, revision = revision + 1
@@ -360,6 +360,15 @@ mod tests {
             .unwrap();
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload["stale_days"], json!(60));
+        assert_eq!(payload["archived_at"], json!(post_archive_updated_at));
+        let archived_at = payload["archived_at"].as_str().unwrap();
+        let (_, millis_and_z) = archived_at.rsplit_once('.').unwrap();
+        assert!(archived_at.ends_with('Z'));
+        assert_eq!(
+            millis_and_z.len(),
+            4,
+            "timestamp must use millisecond UTC form"
+        );
         let pass = &payload["passes"][0];
         assert_eq!(
             pass["predicate"],
@@ -377,6 +386,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(receipt_count, 1, "a no-op write must not emit a receipt");
+    }
+
+    #[test]
+    fn unattended_archival_receipt_names_every_row_beyond_the_former_sample_boundary() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let expected_ids: Vec<String> = (0..501)
+            .map(|index| format!("unattended-arch-{index:03}"))
+            .collect();
+        for id in &expected_ids {
+            store.upsert(&test_entry(id)).expect("seed stale row");
+            backdate_created_at(&store, id);
+        }
+
+        assert_eq!(
+            store.archive_stale_low_value_memories().unwrap(),
+            expected_ids.len()
+        );
+        let payload: String = store
+            .connection()
+            .query_row(
+                "SELECT payload_json FROM tachi_events WHERE event_type = 'memory.gc_archived'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let pass = &payload["passes"][0];
+        let ids: Vec<String> = serde_json::from_value(pass["memory_ids"].clone()).unwrap();
+        assert_eq!(pass["archived_count"], json!(expected_ids.len()));
+        assert_eq!(ids, expected_ids);
     }
 
     #[test]

@@ -149,9 +149,10 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
                 -- tachi#1459: same blind spot as `access_count` above, and these
                 -- two are the tier-promotion gate. `recall_count` moves only for
                 -- the FTS-matched subset of a search's results; `query_diversity`
-                -- is derived from `access_history` rows carrying a query hash,
-                -- which only the search path writes. The gate therefore rests on
-                -- a search-only view of a memory's use.
+                -- is derived from `access_history` rows carrying a non-empty
+                -- query hash, which only search writes. Use rows have empty
+                -- query hashes and do not add query-diversity evidence. The gate
+                -- therefore rests on a search-only view of query diversity.
                 recall_count    INTEGER NOT NULL DEFAULT 0,
                 query_diversity INTEGER NOT NULL DEFAULT 0,
                 tier            TEXT NOT NULL DEFAULT 'raw'

@@ -47,6 +47,7 @@ pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use anchor::{anchor_id, anchor_path, ensure_anchor, AnchorKind};
 pub use audit::{audit_log_insert, audit_log_list};
 pub(crate) use common::normalize_utc_iso;
+pub(crate) use common::now_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
 pub use daily_pipeline::{
     collect_daily_health_snapshot, count_active_memories, count_consolidated_active_memories,
@@ -182,9 +183,6 @@ pub use vault_db::{
 };
 #[cfg(feature = "admin")]
 pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
-
-#[cfg(test)]
-pub(crate) use common::now_utc_iso;
 
 #[cfg(test)]
 mod tests;
