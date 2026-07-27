@@ -1,6 +1,6 @@
 {
  "schema_version": "3",
- "generated_at": "2026-07-27T10:44:49Z",
+ "generated_at": "2026-07-27T16:39:41Z",
  "generated_from_note": "Refreshed by scripts/lock_census.py regen against the current branch head. Evidence source selection: archive exact (file, fn_name) match is authoritative and beats committed prior (cleans v2 nearest-line contamination). When no archive match exists, prior evidence matching a different archive function's prose is rejected as foreign; the callsite falls to regenerated structural evidence. env_vars_touched is re-derived; env_role and deletion_scope are schema v3 additions (Refs #1476). See historical_mapping.evidence_provenance_counts for the distribution.",
  "definitions": [
   {
@@ -17,11 +17,11 @@
  "doc_comment_references_non_callsites": [
   "crates/tachi-llm/src/test_support.rs:63 (/// let _guard = crate::test_support::global_test_lock().lock();)",
   "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:12 (//! `global_test_lock()` because `DISPATCH_V2_ENABLED` / `TACHI_HOME` are)",
-  "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs:613 (// holds `crate::utils::global_test_lock()` for its lifetime (see)",
-  "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs:277 (// `global_test_lock()` with a `!Send`-guard-across-`.await` claim that)",
-  "crates/tachi-server/src/builtins/tests.rs:26 (/// `crate::utils::global_test_lock()` so a mutation here can never race a)",
-  "crates/tachi-server/src/test_support.rs:321 (/// Deliberately does NOT wrap the whole test in `global_test_lock()`:)",
   "crates/tachi-server/src/foundry_runtime_ops/daily_distill/tests.rs:486 (/// `crate::utils::global_test_lock()`, matching their convention, not a)",
+  "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs:277 (// `global_test_lock()` with a `!Send`-guard-across-`.await` claim that)",
+  "crates/tachi-server/src/test_support.rs:321 (/// Deliberately does NOT wrap the whole test in `global_test_lock()`:)",
+  "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs:613 (// holds `crate::utils::global_test_lock()` for its lifetime (see)",
+  "crates/tachi-server/src/builtins/tests.rs:26 (/// `crate::utils::global_test_lock()` so a mutation here can never race a)",
   "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1098 (// `global_test_lock()` is a process-wide `std::sync::Mutex<()>` (see)",
   "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1105 (// `global_test_lock()` acquisition on this async path — neither)"
  ],
@@ -1709,7 +1709,7 @@
    "test_or_fn_name": "acquire",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of acquire",
-   "evidence_provenance": "regenerated_structural",
+   "evidence_provenance": "committed_prior",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2301,7 +2301,7 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_env_lock",
-   "evidence_provenance": "regenerated_structural",
+   "evidence_provenance": "committed_prior",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2505,7 +2505,7 @@
    "test_or_fn_name": "tachi_home_test_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of tachi_home_test_lock",
-   "evidence_provenance": "regenerated_structural",
+   "evidence_provenance": "committed_prior",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2572,7 +2572,7 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_env_lock",
-   "evidence_provenance": "regenerated_structural",
+   "evidence_provenance": "committed_prior",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2778,7 +2778,7 @@
    "test_or_fn_name": "with_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of with_env_lock",
-   "evidence_provenance": "regenerated_structural",
+   "evidence_provenance": "committed_prior",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -2802,7 +2802,7 @@
   },
   {
    "file": "crates/tachi-server/src/pipeline_ops/helpers.rs",
-   "line": 243,
+   "line": 386,
    "test_or_fn_name": "blank_or_absent_domain_falls_back_to_general_never_tachi_domain_env",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of blank_or_absent_domain_falls_back_to_general_never_tachi_domain_env",
@@ -2985,7 +2985,7 @@
   },
   {
    "file": "crates/tachi-server/src/shell_ops/flow.rs",
-   "line": 319,
+   "line": 215,
    "test_or_fn_name": "tachi_run_root_env_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of tachi_run_root_env_lock",
@@ -3131,7 +3131,7 @@
    "test_or_fn_name": "live_lane_keys_are_not_deprecated_or_remove_migrate_targets",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of live_lane_keys_are_not_deprecated_or_remove_migrate_targets",
-   "evidence_provenance": "regenerated_structural",
+   "evidence_provenance": "committed_prior",
    "env_vars_touched": [
     "DISTILL_API_KEY",
     "REASONING_API_KEY"
@@ -3608,7 +3608,7 @@
    "test_or_fn_name": "home_test_lock",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of home_test_lock",
-   "evidence_provenance": "regenerated_structural",
+   "evidence_provenance": "committed_prior",
    "env_vars_touched": [],
    "env_vars_touched_note": "re-derived from enclosing function body, not preserved from archive",
    "env_role": "unknown",
@@ -3654,7 +3654,7 @@
    "test_or_fn_name": "default_and_fill_missing_preserve_inherited_openai_api_key",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of default_and_fill_missing_preserve_inherited_openai_api_key",
-   "evidence_provenance": "regenerated_structural",
+   "evidence_provenance": "committed_prior",
    "env_vars_touched": [
     "OPENAI_API_KEY",
     "TACHI_VAULT_CHILD_ENV"
@@ -3821,7 +3821,7 @@
   },
   {
    "file": "crates/tachi-server/src/vault_ops/tests.rs",
-   "line": 260,
+   "line": 301,
    "test_or_fn_name": "locked_provider_refresh_auto_unlocks_once_without_recursive_materialization",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of locked_provider_refresh_auto_unlocks_once_without_recursive_materialization",
@@ -3838,7 +3838,7 @@
   },
   {
    "file": "crates/tachi-server/src/vault_ops/tests.rs",
-   "line": 338,
+   "line": 382,
    "test_or_fn_name": "failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly",
@@ -3855,7 +3855,7 @@
   },
   {
    "file": "crates/tachi-server/src/vault_ops/tests.rs",
-   "line": 398,
+   "line": 445,
    "test_or_fn_name": "bootstrap_auto_unlock_owns_one_provider_refresh",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of bootstrap_auto_unlock_owns_one_provider_refresh",
@@ -3872,7 +3872,7 @@
   },
   {
    "file": "crates/tachi-server/src/vault_ops/tests.rs",
-   "line": 694,
+   "line": 741,
    "test_or_fn_name": "vault_unlock_use_keychain_succeeds_via_injected_password",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of vault_unlock_use_keychain_succeeds_via_injected_password",
@@ -3887,7 +3887,7 @@
   },
   {
    "file": "crates/tachi-server/src/vault_ops/tests.rs",
-   "line": 746,
+   "line": 793,
    "test_or_fn_name": "vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error",
    "class": "class2_runtime_config",
    "evidence": "structural inspection of vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error",
@@ -3902,7 +3902,7 @@
   },
   {
    "file": "crates/tachi-server/src/vault_ops/tests.rs",
-   "line": 883,
+   "line": 930,
    "test_or_fn_name": "vault_lock_clears_key_and_provider_secrets",
    "class": "class2_runtime_config",
    "evidence": "移除 OPENAI_API_KEY，断言 vault_lock 清除 key 和 provider secrets",
@@ -3917,7 +3917,7 @@
   },
   {
    "file": "crates/tachi-server/src/vault_ops/tests.rs",
-   "line": 930,
+   "line": 977,
    "test_or_fn_name": "autolock_disabled_when_env_zero",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_VAULT_AUTOLOCK_SECS=0 + 移除 OPENAI_API_KEY，断言自动锁定禁用 (#400)",
@@ -3933,7 +3933,7 @@
   },
   {
    "file": "crates/tachi-server/src/vault_ops/tests.rs",
-   "line": 994,
+   "line": 1041,
    "test_or_fn_name": "autolock_disabled_reports_unlocked_in_runtime_status",
    "class": "class2_runtime_config",
    "evidence": "设置 TACHI_VAULT_AUTOLOCK_SECS=0 + 移除 OPENAI_API_KEY，断言运行时状态报告未锁定",
@@ -4179,8 +4179,7 @@
   ],
   "evidence_provenance_counts": {
    "archive_authoritative": 107,
-   "committed_prior": 141,
-   "regenerated_structural": 8
+   "committed_prior": 149
   },
   "source_preference": "Archive exact (file, test_or_fn_name) match is authoritative and beats committed prior — including prior non-placeholder text — to clean v2 nearest-line contamination. When no archive exact match exists, committed-prior evidence is rejected if it exactly matches an archive row for a different function (foreign prose); the callsite falls back to honest regenerated structural evidence. No cross-function matching.",
   "note": "Every original Leaf-0 archive row is accounted for. Matched by (file, test_or_fn_name) against the live callsite set; unmatched rows are callsites whose function was removed, renamed, or whose line drifted to a different function since the 2026-07-14 audit."
