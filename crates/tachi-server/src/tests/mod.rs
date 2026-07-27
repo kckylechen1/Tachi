@@ -495,12 +495,19 @@ fn seed_pre_v23_wiki_reference_metadata(wiki_db: &std::path::Path, entries: &[Me
         )
         .expect("remove v23 guard migration sentinel from legacy fixture");
     connection
+        .execute(
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+            params!["migrations", "v24_memories_scored_count"],
+        )
+        .expect("remove v24 scored-count migration sentinel from legacy fixture");
+    connection
         .execute_batch(
             "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
              DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
+             ALTER TABLE memories DROP COLUMN scored_count;
              PRAGMA user_version = 22;",
         )
-        .expect("downgrade disposable wiki fixture to v22 guards");
+        .expect("downgrade disposable wiki fixture to v22");
     let schema_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read legacy wiki fixture schema version");
