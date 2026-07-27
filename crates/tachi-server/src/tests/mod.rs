@@ -376,13 +376,20 @@ fn make_server_preserves_explicit_home_and_run_root() {
 }
 
 pub(crate) fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
+    make_server_with_temp_home_and_migration_authority(MigrationAuthority::Deny)
+}
+
+pub(crate) fn make_server_with_temp_home_and_migration_authority(
+    migration: MigrationAuthority,
+) -> (MemoryServer, TempHomeGuard) {
     ensure_test_env();
     let temp_home = TempHomeGuard::new();
     let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
     std::fs::create_dir_all(global_db.parent().expect("global db parent"))
         .expect("create global db dir");
     copy_template_db(&global_db);
-    let server = MemoryServer::new(global_db, None).expect("failed to create test server");
+    let server = MemoryServer::new_with_migration_authority(global_db, None, migration)
+        .expect("failed to create test server");
     (server, temp_home)
 }
 
