@@ -54,10 +54,57 @@ impl AccessEventKind {
     /// arm returns exactly the row set the pre-#1446 unfiltered query returned
     /// — which is what makes the knob-OFF path byte-identical — while making
     /// it impossible for a `use` row to reach the default scorer by omission.
-    const fn sql_predicate(self) -> &'static str {
+    ///
+    /// Two readers now share this fragment: `get_access_times_of_kind` below
+    /// (lever 5, ranking) and `db::daily_pipeline::count_distinct_access_days`
+    /// (lever 6, the durable-promotion ratchet). Both are crate-internal;
+    /// `pub(crate)` rather than `pub` keeps the closed-enum guarantee — no
+    /// caller outside memcore can hand a raw predicate to either query.
+    pub(crate) const fn sql_predicate(self) -> &'static str {
         match self {
             Self::Display => " AND event_kind = 'display'",
             Self::Use => " AND event_kind = 'use'",
+        }
+    }
+
+    /// The arm the **durable-promotion ratchet** reads — tachi#1446 lever 6.
+    ///
+    /// `count_distinct_access_days` feeds `calculate_promotion_score`, and a
+    /// score at or above 0.60 calls `promote_memory_to_durable`, which pins
+    /// `importance = 0.7` and `retention_policy = 'durable'` permanently.
+    /// Counting `display` rows there means *the system showing a memory
+    /// repeatedly promotes it, irreversibly* — the same defect as levers 1-5,
+    /// on the one substrate where the consequence cannot be undone by
+    /// flipping the knob back.
+    ///
+    /// **This deliberately shares `use_provenance_recency` rather than adding
+    /// a lever-6 knob.** Three reasons, in order of weight:
+    ///
+    /// 1. A separate knob creates a four-state config matrix of which two
+    ///    states are incoherent — ranking that refuses to believe display
+    ///    events while promotion still ratchets on them, or the reverse. There
+    ///    is no deployment that wants either, so the second knob would exist
+    ///    only to be set equal to the first.
+    /// 2. The irreversibility objection points the *other* way once the sign
+    ///    is checked. Turning the knob ON makes this gate strictly harder to
+    ///    pass in the common case (a memory's `use` days are near zero while
+    ///    its `display` days accumulate), so the ON state performs *fewer*
+    ///    irreversible promotions than OFF. Non-promotion is recoverable — the
+    ///    row is re-examined on every pipeline run and promotes as soon as it
+    ///    earns it. Promotion is not.
+    /// 3. It is one defect with one substrate (`access_history.event_kind`).
+    ///    Two knobs over one column is how the two halves drift apart.
+    ///
+    /// The residual case where ON *raises* the count is a memory with `use`
+    /// days on dates it was never displayed. That is bounded by how rarely
+    /// `record_memory_use` fires, and it is the intended semantics: a memory a
+    /// caller actually cited earning durable retention is the behaviour this
+    /// gate was supposed to have all along.
+    pub fn for_promotion(recall_config: &crate::RecallConfig) -> Self {
+        if recall_config.use_provenance_recency {
+            Self::Use
+        } else {
+            Self::Display
         }
     }
 

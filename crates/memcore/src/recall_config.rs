@@ -57,6 +57,18 @@ pub struct RecallConfig {
     /// channel stops discriminating between candidates (see
     /// `search/tests/exposure_loop.rs`). Off by default; #1446 commit 1 lands
     /// the mechanism and the proof, not a ranking-semantics change.
+    ///
+    /// **This knob is no longer ranking-only.** tachi#1446 lever 6 hangs the
+    /// durable-promotion ratchet off it as well
+    /// ([`crate::db::AccessEventKind::for_promotion`]): with it on,
+    /// `calculate_promotion_score` counts the days a caller *used* a memory
+    /// instead of the days the pipeline *showed* it. Promotion is the one
+    /// consumer whose output cannot be undone by flipping the knob back —
+    /// `promote_memory_to_durable` pins `importance` and `retention_policy`
+    /// permanently. The sign is favourable (ON promotes strictly less often in
+    /// the ordinary case, and a withheld promotion is re-decided on the next
+    /// pipeline run), but anyone flipping this is changing retention, not only
+    /// rank order, and should read that function's rationale first.
     pub use_provenance_recency: bool,
 }
 

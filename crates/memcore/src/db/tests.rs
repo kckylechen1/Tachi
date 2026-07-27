@@ -16,8 +16,8 @@ use super::{
     search_symbolic_candidates, search_vec, serialize_f32, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, set_sandbox_policy, stats, supersede_memory, table_exists,
     try_claim_event, try_load_sqlite_vec, update_agent_known_state, update_enrichment_fields,
-    update_with_revision, upsert, AccessUpdate, AnchorKind, EdgeProvenance, FoundryJobStatusCounts,
-    KeywordSuspectProbe, GC_MEMORY_ARCHIVED_EVENT_TYPE,
+    update_with_revision, upsert, AccessEventKind, AccessUpdate, AnchorKind, EdgeProvenance,
+    FoundryJobStatusCounts, KeywordSuspectProbe, GC_MEMORY_ARCHIVED_EVENT_TYPE,
 };
 #[cfg(feature = "admin")]
 use super::{vault_touch_entry, vault_upsert_entry};
