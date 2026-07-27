@@ -311,6 +311,7 @@ fn symbolic_pre_cap_legacy_null_json_columns_fall_back_to_empty_arrays() {
             archived INTEGER NOT NULL,
             superseded_by TEXT,
             access_count INTEGER NOT NULL,
+            scored_count INTEGER NOT NULL DEFAULT 0,
             last_access TEXT,
             -- tachi#1446. Present in the CREATE TABLE but deliberately absent
             -- from the INSERT below: NULL is exactly the state this column is in
@@ -345,8 +346,9 @@ fn symbolic_pre_cap_legacy_null_json_columns_fall_back_to_empty_arrays() {
     // reject (`memories_new.keywords` is `TEXT NOT NULL`), so `init_schema` is
     // not an option here. The cost of hand-building is that the table silently
     // falls behind `MEMORY_SELECT_COLUMNS` every time a column is added — which
-    // is what happened when tachi#1446 added `last_use_at`, surfacing as a bare
-    // `no such column` from inside `search_symbolic_candidates`. This assertion
+    // is what happened when tachi#1446 added `last_use_at` and tachi#1459 added
+    // `scored_count`, surfacing as a bare `no such column` from inside
+    // `search_symbolic_candidates`. This assertion
     // converts that into a named failure that says which columns to add.
     crate::db::assert_memories_fixture_matches_select_columns(
         &conn,
