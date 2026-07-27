@@ -47,12 +47,13 @@ pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use anchor::{anchor_id, anchor_path, ensure_anchor, AnchorKind};
 pub use audit::{audit_log_insert, audit_log_list};
 pub(crate) use common::normalize_utc_iso;
+pub(crate) use common::now_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
 pub use daily_pipeline::{
     collect_daily_health_snapshot, count_active_memories, count_consolidated_active_memories,
-    count_distinct_access_days, list_eval_evidence, list_memory_ids_needing_embedding,
-    list_promotion_candidate_ids, promote_memory_to_durable, CategorySourceGroup,
-    DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
+    count_distinct_access_days, count_distinct_promotion_days, list_eval_evidence,
+    list_memory_ids_needing_embedding, list_promotion_candidate_ids, promote_memory_to_durable,
+    CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
 };
 #[cfg(feature = "admin")]
 pub use dispatch_adjudications::{
@@ -170,7 +171,8 @@ pub use state::{
     list_derived_by_source, list_state, reap_expired_state, save_derived, save_derived_with_id,
     set_state, set_state_if_version, StateRow,
 };
-pub use stats_gc::{archive_stale_memories, gc_tables, stats};
+pub(crate) use stats_gc::write_gc_archived_receipt;
+pub use stats_gc::{archive_stale_memories, gc_tables, stats, GC_MEMORY_ARCHIVED_EVENT_TYPE};
 #[cfg(feature = "admin")]
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,
@@ -181,9 +183,6 @@ pub use vault_db::{
 };
 #[cfg(feature = "admin")]
 pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
-
-#[cfg(test)]
-pub(crate) use common::now_utc_iso;
 
 #[cfg(test)]
 mod tests;

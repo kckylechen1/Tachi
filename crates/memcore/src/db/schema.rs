@@ -188,6 +188,15 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     )?;
 
     // Memory lifecycle columns for tier-based decay and historical training flags.
+    //
+    // tachi#1459: both of these observe the search path only; reads through
+    // path-listing routes do not increment them. `record_access_with_updates`
+    // (from `hybrid_search`) is the only production writer of `recall_count`,
+    // and `query_diversity` is written there and reconciled by `gc_tables` from
+    // `access_history`: only search writes non-empty query hashes, so only
+    // those rows supply query-diversity evidence. Use rows have empty query
+    // hashes and do not inflate diversity. They gate tier promotion, so that
+    // gate sees a search-only view of a memory's query diversity.
     ensure_column(
         conn,
         "memories",
@@ -822,6 +831,13 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
     } else {
         "NULL"
     };
+    // tachi#1459, on the `access_count` / `last_access` / `recall_count` /
+    // `query_diversity` columns carried through the rebuild below: those
+    // counters observe the search path only; reads through path-listing routes
+    // do not increment them. See `ddl.rs`'s BASE_SCHEMA_SQL, where the same
+    // columns carry the full note, and `db::record_access_with_updates`, their
+    // single production writer. The rebuild preserves the stored values
+    // verbatim — it neither widens nor narrows what they measure.
     let rebuild_sql = r#"
         CREATE TABLE memories_new (
             id           TEXT PRIMARY KEY,

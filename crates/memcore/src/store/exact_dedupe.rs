@@ -209,6 +209,12 @@ fn tier_rank(v: &str) -> i32 {
         _ => 0,
     }
 }
+/// tachi#1459: the three counters ranked below observe the search path only;
+/// reads through path-listing routes do not increment them. They decide which
+/// of two byte-identical rows survives, so the survivor is the one search has
+/// shown more, which is not necessarily the one that has been read more. The
+/// rows being compared are exact duplicates, so the choice moves provenance and
+/// history, not content.
 fn order(a: &Candidate, b: &Candidate) -> Ordering {
     b.retention_rank
         .cmp(&a.retention_rank)

@@ -55,7 +55,15 @@ pub struct SearchOptions {
     pub query_vec: Option<Vec<f32>>,
     /// Whether the sqlite-vec extension is available for vector search.
     pub vec_available: bool,
-    /// Whether to bump access_count after retrieval (disable in bulk/bench mode).
+    /// Whether to bump `access_count` after retrieval (disable in bulk/bench mode).
+    ///
+    /// tachi#1459: this switch is the *inner* narrowing of what those counters
+    /// observe. They already observe the search path only — reads through
+    /// path-listing routes do not increment them — and setting this false
+    /// removes a search from that view too. Internal searches do set it false
+    /// (similarity lookup, auto-link, contradiction scan, auto-ingest,
+    /// capture), which is intended, but it means `access_count` is not even a
+    /// complete count of searches that returned the row.
     pub record_access: bool,
     /// Whether to include archived entries in query results.
     pub include_archived: bool,
@@ -307,9 +315,14 @@ pub struct AccessRecordingPhaseReceipt {
     /// Read off a value the search already had — it adds **no extra DB query**
     /// (that is the mechanism; it is not a claim that reading it is free):
     /// this is `record_access_with_updates(...).len()` — the number of existing
-    /// memory rows whose `access_count`/`recall_count`/`query_diversity`
-    /// were bumped (access.rs:73 returns the map; we read `.len()` on it).
+    /// memory rows whose `access_count` was bumped. `recall_count` and
+    /// `query_diversity` may also change under their separate gates (that
+    /// function returns the map; we read `.len()` on it).
     /// **No new counter logic is added on the access-recording boundary.**
+    ///
+    /// tachi#1459: those counters observe the search path only; reads through
+    /// path-listing routes do not increment them, so this is a count of rows
+    /// this search touched, never a measure of how much the store is read.
     pub updated_row_count: usize,
 }
 
@@ -496,6 +509,18 @@ fn hybrid_search_inner(
     )?;
 
     // ── Record access (bump counters) ─────────────────────────────────────────
+    //
+    // tachi#1459: this is the **only** production call site of
+    // `record_access_with_updates`, and therefore the only place
+    // `access_count` and `recall_count` increment and the only source of the
+    // history from which `query_diversity` is derived. `gc_tables` can later
+    // reconcile `query_diversity` downward from that history; it adds no
+    // non-search observation. These counters observe the search path only;
+    // reads through path-listing routes (`db::list_by_path`,
+    // `db::list_by_path_recent`,
+    // `db::list_memories_by_path_prefix`) do not increment them. Anything
+    // downstream that reads a zero as "never retrieved" is reading this line's
+    // absence, not a fact about the memory.
     let access_start = sample.then(Instant::now);
     let access_receipt = if opts.record_access {
         let accessed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
@@ -511,7 +536,8 @@ fn hybrid_search_inner(
         }
         access_start.map(|s| AccessRecordingPhaseReceipt {
             elapsed: s.elapsed(),
-            // `.len()` on the existing return value (access.rs:73) — the
+            // `.len()` on the existing return value of
+            // `record_access_with_updates` — the
             // mechanism is that no extra DB query and no new counter logic are
             // added on the access-recording boundary; the map was already
             // built and returned. This is not a claim that reading it costs

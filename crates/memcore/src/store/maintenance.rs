@@ -9,21 +9,60 @@ pub struct TierHealthCounts {
 }
 
 impl MemoryStore {
-    /// Archive low-importance memories that were never accessed and are older
-    /// than 60 days, sparing permanent/pinned/durable retention policies.
+    /// Archive low-importance memories that were never surfaced by search and
+    /// are older than 60 days, sparing permanent/pinned/durable retention
+    /// policies.
+    ///
+    /// tachi#1459: the `access_count = 0` predicate below observes the search
+    /// path only; reads through path-listing routes do not increment it. "Never
+    /// accessed" here means "`hybrid_search` never returned it", so a row read
+    /// constantly through `list_by_path` / `list_by_path_recent` /
+    /// `list_memories_by_path_prefix` still qualifies. The other predicates are
+    /// what currently keep that from destroying a live row: rows under
+    /// `/handoff*` and `/kanban*` with no policy of their own are backfilled to
+    /// `pinned`, and `/wiki*` / `/guide*` to `permanent`
+    /// (`backfill_retention_defaults` in `db/schema.rs`), and the retention
+    /// filter spares those — but that is a second mechanism doing the work, not
+    /// this predicate meaning what it reads like.
     pub fn archive_stale_low_value_memories(&self) -> Result<usize, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        Ok(self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let archived_at = db::now_utc_iso();
+        let mut stmt = tx.prepare(
             "UPDATE memories
-             SET archived = 1, updated_at = datetime('now')
+             SET archived = 1, updated_at = ?1, revision = revision + 1
              WHERE archived = 0
                AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned', 'durable')
                AND importance < 0.70
                AND access_count = 0
-               AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')",
-            [],
-        )?)
+               AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')
+             RETURNING id",
+        )?;
+        let mut ids = stmt
+            .query_map([&archived_at], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        ids.sort();
+        if !ids.is_empty() {
+            db::write_gc_archived_receipt(
+                &tx,
+                &archived_at,
+                60,
+                serde_json::json!([{
+                    "predicate": "stale_low_value_never_search_accessed",
+                    "recency_column": "created_at_or_timestamp",
+                    "importance_below": 0.70,
+                    "retention_scope": "not_permanent_pinned_or_durable",
+                    "archived_count": ids.len(),
+                    "memory_ids": ids,
+                }]),
+                ids.len(),
+                "memcore::store::maintenance::MemoryStore::archive_stale_low_value_memories",
+            )?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
     }
 
     /// Count active memories and how many reached consolidated/pattern tier.
@@ -47,6 +86,12 @@ impl MemoryStore {
     /// Promote raw memories that earned consolidation through repeated exact
     /// recall from diverse queries (the same gate as `record_access`); a raw
     /// note must not be promoted merely because it was accessed often.
+    ///
+    /// tachi#1459: both counters this gate reads observe the search path only;
+    /// reads through path-listing routes do not increment them. This is the
+    /// batch twin of the inline gate in `db::record_access_with_updates` and it
+    /// inherits the same partial view — it can only fail to promote a
+    /// path-listed memory, never promote one on evidence it did not earn.
     pub fn promote_diversely_recalled_raw_memories(&self) -> Result<usize, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
@@ -92,6 +137,11 @@ impl MemoryStore {
     }
 
     /// Load the most-accessed active entries eligible for durable promotion.
+    ///
+    /// tachi#1459: the `access_count DESC` ordering observes the search path
+    /// only; reads through path-listing routes do not increment it. This ranks
+    /// by how often search has shown a memory, so a memory reached only by path
+    /// listing sorts to the bottom of this list however heavily it is read.
     pub fn promotion_candidate_entries(
         &self,
         limit: usize,
@@ -111,14 +161,48 @@ impl MemoryStore {
             .collect())
     }
 
-    /// Count the distinct days on which a memory was accessed.
-    pub fn distinct_access_days(&self, id: &str) -> Result<usize, MemoryError> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
-            rusqlite::params![id],
-            |row| row.get(0),
+    /// Load promotion candidates using the same provenance arm as the daily
+    /// promotion gate. OFF preserves [`Self::promotion_candidate_entries`]'s
+    /// literal historical ordering.
+    pub fn promotion_candidate_entries_for_config(
+        &self,
+        limit: usize,
+        recall_config: &crate::RecallConfig,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        if !recall_config.use_provenance_recency {
+            return self.promotion_candidate_entries(limit);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id FROM memories m
+             LEFT JOIN access_history ah
+               ON ah.memory_id = m.id AND ah.event_kind = 'use'
+             WHERE m.archived = 0
+               AND COALESCE(m.retention_policy, '') NOT IN ('permanent', 'pinned')
+             GROUP BY m.id
+             ORDER BY COUNT(DISTINCT date(ah.accessed_at)) DESC, m.timestamp DESC
+             LIMIT ?1",
         )?;
-        Ok(count as usize)
+        let ids = stmt
+            .query_map([limit as i64], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(db::fetch_by_ids(&self.conn, &ids, false)?
+            .into_values()
+            .collect())
+    }
+
+    /// Count distinct access days using the pre-#1446 unfiltered semantics.
+    pub fn distinct_access_days(&self, id: &str) -> Result<usize, MemoryError> {
+        db::count_distinct_access_days(&self.conn, id)
+    }
+
+    /// Count the distinct days feeding the durable-promotion gate. The config
+    /// selects the frozen unfiltered OFF arm or the use-only ON arm.
+    pub fn distinct_promotion_days(
+        &self,
+        id: &str,
+        recall_config: &crate::RecallConfig,
+    ) -> Result<usize, MemoryError> {
+        db::count_distinct_promotion_days(&self.conn, id, recall_config)
     }
 
     /// Pin importance and durable retention once a memory passes the
@@ -149,6 +233,7 @@ impl MemoryStore {
 mod tests {
     use serde_json::json;
 
+    use crate::db::AccessEventKind;
     use crate::types::MemoryEntry;
     use crate::MemoryStore;
 
@@ -224,6 +309,113 @@ mod tests {
                 .expect("durable exists")
                 .archived
         );
+    }
+
+    #[test]
+    fn unattended_archival_is_revision_safe_and_receipted_without_noop_events() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store.upsert(&test_entry("stale-a")).expect("seed stale-a");
+        store.upsert(&test_entry("stale-b")).expect("seed stale-b");
+        let mut durable = test_entry("durable");
+        durable.retention_policy = Some("durable".to_string());
+        store.upsert(&durable).expect("seed durable");
+        for id in ["stale-a", "stale-b", "durable"] {
+            backdate_created_at(&store, id);
+        }
+        let pre_archive_revision = store.get("stale-a").unwrap().unwrap().revision;
+        let pre_archive_updated_at: String = store
+            .connection()
+            .query_row(
+                "SELECT updated_at FROM memories WHERE id = 'stale-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(store.archive_stale_low_value_memories().unwrap(), 2);
+        let post_archive_updated_at: String = store
+            .connection()
+            .query_row(
+                "SELECT updated_at FROM memories WHERE id = 'stale-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(post_archive_updated_at, pre_archive_updated_at);
+        assert!(
+            !store
+                .restore_archived_if_revision("stale-a", pre_archive_revision)
+                .unwrap(),
+            "a pre-archive revision must not restore an unattended archival"
+        );
+        assert!(!store.get("durable").unwrap().unwrap().archived);
+
+        let payload: String = store
+            .connection()
+            .query_row(
+                "SELECT payload_json FROM tachi_events WHERE event_type = 'memory.gc_archived'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["stale_days"], json!(60));
+        assert_eq!(payload["archived_at"], json!(post_archive_updated_at));
+        let archived_at = payload["archived_at"].as_str().unwrap();
+        let (_, millis_and_z) = archived_at.rsplit_once('.').unwrap();
+        assert!(archived_at.ends_with('Z'));
+        assert_eq!(
+            millis_and_z.len(),
+            4,
+            "timestamp must use millisecond UTC form"
+        );
+        let pass = &payload["passes"][0];
+        assert_eq!(
+            pass["predicate"],
+            json!("stale_low_value_never_search_accessed")
+        );
+        assert_eq!(pass["archived_count"], json!(2));
+        assert_eq!(pass["memory_ids"], json!(["stale-a", "stale-b"]));
+        assert_eq!(store.archive_stale_low_value_memories().unwrap(), 0);
+        let receipt_count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM tachi_events WHERE event_type = 'memory.gc_archived'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt_count, 1, "a no-op write must not emit a receipt");
+    }
+
+    #[test]
+    fn unattended_archival_receipt_names_every_row_beyond_the_former_sample_boundary() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let expected_ids: Vec<String> = (0..501)
+            .map(|index| format!("unattended-arch-{index:03}"))
+            .collect();
+        for id in &expected_ids {
+            store.upsert(&test_entry(id)).expect("seed stale row");
+            backdate_created_at(&store, id);
+        }
+
+        assert_eq!(
+            store.archive_stale_low_value_memories().unwrap(),
+            expected_ids.len()
+        );
+        let payload: String = store
+            .connection()
+            .query_row(
+                "SELECT payload_json FROM tachi_events WHERE event_type = 'memory.gc_archived'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let pass = &payload["passes"][0];
+        let ids: Vec<String> = serde_json::from_value(pass["memory_ids"].clone()).unwrap();
+        assert_eq!(pass["archived_count"], json!(expected_ids.len()));
+        assert_eq!(ids, expected_ids);
     }
 
     #[test]
@@ -361,6 +553,77 @@ mod tests {
     }
 
     #[test]
+    fn promotion_candidate_admission_uses_use_provenance_only_when_enabled() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store.upsert(&test_entry("used-low-display")).unwrap();
+        for index in 0..3 {
+            let id = format!("display-heavy-{index}");
+            let mut entry = test_entry(&id);
+            entry.timestamp = format!("2026-07-06T00:00:0{index}Z");
+            entry.access_count = 100;
+            store.upsert(&entry).unwrap();
+        }
+        for day in 1..=4 {
+            store.connection().execute(
+                "INSERT INTO access_history (memory_id, accessed_at, event_kind) VALUES ('used-low-display', ?1, 'use')",
+                [format!("2026-07-0{day}T00:00:00Z")],
+            ).unwrap();
+        }
+        store.upsert(&test_entry("same-day-heavy")).unwrap();
+        for _ in 0..10 {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO access_history (memory_id, accessed_at, event_kind)
+                 VALUES ('same-day-heavy', '2026-07-01T12:00:00Z', 'use')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let off = crate::RecallConfig::default();
+        let on = crate::RecallConfig {
+            use_provenance_recency: true,
+            ..off.clone()
+        };
+        let off_ids: Vec<String> = store
+            .promotion_candidate_entries_for_config(1, &off)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        let legacy_off_ids: Vec<String> = store
+            .promotion_candidate_entries(1)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(
+            off_ids, legacy_off_ids,
+            "OFF must retain the existing promotion_candidate_entries behavior"
+        );
+        let on_ids: Vec<String> = store
+            .promotion_candidate_entries_for_config(1, &on)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(
+            on_ids,
+            vec!["used-low-display"],
+            "ON must admit the four-distinct-day memory ahead of a row with ten use events on one day"
+        );
+        assert!(
+            !on_ids.contains(&"display-heavy-0".to_string()),
+            "the bounded ON admission must exclude a no-use row"
+        );
+        assert!(
+            !on_ids.contains(&"same-day-heavy".to_string()),
+            "duplicate same-day use events must not outrank broader calendar-day evidence"
+        );
+    }
+
+    #[test]
     fn distinct_access_days_counts_unique_dates() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         store.upsert(&test_entry("tracked")).expect("seed entry");
@@ -383,6 +646,89 @@ mod tests {
             2
         );
         assert_eq!(store.distinct_access_days("other").expect("count days"), 0);
+    }
+
+    /// tachi#1446 lever 6: the arm the promotion ratchet reads is decided by
+    /// `RecallConfig::use_provenance_recency`, and OFF is the default.
+    ///
+    /// This is the knob wiring under test in isolation, because the production
+    /// call site reads `RecallConfig::get()` — a process-wide `OnceLock` that
+    /// cannot be set per-test without cross-test interference.
+    #[test]
+    fn promotion_arm_follows_use_provenance_recency_and_defaults_to_unfiltered() {
+        let default_config = crate::RecallConfig::default();
+        assert!(
+            !default_config.use_provenance_recency,
+            "lever 6 shares the lever 2-5 knob, which must stay opt-in"
+        );
+        assert_eq!(
+            AccessEventKind::for_promotion(&default_config),
+            None,
+            "at default config the promotion ratchet must read exactly the row \
+             set it read before tachi#1446"
+        );
+
+        let on = crate::RecallConfig {
+            use_provenance_recency: true,
+            ..crate::RecallConfig::default()
+        };
+        assert_eq!(
+            AccessEventKind::for_promotion(&on),
+            Some(AccessEventKind::Use),
+            "with the knob on, only caller-initiated use days may feed an \
+             irreversible promotion"
+        );
+    }
+
+    /// tachi#1446 lever 6, end-to-end at the store layer: a memory the system
+    /// displayed on many distinct days contributes **zero** promotion days once
+    /// the knob is on, while the default arm is untouched by the split.
+    #[test]
+    fn exposure_days_do_not_reach_the_promotion_gate_with_the_use_knob_on() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("shown-often"))
+            .expect("seed entry");
+        for accessed_at in [
+            "2026-07-01T08:00:00Z",
+            "2026-07-02T08:00:00Z",
+            "2026-07-03T08:00:00Z",
+            "2026-07-04T08:00:00Z",
+            "2026-07-05T08:00:00Z",
+            "2026-07-06T08:00:00Z",
+        ] {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO access_history (memory_id, accessed_at, event_kind)
+                     VALUES (?1, ?2, 'display')",
+                    ["shown-often", accessed_at],
+                )
+                .expect("insert display row");
+        }
+
+        let off = crate::RecallConfig::default();
+        let on = crate::RecallConfig {
+            use_provenance_recency: true,
+            ..crate::RecallConfig::default()
+        };
+
+        assert_eq!(
+            store
+                .distinct_promotion_days("shown-often", &off)
+                .expect("count days"),
+            6,
+            "default config keeps counting the six display days, unchanged"
+        );
+        assert_eq!(
+            store
+                .distinct_promotion_days("shown-often", &on)
+                .expect("count days"),
+            0,
+            "six displays are six displays — with the knob on, none of them is \
+             evidence anyone used this memory, so none of them may ratchet it \
+             to durable"
+        );
     }
 
     #[test]

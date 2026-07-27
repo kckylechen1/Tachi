@@ -229,6 +229,12 @@ async fn explicit_vault_lock_reports_provider_transaction_poison() {
     );
 }
 
+// Gated with the same `#[cfg(target_os = "macos")]` as their only callers (the
+// three Keychain auto-unlock tests below — see the block comment there and
+// tachi#1466). Nothing in these two helpers is macOS-specific; without the gate
+// they would simply be `dead_code` on Linux, and CI runs
+// `cargo clippy --workspace --all-targets -- -D warnings` on ubuntu-24.04.
+#[cfg(target_os = "macos")]
 fn fixture_vault_access_count(server: &MemoryServer, name: &str) -> i64 {
     server
         .with_global_store_read(|store| {
@@ -240,6 +246,7 @@ fn fixture_vault_access_count(server: &MemoryServer, name: &str) -> i64 {
         .expect("read fixture Vault access count")
 }
 
+#[cfg(target_os = "macos")]
 fn reset_fixture_vault_access_count(server: &MemoryServer, name: &str) {
     server
         .with_global_store(|store| {
@@ -255,6 +262,40 @@ fn reset_fixture_vault_access_count(server: &MemoryServer, name: &str) {
         .expect("reset fixture Vault access count");
 }
 
+// tachi#1466 — the three tests below are macOS-only, by dependency, not by
+// oversight. THIS BEHAVIOUR IS UNVERIFIED ON LINUX.
+//
+// They exercise Keychain *auto-unlock*, and that path does not exist off macOS:
+// `provider_config::auto_unlock_vault_key_from_keychain` returns `Ok(false)` for
+// `!cfg!(target_os = "macos")` BEFORE it consults the
+// `TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK` / `TACHI_TEST_KEYCHAIN_PASSWORD`
+// injection seam. (Note the seam itself is platform-neutral — the `use_keychain`
+// unlock tests further down do run on Linux, because
+// `vault_crypto::read_password_from_macos_keychain` checks its `#[cfg(test)]`
+// override before its platform check. It is only the auto-unlock entry point
+// that refuses early.) So on Linux the Vault is never auto-unlocked,
+// `resolve_vault_pools` classifies the locked read as a benign miss, and
+// materialization returns `Ok(MaterializeReport { loaded: 0, from_vault: 0, .. })`
+// — the vault stays locked and the loud failure never arrives, which is how all
+// three used to fail in a container with nothing in the output naming the
+// platform.
+//
+// `#[cfg(target_os = "macos")]` rather than a runtime skip, deliberately:
+//   * it matches the only other platform gate in this module
+//     (`keychain_auto_unlock_smoke`, bottom of this file);
+//   * the subject under test is itself macOS-only, so a macOS-only test is
+//     exact rather than a workaround; and
+//   * unlike `#[ignore]`, no invocation (`--run-ignored all`) can re-arm the
+//     false red that #1466 exists to remove. A runtime early-`return` was
+//     rejected outright: it would report a green on Linux for behaviour nothing
+//     verified there.
+//
+// Known cost, accepted: the bodies below are not type-checked by a Linux-only
+// build, so a refactor can rot them until the suite is next run on macOS.
+// No assertion is weakened — a fake provider that fails loudly by construction
+// would prove nothing. Real Linux coverage means giving the keychain provider a
+// Linux-viable fallback (#1466 option 2), which is a separate slice.
+#[cfg(target_os = "macos")]
 #[test]
 fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization() {
     let _lock = crate::utils::global_test_lock()
@@ -333,6 +374,9 @@ fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization()
     );
 }
 
+// macOS-only: requires the Keychain auto-unlock path (tachi#1466 — see the
+// block comment above `locked_provider_refresh_auto_unlocks_once_...`).
+#[cfg(target_os = "macos")]
 #[test]
 fn failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly() {
     let _lock = crate::utils::global_test_lock()
@@ -393,6 +437,9 @@ fn failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly() {
     assert_eq!(fixture_vault_access_count(&server, "OPENAI_API_KEY"), 0);
 }
 
+// macOS-only: requires the Keychain auto-unlock path (tachi#1466 — see the
+// block comment above `locked_provider_refresh_auto_unlocks_once_...`).
+#[cfg(target_os = "macos")]
 #[test]
 fn bootstrap_auto_unlock_owns_one_provider_refresh() {
     let _lock = crate::utils::global_test_lock()

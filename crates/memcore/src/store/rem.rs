@@ -5,6 +5,12 @@ use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 impl MemoryStore {
     /// Load recent `tier=pattern` memories not yet processed by the weekly REM
     /// pass, excluding training seeds, best candidates first.
+    ///
+    /// tachi#1459: the `access_count DESC` half of "best candidates first"
+    /// observes the search path only; reads through path-listing routes do not
+    /// increment it. Within a `LIMIT 200` this only reorders — it never
+    /// excludes on that basis — but the tiebreak favours what search has shown,
+    /// not what has been read.
     pub fn unprocessed_pattern_memories(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} FROM memories

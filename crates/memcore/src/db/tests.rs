@@ -1,13 +1,14 @@
+use super::daily_pipeline::count_distinct_access_days_of_kind;
 use super::{
     add_component_governance_edge, add_edge, add_edge_with_provenance, anchor_id, archive_memory,
-    archive_memory_if_revision, checkpoint_wal_truncate, close_related_to_fog,
-    collect_daily_health_snapshot, count_active_observations, count_chunks_rows,
-    count_distinct_access_days, count_memories_missing_domain, count_memories_rows,
-    count_memories_vec_rows, delete, ensure_anchor, fetch_by_ids, foundry_job_status_counts,
-    gc_tables, get_all, get_edges, get_edges_limited, get_sandbox_policy, graph_expand,
-    graph_expand_limited, init_schema, insert_tachi_event, insert_tachi_event_if_absent,
-    invalidate_observation, list_by_path, list_eval_evidence,
-    list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
+    archive_memory_if_revision, archive_stale_memories, checkpoint_wal_truncate,
+    close_related_to_fog, collect_daily_health_snapshot, count_active_observations,
+    count_chunks_rows, count_distinct_access_days, count_distinct_promotion_days,
+    count_memories_missing_domain, count_memories_rows, count_memories_vec_rows, delete,
+    ensure_anchor, fetch_by_ids, foundry_job_status_counts, gc_tables, get_all, get_edges,
+    get_edges_limited, get_sandbox_policy, graph_expand, graph_expand_limited, init_schema,
+    insert_tachi_event, insert_tachi_event_if_absent, invalidate_observation, list_by_path,
+    list_eval_evidence, list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
     list_observations_for_edge, list_sandbox_policies, list_tachi_events,
     list_wiki_duplicate_candidates, normalize_for_write, now_utc_iso, open_for_wal_checkpoint,
     open_immutable_readonly, open_raw, probe_keyword_suspects, promote_memory_to_durable,
@@ -16,8 +17,8 @@ use super::{
     search_symbolic_candidates, search_vec, serialize_f32, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, set_sandbox_policy, stats, supersede_memory, table_exists,
     try_claim_event, try_load_sqlite_vec, update_agent_known_state, update_enrichment_fields,
-    update_with_revision, upsert, AccessUpdate, AnchorKind, EdgeProvenance, FoundryJobStatusCounts,
-    KeywordSuspectProbe,
+    update_with_revision, upsert, AccessEventKind, AccessUpdate, AnchorKind, EdgeProvenance,
+    FoundryJobStatusCounts, KeywordSuspectProbe, GC_MEMORY_ARCHIVED_EVENT_TYPE,
 };
 #[cfg(feature = "admin")]
 use super::{vault_touch_entry, vault_upsert_entry};

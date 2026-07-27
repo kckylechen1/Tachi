@@ -51,12 +51,31 @@ pub struct RecallConfig {
     /// `MemoryEntry::last_use_at` instead of `MemoryEntry::last_access`.
     ///
     /// `last_access` is written by the search path for every row it returns
-    /// (`db/memory_crud/access.rs:112-117`), so with this off the act of
+    /// (`record_access_with_updates` in `db/memory_crud/access.rs`), so with
+    /// this off the act of
     /// displaying a result set resets every displayed row's age to zero at
     /// once — measured effect is not inflation but range collapse: the decay
     /// channel stops discriminating between candidates (see
     /// `search/tests/exposure_loop.rs`). Off by default; #1446 commit 1 lands
     /// the mechanism and the proof, not a ranking-semantics change.
+    ///
+    /// **This knob is no longer ranking-only.** tachi#1446 lever 6 hangs the
+    /// durable-promotion ratchet off it as well
+    /// ([`crate::db::AccessEventKind::for_promotion`]): with it on,
+    /// `calculate_promotion_score` counts the days a caller *used* a memory
+    /// instead of the days the pipeline *showed* it. Promotion is the one
+    /// consumer whose output cannot be undone by flipping the knob back —
+    /// `promote_memory_to_durable` pins `importance` and `retention_policy`
+    /// permanently. The sign is favourable (the ON history is a subset of the
+    /// unfiltered OFF history, and a withheld promotion remains eligible for
+    /// reconsideration whenever the bounded candidate scan selects it), but
+    /// anyone flipping this is changing retention, not only rank order, and
+    /// should read that function's rationale first.
+    ///
+    /// tachi#1459: "written by the search path" is the whole of it — that
+    /// column observes the search path only; reads through path-listing routes
+    /// do not update it. So this knob chooses between two partial views, not
+    /// between a partial one and a complete one.
     pub use_provenance_recency: bool,
 }
 
