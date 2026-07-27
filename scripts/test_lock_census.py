@@ -30,6 +30,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from lock_census import (  # noqa: E402
     VALID_DELETION_SCOPES,
     VALID_ENV_ROLES,
+    build_archive_evidence_index,
     classify_env_role,
     deletion_scope_for,
     discover_raw_hits,
@@ -325,8 +326,9 @@ fn test_parses_env() {
 # -- historical exact-function mapping (Finding 1) -------------------------
 
 class HistoricalMapping(unittest.TestCase):
-    """match_historical must match by (file, fn_name) first, never nearest-line
-    cross-function."""
+    """match_historical must use authoritative source selection: archive exact
+    match beats prior (including prior non-placeholder); foreign prior prose
+    from a different archive function is rejected. Never cross-function."""
 
     def test_matches_by_file_and_fn_name(self):
         historical = {
@@ -335,8 +337,8 @@ class HistoricalMapping(unittest.TestCase):
                  "evidence": "hand-audited evidence", "class": "class2_runtime_config"},
             ]
         }
-        callsite = {"file": "crates/foo/a.rs", "line": 55}  # line drifted by 5
-        matched, label = match_historical(callsite, "my_test", [historical])
+        callsite = {"file": "crates/foo/a.rs", "line": 55}  # line drifted
+        matched, label = match_historical(callsite, "my_test", [None, historical])
         self.assertIsNotNone(matched)
         self.assertEqual(matched["evidence"], "hand-audited evidence")
 
@@ -347,69 +349,88 @@ class HistoricalMapping(unittest.TestCase):
                  "evidence": "WRONG evidence"},
             ]
         }
-        callsite = {"file": "crates/foo/a.rs", "line": 50}  # exact same line
-        matched, _ = match_historical(callsite, "my_test", [historical])
-        # Must NOT match: different function name even at same line
+        callsite = {"file": "crates/foo/a.rs", "line": 50}
+        matched, _ = match_historical(callsite, "my_test", [None, historical])
         self.assertIsNone(matched)
 
     def test_returns_none_when_no_match(self):
-        historical = {"callsites": []}
         callsite = {"file": "crates/foo/a.rs", "line": 10}
-        matched, _ = match_historical(callsite, "my_test", [historical])
+        matched, _ = match_historical(callsite, "my_test", [None, {"callsites": []}])
         self.assertIsNone(matched)
 
-    def test_archive_richer_evidence_beats_prior_placeholder(self):
-        """When committed-prior has a structural placeholder for the same
-        (file, fn_name) but the archive has hand-audited evidence, the archive
-        evidence must win."""
+    def test_archive_authoritative_beats_prior_non_placeholder(self):
+        """Poisoned prior-rich evidence for the same fn must lose to the
+        correct archive entry. This cleans the 8 same-fn poisoned rows."""
         prior = {
             "callsites": [
                 {"file": "crates/foo/a.rs", "line": 50, "test_or_fn_name": "my_test",
-                 "evidence": "structural inspection of my_test", "class": "class2_runtime_config"},
-            ]
-        }
-        archive = {
-            "callsites": [
-                {"file": "crates/foo/a.rs", "line": 48, "test_or_fn_name": "my_test",
-                 "evidence": "owner-audited: verifies from_env parsing of VOYAGE_API_KEY",
-                 "class": "class2_runtime_config"},
-            ]
-        }
-        callsite = {"file": "crates/foo/a.rs", "line": 50}
-        matched, label = match_historical(callsite, "my_test", [prior, archive])
-        self.assertIsNotNone(matched)
-        self.assertEqual(label, "archive_fallback",
-                         "archive must win over prior placeholder")
-        self.assertIn("owner-audited", matched["evidence"])
-
-    def test_prior_manual_evidence_beats_archive(self):
-        """When committed-prior has non-placeholder (manually edited) evidence
-        for the same (file, fn_name), it must be preferred over the archive
-        even if the archive also has evidence."""
-        prior = {
-            "callsites": [
-                {"file": "crates/foo/a.rs", "line": 50, "test_or_fn_name": "my_test",
-                 "evidence": "manually reviewed in PR #999: confirms drift detection",
+                 "evidence": "poisoned prose from a different function (v2 nearest-line)",
                  "class": "class2_runtime_config"},
             ]
         }
         archive = {
             "callsites": [
                 {"file": "crates/foo/a.rs", "line": 48, "test_or_fn_name": "my_test",
-                 "evidence": "original hand-audited evidence",
+                 "evidence": "correct owner-audited evidence for my_test",
                  "class": "class2_runtime_config"},
             ]
         }
+        arch_idx = build_archive_evidence_index(archive)
         callsite = {"file": "crates/foo/a.rs", "line": 50}
-        matched, label = match_historical(callsite, "my_test", [prior, archive])
+        matched, label = match_historical(
+            callsite, "my_test", [prior, archive], arch_idx,
+        )
         self.assertIsNotNone(matched)
-        self.assertEqual(label, "committed_prior",
-                         "prior manual evidence must win over archive")
-        self.assertIn("manually reviewed", matched["evidence"])
+        self.assertEqual(label, "archive_authoritative")
+        self.assertIn("correct owner-audited", matched["evidence"])
 
-    def test_cross_function_invariant_under_evidence_preference(self):
-        """The evidence-preference logic must never attach a DIFFERENT
-        function's evidence, even when that function has richer evidence."""
+    def test_prior_foreign_prose_rejected_when_no_archive_match(self):
+        """When no exact archive match exists but prior evidence text exactly
+        matches an archive row for a DIFFERENT function, the prior evidence
+        is foreign prose and must be rejected → structural fallback."""
+        prior = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 30, "test_or_fn_name": "my_test",
+                 "evidence": "evidence text that belongs to other_fn",
+                 "class": "class2_runtime_config"},
+            ]
+        }
+        archive = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 99, "test_or_fn_name": "other_fn",
+                 "evidence": "evidence text that belongs to other_fn",
+                 "class": "class2_runtime_config"},
+            ]
+        }
+        arch_idx = build_archive_evidence_index(archive)
+        callsite = {"file": "crates/foo/a.rs", "line": 30}
+        matched, label = match_historical(
+            callsite, "my_test", [prior, archive], arch_idx,
+        )
+        self.assertIsNone(matched,
+                          "foreign prose must be rejected, not carried forward")
+
+    def test_prior_legitimate_new_evidence_kept(self):
+        """When no archive match exists and prior evidence is NOT in the archive
+        at all, it is legitimately new evidence and should be kept."""
+        prior = {
+            "callsites": [
+                {"file": "crates/foo/a.rs", "line": 30, "test_or_fn_name": "new_test",
+                 "evidence": "brand new evidence for a function added post-archive",
+                 "class": "class2_runtime_config"},
+            ]
+        }
+        archive = {"callsites": []}
+        arch_idx = build_archive_evidence_index(archive)
+        callsite = {"file": "crates/foo/a.rs", "line": 30}
+        matched, label = match_historical(
+            callsite, "new_test", [prior, archive], arch_idx,
+        )
+        self.assertIsNotNone(matched)
+        self.assertEqual(label, "committed_prior")
+
+    def test_cross_function_invariant_holds_under_all_paths(self):
+        """No code path may attach a different function's evidence."""
         prior = {
             "callsites": [
                 {"file": "crates/foo/a.rs", "line": 50, "test_or_fn_name": "other_fn",
@@ -422,11 +443,11 @@ class HistoricalMapping(unittest.TestCase):
                  "evidence": "owner-audited", "class": "class2_runtime_config"},
             ]
         }
+        arch_idx = build_archive_evidence_index(archive)
         callsite = {"file": "crates/foo/a.rs", "line": 50}
-        # Looking for my_test but both sources only have other_fn — no match.
-        matched, _ = match_historical(callsite, "my_test", [prior, archive])
-        self.assertIsNone(matched,
-                          "must not match other_fn evidence to my_test callsite")
+        # Looking for my_test but both sources only have other_fn.
+        matched, _ = match_historical(callsite, "my_test", [prior, archive], arch_idx)
+        self.assertIsNone(matched)
 
 
 # -- deletion_scope narrowing (Finding 4) ----------------------------------

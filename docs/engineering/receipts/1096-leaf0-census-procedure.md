@@ -115,10 +115,11 @@ fixture and any classification changes in the same commit.
 | `deletion_scope=none` | 246 |
 | archive rows matched (of 142) | 107 |
 | archive rows unmatched | 35 |
-| evidence from `archive_fallback` (hand-audited, beat placeholder) | 73 |
-| evidence from `committed_prior` (manual or placeholder-only) | 183 |
-| total non-placeholder evidence | 115 |
-| total placeholder evidence | 141 |
+| evidence from `archive_authoritative` (exact fn match) | 107 |
+| evidence from `committed_prior` (legitimate, all placeholder) | 141 |
+| evidence from `regenerated_structural` (foreign prose cleansed) | 8 |
+| total non-placeholder evidence | 107 |
+| total placeholder evidence | 149 |
 
 ## Migration candidate list — LOWER BOUND, not a safe migration list
 
@@ -151,26 +152,30 @@ pending a separate production-endpoint-injection leaf.
 The original Leaf-0 artifact (142 callsites, archived 2026-07-14 at
 `~/.cache/sigil-eval-archive/`) is preserved and accounted for:
 
-- **Evidence source preference:** for the same `(file, test_or_fn_name)`,
-  non-placeholder evidence is preferred over placeholder evidence.
-  - Committed-prior **non-placeholder** (manually edited) evidence beats
-    archive evidence — it may contain review-round edits.
-  - Archive **non-placeholder** (hand-audited) evidence beats committed-prior
-    **placeholder** (`"structural inspection of <fn>"`) — this prevents a
-    prior regen's auto-generated placeholder from shadowing the richer
-    owner-audited archive row.
-  - This logic recovered **73 callsites** that were previously shadowed by
-    committed-prior placeholders and now carry hand-audited archive evidence.
-- `evidence` and `class` fields are carried forward from the selected source
-  wherever a callsite matched by `(file, test_or_fn_name)` — never by nearest
-  line to a different function.
-- 107 of 142 archive rows matched a live callsite by function name. **Not all
-  142 archive rows are injected into the live fixture**: 35 are unmatched
-  (function removed, renamed, or line-drifted to a different function) and are
-  listed in `historical_mapping.unmatched_entries` for traceability. Of the 107
-  matched archive rows, 73 contributed their hand-audited evidence (the other 34
-  were superseded by committed-prior non-placeholder evidence from a prior
-  review).
+- **Evidence source selection (no heuristics):**
+  1. **Archive exact match is authoritative.** When the owner archive has an
+     entry for the exact `(file, test_or_fn_name)`, it wins — including over
+     committed-prior non-placeholder text. This cleans 8 rows where v2
+     nearest-line matching had attached a different function's hand-audited
+     evidence to this function while the archive held the correct row.
+  2. **Foreign-prose rejection.** When no exact archive match exists, a
+     committed-prior evidence value that exactly matches an archive row for a
+     *different* function is rejected — it was carried over from that function
+     via v2 nearest-line matching. The callsite falls back to honest
+     regenerated structural evidence. This cleansed 8 rows (including
+     helper-rename prose where the prior fn name was a truncated/normalized
+     variant of the archive fn name).
+  3. **Legitimate prior.** When no exact archive match exists and the prior
+     evidence does NOT appear in the archive at all, it is kept (legitimately
+     new evidence for a function added since the archive). All 141 such
+     entries carry placeholder evidence (`"structural inspection of <fn>"`).
+- **No "prior review superseded archive" claim.** The committed prior is a
+  derived artifact, not an authoritative source. The owner archive is the
+  only authoritative evidence source for this initial landing.
+- 107 of 142 archive rows matched a live callsite by exact function name and
+  are injected as `archive_authoritative`. **Not all 142 archive rows are
+  injected**: 35 are unmatched (function removed, renamed, or line-drifted to
+  a different function) and are listed in `historical_mapping.unmatched_entries`.
 - `env_vars_touched` is **re-derived** from current source, not preserved.
 - `secondary_classes_present` line references were refreshed: all historical
   references were stale against the current callsite set and dropped.
