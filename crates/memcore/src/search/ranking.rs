@@ -29,11 +29,13 @@ pub(super) struct CandidateRanking<'a> {
     pub(super) as_of_utc: Option<&'a str>,
 }
 
+type RankedEntries = (Vec<SearchResult>, Vec<String>, Option<RankPhaseReceipt>);
+
 pub(super) fn rank_candidate_entries(
     conn: &Connection,
     ranking: CandidateRanking<'_>,
     sample: bool,
-) -> Result<(Vec<SearchResult>, Vec<String>, Option<RankPhaseReceipt>), MemoryError> {
+) -> Result<RankedEntries, MemoryError> {
     let phase_start = sample.then(Instant::now);
     let CandidateRanking {
         query,
