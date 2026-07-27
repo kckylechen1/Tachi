@@ -90,3 +90,33 @@ fn record_access_deduplicates_repeated_ids_before_incrementing() {
         .unwrap();
     assert_eq!(history_count, 1);
 }
+
+#[test]
+fn record_access_scored_only_deduplicates_and_ignores_missing_ids() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "scored-only-direct",
+        "ScoredOnlyDirectProbe searchable memory",
+        &["scoredonlydirectprobe"],
+    );
+    let scored_ids = vec![
+        "scored-only-direct".to_string(),
+        "scored-only-direct".to_string(),
+        "missing-scored-id".to_string(),
+    ];
+    let updates = record_access_with_updates(&conn, &[], &scored_ids, &[], None).unwrap();
+    assert!(
+        updates.is_empty(),
+        "scored-only rows are not displayed updates"
+    );
+    let (scored_count, history_count): (i64, i64) = conn
+        .query_row(
+            "SELECT scored_count, (SELECT COUNT(*) FROM access_history WHERE memory_id = ?1) FROM memories WHERE id = ?1",
+            rusqlite::params!["scored-only-direct"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(scored_count, 1);
+    assert_eq!(history_count, 0);
+}

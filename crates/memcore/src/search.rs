@@ -536,6 +536,7 @@ fn hybrid_search_inner(
         for r in &mut results {
             if let Some(update) = access_updates.get(&r.entry.id) {
                 r.entry.access_count = update.access_count;
+                r.entry.scored_count = update.scored_count;
                 r.entry.last_access = update.last_access.clone();
             }
         }

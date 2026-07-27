@@ -40,11 +40,84 @@ fn scorer_counts_top_k_losers_without_recording_display_access() {
         "winner"
     };
     assert_eq!(counts(&conn, winner), (1, 1, 1));
+    assert_eq!(
+        results[0].entry.scored_count,
+        counts(&conn, winner).1,
+        "returned displayed entry must carry its post-write scored count"
+    );
     assert_eq!(counts(&conn, loser), (0, 1, 0));
 
     hybrid_search(&conn, "ScoredCountProbe winner", &opts).unwrap();
     assert_eq!(counts(&conn, winner).1, 2, "one increment per search");
     assert_eq!(counts(&conn, loser).1, 2, "one increment per search");
+}
+
+#[test]
+fn scorer_excludes_post_candidate_eligibility_rejections() {
+    let mut conn = setup();
+    let mut eligible = memory_entry(
+        "eligible",
+        "ScoredEligibilityProbe lexical candidate",
+        &["scoredeligibilityprobe"],
+    );
+    eligible.path = "/inside".into();
+    insert_entry(&mut conn, eligible);
+    let mut filtered = memory_entry(
+        "filtered",
+        "ScoredEligibilityProbe lexical candidate",
+        &["scoredeligibilityprobe"],
+    );
+    filtered.path = "/outside".into();
+    insert_entry(&mut conn, filtered);
+
+    let opts = SearchOptions {
+        path_prefix: Some("/inside".into()),
+        record_access: true,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "ScoredEligibilityProbe", &opts).unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|r| r.entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["eligible"]
+    );
+    assert_eq!(counts(&conn, "eligible").1, 1);
+    assert_eq!(
+        counts(&conn, "filtered"),
+        (0, 0, 0),
+        "post-candidate path eligibility rejection must not receive scorer evidence"
+    );
+}
+
+#[test]
+fn top_k_zero_scores_without_display_and_advances_generation() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "scored-only",
+        "ScoredOnlyGenerationProbe lexical candidate",
+        &["scoredonlygenerationprobe"],
+    );
+    let cached_generation = crate::db::search_generation(&conn).unwrap();
+    let opts = SearchOptions {
+        top_k: 0,
+        record_access: true,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "ScoredOnlyGenerationProbe", &opts).unwrap();
+    assert!(results.is_empty());
+    assert_eq!(counts(&conn, "scored-only"), (0, 1, 0));
+    let current_generation = crate::db::search_generation(&conn).unwrap();
+    assert!(current_generation > cached_generation);
+    assert_ne!(
+        format!("generation:{cached_generation}"),
+        format!("generation:{current_generation}"),
+        "a cached generation fingerprint is stale after scored-only persistence"
+    );
 }
 
 #[test]

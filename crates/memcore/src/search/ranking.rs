@@ -149,7 +149,11 @@ pub(super) fn rank_candidate_entries(
     // The scorer invariant: these are exactly the post-merge/post-boost score
     // keys, before MMR or `top_k` can remove displayed results. Sorting makes
     // the persistence input deterministic; keys are inherently deduplicated.
-    let mut scored_ids: Vec<String> = scores.keys().cloned().collect();
+    let mut scored_ids: Vec<String> = scores
+        .keys()
+        .filter(|id| entries_ref.contains_key(*id))
+        .cloned()
+        .collect();
     scored_ids.sort();
 
     // Decorate each candidate with its parsed instant once (epoch millis), then

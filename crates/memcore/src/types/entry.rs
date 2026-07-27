@@ -294,7 +294,9 @@ pub struct MemoryEntry {
     ///
     /// This is scorer-only instrumentation, not retrieval or use evidence.
     /// It is written only when `hybrid_search` records access, and no ranking,
-    /// lifecycle, GC, or save policy reads it.
+    /// lifecycle, GC, or save policy reads it; persisting a scored-only loser
+    /// advances the DB-authoritative search generation but changes no ranking
+    /// or policy result.
     #[serde(default)]
     pub scored_count: i64,
 

@@ -11,6 +11,7 @@ use super::{now_utc_iso, IN_BATCH_SIZE};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AccessUpdate {
     pub access_count: i64,
+    pub scored_count: i64,
     pub last_access: Option<String>,
 }
 
@@ -190,8 +191,9 @@ pub(crate) fn record_access(
 /// Applies a promotion gate: tier -> "consolidated" when `recall_count >= 3`
 /// and `query_diversity >= 3`.
 ///
-/// **This is the only production path that increments all three counters, and
-/// it has exactly one production caller: `search.rs`'s `hybrid_search`**
+/// **This is the only production path that increments the displayed-result
+/// counters and scorer-only `scored_count`, and it has exactly one production
+/// caller: `search.rs`'s `hybrid_search`**
 /// (tachi#1459). `gc_tables` can later reconcile `query_diversity` downward
 /// from the search-written `access_history`; it does not add non-search use.
 /// So every counter it maintains observes the search path only; reads through
@@ -266,27 +268,43 @@ pub(crate) fn record_access_with_updates(
         .copied()
         .filter(|id| displayed_set.contains(*id))
         .collect::<Vec<_>>();
-    let scored_existing_ids = existing_ids
+    let displayed_scored_ids = existing_ids
         .iter()
         .copied()
-        .filter(|id| scored_set.contains(*id))
+        .filter(|id| displayed_set.contains(*id) && scored_set.contains(*id))
+        .collect::<Vec<_>>();
+    let displayed_only_ids = existing_ids
+        .iter()
+        .copied()
+        .filter(|id| displayed_set.contains(*id) && !scored_set.contains(*id))
+        .collect::<Vec<_>>();
+    let scored_only_ids = existing_ids
+        .iter()
+        .copied()
+        .filter(|id| scored_set.contains(*id) && !displayed_set.contains(*id))
         .collect::<Vec<_>>();
 
-    // Scoring-count invariant: once per existing score key, without creating
-    // display history for MMR/top-k losers.
-    for batch in scored_existing_ids.chunks(IN_BATCH_SIZE) {
-        let placeholders = numbered_placeholders(1, batch.len());
+    // The intersection has one persistence update, so a displayed scorer hit
+    // increments each diagnostic exactly once without an avoidable second
+    // all-memories generation-trigger write.
+    for batch in displayed_scored_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(2, batch.len());
         let sql = format!(
-            "UPDATE memories SET scored_count = scored_count + 1 WHERE id IN ({placeholders})"
+            "UPDATE memories
+             SET scored_count = scored_count + 1,
+                 access_count = access_count + 1,
+                 last_access = ?1
+             WHERE id IN ({placeholders})"
         );
-        let values = batch
-            .iter()
-            .map(|id| Value::Text((*id).to_string()))
-            .collect::<Vec<_>>();
+        let mut values = Vec::with_capacity(batch.len() + 1);
+        values.push(Value::Text(now.clone()));
+        values.extend(batch.iter().map(|id| Value::Text((*id).to_string())));
         tx.execute(&sql, params_from_iter(values.iter()))?;
     }
 
-    for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE) {
+    // Graph-only appended rows are displayed but never scored; preserve their
+    // established access/history behavior without assigning scorer evidence.
+    for batch in displayed_only_ids.chunks(IN_BATCH_SIZE) {
         let placeholders = numbered_placeholders(2, batch.len());
         let sql = format!(
             "UPDATE memories
@@ -296,6 +314,25 @@ pub(crate) fn record_access_with_updates(
         let mut values = Vec::with_capacity(batch.len() + 1);
         values.push(Value::Text(now.clone()));
         values.extend(batch.iter().map(|id| Value::Text((*id).to_string())));
+        tx.execute(&sql, params_from_iter(values.iter()))?;
+    }
+
+    // Scoring-count invariant: MMR/top-k losers get one persisted scorer count
+    // and no access-history row. Because scored_count lives on `memories`, this
+    // UPDATE intentionally advances the DB-authoritative search generation via
+    // `memory_search_generation_after_update`: record_access already invalidates
+    // display searches, and generation consumers compare fingerprints/equality,
+    // never numeric deltas. This adds one bounded generation write per newly
+    // scored-only persisted row without changing any ranking or policy result.
+    for batch in scored_only_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(1, batch.len());
+        let sql = format!(
+            "UPDATE memories SET scored_count = scored_count + 1 WHERE id IN ({placeholders})"
+        );
+        let values = batch
+            .iter()
+            .map(|id| Value::Text((*id).to_string()))
+            .collect::<Vec<_>>();
         tx.execute(&sql, params_from_iter(values.iter()))?;
     }
 
@@ -405,7 +442,7 @@ pub(crate) fn record_access_with_updates(
     for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE) {
         let placeholders = numbered_placeholders(1, batch.len());
         let sql = format!(
-            "SELECT id, access_count, last_access FROM memories WHERE id IN ({placeholders})"
+            "SELECT id, access_count, scored_count, last_access FROM memories WHERE id IN ({placeholders})"
         );
         let values = batch
             .iter()
@@ -417,7 +454,8 @@ pub(crate) fn record_access_with_updates(
                 row.get::<_, String>(0)?,
                 AccessUpdate {
                     access_count: row.get(1)?,
-                    last_access: row.get(2)?,
+                    scored_count: row.get(2)?,
+                    last_access: row.get(3)?,
                 },
             ))
         })?;
