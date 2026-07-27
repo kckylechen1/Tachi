@@ -193,8 +193,10 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // path-listing routes do not increment them. `record_access_with_updates`
     // (from `hybrid_search`) is the only production writer of `recall_count`,
     // and `query_diversity` is written there and reconciled by `gc_tables` from
-    // `access_history`, which only the search path fills. They gate tier
-    // promotion, so that gate sees a search-only view of a memory's use.
+    // `access_history`: only search writes non-empty query hashes, so only
+    // those rows supply query-diversity evidence. Use rows have empty query
+    // hashes and do not inflate diversity. They gate tier promotion, so that
+    // gate sees a search-only view of a memory's query diversity.
     ensure_column(
         conn,
         "memories",

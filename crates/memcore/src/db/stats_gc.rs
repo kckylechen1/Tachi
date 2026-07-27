@@ -122,16 +122,6 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
 /// agree on the exact string — tachi#1463.
 pub const GC_MEMORY_ARCHIVED_EVENT_TYPE: &str = "memory.gc_archived";
 
-/// How many archived memory ids a single receipt records verbatim.
-///
-/// `tachi_events` is append-only and, unlike every table [`gc_tables`] prunes,
-/// nothing reaps it — so an uncapped id list turns one first-run sweep over a
-/// large corpus into a permanent multi-megabyte row. The cap only ever elides
-/// *ids*: `archived_count` is the true count for every pass whether or not the
-/// sample was truncated, and a truncated pass says so in `memory_ids_truncated`
-/// rather than presenting a short list as if it were complete.
-const GC_ARCHIVED_ID_SAMPLE_CAP: usize = 500;
-
 /// One auto-archive predicate, paired with the receipt vocabulary describing it.
 ///
 /// The descriptive fields sit in the same literal as the statement they
@@ -155,7 +145,6 @@ struct ArchivalPass {
 struct ArchivalOutcome {
     count: usize,
     ids: Vec<String>,
-    truncated: bool,
 }
 
 /// Run a single archival pass and capture the ids it actually archived.
@@ -165,9 +154,6 @@ struct ArchivalOutcome {
 /// output, so stepping it to completion is what both applies the whole update
 /// and yields every id. `execute` is the wrong verb for a returning statement.
 ///
-/// The loop counts every returned row but stops *storing* ids at
-/// [`GC_ARCHIVED_ID_SAMPLE_CAP`], so a truncated sample never costs the caller
-/// an accurate count.
 fn run_archival_pass(
     conn: &Connection,
     pass: &ArchivalPass,
@@ -181,15 +167,44 @@ fn run_archival_pass(
     for row in rows {
         let id = row?;
         count += 1;
-        if ids.len() < GC_ARCHIVED_ID_SAMPLE_CAP {
-            ids.push(id);
-        }
+        ids.push(id);
     }
-    Ok(ArchivalOutcome {
-        count,
-        truncated: count > ids.len(),
-        ids,
-    })
+    Ok(ArchivalOutcome { count, ids })
+}
+
+pub(crate) fn write_gc_archived_receipt(
+    conn: &Connection,
+    archived_at: &str,
+    stale_days: u32,
+    passes: serde_json::Value,
+    archived_total: usize,
+    source: &str,
+) -> Result<(), MemoryError> {
+    let event = TachiEventRecord {
+        id: format!("gc-archive-{}", uuid::Uuid::new_v4()),
+        source_repo: "tachi".to_string(),
+        adapter: "memcore_gc".to_string(),
+        project: String::new(),
+        domain: String::new(),
+        session_id: String::new(),
+        actor: "memcore_gc".to_string(),
+        event_type: GC_MEMORY_ARCHIVED_EVENT_TYPE.to_string(),
+        authority: AuthorityLevel::RawFact,
+        effects: vec![EffectScope::MemoryWrite, EffectScope::Recall],
+        projection_hints: Vec::new(),
+        payload: serde_json::json!({
+            "stale_days": stale_days,
+            "archived_total": archived_total,
+            "archived_at": archived_at,
+            "passes": passes,
+        }),
+        provenance: serde_json::json!({
+            "source": source,
+            "note": "scheduled unattended archival; rows listed here were removed from default search and had their revision bumped",
+        }),
+        created_at: archived_at.to_string(),
+    };
+    insert_tachi_event(conn, &event)
 }
 
 /// Archive low-importance memories that haven't been accessed in `stale_days`.
@@ -252,8 +267,8 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
     // failure after a GC sweep is the guard working. `updated_at` moves with it
     // because every sibling archival path sets both (`archive_memory`,
     // `archive_memory_if_revision`, `restore_archived_if_revision`, and the
-    // lifecycle-proposal path in `store/memory_lifecycle.rs`); GC was the sole
-    // outlier, and a row mutated at a time its `updated_at` does not mention is
+    // lifecycle-proposal path in `store/memory_lifecycle.rs`); a row mutated at
+    // a time its `updated_at` does not mention is
     // a column that lies. Checked before doing this: `updated_at` is not a
     // ranking input — it is absent from `MEMORY_SELECT_COLUMNS`, absent from
     // `MemoryEntry`, and the scorer's recency reference is `last_use_at` /
@@ -340,48 +355,18 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
             "retention_scope": pass.retention_scope,
             "archived_count": outcome.count,
             "memory_ids": outcome.ids,
-            "memory_ids_truncated": outcome.truncated,
         }));
     }
 
     if total > 0 {
-        let event = TachiEventRecord {
-            id: format!("gc-archive-{}", uuid::Uuid::new_v4()),
-            source_repo: "tachi".to_string(),
-            adapter: "memcore_gc".to_string(),
-            // No project/domain/session context reaches this layer. The receipt
-            // is written to the same database whose rows it archived, so global
-            // and per-project sweeps are already told apart by which
-            // `tachi_events` table holds the row; inventing a label here would
-            // be guessing. `event_type` carries the discriminator, and it is
-            // indexed.
-            project: String::new(),
-            domain: String::new(),
-            session_id: String::new(),
-            actor: "memcore_gc".to_string(),
-            event_type: GC_MEMORY_ARCHIVED_EVENT_TYPE.to_string(),
-            // The rows were archived by the time this is written: a completed
-            // state change, not a proposal — same authority as
-            // `emit_memory_saved_event`.
-            authority: AuthorityLevel::RawFact,
-            // `Recall` is the whole reason this receipt exists: archiving drops
-            // rows out of default search.
-            effects: vec![EffectScope::MemoryWrite, EffectScope::Recall],
-            projection_hints: Vec::new(),
-            payload: serde_json::json!({
-                "stale_days": stale_days,
-                "archived_total": total,
-                "archived_at": now,
-                "id_sample_cap": GC_ARCHIVED_ID_SAMPLE_CAP,
-                "passes": pass_receipts,
-            }),
-            provenance: serde_json::json!({
-                "source": "memcore::db::stats_gc::archive_stale_memories",
-                "note": "scheduled unattended archival; rows listed here were removed from default search and had their revision bumped",
-            }),
-            created_at: now.clone(),
-        };
-        insert_tachi_event(&tx, &event)?;
+        write_gc_archived_receipt(
+            &tx,
+            &now,
+            stale_days,
+            serde_json::Value::Array(pass_receipts),
+            total,
+            "memcore::db::stats_gc::archive_stale_memories",
+        )?;
     }
 
     tx.commit()?;

@@ -335,7 +335,6 @@ fn gc_archival_writes_a_receipt_naming_rows_predicate_and_threshold() {
         json!(["gc-arch-stale"]),
         "the receipt must name which rows moved, not just how many"
     );
-    assert_eq!(fired[0]["memory_ids_truncated"], json!(false));
 
     assert_eq!(events[0].authority, AuthorityLevel::RawFact);
     assert!(
@@ -479,6 +478,34 @@ fn gc_archival_receipt_attributes_each_row_to_the_predicate_that_took_it() {
         "a predicate that took nothing must report an empty list, not be omitted"
     );
     assert_eq!(events[0].payload["archived_total"], json!(2));
+}
+
+#[test]
+fn gc_archival_receipt_names_every_row_beyond_the_former_sample_boundary() {
+    let mut conn = make_conn();
+    let expected_ids: Vec<String> = (0..501)
+        .map(|index| format!("gc-arch-all-{index:03}"))
+        .collect();
+    for id in &expected_ids {
+        seed_archivable(&mut conn, id, 0.2, None, None);
+    }
+
+    assert_eq!(
+        archive_stale_memories(&conn, 90).unwrap(),
+        expected_ids.len() as u64
+    );
+    let receipt = gc_archival_receipts(&conn);
+    let passes = receipt[0].payload["passes"].as_array().unwrap();
+    let pass = passes
+        .iter()
+        .find(|pass| pass["predicate"] == json!("durable_never_accessed_by_timestamp"))
+        .unwrap();
+    let ids: Vec<String> = serde_json::from_value(pass["memory_ids"].clone()).unwrap();
+    assert_eq!(pass["archived_count"], json!(expected_ids.len()));
+    assert_eq!(ids.len(), expected_ids.len());
+    for id in expected_ids {
+        assert!(ids.contains(&id), "receipt omitted archived row {id}");
+    }
 }
 
 #[test]

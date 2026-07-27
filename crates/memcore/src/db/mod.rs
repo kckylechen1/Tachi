@@ -170,6 +170,7 @@ pub use state::{
     list_derived_by_source, list_state, reap_expired_state, save_derived, save_derived_with_id,
     set_state, set_state_if_version, StateRow,
 };
+pub(crate) use stats_gc::write_gc_archived_receipt;
 pub use stats_gc::{archive_stale_memories, gc_tables, stats, GC_MEMORY_ARCHIVED_EVENT_TYPE};
 #[cfg(feature = "admin")]
 pub use vault_db::{

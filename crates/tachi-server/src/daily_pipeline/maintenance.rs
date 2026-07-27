@@ -281,15 +281,15 @@ async fn run_truth_maintenance_for_target(
                 ));
     }
 
-    let promotion_candidates = store
-        .promotion_candidate_entries(200)
-        .map_err(|e| format!("scan promotion candidates {}: {e}", target.label))?;
     // tachi#1446 lever 6. `promote_memory_to_durable` below is irreversible, so
     // what feeds its score must not be the system's own display action. Read
     // once outside the loop: the arm is a property of the configuration, not of
     // the candidate, and re-resolving it per entry would let a mid-run config
     // reload promote two candidates under two different rules.
     let recall_config = memcore::RecallConfig::get();
+    let promotion_candidates = store
+        .promotion_candidate_entries_for_config(200, recall_config)
+        .map_err(|e| format!("scan promotion candidates {}: {e}", target.label))?;
     for entry in &promotion_candidates {
         let access_days = store
             .distinct_promotion_days(&entry.id, recall_config)
