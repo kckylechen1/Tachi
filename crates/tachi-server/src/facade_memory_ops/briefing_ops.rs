@@ -363,7 +363,7 @@ pub(crate) async fn handle_memory_briefing(
     // Cross-flow closure debt: surface unclosed loops / stale specs at the
     // session-start surface the agent actually opens, not just the per-flow
     // feature briefing (which only sees the flow already in scope).
-    let open_loops = crate::shell_ops::scan_open_loops(8);
+    let open_loops = crate::task_lifecycle::scan_open_loops(8);
 
     // Issue freshness (#1000): zombie (fixed-but-open) + stale-candidate
     // queues, projected from already-scanned review-candidate rows

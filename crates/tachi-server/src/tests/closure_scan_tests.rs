@@ -44,7 +44,13 @@ async fn scan_open_loops_flags_unclosed_and_spec_drift() {
     )
     .unwrap();
 
-    let debts = crate::shell_ops::scan_open_loops(8);
+    // error-path: malformed status.json must be fail-safe (no panic, no fabricated debt)
+    let malformed = runs_root.join("flow_20260101T000000Z_malformed_ffff6666");
+    std::fs::create_dir_all(&malformed).unwrap();
+    std::fs::write(malformed.join("result.md"), "done").unwrap();
+    std::fs::write(malformed.join("status.json"), r#"{"issue_ref": "bad"#).unwrap(); // malformed JSON
+
+    let debts = crate::task_lifecycle::scan_open_loops(8);
     let kind_for = |needle: &str| -> Option<String> {
         debts
             .iter()
@@ -79,6 +85,10 @@ async fn scan_open_loops_flags_unclosed_and_spec_drift() {
     assert!(
         kind_for("issue_less").is_none(),
         "issue-less transient flow must not be flagged with a close_loop action that cannot run"
+    );
+    assert!(
+        kind_for("malformed").is_none(),
+        "malformed status JSON must remain fail-safe and not fabricate closure debt"
     );
 }
 
