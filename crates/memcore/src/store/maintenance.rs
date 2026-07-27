@@ -39,10 +39,11 @@ impl MemoryStore {
                AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')
              RETURNING id",
         )?;
-        let ids = stmt
+        let mut ids = stmt
             .query_map([&archived_at], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
+        ids.sort();
         if !ids.is_empty() {
             db::write_gc_archived_receipt(
                 &tx,
@@ -178,7 +179,7 @@ impl MemoryStore {
              WHERE m.archived = 0
                AND COALESCE(m.retention_policy, '') NOT IN ('permanent', 'pinned')
              GROUP BY m.id
-             ORDER BY COUNT(ah.memory_id) DESC, m.timestamp DESC
+             ORDER BY COUNT(DISTINCT date(ah.accessed_at)) DESC, m.timestamp DESC
              LIMIT ?1",
         )?;
         let ids = stmt
@@ -529,43 +530,57 @@ mod tests {
                 [format!("2026-07-0{day}T00:00:00Z")],
             ).unwrap();
         }
+        store.upsert(&test_entry("same-day-heavy")).unwrap();
+        for _ in 0..10 {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO access_history (memory_id, accessed_at, event_kind)
+                 VALUES ('same-day-heavy', '2026-07-01T12:00:00Z', 'use')",
+                    [],
+                )
+                .unwrap();
+        }
 
         let off = crate::RecallConfig::default();
         let on = crate::RecallConfig {
             use_provenance_recency: true,
             ..off.clone()
         };
-        let mut off_ids: Vec<String> = store
-            .promotion_candidate_entries_for_config(2, &off)
+        let off_ids: Vec<String> = store
+            .promotion_candidate_entries_for_config(1, &off)
             .unwrap()
             .into_iter()
             .map(|entry| entry.id)
             .collect();
-        let mut legacy_off_ids: Vec<String> = store
-            .promotion_candidate_entries(2)
+        let legacy_off_ids: Vec<String> = store
+            .promotion_candidate_entries(1)
             .unwrap()
             .into_iter()
             .map(|entry| entry.id)
             .collect();
-        off_ids.sort();
-        legacy_off_ids.sort();
         assert_eq!(
             off_ids, legacy_off_ids,
             "OFF must retain the existing promotion_candidate_entries behavior"
         );
         let on_ids: Vec<String> = store
-            .promotion_candidate_entries_for_config(2, &on)
+            .promotion_candidate_entries_for_config(1, &on)
             .unwrap()
             .into_iter()
             .map(|entry| entry.id)
             .collect();
-        assert!(
-            on_ids.contains(&"used-low-display".to_string()),
-            "ON must admit use-backed memory ahead of display-heavy rows"
+        assert_eq!(
+            on_ids,
+            vec!["used-low-display"],
+            "ON must admit the four-distinct-day memory ahead of a row with ten use events on one day"
         );
         assert!(
             !on_ids.contains(&"display-heavy-0".to_string()),
             "the bounded ON admission must exclude a no-use row"
+        );
+        assert!(
+            !on_ids.contains(&"same-day-heavy".to_string()),
+            "duplicate same-day use events must not outrank broader calendar-day evidence"
         );
     }
 

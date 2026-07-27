@@ -502,10 +502,7 @@ fn gc_archival_receipt_names_every_row_beyond_the_former_sample_boundary() {
         .unwrap();
     let ids: Vec<String> = serde_json::from_value(pass["memory_ids"].clone()).unwrap();
     assert_eq!(pass["archived_count"], json!(expected_ids.len()));
-    assert_eq!(ids.len(), expected_ids.len());
-    for id in expected_ids {
-        assert!(ids.contains(&id), "receipt omitted archived row {id}");
-    }
+    assert_eq!(ids, expected_ids);
 }
 
 #[test]

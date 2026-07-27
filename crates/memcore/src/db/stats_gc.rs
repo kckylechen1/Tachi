@@ -169,6 +169,7 @@ fn run_archival_pass(
         count += 1;
         ids.push(id);
     }
+    ids.sort();
     Ok(ArchivalOutcome { count, ids })
 }
 
