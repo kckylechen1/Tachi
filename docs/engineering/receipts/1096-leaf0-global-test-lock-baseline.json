@@ -1,0 +1,3418 @@
+{
+ "schema_version": "2",
+ "generated_at": "2026-07-27T10:11:43Z",
+ "generated_from_note": "Refreshed by scripts/lock_census.py regen against the current branch head.",
+ "definitions": [
+  {
+   "file": "crates/tachi-llm/src/test_support.rs",
+   "line": 65,
+   "kind": "fn_definition"
+  },
+  {
+   "file": "crates/tachi-server/src/utils/locks.rs",
+   "line": 43,
+   "kind": "fn_definition"
+  }
+ ],
+ "doc_comment_references_non_callsites": [
+  "crates/tachi-llm/src/test_support.rs:63 (/// let _guard = crate::test_support::global_test_lock().lock();)",
+  "crates/tachi-server/src/foundry_runtime_ops/daily_distill/tests.rs:486 (/// `crate::utils::global_test_lock()`, matching their convention, not a)",
+  "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:12 (//! `global_test_lock()` because `DISPATCH_V2_ENABLED` / `TACHI_HOME` are)",
+  "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs:613 (// holds `crate::utils::global_test_lock()` for its lifetime (see)",
+  "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs:277 (// `global_test_lock()` with a `!Send`-guard-across-`.await` claim that)",
+  "crates/tachi-server/src/builtins/tests.rs:26 (/// `crate::utils::global_test_lock()` so a mutation here can never race a)",
+  "crates/tachi-server/src/test_support.rs:321 (/// Deliberately does NOT wrap the whole test in `global_test_lock()`:)",
+  "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1098 (// `global_test_lock()` is a process-wide `std::sync::Mutex<()>` (see)",
+  "crates/tachi-server/src/cli_client/concurrency_receipt.rs:1105 (// `global_test_lock()` acquisition on this async path — neither)"
+ ],
+ "callsites": [
+  {
+   "file": "crates/tachi-llm/src/llm/provider_health/config.rs",
+   "line": 190,
+   "test_or_fn_name": "from_env",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of from_env",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: from_env()",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/auth_probe.rs",
+   "line": 290,
+   "test_or_fn_name": "ambient_proxy_cannot_receive_probe_bearer_or_own_transport",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of ambient_proxy_cannot_receive_probe_bearer_or_own_transport",
+   "env_vars_touched": [
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+   "line": 9,
+   "test_or_fn_name": "foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured",
+   "class": "class2_runtime_config",
+   "evidence": "取消设置 ~22 个 DISTILL/REASONING/ZAI/BIGMODEL/EXTRACT/SILICONFLOW/DEEPSEEK key+base_url+model+tier 环境变量，设置 DEEPSEEK_API_KEY 和过时的 REASONING_*，断言 lane 默认值",
+   "env_vars_touched": [
+    "BIGMODEL_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_DISTILL_BASE_URL",
+    "DEEPSEEK_DISTILL_MODEL",
+    "DEEPSEEK_MODEL",
+    "DEEPSEEK_REASONING_BASE_URL",
+    "DEEPSEEK_REASONING_MODEL",
+    "DISTILL_API_KEY",
+    "DISTILL_BASE_URL",
+    "DISTILL_MODEL",
+    "EXTRACT_API_KEY",
+    "EXTRACT_BASE_URL",
+    "EXTRACT_MODEL",
+    "REASONING_API_KEY",
+    "REASONING_BASE_URL",
+    "REASONING_MODEL",
+    "SILICONFLOW_API_KEY",
+    "SILICONFLOW_BASE_URL",
+    "SILICONFLOW_MODEL",
+    "TACHI_BACKEND_DISTILL_TIER",
+    "TACHI_BACKEND_REASONING_TIER",
+    "ZAI_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+   "line": 1107,
+   "test_or_fn_name": "from_env_golden_values",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of from_env_golden_values",
+   "env_vars_touched": [
+    "BIGMODEL_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_DISTILL_BASE_URL",
+    "DEEPSEEK_DISTILL_MODEL",
+    "DEEPSEEK_MODEL",
+    "DEEPSEEK_REASONING_BASE_URL",
+    "DEEPSEEK_REASONING_MODEL",
+    "DISTILL_API_KEY",
+    "DISTILL_BASE_URL",
+    "DISTILL_MODEL",
+    "EXTRACTOR_BASE_URL",
+    "EXTRACTOR_MODEL",
+    "EXTRACT_API_KEY",
+    "EXTRACT_BASE_URL",
+    "EXTRACT_MODEL",
+    "REASONING_API_KEY",
+    "REASONING_BASE_URL",
+    "REASONING_MODEL",
+    "RERANK_LOCAL_ENDPOINT_ENV",
+    "RERANK_PROVIDER_ENV",
+    "SILICONFLOW_API_KEY",
+    "SILICONFLOW_BASE_URL",
+    "SILICONFLOW_MODEL",
+    "SUMMARY_API_KEY",
+    "SUMMARY_BASE_URL",
+    "SUMMARY_MODEL",
+    "TACHI_BACKEND_DISTILL_TIER",
+    "TACHI_BACKEND_EXTRACT_TIER",
+    "TACHI_BACKEND_REASONING_TIER",
+    "TACHI_BACKEND_SUMMARY_TIER",
+    "ZAI_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: from_env()",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+   "line": 1985,
+   "test_or_fn_name": "lane_fallback_config_from_env_resolves_deepseek_default_for_extract",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of lane_fallback_config_from_env_resolves_deepseek_default_for_extract",
+   "env_vars_touched": [
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_MODEL",
+    "DISTILL_FALLBACK_API_KEY",
+    "DISTILL_FALLBACK_BASE_URL",
+    "DISTILL_FALLBACK_MODEL",
+    "EXTRACT_FALLBACK_API_KEY",
+    "EXTRACT_FALLBACK_BASE_URL",
+    "EXTRACT_FALLBACK_MODEL",
+    "REASONING_FALLBACK_API_KEY",
+    "REASONING_FALLBACK_BASE_URL",
+    "REASONING_FALLBACK_MODEL",
+    "SILICONFLOW_API_KEY",
+    "SILICONFLOW_BASE_URL",
+    "SILICONFLOW_MODEL",
+    "SUMMARY_FALLBACK_API_KEY",
+    "SUMMARY_FALLBACK_BASE_URL",
+    "SUMMARY_FALLBACK_MODEL"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: from_env()",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/chat_lanes.rs",
+   "line": 2040,
+   "test_or_fn_name": "lane_fallback_config_from_env_is_none_when_no_fallback_key_configured",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of lane_fallback_config_from_env_is_none_when_no_fallback_key_configured",
+   "env_vars_touched": [
+    "DEEPSEEK_API_KEY",
+    "DISTILL_FALLBACK_API_KEY",
+    "EXTRACT_FALLBACK_API_KEY",
+    "REASONING_FALLBACK_API_KEY",
+    "SILICONFLOW_API_KEY",
+    "SUMMARY_FALLBACK_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: from_env()",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/embedding_rerank.rs",
+   "line": 53,
+   "test_or_fn_name": "default_rerank_provider_is_voyage",
+   "class": "class2_runtime_config",
+   "evidence": "取消设置 RERANK_PROVIDER_ENV 和 RERANK_LOCAL_ENDPOINT_ENV，断言默认 rerank provider=voyage",
+   "env_vars_touched": [
+    "RERANK_LOCAL_ENDPOINT_ENV",
+    "RERANK_PROVIDER_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: from_env()",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/embedding_rerank.rs",
+   "line": 65,
+   "test_or_fn_name": "voyage_provider_selected_explicitly",
+   "class": "class2_runtime_config",
+   "evidence": "设置 RERANK_PROVIDER_ENV=voyage，断言 config 解析为 voyage",
+   "env_vars_touched": [
+    "RERANK_PROVIDER_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: from_env()",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/embedding_rerank.rs",
+   "line": 142,
+   "test_or_fn_name": "voyage_request_shape_unchanged",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of voyage_request_shape_unchanged",
+   "env_vars_touched": [
+    "RERANK_VOYAGE_ENDPOINT_ENV",
+    "VOYAGE_API_KEY",
+    "VOYAGE_RERANK_API_KEY"
+   ],
+   "env_role": "incidental_delivery",
+   "env_role_evidence": "injection constructors: new_with_config(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/embedding_rerank.rs",
+   "line": 210,
+   "test_or_fn_name": "unknown_rerank_provider_fails_closed",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of unknown_rerank_provider_fails_closed",
+   "env_vars_touched": [
+    "RERANK_PROVIDER_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(, from_env()",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/embedding_rerank.rs",
+   "line": 227,
+   "test_or_fn_name": "local_rerank_unconfigured_fails_at_construction",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of local_rerank_unconfigured_fails_at_construction",
+   "env_vars_touched": [
+    "RERANK_LOCAL_ENDPOINT_ENV",
+    "RERANK_PROVIDER_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(, from_env()",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/embedding_rerank.rs",
+   "line": 244,
+   "test_or_fn_name": "local_rerank_unconfigured_does_not_fall_back_to_voyage",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of local_rerank_unconfigured_does_not_fall_back_to_voyage",
+   "env_vars_touched": [
+    "RERANK_LOCAL_ENDPOINT_ENV",
+    "RERANK_PROVIDER_ENV",
+    "VOYAGE_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/embedding_rerank.rs",
+   "line": 362,
+   "test_or_fn_name": "default_path_dispatches_to_voyage_arm",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of default_path_dispatches_to_voyage_arm",
+   "env_vars_touched": [
+    "RERANK_LOCAL_ENDPOINT_ENV",
+    "RERANK_PROVIDER_ENV",
+    "RERANK_VOYAGE_ENDPOINT_ENV",
+    "VOYAGE_API_KEY",
+    "VOYAGE_RERANK_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/provider_key_persistence.rs",
+   "line": 6,
+   "test_or_fn_name": "provider_key_health_blocking_persist_honors_test_disable_env",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=1 并断言没有创建 vault DB",
+   "env_vars_touched": [
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
+   ],
+   "env_role": "incidental_delivery",
+   "env_role_evidence": "injection constructors: new_with_vault_db(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/provider_key_persistence.rs",
+   "line": 34,
+   "test_or_fn_name": "provider_key_health_persists_off_async_runtime_thread",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=0 并轮询异步持久化到 vault DB",
+   "env_vars_touched": [
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
+   ],
+   "env_role": "incidental_delivery",
+   "env_role_evidence": "injection constructors: new_with_vault_db(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/provider_key_persistence.rs",
+   "line": 92,
+   "test_or_fn_name": "provider_key_health_persist_errors_are_visible_in_status",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=0，指向缺失的父路径 db_path，断言持久化错误显示",
+   "env_vars_touched": [
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
+   ],
+   "env_role": "incidental_delivery",
+   "env_role_evidence": "injection constructors: new_with_vault_db(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/provider_key_persistence.rs",
+   "line": 186,
+   "test_or_fn_name": "provider_key_health_reload_clears_local_cooldown_on_external_success",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=1 以在进行外部 DB 成功测试时抑制本地异步写入",
+   "env_vars_touched": [
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
+   ],
+   "env_role": "incidental_delivery",
+   "env_role_evidence": "injection constructors: new_with_vault_db(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/llm/tests/recall_pool_hygiene.rs",
+   "line": 26,
+   "test_or_fn_name": "recall_pool_streak_counts_header_then_stall_as_timeout_not_success",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST=1，然后运行 header-then-stall mock provider 以验证 pool streak 计算逻辑",
+   "env_vars_touched": [
+    "TACHI_RECALL_PROVIDER_ATTEMPTS",
+    "TACHI_RECALL_PROVIDER_TIMEOUT_SECS",
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+    "VOYAGE_API_KEY",
+    "VOYAGE_BASE_URL"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 365,
+   "test_or_fn_name": "materialize_provider_secrets_preserves_vault_alias_env",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_preserves_vault_alias_env",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 398,
+   "test_or_fn_name": "materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 428,
+   "test_or_fn_name": "materialize_provider_secrets_does_not_report_same_value_as_bypassed",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_does_not_report_same_value_as_bypassed",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 455,
+   "test_or_fn_name": "materialize_provider_secrets_skips_missing_alias_without_aborting",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_skips_missing_alias_without_aborting",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 482,
+   "test_or_fn_name": "materialize_provider_secrets_removes_same_named_stale_pool_for_missing_alias",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_removes_same_named_stale_pool_for_missing_alias",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 506,
+   "test_or_fn_name": "materialize_provider_secrets_preserves_unrelated_pools_when_removing_stale_alias_pool",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_preserves_unrelated_pools_when_removing_stale_alias_pool",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 546,
+   "test_or_fn_name": "materialize_provider_secrets_isolates_one_bad_alias_from_good_ones",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_isolates_one_bad_alias_from_good_ones",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 603,
+   "test_or_fn_name": "materialize_provider_secrets_rejects_malformed_alias_name",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_rejects_malformed_alias_name",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 621,
+   "test_or_fn_name": "materialize_provider_secrets_rejects_oversized_alias_name",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_rejects_oversized_alias_name",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 639,
+   "test_or_fn_name": "malformed_alias_refresh_retains_last_known_good_cache_and_sanitizes_error",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of malformed_alias_refresh_retains_last_known_good_cache_and_sanitizes_error",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 672,
+   "test_or_fn_name": "later_alias_failure_exposes_no_partial_pool_and_retains_old_cache",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of later_alias_failure_exposes_no_partial_pool_and_retains_old_cache",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 713,
+   "test_or_fn_name": "successful_refresh_atomically_replaces_complete_provider_cache",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of successful_refresh_atomically_replaces_complete_provider_cache",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 742,
+   "test_or_fn_name": "poisoned_materialization_lock_refuses_refresh_and_clear_loudly",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of poisoned_materialization_lock_refuses_refresh_and_clear_loudly",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 771,
+   "test_or_fn_name": "missing_alias_retains_existing_logical_pool_and_reports_key_only",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of missing_alias_retains_existing_logical_pool_and_reports_key_only",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 793,
+   "test_or_fn_name": "missing_alias_without_existing_pool_stays_absent_and_loudly_skipped",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of missing_alias_without_existing_pool_stays_absent_and_loudly_skipped",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 817,
+   "test_or_fn_name": "degraded_refresh_retains_only_skipped_configured_key_and_adds_valid_new_key",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of degraded_refresh_retains_only_skipped_configured_key_and_adds_valid_new_key",
+   "env_vars_touched": [
+    "TACHI_TEST_FRESH_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 854,
+   "test_or_fn_name": "missing_alias_outranks_canonical_same_key_and_retains_old_logical_pool",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of missing_alias_outranks_canonical_same_key_and_retains_old_logical_pool",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 878,
+   "test_or_fn_name": "missing_alias_outranks_canonical_same_key_without_old_pool",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of missing_alias_outranks_canonical_same_key_without_old_pool",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 903,
+   "test_or_fn_name": "existing_alias_target_outranks_canonical_same_key_pool",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of existing_alias_target_outranks_canonical_same_key_pool",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 937,
+   "test_or_fn_name": "retained_pool_preserves_index_and_cooldown_while_new_pool_resets_state",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of retained_pool_preserves_index_and_cooldown_while_new_pool_resets_state",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 1002,
+   "test_or_fn_name": "retained_cooldown_does_not_block_fresh_pool_with_same_member_id",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of retained_cooldown_does_not_block_fresh_pool_with_same_member_id",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 1063,
+   "test_or_fn_name": "concurrent_refresh_cannot_overwrite_newer_cache_from_stale_alias_snapshot",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of concurrent_refresh_cannot_overwrite_newer_cache_from_stale_alias_snapshot",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 1146,
+   "test_or_fn_name": "explicit_clear_finishes_after_inflight_stale_materialization",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of explicit_clear_finishes_after_inflight_stale_materialization",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 1232,
+   "test_or_fn_name": "replacement_clears_stale_health_but_retained_pool_keeps_composite_health_state",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of replacement_clears_stale_health_but_retained_pool_keeps_composite_health_state",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 1307,
+   "test_or_fn_name": "readable_vault_drops_the_cached_pool_when_the_alias_target_is_gone",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of readable_vault_drops_the_cached_pool_when_the_alias_target_is_gone",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 1332,
+   "test_or_fn_name": "locked_vault_retains_the_cached_pool_for_the_same_missing_alias",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of locked_vault_retains_the_cached_pool_for_the_same_missing_alias",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-llm/src/provider_materialization.rs",
+   "line": 1356,
+   "test_or_fn_name": "skip_reason_names_which_of_the_two_conditions_occurred",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of skip_reason_names_which_of_the_two_conditions_occurred",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/agent_eval.rs",
+   "line": 121,
+   "test_or_fn_name": "fixture_replay_requires_explicit_env_opt_in",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of fixture_replay_requires_explicit_env_opt_in",
+   "env_vars_touched": [
+    "AGENT_EVAL_FIXTURE_ENV"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/arena_ops/tests/harness.rs",
+   "line": 88,
+   "test_or_fn_name": "arena_spawn_launches_opencode_dispatch_and_collects_result",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of arena_spawn_launches_opencode_dispatch_and_collects_result",
+   "env_vars_touched": [
+    "TACHI_DISPATCH_WATCHDOG_POLL_MS"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/arena_ops/tests/harness.rs",
+   "line": 259,
+   "test_or_fn_name": "arena_opencode_executor_fallback_uses_glm_registry_model",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of arena_opencode_executor_fallback_uses_glm_registry_model",
+   "env_vars_touched": [
+    "TACHI_DISPATCH_GLM_CODING_MODEL",
+    "TACHI_DISPATCH_WATCHDOG_POLL_MS"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
+   "line": 436,
+   "test_or_fn_name": "cli_named_project_forward_binds_daemon_session_for_write",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of cli_named_project_forward_binds_daemon_session_for_write",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_DAEMON",
+    "TACHI_DISABLE_AUTO_DAEMON"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
+   "line": 601,
+   "test_or_fn_name": "remember_named_project_forward_binds_daemon_session_without_project_db",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of remember_named_project_forward_binds_daemon_session_without_project_db",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_DAEMON",
+    "TACHI_DISABLE_AUTO_DAEMON"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
+   "line": 753,
+   "test_or_fn_name": "wiki_write_named_project_forward_binds_daemon_session_without_project_db",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of wiki_write_named_project_forward_binds_daemon_session_without_project_db",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_DAEMON",
+    "TACHI_DISABLE_AUTO_DAEMON"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
+   "line": 1105,
+   "test_or_fn_name": "daemon_call_rejects_nonexistent_ascii_project_name_binding",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of daemon_call_rejects_nonexistent_ascii_project_name_binding",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
+   "line": 1160,
+   "test_or_fn_name": "non_ascii_project_binding_fails_closed_before_tool_execution",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of non_ascii_project_binding_fails_closed_before_tool_execution",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
+   "line": 1217,
+   "test_or_fn_name": "daemon_call_accepts_project_name_with_space_then_fails_as_unknown_project",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of daemon_call_accepts_project_name_with_space_then_fails_as_unknown_project",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
+   "line": 1274,
+   "test_or_fn_name": "daemon_call_with_empty_project_name_fails_closed",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of daemon_call_with_empty_project_name_fails_closed",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/cli_tool/tool_dispatch.rs",
+   "line": 1334,
+   "test_or_fn_name": "non_ascii_only_and_ambiguous_unnamed_project_names_fail_closed",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of non_ascii_only_and_ambiguous_unnamed_project_names_fail_closed",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/manifest_cli.rs",
+   "line": 390,
+   "test_or_fn_name": "doctor_run_daily_requires_flag_to_migrate_stamped_older_global_db",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of doctor_run_daily_requires_flag_to_migrate_stamped_older_global_db",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1175,
+   "test_or_fn_name": "distill_db_override_dangling_symlink_refuses_before_side_effects",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of distill_db_override_dangling_symlink_refuses_before_side_effects",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1215,
+   "test_or_fn_name": "distill_db_override_wrong_symlink_refuses_without_external_mutation",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of distill_db_override_wrong_symlink_refuses_without_external_mutation",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1262,
+   "test_or_fn_name": "distill_db_override_symlink_loop_refuses_before_side_effects",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of distill_db_override_symlink_loop_refuses_before_side_effects",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1300,
+   "test_or_fn_name": "distill_db_override_regular_file_opens_normally",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of distill_db_override_regular_file_opens_normally",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1335,
+   "test_or_fn_name": "startup_canonical_db_dangling_symlink_refuses_before_side_effects",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of startup_canonical_db_dangling_symlink_refuses_before_side_effects",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1394,
+   "test_or_fn_name": "startup_canonical_db_wrong_target_symlink_refuses_before_side_effects",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of startup_canonical_db_wrong_target_symlink_refuses_before_side_effects",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1453,
+   "test_or_fn_name": "startup_canonical_db_symlink_loop_refuses_before_side_effects",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of startup_canonical_db_symlink_loop_refuses_before_side_effects",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1506,
+   "test_or_fn_name": "startup_canonical_db_normal_absence_keeps_plan_c_alias_and_opens_regular_db",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of startup_canonical_db_normal_absence_keeps_plan_c_alias_and_opens_regular_db",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1545,
+   "test_or_fn_name": "startup_canonical_db_regular_file_keeps_plan_c_alias_and_opens",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of startup_canonical_db_regular_file_keeps_plan_c_alias_and_opens",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1586,
+   "test_or_fn_name": "startup_plan_c_alias_refusal_precedes_legacy_copy_for_regular_file",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of startup_plan_c_alias_refusal_precedes_legacy_copy_for_regular_file",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1631,
+   "test_or_fn_name": "startup_plan_c_alias_refusal_precedes_legacy_copy_for_wrong_symlink",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of startup_plan_c_alias_refusal_precedes_legacy_copy_for_wrong_symlink",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1885,
+   "test_or_fn_name": "remember_cli_requires_flag_to_migrate_stamped_older_db_in_process",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of remember_cli_requires_flag_to_migrate_stamped_older_db_in_process",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 1964,
+   "test_or_fn_name": "backfill_fts_cli_requires_flag_to_migrate_stamped_older_db_in_process",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of backfill_fts_cli_requires_flag_to_migrate_stamped_older_db_in_process",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 2058,
+   "test_or_fn_name": "vault_exec_does_not_create_project_alias_from_cwd",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of vault_exec_does_not_create_project_alias_from_cwd",
+   "env_vars_touched": [
+    "MEMORY_DB_PATH",
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_ROOT"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 2178,
+   "test_or_fn_name": "daily_distill_scheduler_stays_enabled_when_pipeline_is_disabled",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of daily_distill_scheduler_stays_enabled_when_pipeline_is_disabled",
+   "env_vars_touched": [
+    "ENABLE_PIPELINE"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 2206,
+   "test_or_fn_name": "daily_distill_scheduler_requires_project_db",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of daily_distill_scheduler_requires_project_db",
+   "env_vars_touched": [
+    "ENABLE_PIPELINE"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve.rs",
+   "line": 2239,
+   "test_or_fn_name": "new",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of new",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/background.rs",
+   "line": 651,
+   "test_or_fn_name": "wal_checkpoint_scoped_to_active_dbs_does_not_attach_named_projects",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of wal_checkpoint_scoped_to_active_dbs_does_not_attach_named_projects",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/background.rs",
+   "line": 693,
+   "test_or_fn_name": "background_checkpoint_enumerates_server_home_after_environment_drift",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of background_checkpoint_enumerates_server_home_after_environment_drift",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/background.rs",
+   "line": 902,
+   "test_or_fn_name": "wal_checkpoint_reaps_named_project_hard_state_only_when_maintenance_enabled",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of wal_checkpoint_reaps_named_project_hard_state_only_when_maintenance_enabled",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 23,
+   "test_or_fn_name": "with_tachi_home",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of with_tachi_home",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 264,
+   "test_or_fn_name": "ensure_stdio_proxy_accepts_global_only_daemon_for_project_client",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_HOME，取消设置 SIGIL_HOME/TACHI_APP_HOME/TACHI_DISABLE_STDIO_PROXY，设置 TACHI_DISABLE_AUTO_DAEMON=1，写入 pid 文件，断言 proxy 接收",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_DISABLE_AUTO_DAEMON",
+    "TACHI_DISABLE_STDIO_PROXY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 317,
+   "test_or_fn_name": "stdio_proxy_call_writes_bound_project_via_global_only_daemon",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_call_writes_bound_project_via_global_only_daemon",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 382,
+   "test_or_fn_name": "stdio_proxy_same_db_alias_write_normalizes_to_bound_identity",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_same_db_alias_write_normalizes_to_bound_identity",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 470,
+   "test_or_fn_name": "stdio_proxy_call_rejects_cross_project_override_before_daemon_write",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_call_rejects_cross_project_override_before_daemon_write",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 549,
+   "test_or_fn_name": "stdio_proxy_tachi_search_returns_global_and_bound_project_rows",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_tachi_search_returns_global_and_bound_project_rows",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 650,
+   "test_or_fn_name": "stdio_proxy_allows_explicit_cross_project_read",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_allows_explicit_cross_project_read",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 758,
+   "test_or_fn_name": "stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 886,
+   "test_or_fn_name": "stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 1015,
+   "test_or_fn_name": "stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 1081,
+   "test_or_fn_name": "stdio_proxy_delete_and_archive_global_rows_with_bound_project",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of stdio_proxy_delete_and_archive_global_rows_with_bound_project",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 1776,
+   "test_or_fn_name": "http_direct_connect_header_identity_binds_profile_and_project",
+   "class": "class2_runtime_config",
+   "evidence": "变更 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 以进行未绑定会话跨项目写入测试",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 1920,
+   "test_or_fn_name": "http_direct_connect_rejects_admin_profile_without_authorization_policy",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of http_direct_connect_rejects_admin_profile_without_authorization_policy",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 1957,
+   "test_or_fn_name": "http_direct_connect_unbound_session_rejects_explicit_cross_project_write",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of http_direct_connect_unbound_session_rejects_explicit_cross_project_write",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 2072,
+   "test_or_fn_name": "http_direct_connect_initialize_advertises_http_guidance",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of http_direct_connect_initialize_advertises_http_guidance",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 2107,
+   "test_or_fn_name": "http_direct_connect_same_db_alias_write_normalizes_to_bound_identity",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of http_direct_connect_same_db_alias_write_normalizes_to_bound_identity",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+   "line": 2205,
+   "test_or_fn_name": "http_direct_connect_bound_session_rejects_cross_project_write",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of http_direct_connect_bound_session_rejects_cross_project_write",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/exec_actions.rs",
+   "line": 279,
+   "test_or_fn_name": "exec_requires_missing_name_before_spawning",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of exec_requires_missing_name_before_spawning",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/exec_actions.rs",
+   "line": 306,
+   "test_or_fn_name": "exec_preserves_caller_environment_over_vault_value",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of exec_preserves_caller_environment_over_vault_value",
+   "env_vars_touched": [
+    "TACHI_VAULT_CHILD_ENV",
+    "TACHI_VAULT_EXEC_FILL_API_KEY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/exec_actions.rs",
+   "line": 325,
+   "test_or_fn_name": "exec_locked_vault_refuses_required_name_before_spawning",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of exec_locked_vault_refuses_required_name_before_spawning",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/exec_actions.rs",
+   "line": 362,
+   "test_or_fn_name": "exec_env_load_failure_refuses_spawn_by_default",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of exec_env_load_failure_refuses_spawn_by_default",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/exec_actions.rs",
+   "line": 390,
+   "test_or_fn_name": "exec_allow_unauthenticated_runs_inherited_on_env_load_failure",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of exec_allow_unauthenticated_runs_inherited_on_env_load_failure",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/exec_actions.rs",
+   "line": 413,
+   "test_or_fn_name": "exec_action_unlock_failure_refuses_spawn_by_default",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of exec_action_unlock_failure_refuses_spawn_by_default",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/exec_actions.rs",
+   "line": 457,
+   "test_or_fn_name": "exec_action_unlock_failure_allow_unauthenticated_runs_inherited",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of exec_action_unlock_failure_allow_unauthenticated_runs_inherited",
+   "env_vars_touched": [
+    "TACHI_VAULT_EXEC_ACTION_INHERITED"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/providers_doctor.rs",
+   "line": 1712,
+   "test_or_fn_name": "providers_doctor_leaves_opencode_and_vault_db_byte_identical_read_only",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of providers_doctor_leaves_opencode_and_vault_db_byte_identical_read_only",
+   "env_vars_touched": [
+    "TACHI_R11_DOCTOR_FIXTURE_API_KEY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/tests.rs",
+   "line": 379,
+   "test_or_fn_name": "read_vault_password_reports_no_tty_hint_instead_of_os_error",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of read_vault_password_reports_no_tty_hint_instead_of_os_error",
+   "env_vars_touched": [
+    "TACHI_TEST_FORCE_NO_TTY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/bootstrap/vault_cli/tests.rs",
+   "line": 399,
+   "test_or_fn_name": "read_vault_init_password_reports_no_tty_hint_instead_of_os_error",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of read_vault_init_password_reports_no_tty_hint_instead_of_os_error",
+   "env_vars_touched": [
+    "TACHI_TEST_FORCE_NO_TTY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/builtins/tests.rs",
+   "line": 35,
+   "test_or_fn_name": "acquire",
+   "class": "class2_runtime_config",
+   "evidence": "在变更 TACHI_SKILLS_ROOT 时获取锁并保持 guard 有效期的 RAII guard 构造函数",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/builtins/tests.rs",
+   "line": 167,
+   "test_or_fn_name": "builtin_waza_and_superpowers_seed_successfully_regardless_of_library_state",
+   "class": "class2_runtime_config",
+   "evidence": "获取锁 (与 shell_ops TACHI_SKILLS_ROOT 变更器共享)，断言无论库状态如何，内置种子均成功",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/builtins/tests.rs",
+   "line": 212,
+   "test_or_fn_name": "builtin_skill_definitions_keep_runtime_paths_out_of_scored_content",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of builtin_skill_definitions_keep_runtime_paths_out_of_scored_content",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/builtins/tests.rs",
+   "line": 239,
+   "test_or_fn_name": "reseeding_changed_builtin_definition_preserves_operational_ranking_state",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of reseeding_changed_builtin_definition_preserves_operational_ranking_state",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/cli_client/concurrency_receipt.rs",
+   "line": 1118,
+   "test_or_fn_name": "transport_concurrency_receipt_serial_and_burst",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of transport_concurrency_receipt_serial_and_burst",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: tachi_home(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/complete_ops/dispatch_outcome.rs",
+   "line": 1704,
+   "test_or_fn_name": "with_named_project_env",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of with_named_project_env",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/copilot_ops/support/guides.rs",
+   "line": 303,
+   "test_or_fn_name": "wiki_and_guide_visibility_use_server_home_after_environment_drift",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of wiki_and_guide_visibility_use_server_home_after_environment_drift",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/board/tests.rs",
+   "line": 401,
+   "test_or_fn_name": "harness_probe_requires_password_for_opencode_api_attach_ready",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of harness_probe_requires_password_for_opencode_api_attach_ready",
+   "env_vars_touched": [
+    "OPENCODE_SERVER_PASSWORD"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/board/tests.rs",
+   "line": 429,
+   "test_or_fn_name": "harness_probe_reports_attach_ready_for_authenticated_opencode_schema",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of harness_probe_reports_attach_ready_for_authenticated_opencode_schema",
+   "env_vars_touched": [
+    "OPENCODE_SERVER_PASSWORD"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/authority.rs",
+   "line": 290,
+   "test_or_fn_name": "explicit_sandbox_cannot_shadow_the_operator_bypass_check_at_the_entry_point",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE=true (FullPermissionOptIn)；profile 解析读取 TACHI_OPENCODE_* 环境变量",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/authority.rs",
+   "line": 334,
+   "test_or_fn_name": "write_intent_skill_is_dropped_from_a_read_only_mount",
+   "class": "class2_runtime_config",
+   "evidence": "codex_55_review 解析读取 TACHI_OPENCODE_* 环境变量 (OpenCode 适配器)；锁序列化这些变量",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/authority.rs",
+   "line": 411,
+   "test_or_fn_name": "shell_capable_read_only_lane_on_an_uncertified_backend_is_refused",
+   "class": "class2_runtime_config",
+   "evidence": "deepseek_explore 解析通过读取 TACHI_OPENCODE_* 环境变量的 OpenCode 适配器",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/authority.rs",
+   "line": 485,
+   "test_or_fn_name": "primitive_less_backend_gets_no_sandbox_flag_and_an_advisory_receipt",
+   "class": "class2_runtime_config",
+   "evidence": "opencode_builder profile 解析读取 TACHI_OPENCODE_* 环境变量",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 98,
+   "test_or_fn_name": "generate_mcp_config_sets_owner_only_permissions",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of generate_mcp_config_sets_owner_only_permissions",
+   "env_vars_touched": [
+    "HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 162,
+   "test_or_fn_name": "cp2_two_dispatches_on_same_profile_get_distinct_agent_seats",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of cp2_two_dispatches_on_same_profile_get_distinct_agent_seats",
+   "env_vars_touched": [
+    "HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 266,
+   "test_or_fn_name": "dispatch_depth_child_env_is_parent_plus_one",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of dispatch_depth_child_env_is_parent_plus_one",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 334,
+   "test_or_fn_name": "handle_tachi_dispatch_refuses_at_max_depth_from_session",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of handle_tachi_dispatch_refuses_at_max_depth_from_session",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 364,
+   "test_or_fn_name": "opencode_serve_dispatch_fails_fast_when_probe_auth_fails",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_HOME，移除 OPENCODE_SERVER_PASSWORD/USERNAME 以进行 preflight credential 测试",
+   "env_vars_touched": [
+    "OPENCODE_SERVER_PASSWORD",
+    "OPENCODE_SERVER_USERNAME",
+    "TACHI_HOST_PROFILE"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 435,
+   "test_or_fn_name": "opencode_serve_preflight_uses_dispatch_credential_env",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of opencode_serve_preflight_uses_dispatch_credential_env",
+   "env_vars_touched": [
+    "OPENCODE_SERVER_PASSWORD",
+    "OPENCODE_SERVER_USERNAME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 526,
+   "test_or_fn_name": "opencode_agent_missing_command_keeps_vocabulary_through_full_dispatch",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of opencode_agent_missing_command_keeps_vocabulary_through_full_dispatch",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 563,
+   "test_or_fn_name": "v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 616,
+   "test_or_fn_name": "read_only_request_to_uncertified_backend_is_refused_before_run_dir_or_credentials",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of read_only_request_to_uncertified_backend_is_refused_before_run_dir_or_credentials",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 662,
+   "test_or_fn_name": "dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 697,
+   "test_or_fn_name": "dispatch_rejects_level_above_host_profile_before_workspace_creation",
+   "class": "class2_runtime_config",
+   "evidence": "设置 HOME，移除 TACHI_HOME 以进行孤儿恢复测试",
+   "env_vars_touched": [
+    "TACHI_HOST_PROFILE"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 743,
+   "test_or_fn_name": "dispatch_runs_root_uses_canonical_tachi_home_aliases",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of dispatch_runs_root_uses_canonical_tachi_home_aliases",
+   "env_vars_touched": [
+    "HOME",
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 808,
+   "test_or_fn_name": "recover_orphaned_dispatch_runs_marks_working_runs_failed",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of recover_orphaned_dispatch_runs_marks_working_runs_failed",
+   "env_vars_touched": [
+    "HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 894,
+   "test_or_fn_name": "named_project_dispatch_receipt_carries_project_field",
+   "class": "class2_runtime_config",
+   "evidence": "设置 HOME，移除 TACHI_HOME 以进行遵循回执的孤儿恢复测试",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 953,
+   "test_or_fn_name": "dispatch_receipt_carries_the_effective_authority_contract",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of dispatch_receipt_carries_the_effective_authority_contract",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 1001,
+   "test_or_fn_name": "canonical_external_staffing_start_and_terminal_receipt_share_one_run_dir",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of canonical_external_staffing_start_and_terminal_receipt_share_one_run_dir",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 1104,
+   "test_or_fn_name": "dispatch_response_default_omits_fat_routing_card",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of dispatch_response_default_omits_fat_routing_card",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 1171,
+   "test_or_fn_name": "dispatch_response_verbose_true_restores_full_routing_card",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of dispatch_response_verbose_true_restores_full_routing_card",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 1236,
+   "test_or_fn_name": "recover_orphaned_dispatch_runs_honors_project_from_receipt",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of recover_orphaned_dispatch_runs_honors_project_from_receipt",
+   "env_vars_touched": [
+    "HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: tachi_home(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 1329,
+   "test_or_fn_name": "global_dispatch_slot_blocks_duplicate_active_task_without_flow_id",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of global_dispatch_slot_blocks_duplicate_active_task_without_flow_id",
+   "env_vars_touched": [
+    "HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 1367,
+   "test_or_fn_name": "flow_dispatch_slot_blocks_duplicate_active_task",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of flow_dispatch_slot_blocks_duplicate_active_task",
+   "env_vars_touched": [
+    "HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch/tests.rs",
+   "line": 1415,
+   "test_or_fn_name": "flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing",
+   "env_vars_touched": [
+    "TACHI_RUN_ROOT"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/dispatch_v2.rs",
+   "line": 550,
+   "test_or_fn_name": "call_plan_llm_never_reaches_cli_binary_resolver",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of call_plan_llm_never_reaches_cli_binary_resolver",
+   "env_vars_touched": [
+    "CLAUDE_BIN",
+    "TACHI_CLAUDE_POOL_PROVIDER_FIRST"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_ops/prompt.rs",
+   "line": 665,
+   "test_or_fn_name": "over_budget_skill_contracts_keep_references_without_raw_bodies",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of over_budget_skill_contracts_keep_references_without_raw_bodies",
+   "env_vars_touched": [
+    "SKILL_TEXT_BUDGET_ENV"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_profile/tests/opencode_transport.rs",
+   "line": 6,
+   "test_or_fn_name": "recommendation_transport_reports_opencode_serve_fallback",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_OPENCODE_TRANSPORT=serve + TACHI_OPENCODE_SERVER_URL 以进行 serve-fallback 推荐测试",
+   "env_vars_touched": [
+    "TACHI_OPENCODE_SERVER_URL",
+    "TACHI_OPENCODE_TRANSPORT"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/dispatch_profile/tests/opencode_transport.rs",
+   "line": 32,
+   "test_or_fn_name": "custom_profile_can_attach_to_opencode_serve",
+   "class": "class2_runtime_config",
+   "evidence": "设置 OPENCODE_SERVER_PASSWORD，生成探针服务器，断言 opencode_serve 附加",
+   "env_vars_touched": [
+    "OPENCODE_SERVER_PASSWORD"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/doctor/tests.rs",
+   "line": 6,
+   "test_or_fn_name": "with_env_lock",
+   "class": "class2_runtime_config",
+   "evidence": "doctor 测试设置 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 的辅助函数",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/enrichment.rs",
+   "line": 930,
+   "test_or_fn_name": "write_keyword_enrichment_flag_defaults_off",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of write_keyword_enrichment_flag_defaults_off",
+   "env_vars_touched": [
+    "WRITE_ENRICH_KEYWORDS_ENV"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/enrichment.rs",
+   "line": 1040,
+   "test_or_fn_name": "write_side_keyword_enrichment_hits_search_via_synonym",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of write_side_keyword_enrichment_hits_search_via_synonym",
+   "env_vars_touched": [
+    "EXTRACT_API_KEY",
+    "EXTRACT_BASE_URL",
+    "EXTRACT_MODEL",
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+    "WRITE_ENRICH_KEYWORDS_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(, make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/enrichment.rs",
+   "line": 1213,
+   "test_or_fn_name": "enrichment_flush_keyword_write_back_busts_a_warm_recall_cache",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of enrichment_flush_keyword_write_back_busts_a_warm_recall_cache",
+   "env_vars_touched": [
+    "EXTRACT_API_KEY",
+    "EXTRACT_BASE_URL",
+    "EXTRACT_MODEL",
+    "TACHI_ENABLE_RECALL_CACHE",
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+    "WRITE_ENRICH_KEYWORDS_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(, make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/enrichment.rs",
+   "line": 1356,
+   "test_or_fn_name": "write_side_keyword_enrichment_failure_leaves_save_intact",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of write_side_keyword_enrichment_failure_leaves_save_intact",
+   "env_vars_touched": [
+    "EXTRACT_API_KEY",
+    "EXTRACT_BASE_URL",
+    "EXTRACT_MODEL",
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+    "WRITE_ENRICH_KEYWORDS_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/enrichment.rs",
+   "line": 1433,
+   "test_or_fn_name": "write_side_keyword_enrichment_flag_off_is_noop",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of write_side_keyword_enrichment_flag_off_is_noop",
+   "env_vars_touched": [
+    "EXTRACT_API_KEY",
+    "EXTRACT_BASE_URL",
+    "EXTRACT_MODEL",
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+    "WRITE_ENRICH_KEYWORDS_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/enrichment.rs",
+   "line": 1525,
+   "test_or_fn_name": "write_side_keyword_enrichment_sanitizes_hostile_llm_keywords",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of write_side_keyword_enrichment_sanitizes_hostile_llm_keywords",
+   "env_vars_touched": [
+    "EXTRACT_API_KEY",
+    "EXTRACT_BASE_URL",
+    "EXTRACT_MODEL",
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+    "WRITE_ENRICH_KEYWORDS_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(, make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/enrichment.rs",
+   "line": 1662,
+   "test_or_fn_name": "write_side_keyword_enrichment_scrubs_existing_keywords_in_prompt",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of write_side_keyword_enrichment_scrubs_existing_keywords_in_prompt",
+   "env_vars_touched": [
+    "EXTRACT_API_KEY",
+    "EXTRACT_BASE_URL",
+    "EXTRACT_MODEL",
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+    "WRITE_ENRICH_KEYWORDS_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/exec_env/tests/canonical_paths.rs",
+   "line": 156,
+   "test_or_fn_name": "provision_writer_persists_canonical_path_for_post_delete_reclaim",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of provision_writer_persists_canonical_path_for_post_delete_reclaim",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/foundry_runtime_ops/daily_distill/runner.rs",
+   "line": 510,
+   "test_or_fn_name": "daily_distill_enumerates_server_home_after_environment_drift",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of daily_distill_enumerates_server_home_after_environment_drift",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/foundry_runtime_ops/daily_distill/tests.rs",
+   "line": 493,
+   "test_or_fn_name": "call_claude_batch_never_reaches_cli_binary_resolver",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of call_claude_batch_never_reaches_cli_binary_resolver",
+   "env_vars_touched": [
+    "CLAUDE_BIN",
+    "TACHI_CLAUDE_POOL_PROVIDER_FIRST"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/foundry_runtime_ops/handlers/capture_session.rs",
+   "line": 2943,
+   "test_or_fn_name": "short_voyage_batch_response_is_rejected_not_silently_truncated",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of short_voyage_batch_response_is_rejected_not_silently_truncated",
+   "env_vars_touched": [
+    "TACHI_RECALL_PROVIDER_ATTEMPTS",
+    "VOYAGE_API_KEY",
+    "VOYAGE_BASE_URL"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/foundry_runtime_ops/tests.rs",
+   "line": 21,
+   "test_or_fn_name": "tachi_home_test_lock",
+   "class": "class2_runtime_config",
+   "evidence": "包装器返回 crate::utils::global_test_lock()；供该模块中变更 TACHI_HOME 的测试使用",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/foundry_scheduler.rs",
+   "line": 119,
+   "test_or_fn_name": "classify_route_recognizes_plan_c_symlink_target",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_HOME=tmp/home，建立 plan-C 符号链接，断言 NamedProject 路由",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/gh_ops/handoff.rs",
+   "line": 1326,
+   "test_or_fn_name": "supersede_close_actually_executes_in_normal_flow",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of supersede_close_actually_executes_in_normal_flow",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/gh_ops/handoff.rs",
+   "line": 1363,
+   "test_or_fn_name": "supersede_refuses_non_handoff_labeled_target_with_zero_mutation",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of supersede_refuses_non_handoff_labeled_target_with_zero_mutation",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/gh_ops/handoff.rs",
+   "line": 1391,
+   "test_or_fn_name": "supersede_refuses_closed_target_with_zero_mutation",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of supersede_refuses_closed_target_with_zero_mutation",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/manifest/tests/alias_drift.rs",
+   "line": 23,
+   "test_or_fn_name": "with_env_lock",
+   "class": "class2_runtime_config",
+   "evidence": "alias-drift 测试设置 TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME 的辅助函数",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/manifest/tests/gc_hygiene.rs",
+   "line": 109,
+   "test_or_fn_name": "repo_local_db_fixture_helper_avoids_linux_tmp_skip_semantics",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of repo_local_db_fixture_helper_avoids_linux_tmp_skip_semantics",
+   "env_vars_touched": [
+    "CARGO_TARGET_DIR"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_ops.rs",
+   "line": 581,
+   "test_or_fn_name": "runtime_info_alias_health_stays_bound_after_environment_drift",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of runtime_info_alias_health_stays_bound_after_environment_drift",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/auto_link.rs",
+   "line": 1538,
+   "test_or_fn_name": "auto_link_supersede_busts_a_warm_recall_cache",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of auto_link_supersede_busts_a_warm_recall_cache",
+   "env_vars_touched": [
+    "TACHI_ENABLE_RECALL_CACHE"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/auto_link.rs",
+   "line": 1851,
+   "test_or_fn_name": "spawn_queue_wait_measures_dispatch_delay_under_worker_contention",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of spawn_queue_wait_measures_dispatch_delay_under_worker_contention",
+   "env_vars_touched": [
+    "TACHI_AUTO_LINK_PHASE_RECEIPTS"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/library_binding.rs",
+   "line": 239,
+   "test_or_fn_name": "single_db_mode_warns_when_workspace_local_db_exists_project_bound_does_not",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of single_db_mode_warns_when_workspace_local_db_exists_project_bound_does_not",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/save_memory/enrichment.rs",
+   "line": 123,
+   "test_or_fn_name": "enrichment_work_pending_when_metadata_missing",
+   "class": "class2_runtime_config",
+   "evidence": "移除 WRITE_ENRICH_KEYWORDS_ENV 以断言缺失元数据时的 pending 状态",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/save_memory/enrichment.rs",
+   "line": 144,
+   "test_or_fn_name": "enrichment_work_pending_when_keyword_flag_on",
+   "class": "class2_runtime_config",
+   "evidence": "设置 WRITE_ENRICH_KEYWORDS_ENV=true 以断言 pending 状态行为",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/save_memory/write_affinity.rs",
+   "line": 556,
+   "test_or_fn_name": "outer_write_gate_keeps_two_servers_routing_configs_separate",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of outer_write_gate_keeps_two_servers_routing_configs_separate",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME",
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/search_helpers.rs",
+   "line": 553,
+   "test_or_fn_name": "resolve_effective_named_project_does_not_pick_single_available_project",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of resolve_effective_named_project_does_not_pick_single_available_project",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/search_memory/tests.rs",
+   "line": 462,
+   "test_or_fn_name": "cache_generation_through_plan_c_alias_tracks_canonical_bound_project_writes",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of cache_generation_through_plan_c_alias_tracks_canonical_bound_project_writes",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/search_memory/tests.rs",
+   "line": 696,
+   "test_or_fn_name": "write_through_is_safe_when_no_invalidation_landed_since_snapshot",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of write_through_is_safe_when_no_invalidation_landed_since_snapshot",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/search_memory/tests.rs",
+   "line": 708,
+   "test_or_fn_name": "write_through_is_rejected_after_a_concurrent_invalidation_bumped_the_epoch",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of write_through_is_rejected_after_a_concurrent_invalidation_bumped_the_epoch",
+   "env_vars_touched": [
+    "TACHI_ENABLE_RECALL_CACHE"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/memory_search_ops/search_memory/tests.rs",
+   "line": 761,
+   "test_or_fn_name": "locked_write_through_rejects_a_write_snapshotted_before_invalidation_completed",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of locked_write_through_rejects_a_write_snapshotted_before_invalidation_completed",
+   "env_vars_touched": [
+    "TACHI_ENABLE_RECALL_CACHE"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/path_utils/tests.rs",
+   "line": 7,
+   "test_or_fn_name": "with_env_lock",
+   "class": "class2_runtime_config",
+   "evidence": "测试使用的共享辅助函数，既变更 env (TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME) 又调用 set_current_dir — 锁同时序列化了两者",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/pipeline_ops/audit.rs",
+   "line": 1010,
+   "test_or_fn_name": "async_heartbeat_uses_server_home_after_environment_drift",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of async_heartbeat_uses_server_home_after_environment_drift",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/pipeline_ops/helpers.rs",
+   "line": 243,
+   "test_or_fn_name": "blank_or_absent_domain_falls_back_to_general_never_tachi_domain_env",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of blank_or_absent_domain_falls_back_to_general_never_tachi_domain_env",
+   "env_vars_touched": [
+    "TACHI_DOMAIN"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/project_db_ops.rs",
+   "line": 1253,
+   "test_or_fn_name": "with_test_home",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of with_test_home",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/project_db_ops.rs",
+   "line": 1715,
+   "test_or_fn_name": "rejects_path_outside_git_repo_when_cargo_target_dir_is_in_a_git_repo",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of rejects_path_outside_git_repo_when_cargo_target_dir_is_in_a_git_repo",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/provider_config.rs",
+   "line": 520,
+   "test_or_fn_name": "collect_config_env_values_unions_in_resolved_home",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of collect_config_env_values_unions_in_resolved_home",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: collect_config_env_values(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/provider_config.rs",
+   "line": 586,
+   "test_or_fn_name": "materialize_provider_secrets_preserves_vault_alias_env",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_preserves_vault_alias_env",
+   "env_vars_touched": [
+    "VOYAGE_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/provider_config.rs",
+   "line": 616,
+   "test_or_fn_name": "materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins",
+   "env_vars_touched": [
+    "OPENAI_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/provider_config.rs",
+   "line": 651,
+   "test_or_fn_name": "materialize_provider_secrets_formats_missing_alias_remediation",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of materialize_provider_secrets_formats_missing_alias_remediation",
+   "env_vars_touched": [
+    "ANTHROPIC_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: LlmClient::new(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/repair/tests/plan_c_restore.rs",
+   "line": 5,
+   "test_or_fn_name": "r11_plan_c_split_brain_merges_alias_and_relinks_symlink",
+   "class": "class2_runtime_config",
+   "evidence": "在断言 plan-C 别名合并前设置 TACHI_HOME=tempdir",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/server_methods/db.rs",
+   "line": 559,
+   "test_or_fn_name": "with_env_lock",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of with_env_lock",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/server_state/accessors.rs",
+   "line": 327,
+   "test_or_fn_name": "refresh_from_vault_emits_bypassed_env_warning_via_real_emission_path",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of refresh_from_vault_emits_bypassed_env_warning_via_real_emission_path",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/server_state/init.rs",
+   "line": 519,
+   "test_or_fn_name": "memory_server_tachi_home_dir_matches_canonical_resolution",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of memory_server_tachi_home_dir_matches_canonical_resolution",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: tachi_home(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/session_identity.rs",
+   "line": 552,
+   "test_or_fn_name": "with_test_home",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of with_test_home",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/shell_ops/flow.rs",
+   "line": 319,
+   "test_or_fn_name": "tachi_run_root_env_lock",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of tachi_run_root_env_lock",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/shell_ops/tests/instructions.rs",
+   "line": 23,
+   "test_or_fn_name": "superpowers_meta_skills_resolve_for_all_shell_stages",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of superpowers_meta_skills_resolve_for_all_shell_stages",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/skill_source_resolver.rs",
+   "line": 71,
+   "test_or_fn_name": "acquire",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of acquire",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/snapshot.rs",
+   "line": 451,
+   "test_or_fn_name": "snapshot_alias_health_stays_bound_after_environment_drift",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of snapshot_alias_health_stays_bound_after_environment_drift",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_cli/daemon_cli.rs",
+   "line": 854,
+   "test_or_fn_name": "reap_stdio_defaults_are_conservative",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of reap_stdio_defaults_are_conservative",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_cli/daemon_cli.rs",
+   "line": 871,
+   "test_or_fn_name": "reap_stdio_parent_cap_rejects_zero_and_garbage",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of reap_stdio_parent_cap_rejects_zero_and_garbage",
+   "env_vars_touched": [
+    "TACHI_REAP_STDIO_PARENT_CAP"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 13,
+   "test_or_fn_name": "vault_plaintext_duplicate_with_same_value_is_not_drift",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of vault_plaintext_duplicate_with_same_value_is_not_drift",
+   "env_vars_touched": [
+    "VOYAGE_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 39,
+   "test_or_fn_name": "vault_plaintext_duplicate_with_different_value_is_drift",
+   "class": "class2_runtime_config",
+   "evidence": "设置 VOYAGE_API_KEY=same-secret 以进行 vault 明文重复漂移检测测试",
+   "env_vars_touched": [
+    "VOYAGE_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 65,
+   "test_or_fn_name": "vault_plaintext_duplicate_without_decrypted_value_is_unverified_not_drift",
+   "class": "class2_runtime_config",
+   "evidence": "设置 VOYAGE_API_KEY=env-secret 以进行漂移检测测试",
+   "env_vars_touched": [
+    "VOYAGE_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 91,
+   "test_or_fn_name": "deprecated_configured_key_reports_canonical_cleanup_hint",
+   "class": "class2_runtime_config",
+   "evidence": "设置 VOYAGE_API_KEY=env-secret 以进行未验证非漂移测试",
+   "env_vars_touched": [
+    "MINIMAX_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 118,
+   "test_or_fn_name": "live_lane_keys_are_not_deprecated_or_remove_migrate_targets",
+   "class": "class2_runtime_config",
+   "evidence": "设置 REASONING_API_KEY=legacy-secret，断言已废弃 key 的清理提示",
+   "env_vars_touched": [
+    "DISTILL_API_KEY",
+    "REASONING_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 160,
+   "test_or_fn_name": "unset_live_lane_keys_are_missing_not_deprecated",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of unset_live_lane_keys_are_missing_not_deprecated",
+   "env_vars_touched": [
+    "BIGMODEL_API_KEY",
+    "DISTILL_API_KEY",
+    "REASONING_API_KEY",
+    "ZAI_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 194,
+   "test_or_fn_name": "rotation_members_configure_their_logical_provider_key",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of rotation_members_configure_their_logical_provider_key",
+   "env_vars_touched": [
+    "VOYAGE_API_KEY"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: collect_api_key_status_from_sources(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 447,
+   "test_or_fn_name": "provider_probe_client_loads_target_db_key_health",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of provider_probe_client_loads_target_db_key_health",
+   "env_vars_touched": [
+    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST"
+   ],
+   "env_role": "incidental_delivery",
+   "env_role_evidence": "injection constructors: new_with_vault_db(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 485,
+   "test_or_fn_name": "model_lanes_reports_default_voyage_rerank_provider",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of model_lanes_reports_default_voyage_rerank_provider",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: model_lanes_json(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/status_health/tests.rs",
+   "line": 506,
+   "test_or_fn_name": "model_lanes_reports_configured_local_rerank_provider",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of model_lanes_reports_configured_local_rerank_provider",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: model_lanes_json(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/tests/markers_errors.rs",
+   "line": 97,
+   "test_or_fn_name": "infer_provider_from_auth_error_maps_real_failures",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of infer_provider_from_auth_error_maps_real_failures",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/status_ops/tests/vector_namespace.rs",
+   "line": 73,
+   "test_or_fn_name": "collect_snapshot_surfaces_plan_c_split_brain_warning",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_HOME=app_home 以进行 plan-C split-brain 快照警告测试",
+   "env_vars_touched": [
+    "TACHI_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/sticky_ops/tests.rs",
+   "line": 748,
+   "test_or_fn_name": "with_tachi_agent_seat_env",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of with_tachi_agent_seat_env",
+   "env_vars_touched": [
+    "TACHI_AGENT_SEAT"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/sticky_ops/tests.rs",
+   "line": 891,
+   "test_or_fn_name": "cp2_tachi_profile_env_alone_no_longer_resolves_a_seat",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of cp2_tachi_profile_env_alone_no_longer_resolves_a_seat",
+   "env_vars_touched": [
+    "TACHI_AGENT_SEAT",
+    "TACHI_PROFILE"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/sticky_ops/tests.rs",
+   "line": 962,
+   "test_or_fn_name": "cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_string",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_string",
+   "env_vars_touched": [
+    "TACHI_AGENT_SEAT",
+    "TACHI_PROFILE"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/sticky_ops/tests.rs",
+   "line": 1024,
+   "test_or_fn_name": "cp2_round3_sticky_leave_from_agent_uses_seat_not_profile",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of cp2_round3_sticky_leave_from_agent_uses_seat_not_profile",
+   "env_vars_touched": [
+    "TACHI_AGENT_SEAT",
+    "TACHI_PROFILE"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/test_support.rs",
+   "line": 247,
+   "test_or_fn_name": "with_tachi_home",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of with_tachi_home",
+   "env_vars_touched": [
+    "SIGIL_HOME",
+    "TACHI_APP_HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/test_support.rs",
+   "line": 378,
+   "test_or_fn_name": "relative_cargo_target_dir_resolving_inside_a_git_repo_is_rejected",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of relative_cargo_target_dir_resolving_inside_a_git_repo_is_rejected",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/dispatch_tests/board_first.rs",
+   "line": 212,
+   "test_or_fn_name": "plan_stage_failure_closes_both_status_and_kanban_row",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_HOME + CLAUDE_BIN=fake-claude + TACHI_CLAUDE_SKIP_PERMISSIONS + DISPATCH_V2_PLAN_REVIEW=false",
+   "env_vars_touched": [
+    "DISPATCH_V2_PLAN_REVIEW"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/dispatch_tests/board_first.rs",
+   "line": 265,
+   "test_or_fn_name": "successful_dispatch_seeds_status_and_kanban_before_plan_completes",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of successful_dispatch_seeds_status_and_kanban_before_plan_completes",
+   "env_vars_touched": [
+    "DISPATCH_V2_PLAN_REVIEW"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/dispatch_tests/board_first.rs",
+   "line": 369,
+   "test_or_fn_name": "plan_review_pending_response_projects_input_required_kanban_state",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of plan_review_pending_response_projects_input_required_kanban_state",
+   "env_vars_touched": [
+    "DISPATCH_V2_PLAN_REVIEW"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/dispatch_tests/board_first.rs",
+   "line": 440,
+   "test_or_fn_name": "v1_dispatch_status_and_kanban_unaffected_by_reorder",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of v1_dispatch_status_and_kanban_unaffected_by_reorder",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/dispatch_tests/prompt_credentials_board/prompt_context/memory_budget_delimiter.rs",
+   "line": 29,
+   "test_or_fn_name": "over_budget_memory_context_keeps_paired_untrusted_boundary",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of over_budget_memory_context_keeps_paired_untrusted_boundary",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/dispatch_tests/workflow_artifacts/closure_dispatch_markers/closure.rs",
+   "line": 49,
+   "test_or_fn_name": "tachi_task_close_loop_writes_wiki_with_references",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_HOME + TACHI_RUN_ROOT，以便非隔离的 make_server() 在此测试期间读取稳定的 HOME",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "1319"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/facade_tests/briefing/project_routing/checkpoint_filter.rs",
+   "line": 72,
+   "test_or_fn_name": "briefing_checkpoints_use_server_home_after_environment_drift",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of briefing_checkpoints_use_server_home_after_environment_drift",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/facade_tests/memory_actions/ask.rs",
+   "line": 519,
+   "test_or_fn_name": "tachi_memory_ask_synthesis_call_site_threads_missing_anchor_cap",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of tachi_memory_ask_synthesis_call_site_threads_missing_anchor_cap",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/gh_comment_tests.rs",
+   "line": 97,
+   "test_or_fn_name": "gh_comment_uses_body_file_not_inline_body",
+   "class": "class2_runtime_config",
+   "evidence": "写入伪造的 `gh` 可执行文件，通过 PathEnvGuard 前置 PATH，断言 --body-file 的用法",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/auto_link_latency_w5.rs",
+   "line": 282,
+   "test_or_fn_name": "w5_auto_link_latency_under_saturation",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of w5_auto_link_latency_under_saturation",
+   "env_vars_touched": [
+    "TACHI_AUTO_LINK_PHASE_RECEIPTS"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
+   "line": 371,
+   "test_or_fn_name": "new_save_is_visible_immediately_even_behind_a_warm_recall_cache",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of new_save_is_visible_immediately_even_behind_a_warm_recall_cache",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
+   "line": 442,
+   "test_or_fn_name": "save_then_immediate_search_hits_and_receipt_declares_lexical_immediate",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of save_then_immediate_search_hits_and_receipt_declares_lexical_immediate",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
+   "line": 514,
+   "test_or_fn_name": "exact_duplicate_save_does_not_bust_the_recall_cache",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of exact_duplicate_save_does_not_bust_the_recall_cache",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
+   "line": 583,
+   "test_or_fn_name": "successful_save_receipt_recall_fence_is_cleared",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of successful_save_receipt_recall_fence_is_cleared",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
+   "line": 755,
+   "test_or_fn_name": "delete_memory_clears_recall_cache_after_commit",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of delete_memory_clears_recall_cache_after_commit",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
+   "line": 796,
+   "test_or_fn_name": "archive_memory_clears_recall_cache_after_commit",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of archive_memory_clears_recall_cache_after_commit",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
+   "line": 842,
+   "test_or_fn_name": "memory_gc_clears_recall_cache_after_commit",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of memory_gc_clears_recall_cache_after_commit",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
+   "line": 882,
+   "test_or_fn_name": "consolidate_lifecycle_clears_recall_cache_after_commit",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of consolidate_lifecycle_clears_recall_cache_after_commit",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/merge_tests/cleaner_bin.rs",
+   "line": 3,
+   "test_or_fn_name": "approve_merge_uses_explicit_cleaner_binary_override",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_CLEAN_BIN=/tmp/custom-tachi-clean 以进行 cleaner-binary 覆盖测试",
+   "env_vars_touched": [
+    "TACHI_CLEAN_BIN"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/mod.rs",
+   "line": 32,
+   "test_or_fn_name": "home_test_lock",
+   "class": "class2_runtime_config",
+   "evidence": "返回 crate::utils::global_test_lock() 的包装器；支持 TempHomeGuard (HOME/TACHI_HOME/TACHI_RUN_ROOT/SIGIL_HOME) 和 acquire_real_home_lock",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/skill_tests/discover/waza_dedup.rs",
+   "line": 5,
+   "test_or_fn_name": "tachi_skill_discover_prefers_hub_waza_skill_over_host_duplicate",
+   "class": "class2_runtime_config",
+   "evidence": "设置 HOME=temp_home 以进行技能发现去重测试",
+   "env_vars_touched": [
+    "HOME"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/vault_tests/env_injection/child_policy.rs",
+   "line": 6,
+   "test_or_fn_name": "dispatch_vault_env_injection_does_not_export_all_secrets_by_default",
+   "class": "class2_runtime_config",
+   "evidence": "移除 TACHI_CHILD_ONLY_API_KEY/LONGPORT_APP_SECRET/TACHI_VAULT_CHILD_ENV，设置 TACHI_EXISTING_API_KEY=env-value，生成 `sh` 子进程以读取注入的 env",
+   "env_vars_touched": [
+    "LONGPORT_APP_SECRET",
+    "TACHI_CHILD_ONLY_API_KEY",
+    "TACHI_EXISTING_API_KEY",
+    "TACHI_VAULT_CHILD_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/vault_tests/env_injection/child_policy.rs",
+   "line": 62,
+   "test_or_fn_name": "default_and_fill_missing_preserve_inherited_openai_api_key",
+   "class": "class2_runtime_config",
+   "evidence": "设置 TACHI_VAULT_CHILD_ENV=all + TACHI_EXISTING_API_KEY，移除 TACHI_CHILD_ONLY_API_KEY/LONGPORT_APP_SECRET/NOT-A-SHELL-NAME，生成 `sh` 子进程",
+   "env_vars_touched": [
+    "OPENAI_API_KEY",
+    "TACHI_VAULT_CHILD_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/vault_tests/env_injection/child_policy.rs",
+   "line": 113,
+   "test_or_fn_name": "dispatch_vault_env_injection_overrides_existing_env_when_all_configured",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of dispatch_vault_env_injection_overrides_existing_env_when_all_configured",
+   "env_vars_touched": [
+    "LONGPORT_APP_SECRET",
+    "TACHI_CHILD_ONLY_API_KEY",
+    "TACHI_EXISTING_API_KEY",
+    "TACHI_FILL_CHILD_ONLY_API_KEY",
+    "TACHI_FILL_EXISTING_API_KEY",
+    "TACHI_FILL_LONGPORT_APP_SECRET",
+    "TACHI_VAULT_CHILD_ENV"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/vault_tests/env_injection/rotation.rs",
+   "line": 6,
+   "test_or_fn_name": "dispatch_env_injection_uses_logical_rotation_key_not_member_names",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of dispatch_env_injection_uses_logical_rotation_key_not_member_names",
+   "env_vars_touched": [
+    "TAVILY_API_KEY",
+    "TAVILY_API_KEY_1",
+    "TAVILY_API_KEY_2"
+   ],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/vault_tests/rotation/access_count.rs",
+   "line": 35,
+   "test_or_fn_name": "provider_pool_materialization_touches_each_successful_concrete_key_exactly_once",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of provider_pool_materialization_touches_each_successful_concrete_key_exactly_once",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tests/vault_tests/rotation/access_count.rs",
+   "line": 118,
+   "test_or_fn_name": "later_member_decrypt_failure_leaves_every_pool_member_untouched",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of later_member_decrypt_failure_leaves_every_pool_member_untouched",
+   "env_vars_touched": [],
+   "env_role": "behavior_under_test",
+   "env_role_evidence": "env-reading constructors: make_server(",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tools/tests.rs",
+   "line": 422,
+   "test_or_fn_name": "local_skill_discovery_scans_host_skill_dirs",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of local_skill_discovery_scans_host_skill_dirs",
+   "env_vars_touched": [
+    "HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/tools/tests.rs",
+   "line": 466,
+   "test_or_fn_name": "local_skill_discovery_expands_common_chinese_queries",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of local_skill_discovery_expands_common_chinese_queries",
+   "env_vars_touched": [
+    "HOME"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/utils/tests.rs",
+   "line": 44,
+   "test_or_fn_name": "find_project_git_root_prefers_real_cwd_over_stale_pwd",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of find_project_git_root_prefers_real_cwd_over_stale_pwd",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/utils/tests.rs",
+   "line": 64,
+   "test_or_fn_name": "find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd",
+   "env_vars_touched": [],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 47,
+   "test_or_fn_name": "auto_lock_clears_key_but_preserves_provider_secrets",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of auto_lock_clears_key_but_preserves_provider_secrets",
+   "env_vars_touched": [
+    "OPENAI_API_KEY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 90,
+   "test_or_fn_name": "explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools",
+   "env_vars_touched": [
+    "OPENAI_API_KEY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 260,
+   "test_or_fn_name": "locked_provider_refresh_auto_unlocks_once_without_recursive_materialization",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of locked_provider_refresh_auto_unlocks_once_without_recursive_materialization",
+   "env_vars_touched": [
+    "OPENAI_API_KEY",
+    "TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK",
+    "TACHI_TEST_KEYCHAIN_PASSWORD"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 338,
+   "test_or_fn_name": "failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly",
+   "env_vars_touched": [
+    "OPENAI_API_KEY",
+    "TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK",
+    "TACHI_TEST_KEYCHAIN_PASSWORD"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 398,
+   "test_or_fn_name": "bootstrap_auto_unlock_owns_one_provider_refresh",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of bootstrap_auto_unlock_owns_one_provider_refresh",
+   "env_vars_touched": [
+    "OPENAI_API_KEY",
+    "TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK",
+    "TACHI_TEST_KEYCHAIN_PASSWORD"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 694,
+   "test_or_fn_name": "vault_unlock_use_keychain_succeeds_via_injected_password",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of vault_unlock_use_keychain_succeeds_via_injected_password",
+   "env_vars_touched": [
+    "TACHI_TEST_KEYCHAIN_PASSWORD"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 746,
+   "test_or_fn_name": "vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error",
+   "env_vars_touched": [
+    "TACHI_TEST_FORCE_KEYCHAIN_MISSING"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 883,
+   "test_or_fn_name": "vault_lock_clears_key_and_provider_secrets",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of vault_lock_clears_key_and_provider_secrets",
+   "env_vars_touched": [
+    "OPENAI_API_KEY"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 930,
+   "test_or_fn_name": "autolock_disabled_when_env_zero",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of autolock_disabled_when_env_zero",
+   "env_vars_touched": [
+    "OPENAI_API_KEY",
+    "TACHI_VAULT_AUTOLOCK_SECS"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vault_ops/tests.rs",
+   "line": 994,
+   "test_or_fn_name": "autolock_disabled_reports_unlocked_in_runtime_status",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of autolock_disabled_reports_unlocked_in_runtime_status",
+   "env_vars_touched": [
+    "OPENAI_API_KEY",
+    "TACHI_VAULT_AUTOLOCK_SECS"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vector_backfill.rs",
+   "line": 731,
+   "test_or_fn_name": "status_sweep_state_recomputes_current_pending_after_threshold_change",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of status_sweep_state_recomputes_current_pending_after_threshold_change",
+   "env_vars_touched": [
+    "TACHI_VECTOR_SWEEP_PENDING_THRESHOLD"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/vector_sweep.rs",
+   "line": 533,
+   "test_or_fn_name": "sweep_interval_allows_env_shortened_debounce_for_tests",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of sweep_interval_allows_env_shortened_debounce_for_tests",
+   "env_vars_touched": [
+    "TACHI_VECTOR_SWEEP_INTERVAL_SECS"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  },
+  {
+   "file": "crates/tachi-server/src/wiki_ops/ingest.rs",
+   "line": 596,
+   "test_or_fn_name": "admits_union_of_all_three_home_env_roots",
+   "class": "class2_runtime_config",
+   "evidence": "structural inspection of admits_union_of_all_three_home_env_roots",
+   "env_vars_touched": [
+    "TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE"
+   ],
+   "env_role": "unknown",
+   "env_role_evidence": "no env-reading or injection constructor detected in enclosing function body",
+   "deletion_scope": "none"
+  }
+ ],
+ "stats": {
+  "total_rg_hits": 267,
+  "definitions_and_reexports": 2,
+  "doc_comment_references_non_callsites": 9,
+  "total_callsites": 256,
+  "per_class_primary": {
+   "class1_registration": 0,
+   "class2_runtime_config": 256,
+   "class3_fs_identity": 0,
+   "class4_harness": 0,
+   "class5_product_concurrency": 0,
+   "unexplained": 0
+  },
+  "secondary_classes_present": {
+   "class3_fs_identity": [
+    "crates/tachi-server/src/path_utils/tests.rs:5",
+    "crates/tachi-server/src/bootstrap/serve.rs:958",
+    "crates/tachi-server/src/utils/tests.rs:81",
+    "crates/tachi-server/src/utils/tests.rs:101"
+   ],
+   "class4_harness": [
+    "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:160",
+    "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:216",
+    "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:329",
+    "crates/tachi-server/src/tests/dispatch_tests/board_first.rs:414",
+    "crates/tachi-server/src/arena_ops/tests/harness.rs:114",
+    "crates/tachi-server/src/arena_ops/tests/harness.rs:270",
+    "crates/tachi-server/src/tests/gh_comment_tests.rs:94"
+   ]
+  },
+  "per_env_role": {
+   "behavior_under_test": 114,
+   "incidental_delivery": 6,
+   "unknown": 136
+  },
+  "per_deletion_scope": {
+   "1319": 82,
+   "none": 174
+  }
+ }
+}
