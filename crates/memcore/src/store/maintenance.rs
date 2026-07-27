@@ -412,7 +412,7 @@ mod tests {
     /// call site reads `RecallConfig::get()` — a process-wide `OnceLock` that
     /// cannot be set per-test without cross-test interference.
     #[test]
-    fn promotion_arm_follows_use_provenance_recency_and_defaults_to_display() {
+    fn promotion_arm_follows_use_provenance_recency_and_defaults_to_unfiltered() {
         let default_config = crate::RecallConfig::default();
         assert!(
             !default_config.use_provenance_recency,
