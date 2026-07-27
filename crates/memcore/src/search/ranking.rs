@@ -648,6 +648,11 @@ fn apply_access_feedback(
         // `read_access_times` already fetched for this candidate — no extra
         // query, no maintained column. Knob off: `entry.access_count`,
         // incremented once per row per search, exactly as before.
+        //
+        // tachi#1459: `access_count` observes the search path only; reads
+        // through path-listing routes do not increment it. The knob-off boost
+        // is thus paid out for search exposure alone, and a memory that is read
+        // constantly through `list_by_path` and friends never earns it.
         let count = if recall_config.use_provenance_recency {
             access_times.get(id).map_or(0, Vec::len) as i64
         } else {

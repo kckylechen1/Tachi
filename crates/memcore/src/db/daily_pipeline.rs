@@ -2,6 +2,8 @@ use rusqlite::{params, Connection};
 
 use crate::error::MemoryError;
 
+use super::AccessEventKind;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalEvidenceRow {
     pub id: String,
@@ -200,11 +202,38 @@ pub fn count_distinct_access_days(
     conn: &Connection,
     memory_id: &str,
 ) -> Result<usize, MemoryError> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
-        params![memory_id],
-        |row| row.get(0),
-    )?;
+    count_distinct_access_days_of_kind(conn, memory_id, None)
+}
+
+/// Distinct calendar days feeding `calculate_promotion_score`, i.e. tachi#1446
+/// **lever 6**.
+///
+/// The config selects the arm through [`AccessEventKind::for_promotion`]: OFF
+/// preserves the literal pre-#1446 unfiltered query, while ON counts only days
+/// on which a caller-initiated save cited this memory.
+pub fn count_distinct_promotion_days(
+    conn: &Connection,
+    memory_id: &str,
+    recall_config: &crate::RecallConfig,
+) -> Result<usize, MemoryError> {
+    count_distinct_access_days_of_kind(
+        conn,
+        memory_id,
+        AccessEventKind::for_promotion(recall_config),
+    )
+}
+
+pub(crate) fn count_distinct_access_days_of_kind(
+    conn: &Connection,
+    memory_id: &str,
+    kind: Option<AccessEventKind>,
+) -> Result<usize, MemoryError> {
+    let kind_predicate = kind.map_or("", AccessEventKind::sql_predicate);
+    let sql = format!(
+        "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history \
+         WHERE memory_id = ?1{kind_predicate}"
+    );
+    let count: i64 = conn.query_row(&sql, params![memory_id], |row| row.get(0))?;
     Ok(count as usize)
 }
 

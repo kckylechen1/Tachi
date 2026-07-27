@@ -1053,6 +1053,11 @@ fn pick_near_dup_survivor_index(entries: &[MemoryEntry], members: &[usize]) -> u
     best
 }
 
+/// tachi#1459: the two counters this gate reads observe the search path only;
+/// reads through path-listing routes do not increment them. The rationale and
+/// evidence emitted below say "search recalled this row from N distinct
+/// queries", which is narrower than the "earned diverse recall" wording implies
+/// — a memory used constantly through path listing accumulates nothing here.
 fn propose_promote_distilled(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
     let mut out = Vec::new();
     for entry in entries {
@@ -1112,6 +1117,12 @@ fn summary_token_jaccard(a: &str, b: &str) -> f64 {
     inter / union.max(1.0)
 }
 
+/// tachi#1459: the `access_count` / `recall_count` guards below observe the
+/// search path only; reads through path-listing routes do not increment them.
+/// A non-zero count is sound evidence to spare a row; zero is not evidence that
+/// nothing read it, so the `access=0` claim in the rationale — and the evidence
+/// block a human approves from — means "search never returned this", not "never
+/// retrieved". These proposals require human approval, which is the backstop.
 fn propose_stale_archives(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
     let cutoff = Utc::now() - Duration::days(STALE_DAYS_DEFAULT);
     let mut out = Vec::new();

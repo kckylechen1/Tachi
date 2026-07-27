@@ -146,6 +146,17 @@ pub fn find_exact_path_text_id(
 }
 
 /// Fetch entries under a path prefix using SQL pushdown instead of full-table scans.
+///
+/// tachi#1459: this route records nothing. `access_count`, `last_access`,
+/// `recall_count` and `query_diversity` observe the search path only — they are
+/// earned by `record_access_with_updates` from `hybrid_search`.
+/// `gc_tables` can reconcile `query_diversity` from the search-written history,
+/// but adds no non-search observation. Every row returned here is therefore
+/// read without recording use. That is the existing behaviour and this note
+/// does not change it; it is written down because those counters are read
+/// downstream as evidence that a memory is unused (archive sweeps, tier
+/// promotion, the `overlooked` scoring lever), and callers of this function are
+/// exactly the population that evidence cannot see.
 pub fn list_by_path(
     conn: &Connection,
     path_prefix: &str,
@@ -205,6 +216,9 @@ pub fn list_by_path(
 /// the `LIMIT` always keeps the truly newest rows. Callers that want a
 /// recency-first view over a path prefix (recent checkpoints, recent kanban
 /// entries, etc.) should use this instead of `list_by_path`.
+///
+/// tachi#1459: like [`list_by_path`], this route records nothing, so reads
+/// through here leave the access counters and retained history unchanged.
 pub fn list_by_path_recent(
     conn: &Connection,
     path_prefix: &str,

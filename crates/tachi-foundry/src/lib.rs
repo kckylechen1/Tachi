@@ -474,6 +474,11 @@ pub fn should_skip_daily_distill_candidate(entry: &MemoryEntry, wiki_project: bo
         || (!wiki_project && memcore::is_wiki_entry(entry))
 }
 
+/// tachi#1459: the `access_count` / `recall_count` guards below observe the
+/// search path only; reads through path-listing routes do not increment them.
+/// A non-zero count is therefore sound evidence to *spare* a row, but zero is
+/// not evidence that nothing read it — a source row consumed only through
+/// `list_by_path` and friends reads zero here and clears this guard.
 pub fn should_archive_daily_distill_source(entry: &MemoryEntry) -> bool {
     if entry.archived
         || entry.source.eq_ignore_ascii_case(FOUNDRY_DISTILL_SOURCE)
@@ -899,6 +904,10 @@ pub fn infer_memory_insight(
     if same_topic_count <= 1 {
         reasons.push("novel_topic".to_string());
     }
+    // tachi#1459: `access_count` observes the search path only; reads through
+    // path-listing routes do not increment it. This reason therefore says "high
+    // importance and search has never returned it", which is not the same claim
+    // as "nobody has looked at it".
     if entry.access_count == 0 && entry.importance > 0.7 {
         reasons.push("overlooked_high_importance".to_string());
     }

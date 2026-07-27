@@ -49,15 +49,60 @@ impl AccessEventKind {
     /// unchanged, so the two arms of `get_access_times_of_kind` differ in
     /// exactly one literal and cannot drift apart in placeholder arithmetic.
     ///
-    /// **There is deliberately no unfiltered variant.** Before tachi#1446
-    /// every row in `access_history` was a display record, so the `Display`
-    /// arm returns exactly the row set the pre-#1446 unfiltered query returned
-    /// — which is what makes the knob-OFF path byte-identical — while making
-    /// it impossible for a `use` row to reach the default scorer by omission.
-    const fn sql_predicate(self) -> &'static str {
+    /// There is deliberately no unfiltered *event kind*: callers that select a
+    /// provenance must name one. The promotion query represents its frozen
+    /// knob-OFF path as `None`, because that path must preserve the literal
+    /// pre-#1446 unfiltered row set even after `use` rows begin to exist.
+    ///
+    /// Two readers now share this fragment: `get_access_times_of_kind` below
+    /// (lever 5, ranking) and `db::daily_pipeline::count_distinct_access_days`
+    /// (lever 6, the durable-promotion ratchet). Both are crate-internal;
+    /// `pub(crate)` rather than `pub` keeps the closed-enum guarantee — no
+    /// caller outside memcore can hand a raw predicate to either query.
+    pub(crate) const fn sql_predicate(self) -> &'static str {
         match self {
             Self::Display => " AND event_kind = 'display'",
             Self::Use => " AND event_kind = 'use'",
+        }
+    }
+
+    /// The arm the **durable-promotion ratchet** reads — tachi#1446 lever 6.
+    ///
+    /// `count_distinct_access_days` feeds `calculate_promotion_score`, and a
+    /// score at or above 0.60 calls `promote_memory_to_durable`, which pins
+    /// `importance = 0.7` and `retention_policy = 'durable'` permanently.
+    /// Counting `display` rows there means *the system showing a memory
+    /// repeatedly promotes it, irreversibly* — the same defect as levers 1-5,
+    /// on the one substrate where the consequence cannot be undone by
+    /// flipping the knob back.
+    ///
+    /// **This deliberately shares `use_provenance_recency` rather than adding
+    /// a lever-6 knob.** Three reasons, in order of weight:
+    ///
+    /// 1. A separate knob creates a four-state config matrix of which two
+    ///    states are incoherent — ranking that refuses to believe display
+    ///    events while promotion still ratchets on them, or the reverse. There
+    ///    is no deployment that wants either, so the second knob would exist
+    ///    only to be set equal to the first.
+    /// 2. The irreversibility objection points the *other* way once the sign
+    ///    is checked. Turning the knob ON makes this gate strictly harder to
+    ///    pass in the common case (a memory's `use` days are near zero while
+    ///    its `display` days accumulate), so the ON state performs *fewer*
+    ///    irreversible promotions than OFF. A withheld row remains eligible
+    ///    for reconsideration whenever the bounded candidate scan selects it;
+    ///    promotion itself is not reversible.
+    /// 3. It is one defect with one substrate (`access_history.event_kind`).
+    ///    Two knobs over one column is how the two halves drift apart.
+    ///
+    /// The ON row set is a strict subset of the OFF row set, so enabling the
+    /// knob can only preserve or lower the count. A caller-cited memory can
+    /// still earn durable retention from its `use` days; display-only days no
+    /// longer help it cross the gate.
+    pub fn for_promotion(recall_config: &crate::RecallConfig) -> Option<Self> {
+        if recall_config.use_provenance_recency {
+            Some(Self::Use)
+        } else {
+            None
         }
     }
 
@@ -124,12 +169,9 @@ fn unique_id_order(ids: &[String]) -> Vec<&str> {
         .collect()
 }
 
-/// Bump access_count and last_access for a list of IDs (called after every search).
-/// `fts_hits` are the IDs matched by the FTS channel (get recall_count incremented).
-/// `query` is the raw query string; its FNV-1a hash is stored in access_history and
-/// used to compute `query_diversity` (distinct queries that reached this memory).
-/// Applies a promotion gate: tier -> "consolidated" when recall_count >= 3,
-/// query_diversity >= 3, and (importance >= 0.8 OR query_diversity >= 3).
+/// Test-only thin wrapper over [`record_access_with_updates`] that drops the
+/// returned map. Read that function's doc for what the counters mean and, in
+/// particular, for what they do not observe.
 #[cfg(test)]
 pub(crate) fn record_access(
     conn: &Connection,
@@ -140,6 +182,33 @@ pub(crate) fn record_access(
     record_access_with_updates(conn, ids, fts_hits, query).map(|_| ())
 }
 
+/// Bump `access_count` and `last_access` for a list of IDs after a non-empty
+/// search when `SearchOptions::record_access` is enabled.
+/// `fts_hits` are the IDs matched by the FTS channel (get `recall_count` incremented).
+/// `query` is the raw query string; its FNV-1a hash is stored in `access_history` and
+/// used to compute `query_diversity` (distinct queries that reached this memory).
+/// Applies a promotion gate: tier -> "consolidated" when `recall_count >= 3`
+/// and `query_diversity >= 3`.
+///
+/// **This is the only production path that increments all three counters, and
+/// it has exactly one production caller: `search.rs`'s `hybrid_search`**
+/// (tachi#1459). `gc_tables` can later reconcile `query_diversity` downward
+/// from the search-written `access_history`; it does not add non-search use.
+/// So every counter it maintains observes the search path only; reads through
+/// path-listing routes do not increment them — `list_by_path`,
+/// `list_by_path_recent` and `list_memories_by_path_prefix` return rows without
+/// coming through here, so kanban, handoffs, briefing projections, the cards
+/// mirror and GC candidate scans can read a memory constantly without changing
+/// any counter below. `access_count = 0` means there is currently no retained
+/// access-count evidence; it does not prove that no search or other read ever
+/// returned the row. Every downstream predicate that treats zero as evidence
+/// of low value inherits that gap.
+///
+/// Two further narrowings inside the search path itself: `hybrid_search` skips
+/// this call entirely when `SearchOptions::record_access` is false (the
+/// internal similarity, auto-link, contradiction, auto-ingest and capture
+/// searches all set it so), and `recall_count` moves only for ids present in
+/// `fts_hits`.
 pub(crate) fn record_access_with_updates(
     conn: &Connection,
     ids: &[String],
@@ -274,6 +343,14 @@ pub(crate) fn record_access_with_updates(
         }
     }
 
+    // The tier-promotion gate. Both counters it reads observe the search path
+    // only; reads through path-listing routes do not increment them
+    // (tachi#1459), so this gate cannot promote on the strength of a memory
+    // that is heavily used but only ever reached by path listing — it can only
+    // ever under-promote, never over-promote, on that account. The promotion is
+    // also one-way here: nothing in this function demotes a row whose counters
+    // later fall back below the thresholds (`gc_tables`' reconciliation can
+    // lower `query_diversity` after the fact).
     for batch in existing_ids.chunks(IN_BATCH_SIZE) {
         let placeholders = numbered_placeholders(1, batch.len());
         let sql = format!(
@@ -461,6 +538,13 @@ const ACCESS_TIMES_MAX_PER_MEMORY: i64 = 256;
 /// true *going forward*: without it, a use event would silently raise the ACT-R
 /// floor at default config, i.e. the new signal would leak into the exact
 /// channel #1446 is repairing. The on arm is [`get_use_access_times`].
+///
+/// tachi#1459: the `display` rows this reads observe recorded search-path
+/// accesses only; reads through path-listing routes do not write them. An empty
+/// vector here means no retained `display` event exists, not that nothing ever
+/// read or returned the memory. The ACT-R floor this feeds is therefore silent
+/// about any memory whose only consumer is `list_by_path` / `list_by_path_recent` /
+/// `list_memories_by_path_prefix`.
 pub fn get_access_times(
     conn: &Connection,
     ids: &[String],
@@ -479,6 +563,13 @@ pub fn get_access_times(
 /// `search/ranking.rs` also takes the per-candidate **use count** from the
 /// length of these vectors (levers 2 and 4), so a candidate's use count is
 /// capped by [`ACCESS_TIMES_MAX_PER_MEMORY`] exactly like its ages are.
+///
+/// tachi#1459: this read has the complementary blind spot to
+/// [`get_access_times`], not the same one. Its rows come from
+/// [`record_memory_use`], whose only production caller is a save that cited an
+/// existing memory's id — so this observes the *save* path only, and a memory
+/// read through search or through a path-listing route without ever being cited
+/// stays absent here. Neither read observes path listing.
 pub fn get_use_access_times(
     conn: &Connection,
     ids: &[String],
