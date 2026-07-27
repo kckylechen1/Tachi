@@ -269,10 +269,8 @@ pub fn lifecycle_text_digest(text: &str) -> String {
 /// `valid_until` has no such wrapper, so here the fix has to be at the
 /// writer.
 ///
-/// Declared in this module rather than imported because `db::common` is a
-/// private module and `db`'s `now_utc_iso` re-export is `#[cfg(test)]`-gated
-/// (`db/mod.rs:163-164`), so `store::` cannot reach it. Same reason
-/// `store::enrichment.rs:25` carries its own copy.
+/// Declared in this module because lifecycle transitions also format
+/// caller-supplied times; `db::now_utc_iso` only renders the current time.
 fn lifecycle_iso(at: chrono::DateTime<chrono::Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
