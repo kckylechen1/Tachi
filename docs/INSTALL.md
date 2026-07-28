@@ -296,13 +296,14 @@ Restart `tachi serve` after changing these values.
 | `TACHI_RECALL_EVENTS_NOTES_*` | `0.35/0.25/0.15/0.25/true` | Override `/events`, `/notes` weights |
 | `TACHI_RECALL_EXPANDED_FTS_SCORE_FACTOR` | `0.78` | Score multiplier for expanded FTS queries |
 | `TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES` | `6` | Max FTS expansion variants |
-| `TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR` | `0` | Optional partial-term `OR` FTS fallback multiplier; `0` disables it |
+| `TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR` | `0.55` | Partial-term `OR` FTS fallback multiplier; `0` disables it |
 | `TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS` | `8` | Max query terms used by the optional `OR` FTS fallback |
 | `TACHI_RECALL_RAW_HALF_LIFE_DAYS` | `30` | Decay half-life for raw memories |
 | `TACHI_RECALL_CONSOLIDATED_HALF_LIFE_DAYS` | `60` | Decay half-life for consolidated memories |
 | `TACHI_RECALL_PATTERN_HALF_LIFE_DAYS` | `30000` | Decay half-life for pattern memories |
 | `TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST` | `12` | Boost for exact id-like query matches |
-| `TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR` | `0.40` | Provisional floor for candidates supported only by vector similarity; FTS, symbolic, and exact-id candidates bypass it |
+| `TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR` | `0.45` | Provisional floor for candidates without sufficient lexical evidence; exact-id and qualified lexical candidates bypass it |
+| `TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS` | `4` | Require two matched terms for rich-query OR fallback and weak-vector symbolic bypass; values below `2` disable |
 
 For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
 `SYMBOLIC`, `DECAY`, or `USE_RRF`; grouped defaults above are listed in that

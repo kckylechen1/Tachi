@@ -117,7 +117,11 @@ fn expanded_fts_queries(query: &str, max_queries: usize) -> Vec<String> {
     queries
 }
 
-fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> {
+fn fts_or_fallback_match_query(
+    query: &str,
+    max_terms: usize,
+    pair_min_query_terms: usize,
+) -> Option<String> {
     let max_terms = max_terms.max(1);
     let mut terms = Vec::new();
     let mut ascii = String::new();
@@ -191,6 +195,18 @@ fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> 
         .collect::<Vec<_>>();
     if query_terms.len() < 2 {
         return None;
+    }
+    if pair_min_query_terms >= 2 && query_terms.len() >= pair_min_query_terms {
+        let mut pairs = Vec::new();
+        for left in 0..query_terms.len() {
+            for right in left + 1..query_terms.len() {
+                pairs.push(format!(
+                    "({} AND {})",
+                    query_terms[left], query_terms[right]
+                ));
+            }
+        }
+        return Some(pairs.join(" OR "));
     }
     Some(query_terms.join(" OR "))
 }
@@ -297,9 +313,11 @@ pub(super) fn search_fts_with_expansion_config(
         }
     }
     if merged.is_empty() && recall_config.or_fallback_fts_score_factor > 0.0 {
-        if let Some(or_query) =
-            fts_or_fallback_match_query(query, recall_config.or_fallback_fts_max_terms)
-        {
+        if let Some(or_query) = fts_or_fallback_match_query(
+            query,
+            recall_config.or_fallback_fts_max_terms,
+            recall_config.or_fallback_fts_pair_min_query_terms,
+        ) {
             let fallback_start = sample.then(Instant::now);
             let fallback_hits = search_fts_raw_match(
                 conn,

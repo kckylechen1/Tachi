@@ -48,6 +48,7 @@ pub(super) fn rank_candidate_entries(
         as_of_utc,
     } = ranking;
     let symbolic_scores = symbolic_scores(query, &entries_map);
+    let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
     let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
     // Per #1097 D3: `get_superseded_ids` (ranking.rs:47) is one of two DB I/O
     // hot spots inside `rank_candidate_entries`. Time it on its own so a
@@ -80,13 +81,14 @@ pub(super) fn rank_candidate_entries(
                     _ => return false,
                 }
             }
-            if below_vector_only_similarity_floor(
+            if below_minimum_retrieval_evidence(
                 id,
                 vec_scores,
                 fts_scores,
                 &symbolic_scores,
                 exact_id,
                 recall_config(opts),
+                minimum_symbolic_coverage,
             ) {
                 return false;
             }
@@ -295,32 +297,62 @@ fn symbolic_scores(
         .collect()
 }
 
-/// A weak vector score alone is not recall evidence strong enough to display
-/// or reinforce. Filter it before access-history reads and every subsequent
-/// ranking boost, while preserving FTS, symbolic, and exact-id candidates.
-fn below_vector_only_similarity_floor(
+/// A weak vector score plus sparse lexical overlap is not recall evidence
+/// strong enough to display or reinforce. Filter it before access-history
+/// reads and every subsequent ranking boost, while preserving exact IDs,
+/// qualified FTS hits, strong vectors, and sufficient symbolic coverage.
+fn below_minimum_retrieval_evidence(
     id: &str,
     vec_scores: &HashMap<String, f64>,
     fts_scores: &HashMap<String, f64>,
     symbolic_scores: &HashMap<String, f64>,
     exact_id: Option<&str>,
     recall_config: &crate::RecallConfig,
+    minimum_symbolic_coverage: f64,
 ) -> bool {
     if exact_id == Some(id) {
         return false;
     }
-    let Some(vector) = vec_scores.get(id) else {
-        return false;
-    };
     let has_fts_evidence = fts_scores
         .get(id)
         .is_some_and(|score| score.is_finite() && *score > 0.0);
-    let has_symbolic_evidence = symbolic_scores
+    if has_fts_evidence {
+        return false;
+    }
+    let vector_is_strong = vec_scores.get(id).is_some_and(|score| {
+        score.is_finite() && *score >= recall_config.vector_only_similarity_floor
+    });
+    if vector_is_strong {
+        return false;
+    }
+    let symbolic = symbolic_scores
         .get(id)
-        .is_some_and(|score| score.is_finite() && *score > 0.0);
-    *vector < recall_config.vector_only_similarity_floor
-        && !has_fts_evidence
-        && !has_symbolic_evidence
+        .copied()
+        .filter(|score| score.is_finite())
+        .unwrap_or(0.0);
+    symbolic + f64::EPSILON < minimum_symbolic_coverage
+}
+
+fn minimum_symbolic_query_coverage(query: &str, recall_config: &crate::RecallConfig) -> f64 {
+    let query_term_count = crate::scorer::tokenize(query)
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let required_symbolic_matches = if recall_config.or_fallback_fts_pair_min_query_terms >= 2
+        && query_term_count >= recall_config.or_fallback_fts_pair_min_query_terms
+    {
+        2.0
+    } else {
+        1.0
+    };
+    // `symbolic_scores` uses the expansion-aware query, so recover its actual
+    // matched-token count with that same denominator. The raw count above is
+    // intentionally retained only for deciding whether this was a rich query.
+    let expanded_query_term_count = crate::scorer::tokenize(&symbolic_query_with_expansion(query))
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    required_symbolic_matches / expanded_query_term_count.max(1) as f64
 }
 
 fn apply_precision_boosts(
@@ -912,6 +944,7 @@ pub(super) mod attribution {
         } = ranking;
 
         let symbolic_scores = symbolic_scores(query, &entries_map);
+        let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
         let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
         let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec)?;
 
@@ -942,13 +975,14 @@ pub(super) mod attribution {
                         _ => return false,
                     }
                 }
-                if below_vector_only_similarity_floor(
+                if below_minimum_retrieval_evidence(
                     id,
                     vec_scores,
                     fts_scores,
                     &symbolic_scores,
                     exact_id,
                     recall_config(opts),
+                    minimum_symbolic_coverage,
                 ) {
                     return false;
                 }

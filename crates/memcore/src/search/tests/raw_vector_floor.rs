@@ -344,3 +344,77 @@ fn fts_symbolic_and_exact_id_evidence_bypass_vector_only_floor() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn rich_query_abstains_on_one_term_noise_but_keeps_multi_term_partial_recall() {
+    let mut conn = setup();
+    require_vec_table(&conn);
+
+    const DIM: usize = 1024;
+    let query_vec = vec![0.5_f32; DIM];
+    // L2 distance 1.16 -> converted similarity 0.42: above the old 0.40
+    // floor, below the calibrated rich-query weak-evidence floor.
+    let weak_doc_vec = vec![0.53625_f32; DIM];
+    insert_with_vector(
+        &mut conn,
+        "one-term-noise",
+        "alignment archive",
+        &[],
+        "pattern",
+        weak_doc_vec.clone(),
+    );
+    insert_with_vector(
+        &mut conn,
+        "multi-term-target",
+        "orbital telescope alignment handbook",
+        &[],
+        "pattern",
+        weak_doc_vec,
+    );
+
+    let opts = SearchOptions {
+        top_k: 5,
+        candidates_per_channel: 20,
+        vec_available: true,
+        query_vec: Some(query_vec),
+        record_access: true,
+        mmr_threshold: None,
+        recall_config: Some(RecallConfig {
+            raw_vector_similarity_floor: 0.0,
+            ..RecallConfig::default()
+        }),
+        ..Default::default()
+    };
+    let query = "orbital telescope mirror alignment calibration";
+    let (candidates, _) = collect_candidates(&conn, query, &opts, false, None, false).unwrap();
+    assert!(
+        candidates.fts_scores.contains_key("multi-term-target"),
+        "the qualified multi-term partial target must enter through OR fallback"
+    );
+    assert!(
+        !candidates.fts_scores.contains_key("one-term-noise"),
+        "the rich-query OR fallback itself must reject one-term noise"
+    );
+    let results = hybrid_search(&conn, query, &opts).unwrap();
+
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["multi-term-target"],
+        "a rich-query OR fallback needs two lexical matches; one generic token plus a weak vector must abstain"
+    );
+    let noise_counts: (i64, i64) = conn
+        .query_row(
+            "SELECT access_count, scored_count FROM memories WHERE id = 'one-term-noise'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        noise_counts,
+        (0, 0),
+        "abstained noise must be filtered before display/scored reinforcement"
+    );
+}

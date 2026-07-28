@@ -16,6 +16,10 @@ const DEFAULT_ID_LIKE_EXACT_MATCH_BOOST: f64 = 12.0;
 // adversarial corpus: 0 hit→miss, 1 miss→hit, 30 unchanged.
 const DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR: f64 = 0.55;
 const DEFAULT_OR_FALLBACK_FTS_MAX_TERMS: usize = 8;
+// Rich queries make a one-token OR fallback hit weak evidence. Once the
+// bounded fallback query reaches this many terms, require a matching pair.
+// Short queries preserve #708's one-token recovery behavior.
+const DEFAULT_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS: usize = 4;
 // Phase C lever (#708): lower k sharpens RRF so single-channel precision wins more often.
 const DEFAULT_RRF_K: f64 = 20.0;
 // Provisional #1242: raw-tier vector hits below this cosine-similarity floor are
@@ -24,7 +28,7 @@ const DEFAULT_RRF_K: f64 = 20.0;
 const DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR: f64 = 0.35;
 // Provisional tachi#1446/#1459: rows supported only by weak vector similarity
 // are withheld before ranking can read or reinforce their display history.
-const DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR: f64 = 0.40;
+const DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR: f64 = 0.45;
 // tachi#1446 lever 1. OFF ships the pre-#1446 behavior byte-for-byte: the
 // decay channel's age reference stays `last_access`, which the recall pipeline
 // writes for every row it returns. ON moves that reference to `last_use_at`.
@@ -46,6 +50,10 @@ pub struct RecallConfig {
     pub id_like_exact_match_boost: f64,
     pub or_fallback_fts_score_factor: f64,
     pub or_fallback_fts_max_terms: usize,
+    /// Query-term count at which OR fallback and weak-vector symbolic bypass
+    /// require at least two lexical matches. Values below 2 disable the pair
+    /// requirement.
+    pub or_fallback_fts_pair_min_query_terms: usize,
     /// Reciprocal Rank Fusion k (classic is 60). Lower values amplify top ranks.
     pub rrf_k: f64,
     /// Minimum vector similarity for raw-tier rows in the vector channel (provisional).
@@ -117,6 +125,7 @@ impl Default for RecallConfig {
             id_like_exact_match_boost: DEFAULT_ID_LIKE_EXACT_MATCH_BOOST,
             or_fallback_fts_score_factor: DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR,
             or_fallback_fts_max_terms: DEFAULT_OR_FALLBACK_FTS_MAX_TERMS,
+            or_fallback_fts_pair_min_query_terms: DEFAULT_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS,
             rrf_k: DEFAULT_RRF_K,
             raw_vector_similarity_floor: DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
             vector_only_similarity_floor: DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
@@ -226,6 +235,11 @@ impl RecallConfig {
             "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
             &mut self.or_fallback_fts_max_terms,
         );
+        apply_usize(
+            values,
+            "TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS",
+            &mut self.or_fallback_fts_pair_min_query_terms,
+        );
         apply_f64(values, "TACHI_RECALL_RRF_K", &mut self.rrf_k);
         apply_f64(
             values,
@@ -277,6 +291,8 @@ impl RecallConfig {
         )
         .clamp(0.0, 1.0);
         self.or_fallback_fts_max_terms = self.or_fallback_fts_max_terms.clamp(1, 32);
+        self.or_fallback_fts_pair_min_query_terms =
+            self.or_fallback_fts_pair_min_query_terms.clamp(0, 32);
         if !self.rrf_k.is_finite() || self.rrf_k < 1.0 {
             self.rrf_k = DEFAULT_RRF_K;
         }
@@ -527,16 +543,20 @@ mod tests {
             DEFAULT_OR_FALLBACK_FTS_MAX_TERMS
         );
         assert_eq!(
+            config.or_fallback_fts_pair_min_query_terms,
+            DEFAULT_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS
+        );
+        assert_eq!(
             config.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
         );
-        assert_eq!(config.vector_only_similarity_floor, 0.40);
+        assert_eq!(config.vector_only_similarity_floor, 0.45);
     }
 
     #[test]
     fn vector_only_similarity_floor_defaults_and_stays_in_unit_interval() {
         let default = RecallConfig::default();
-        assert_eq!(default.vector_only_similarity_floor, 0.40);
+        assert_eq!(default.vector_only_similarity_floor, 0.45);
 
         let below = RecallConfig::from_config_env_source(
             "TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=-0.1\n",
@@ -549,7 +569,7 @@ mod tests {
 
         let invalid =
             RecallConfig::from_config_env_source("TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=NaN\n");
-        assert_eq!(invalid.vector_only_similarity_floor, 0.40);
+        assert_eq!(invalid.vector_only_similarity_floor, 0.45);
     }
 
     /// tachi#1446. The knob must be inert unless a config source explicitly
@@ -596,6 +616,7 @@ mod tests {
             TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST=15
             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.22
             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
+            TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS=6
             TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR=0.28
             "#,
         );
@@ -611,6 +632,7 @@ mod tests {
         assert_eq!(config.id_like_exact_match_boost, 15.0);
         assert_eq!(config.or_fallback_fts_score_factor, 0.22);
         assert_eq!(config.or_fallback_fts_max_terms, 4);
+        assert_eq!(config.or_fallback_fts_pair_min_query_terms, 6);
         assert_eq!(config.raw_vector_similarity_floor, 0.28);
     }
 
@@ -656,6 +678,7 @@ mod tests {
             TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES=0
             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=NaN
             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=0
+            TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS=99
             TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR=NaN
             "#,
         );
@@ -676,6 +699,7 @@ mod tests {
             RecallConfig::default().or_fallback_fts_score_factor
         );
         assert_eq!(config.or_fallback_fts_max_terms, 1);
+        assert_eq!(config.or_fallback_fts_pair_min_query_terms, 32);
         assert_eq!(
             config.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
