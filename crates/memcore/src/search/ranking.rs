@@ -1159,6 +1159,8 @@ pub(super) mod attribution {
         pub(crate) label: &'static str,
         before: HashMap<String, f64>,
         after: HashMap<String, f64>,
+        before_ranks: HashMap<String, usize>,
+        after_ranks: HashMap<String, usize>,
     }
 
     impl BoostStep {
@@ -1182,6 +1184,34 @@ pub(super) mod attribution {
         pub(crate) fn hit(&self, id: &str) -> bool {
             self.multiplier_for(id)
                 .is_some_and(|m| (m - 1.0).abs() > 1e-9)
+        }
+
+        /// Candidate-query observations whose exact production rank changed
+        /// across this one boost step.
+        pub(crate) fn rank_changed_candidates(&self) -> usize {
+            self.before_ranks
+                .iter()
+                .filter(|(id, rank)| self.after_ranks.get(*id) != Some(*rank))
+                .count()
+        }
+
+        /// Pairwise order inversions introduced by this one boost step, using
+        /// the same score/timestamp/id total order as production ranking.
+        pub(crate) fn pairwise_rank_inversions(&self) -> usize {
+            let mut ids = self.before_ranks.keys().collect::<Vec<_>>();
+            ids.sort();
+            ids.iter()
+                .enumerate()
+                .flat_map(|(left_index, left)| {
+                    ids[left_index + 1..]
+                        .iter()
+                        .map(move |right| (*left, *right))
+                })
+                .filter(|(left, right)| {
+                    self.before_ranks[*left].cmp(&self.before_ranks[*right])
+                        != self.after_ranks[*left].cmp(&self.after_ranks[*right])
+                })
+                .count()
         }
     }
 
@@ -1299,21 +1329,55 @@ pub(super) mod attribution {
                 .collect()
         }
 
+        fn ranks(
+            scores: &HashMap<String, f64>,
+            entries: &HashMap<String, &MemoryEntry>,
+        ) -> HashMap<String, usize> {
+            let mut ranked = scores
+                .iter()
+                .map(|(id, score)| {
+                    let timestamp = entries
+                        .get(id)
+                        .map(|entry| crate::scorer::timestamp_epoch_millis(&entry.timestamp))
+                        .unwrap_or(i64::MIN);
+                    (id, *score, timestamp)
+                })
+                .collect::<Vec<_>>();
+            ranked.sort_by(|left, right| {
+                crate::scorer::cmp_recall_rank(
+                    (left.1, left.2, left.0),
+                    (right.1, right.2, right.0),
+                )
+            });
+            ranked
+                .into_iter()
+                .enumerate()
+                .map(|(index, (id, _, _))| (id.clone(), index + 1))
+                .collect()
+        }
+
+        fn step(
+            label: &'static str,
+            before: HashMap<String, f64>,
+            after: HashMap<String, f64>,
+            entries: &HashMap<String, &MemoryEntry>,
+        ) -> BoostStep {
+            BoostStep {
+                label,
+                before_ranks: ranks(&before, entries),
+                after_ranks: ranks(&after, entries),
+                before,
+                after,
+            }
+        }
+
         let before = snapshot(&scores);
         apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
-        steps.push(BoostStep {
-            label: "precision",
-            before,
-            after: snapshot(&scores),
-        });
+        steps.push(step("precision", before, snapshot(&scores), &entries_ref));
 
         let before = snapshot(&scores);
         apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "quality",
-            before,
-            after: snapshot(&scores),
-        });
+        steps.push(step("quality", before, snapshot(&scores), &entries_ref));
 
         let before = snapshot(&scores);
         apply_access_feedback(
@@ -1322,27 +1386,25 @@ pub(super) mod attribution {
             recall_config(opts),
             &mut scores,
         );
-        steps.push(BoostStep {
-            label: "access_feedback",
+        steps.push(step(
+            "access_feedback",
             before,
-            after: snapshot(&scores),
-        });
+            snapshot(&scores),
+            &entries_ref,
+        ));
 
         let before = snapshot(&scores);
         apply_tier_boosts(&entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "tier",
-            before,
-            after: snapshot(&scores),
-        });
+        steps.push(step("tier", before, snapshot(&scores), &entries_ref));
 
         let before = snapshot(&scores);
         apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
-        steps.push(BoostStep {
-            label: "entity_recency",
+        steps.push(step(
+            "entity_recency",
             before,
-            after: snapshot(&scores),
-        });
+            snapshot(&scores),
+            &entries_ref,
+        ));
 
         let before = snapshot(&scores);
         // Renamed on main when Phase 2 dissolved the research-path boost
@@ -1350,11 +1412,7 @@ pub(super) mod attribution {
         // The label moves with it: a report that still said
         // "decision_and_research" would name a boost this build does not apply.
         apply_decision_boost(query, &entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "decision",
-            before,
-            after: snapshot(&scores),
-        });
+        steps.push(step("decision", before, snapshot(&scores), &entries_ref));
 
         let before = snapshot(&scores);
         apply_lexical_overlap_boost(
@@ -1363,11 +1421,12 @@ pub(super) mod attribution {
             &entries_ref,
             &mut scores,
         );
-        steps.push(BoostStep {
-            label: "lexical_overlap",
+        steps.push(step(
+            "lexical_overlap",
             before,
-            after: snapshot(&scores),
-        });
+            snapshot(&scores),
+            &entries_ref,
+        ));
 
         let final_scores = snapshot(&scores);
 

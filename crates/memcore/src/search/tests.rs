@@ -23,6 +23,7 @@ mod ops_audit_corpus;
 mod p3_probe;
 mod phase_receipts;
 mod rank_attribution;
+mod rank_effect;
 mod raw_vector_floor;
 mod scored_count;
 mod supersession;

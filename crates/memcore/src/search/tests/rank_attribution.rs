@@ -45,7 +45,7 @@
 //! nothing else is printed to stdout (no `--nocapture` noise from other
 //! tests, since this is invoked as a single named test).
 
-use super::golden_corpus::{self, Slice};
+use super::golden_corpus;
 use super::ops_audit_corpus;
 use super::*;
 
@@ -196,14 +196,7 @@ fn rank_attribution_report() {
     let mut gconn = setup();
     golden_corpus::seed_corpus(&mut gconn);
     for spec in golden_corpus::QUERIES {
-        let opts = SearchOptions {
-            top_k: 40,
-            candidates_per_channel: 128,
-            record_access: false,
-            mmr_threshold: None,
-            path_prefix: (spec.slice == Slice::WikiScoped).then(|| "/wiki".to_string()),
-            ..Default::default()
-        };
+        let opts = golden_corpus::search_opts(spec);
         print_case(
             &gconn,
             "golden_corpus",
