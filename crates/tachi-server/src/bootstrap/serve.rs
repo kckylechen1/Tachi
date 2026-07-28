@@ -1015,6 +1015,24 @@ async fn start_server_transport(
 
 #[tokio::main]
 pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(Commands::RecallCoverage {
+        db,
+        top_k,
+        candidates_per_channel,
+        limit,
+    }) = cli.command.as_ref()
+    {
+        // This must remain before startup context, default DB resolution,
+        // migration handling, and proxy/daemon setup. The explicit --db route
+        // is a single in-process read-only MemCore operation.
+        return super::recall_coverage_cli::run_recall_coverage_command(
+            db,
+            *top_k,
+            *candidates_per_channel,
+            *limit,
+        );
+    }
+
     let ctx = initialize_startup_context(&cli)?;
     let global_db_path = resolve_global_db(&cli, &ctx).await?;
     let Some(hygiene) = run_startup_hygiene(&cli, &ctx, &global_db_path).await? else {
@@ -1064,6 +1082,31 @@ mod tests {
             gc_interval_secs: None,
             command: Some(Commands::Serve),
         }
+    }
+
+    #[test]
+    fn recall_coverage_cli_short_circuits_default_db_startup() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let coverage_db = dir.path().join("coverage.db");
+        drop(
+            MemoryStore::open(coverage_db.to_str().expect("utf8 coverage path"))
+                .expect("create coverage DB"),
+        );
+        let default_db = dir.path().join("must-not-open-default.db");
+        let mut cli = startup_test_cli();
+        cli.global_db = Some(default_db.clone());
+        cli.command = Some(Commands::RecallCoverage {
+            db: coverage_db,
+            top_k: None,
+            candidates_per_channel: None,
+            limit: None,
+        });
+
+        tokio_main(cli).expect("recall coverage must run through the early read-only route");
+        assert!(
+            !default_db.exists(),
+            "recall coverage must not resolve or create a default database"
+        );
     }
 
     fn startup_test_context(root: &Path, app_home: &Path) -> StartupContext {

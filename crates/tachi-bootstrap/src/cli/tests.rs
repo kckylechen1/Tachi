@@ -2,6 +2,49 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn recall_coverage_cli_requires_db_and_exposes_explicit_options() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "recall-coverage",
+        "--db",
+        "/tmp/coverage.db",
+        "--top-k",
+        "7",
+        "--candidates-per-channel",
+        "13",
+        "--limit",
+        "3",
+    ])
+    .expect("recall-coverage invocation should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::RecallCoverage {
+            db,
+            top_k: Some(7),
+            candidates_per_channel: Some(13),
+            limit: Some(3),
+        }) if db == std::path::Path::new("/tmp/coverage.db")
+    ));
+
+    let missing_db = Cli::try_parse_from(["tachi", "recall-coverage"])
+        .expect_err("recall-coverage must not fall back to a default store");
+    assert_eq!(
+        missing_db.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+
+    let mut command = Cli::command();
+    let help = command
+        .find_subcommand_mut("recall-coverage")
+        .expect("recall-coverage subcommand")
+        .render_long_help()
+        .to_string();
+    for flag in ["--db", "--top-k", "--candidates-per-channel", "--limit"] {
+        assert!(help.contains(flag), "help must advertise {flag}");
+    }
+}
+
+#[test]
 fn vault_exec_cli_parses_require_and_trailing_command() {
     let parsed = Cli::try_parse_from([
         "tachi",

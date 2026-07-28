@@ -144,6 +144,15 @@ pub(super) fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
     recall_config(opts).weights_for_path(path)
 }
 
+/// Process-wide override for intentionally including superseded rows in search.
+///
+/// Keep this environment read here: callers that need to preserve a stricter
+/// search contract can ask whether the override is active without re-parsing
+/// its truthy vocabulary.
+pub(crate) fn include_superseded_env_override_active() -> bool {
+    env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED")
+}
+
 // ---------------------------------------------------------------------------
 // tachi#1097 PERF-T3 S1 — Phase-attribution receipts.
 //
@@ -452,7 +461,7 @@ fn hybrid_search_inner(
         .map(crate::db::normalize_utc_iso)
         .transpose()?;
     let include_superseded = opts.include_superseded
-        || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED")
+        || include_superseded_env_override_active()
         || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
 
     let (candidates, candidates_receipt) = candidates::collect_candidates(
@@ -623,7 +632,7 @@ fn hybrid_search_with_attribution(
         .map(crate::db::normalize_utc_iso)
         .transpose()?;
     let include_superseded = opts.include_superseded
-        || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED")
+        || include_superseded_env_override_active()
         || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
 
     let (candidates, _receipt) = candidates::collect_candidates(

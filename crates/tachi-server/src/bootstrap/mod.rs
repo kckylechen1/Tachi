@@ -17,6 +17,7 @@ mod injection_surface_cli;
 mod manifest_cli;
 mod migrate_cli;
 mod poke_cli;
+mod recall_coverage_cli;
 mod rescue_cli;
 mod serve;
 mod setup;
