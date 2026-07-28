@@ -16,6 +16,7 @@ mod expansion;
 mod exposure_loop;
 mod golden_corpus;
 mod graph;
+mod impression_benchmark;
 mod impressions;
 mod noise;
 mod ops_audit_corpus;
