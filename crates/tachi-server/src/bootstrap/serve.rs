@@ -1015,21 +1015,17 @@ async fn start_server_transport(
 
 #[tokio::main]
 pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(Commands::RecallCoverage {
-        db,
-        top_k,
-        candidates_per_channel,
-        limit,
-    }) = cli.command.as_ref()
-    {
+    if let Some(Commands::RecallCoverage(args)) = cli.command.as_ref() {
         // This must remain before startup context, default DB resolution,
         // migration handling, and proxy/daemon setup. The explicit --db route
         // is a single in-process read-only MemCore operation.
         return super::recall_coverage_cli::run_recall_coverage_command(
-            db,
-            *top_k,
-            *candidates_per_channel,
-            *limit,
+            &args.db,
+            args.top_k,
+            args.candidates_per_channel,
+            args.limit,
+            args.equivalence_file.as_deref(),
+            args.human,
         );
     }
 
@@ -1095,12 +1091,16 @@ mod tests {
         let default_db = dir.path().join("must-not-open-default.db");
         let mut cli = startup_test_cli();
         cli.global_db = Some(default_db.clone());
-        cli.command = Some(Commands::RecallCoverage {
-            db: coverage_db,
-            top_k: None,
-            candidates_per_channel: None,
-            limit: None,
-        });
+        cli.command = Some(Commands::RecallCoverage(Box::new(
+            tachi_bootstrap::cli::RecallCoverageArgs {
+                db: coverage_db,
+                top_k: None,
+                candidates_per_channel: None,
+                limit: None,
+                equivalence_file: None,
+                human: false,
+            },
+        )));
 
         tokio_main(cli).expect("recall coverage must run through the early read-only route");
         assert!(

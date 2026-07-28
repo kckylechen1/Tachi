@@ -4,20 +4,23 @@
 //! hybrid-search kernel as normal recall, but keeps `record_access` false so
 //! measurement cannot create the search evidence it is trying to inspect.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    is_namespace_search_noise, path_in_namespace, MemoryEntry, MemoryError, MemoryStore,
-    SearchOptions,
+    is_namespace_search_noise, path_in_namespace, CandidateLegEvidence, MemoryEntry, MemoryError,
+    MemoryStore, SearchOptions,
 };
 
 /// Default result width for the offline recall-coverage action.
 pub const DEFAULT_RECALL_COVERAGE_TOP_K: usize = 6;
 /// Default candidate width for each hybrid-search channel in the offline action.
 pub const DEFAULT_RECALL_COVERAGE_CANDIDATES_PER_CHANNEL: usize = 20;
+/// Versioned schema accepted by the optional reviewed-equivalence corpus.
+pub const RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION: &str =
+    "tachi.recall_coverage.reviewed_equivalence.v1";
 
 const PATH_LIST_ONLY_NAMESPACES: [&str; 5] = [
     "/guide",
@@ -63,6 +66,56 @@ impl RecallCoverageOptions {
             ));
         }
         Ok(())
+    }
+}
+
+/// One reviewed equivalence set supplied by an audited offline corpus.
+///
+/// IDs are the only memory data carried here. `evidence_source` names the
+/// review artifact or receipt that authorized the equivalence; it must not
+/// contain memory content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecallCoverageEquivalenceSet {
+    pub canonical_id: String,
+    pub equivalent_ids: Vec<String>,
+    pub evidence_source: String,
+}
+
+/// Versioned file shape for `tachi recall-coverage --equivalence-file`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecallCoverageEquivalenceCorpus {
+    pub schema_version: String,
+    /// Optional reviewed expected-row lane. These rows are probed independently
+    /// of the legacy active self-query population, so historical superseded IDs
+    /// can be evaluated without changing legacy exact totals.
+    #[serde(default)]
+    pub expected_ids: Vec<String>,
+    pub equivalences: Vec<RecallCoverageEquivalenceSet>,
+}
+
+impl RecallCoverageEquivalenceCorpus {
+    pub fn validate(&self) -> Result<(), MemoryError> {
+        if self.schema_version != RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION {
+            return Err(MemoryError::InvalidArg(format!(
+                "recall coverage equivalence invariant: schema_version must be {RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION}, got {}",
+                self.schema_version
+            )));
+        }
+        let mut expected_ids = HashSet::new();
+        for expected_id in &self.expected_ids {
+            if expected_id.trim().is_empty() {
+                return Err(MemoryError::InvalidArg(
+                    "recall coverage expected-id invariant: expected_id must be non-empty"
+                        .to_string(),
+                ));
+            }
+            if !expected_ids.insert(expected_id) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "recall coverage expected-id invariant: duplicate expected_id {expected_id}"
+                )));
+            }
+        }
+        validate_reviewed_equivalences(&self.equivalences).map(|_| ())
     }
 }
 
@@ -147,7 +200,58 @@ pub enum RecallCoverageOutcome {
     VectorUnavailable,
 }
 
-/// Content-free result detail for one selected eligible row.
+/// Auditable authority used for a canonical fact/lineage verdict.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallCoverageEvidenceKind {
+    ExactIdentity,
+    ReviewedEquivalence,
+    StoredSupersessionLineage,
+}
+
+/// Content-free evidence for resolving one expected row to one canonical row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecallCoverageFactEvidence {
+    pub kind: RecallCoverageEvidenceKind,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage: Vec<String>,
+}
+
+/// Aggregate Recall@K and MRR for one independently reported identity metric.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecallCoverageMetrics {
+    pub denominator: usize,
+    pub hits: usize,
+    pub recall_at_k: f64,
+    pub mrr: f64,
+}
+
+impl RecallCoverageMetrics {
+    fn from_hit_ranks(denominator: usize, hit_ranks: impl Iterator<Item = usize>) -> Self {
+        let (hits, reciprocal_rank_sum) = hit_ranks.fold((0, 0.0), |(hits, sum), rank| {
+            (hits + 1, sum + 1.0 / rank as f64)
+        });
+        let recall_at_k = if denominator == 0 {
+            0.0
+        } else {
+            hits as f64 / denominator as f64
+        };
+        let mrr = if denominator == 0 {
+            0.0
+        } else {
+            reciprocal_rank_sum / denominator as f64
+        };
+        Self {
+            denominator,
+            hits,
+            recall_at_k,
+            mrr,
+        }
+    }
+}
+
+/// Content-free result detail for one legacy-selected or reviewed expected row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecallCoverageTarget {
     pub id: String,
@@ -161,10 +265,22 @@ pub struct RecallCoverageTarget {
     /// provenance. This can be `Some` while `outcome` is `NotSurfaced` when the
     /// target entered the merged candidate union through lexical/symbolic only.
     pub rank: Option<usize>,
+    /// Candidate-leg membership for the exact target when hybrid search ran.
+    pub exact_candidate_legs: Option<CandidateLegEvidence>,
+    /// Independent canonical fact/lineage result. This never mutates `outcome`.
+    pub canonical_fact_outcome: RecallCoverageOutcome,
+    /// Canonical row selected only through exact identity, reviewed corpus data,
+    /// or stored `superseded_by` lineage.
+    pub canonical_id: Option<String>,
+    /// Canonical row actually present in final hybrid top-k, if any.
+    pub matched_canonical_id: Option<String>,
+    pub canonical_rank: Option<usize>,
+    pub canonical_candidate_legs: Option<CandidateLegEvidence>,
+    pub fact_evidence: RecallCoverageFactEvidence,
 }
 
 /// Serializable report for an offline self-query coverage run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RecallCoverageReport {
     pub partition: RecallCoveragePartitionCounts,
     pub partition_invariant_holds: bool,
@@ -180,7 +296,25 @@ pub struct RecallCoverageReport {
     pub unprobeable: usize,
     pub vector_unavailable: usize,
     pub eligible_prior_scored_count: RecallCoveragePriorScoredCountSplit,
+    pub exact_metrics: RecallCoverageMetrics,
+    pub canonical_fact_metrics: RecallCoverageMetrics,
     pub targets: Vec<RecallCoverageTarget>,
+    /// Optional reviewed expected-ID lane, independent of legacy population
+    /// selection and exact totals.
+    pub expected_id_lane: RecallCoverageExpectedIdLane,
+}
+
+/// Metrics and cases for explicitly reviewed expected IDs, including archived
+/// or superseded historical rows that the legacy self-query population excludes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecallCoverageExpectedIdLane {
+    pub requested: usize,
+    pub probed: usize,
+    pub unprobeable: usize,
+    pub vector_unavailable: usize,
+    pub exact_metrics: RecallCoverageMetrics,
+    pub canonical_fact_metrics: RecallCoverageMetrics,
+    pub cases: Vec<RecallCoverageTarget>,
 }
 
 /// True only for an exact namespace path or one of its descendants.
@@ -194,10 +328,158 @@ pub fn is_recall_coverage_path_list_only(path: &str) -> bool {
         .any(|namespace| path_in_namespace(path, namespace))
 }
 
-fn superseded_ids(conn: &Connection) -> Result<HashSet<String>, MemoryError> {
-    let mut statement = conn.prepare("SELECT id FROM memories WHERE superseded_by IS NOT NULL")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
+fn supersession_links(conn: &Connection) -> Result<HashMap<String, Option<String>>, MemoryError> {
+    let mut statement = conn.prepare("SELECT id, superseded_by FROM memories")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(Into::into)
+}
+
+struct CanonicalResolution {
+    canonical_id: String,
+    evidence: RecallCoverageFactEvidence,
+}
+
+fn stored_lineage_evidence_from_links(
+    links: &HashMap<String, Option<String>>,
+    target_id: &str,
+) -> Result<Option<CanonicalResolution>, MemoryError> {
+    let mut current = target_id.to_string();
+    let mut lineage = vec![current.clone()];
+    let mut seen = HashSet::from([current.clone()]);
+
+    while let Some(Some(next)) = links.get(&current) {
+        if !seen.insert(next.clone()) {
+            lineage.push(next.clone());
+            return Err(MemoryError::InvalidArg(format!(
+                "recall coverage lineage invariant: superseded_by cycle while resolving target {target_id}: {}",
+                lineage.join(" -> ")
+            )));
+        }
+        current = next.clone();
+        lineage.push(current.clone());
+    }
+
+    if lineage.len() == 1 {
+        return Ok(None);
+    }
+    Ok(Some(CanonicalResolution {
+        canonical_id: current,
+        evidence: RecallCoverageFactEvidence {
+            kind: RecallCoverageEvidenceKind::StoredSupersessionLineage,
+            source: "memories.superseded_by".to_string(),
+            lineage,
+        },
+    }))
+}
+
+fn validate_reviewed_equivalences(
+    equivalences: &[RecallCoverageEquivalenceSet],
+) -> Result<HashMap<&str, &RecallCoverageEquivalenceSet>, MemoryError> {
+    let mut by_equivalent_id = HashMap::new();
+    let mut set_owner_by_id: HashMap<&str, &str> = HashMap::new();
+    for set in equivalences {
+        if set.canonical_id.trim().is_empty() {
+            return Err(MemoryError::InvalidArg(
+                "recall coverage equivalence invariant: canonical_id must be non-empty".to_string(),
+            ));
+        }
+        if set.evidence_source.trim().is_empty() {
+            return Err(MemoryError::InvalidArg(format!(
+                "recall coverage equivalence invariant: evidence_source must be non-empty for canonical_id {}",
+                set.canonical_id
+            )));
+        }
+        if !set.evidence_source.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '.' | '_' | ':' | '/' | '#' | '-' | '@')
+        }) {
+            return Err(MemoryError::InvalidArg(format!(
+                "recall coverage equivalence invariant: evidence_source must be a content-free reference identifier for canonical_id {}",
+                set.canonical_id
+            )));
+        }
+        if set.equivalent_ids.is_empty() {
+            return Err(MemoryError::InvalidArg(format!(
+                "recall coverage equivalence invariant: equivalent_ids must be non-empty for canonical_id {}",
+                set.canonical_id
+            )));
+        }
+        if let Some(previous_owner) =
+            set_owner_by_id.insert(set.canonical_id.as_str(), set.canonical_id.as_str())
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "recall coverage equivalence invariant: row id {} overlaps canonical sets {} and {}",
+                set.canonical_id, previous_owner, set.canonical_id
+            )));
+        }
+        let mut within_set = HashSet::new();
+        for equivalent_id in &set.equivalent_ids {
+            if equivalent_id.trim().is_empty() {
+                return Err(MemoryError::InvalidArg(format!(
+                    "recall coverage equivalence invariant: equivalent_id must be non-empty for canonical_id {}",
+                    set.canonical_id
+                )));
+            }
+            if equivalent_id == &set.canonical_id {
+                return Err(MemoryError::InvalidArg(format!(
+                    "recall coverage equivalence invariant: canonical_id {} must not be repeated in equivalent_ids",
+                    set.canonical_id
+                )));
+            }
+            if !within_set.insert(equivalent_id.as_str()) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "recall coverage equivalence invariant: duplicate equivalent_id {equivalent_id} for canonical_id {}",
+                    set.canonical_id
+                )));
+            }
+            if let Some(previous_owner) =
+                set_owner_by_id.insert(equivalent_id.as_str(), set.canonical_id.as_str())
+            {
+                return Err(MemoryError::InvalidArg(format!(
+                    "recall coverage equivalence invariant: row id {equivalent_id} overlaps canonical sets {previous_owner} and {}",
+                    set.canonical_id
+                )));
+            }
+            if let Some(previous) = by_equivalent_id.insert(equivalent_id.as_str(), set) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "recall coverage equivalence invariant: equivalent_id {equivalent_id} maps to both {} and {}",
+                    previous.canonical_id, set.canonical_id
+                )));
+            }
+        }
+    }
+    Ok(by_equivalent_id)
+}
+
+fn canonical_resolution(
+    links: &HashMap<String, Option<String>>,
+    reviewed: &HashMap<&str, &RecallCoverageEquivalenceSet>,
+    target_id: &str,
+) -> Result<CanonicalResolution, MemoryError> {
+    if let Some(lineage) = stored_lineage_evidence_from_links(links, target_id)? {
+        return Ok(lineage);
+    }
+    if let Some(set) = reviewed.get(target_id) {
+        return Ok(CanonicalResolution {
+            canonical_id: set.canonical_id.clone(),
+            evidence: RecallCoverageFactEvidence {
+                kind: RecallCoverageEvidenceKind::ReviewedEquivalence,
+                source: set.evidence_source.clone(),
+                lineage: vec![target_id.to_string(), set.canonical_id.clone()],
+            },
+        });
+    }
+    Ok(CanonicalResolution {
+        canonical_id: target_id.to_string(),
+        evidence: RecallCoverageFactEvidence {
+            kind: RecallCoverageEvidenceKind::ExactIdentity,
+            source: "target.id".to_string(),
+            lineage: Vec::new(),
+        },
+    })
 }
 
 fn is_non_empty(value: &str) -> bool {
@@ -238,6 +520,202 @@ fn sort_eligible(entries: &mut [MemoryEntry]) {
     });
 }
 
+fn vector_qualified_outcome(
+    candidate_legs: Option<CandidateLegEvidence>,
+    rank: Option<usize>,
+) -> RecallCoverageOutcome {
+    if candidate_legs.is_some_and(|legs| legs.vector) && rank.is_some() {
+        RecallCoverageOutcome::Surfaced
+    } else {
+        RecallCoverageOutcome::NotSurfaced
+    }
+}
+
+fn probe_entry(
+    conn: &Connection,
+    store: &MemoryStore,
+    options: &RecallCoverageOptions,
+    entry: &MemoryEntry,
+    planned_canonical: CanonicalResolution,
+) -> Result<RecallCoverageTarget, MemoryError> {
+    let stored_vector_present = entry.vector.is_some();
+    let Some((query_source, query)) = deterministic_self_query(entry) else {
+        return Ok(RecallCoverageTarget {
+            id: entry.id.clone(),
+            path: entry.path.clone(),
+            category: entry.category.clone(),
+            prior_scored_count: entry.scored_count,
+            query_source: None,
+            stored_vector_present,
+            outcome: RecallCoverageOutcome::Unprobeable,
+            rank: None,
+            exact_candidate_legs: None,
+            canonical_fact_outcome: RecallCoverageOutcome::Unprobeable,
+            canonical_id: Some(planned_canonical.canonical_id),
+            matched_canonical_id: None,
+            canonical_rank: None,
+            canonical_candidate_legs: None,
+            fact_evidence: planned_canonical.evidence,
+        });
+    };
+
+    if !store.vec_available || entry.vector.is_none() {
+        return Ok(RecallCoverageTarget {
+            id: entry.id.clone(),
+            path: entry.path.clone(),
+            category: entry.category.clone(),
+            prior_scored_count: entry.scored_count,
+            query_source: Some(query_source),
+            stored_vector_present,
+            outcome: RecallCoverageOutcome::VectorUnavailable,
+            rank: None,
+            exact_candidate_legs: None,
+            canonical_fact_outcome: RecallCoverageOutcome::VectorUnavailable,
+            canonical_id: Some(planned_canonical.canonical_id),
+            matched_canonical_id: None,
+            canonical_rank: None,
+            canonical_candidate_legs: None,
+            fact_evidence: planned_canonical.evidence,
+        });
+    }
+
+    let search_options = SearchOptions {
+        top_k: options.top_k,
+        candidates_per_channel: options.candidates_per_channel,
+        path_prefix: None,
+        query_vec: entry.vector.clone(),
+        vec_available: store.vec_available,
+        record_access: false,
+        include_archived: false,
+        include_superseded: false,
+        graph_expand_hops: 0,
+        graph_relation_filter: None,
+        ..Default::default()
+    };
+    let mut observed_ids = vec![entry.id.clone()];
+    if planned_canonical.canonical_id != entry.id {
+        observed_ids.push(planned_canonical.canonical_id.clone());
+    }
+    let (results, candidate_legs) = crate::search::hybrid_search_with_candidate_leg_evidence(
+        conn,
+        &query,
+        &search_options,
+        &observed_ids,
+    )?;
+    let rank = results
+        .iter()
+        .position(|result| result.entry.id == entry.id)
+        .map(|index| index + 1);
+    let exact_candidate_legs = candidate_legs.get(&entry.id).copied();
+    let outcome = vector_qualified_outcome(exact_candidate_legs, rank);
+    let canonical = if outcome == RecallCoverageOutcome::Surfaced {
+        CanonicalResolution {
+            canonical_id: entry.id.clone(),
+            evidence: RecallCoverageFactEvidence {
+                kind: RecallCoverageEvidenceKind::ExactIdentity,
+                source: "target.id".to_string(),
+                lineage: Vec::new(),
+            },
+        }
+    } else {
+        planned_canonical
+    };
+    let canonical_rank = results
+        .iter()
+        .position(|result| result.entry.id == canonical.canonical_id)
+        .map(|index| index + 1);
+    let canonical_candidate_legs = candidate_legs.get(&canonical.canonical_id).copied();
+    let canonical_fact_outcome = vector_qualified_outcome(canonical_candidate_legs, canonical_rank);
+
+    Ok(RecallCoverageTarget {
+        id: entry.id.clone(),
+        path: entry.path.clone(),
+        category: entry.category.clone(),
+        prior_scored_count: entry.scored_count,
+        query_source: Some(query_source),
+        stored_vector_present,
+        outcome,
+        rank,
+        exact_candidate_legs,
+        canonical_fact_outcome,
+        matched_canonical_id: canonical_rank.map(|_| canonical.canonical_id.clone()),
+        canonical_id: Some(canonical.canonical_id),
+        canonical_rank,
+        canonical_candidate_legs,
+        fact_evidence: canonical.evidence,
+    })
+}
+
+fn run_expected_id_lane(
+    conn: &Connection,
+    store: &MemoryStore,
+    options: &RecallCoverageOptions,
+    expected_ids: &[String],
+    supersession_links: &HashMap<String, Option<String>>,
+    reviewed_equivalences: &HashMap<&str, &RecallCoverageEquivalenceSet>,
+) -> Result<RecallCoverageExpectedIdLane, MemoryError> {
+    if expected_ids.is_empty() {
+        return Ok(RecallCoverageExpectedIdLane::default());
+    }
+
+    let mut ordered_ids = expected_ids.to_vec();
+    ordered_ids.sort();
+    let hydrated = crate::db::fetch_by_ids(conn, &ordered_ids, true)?;
+    let mut cases = Vec::with_capacity(ordered_ids.len());
+    for expected_id in &ordered_ids {
+        let entry = hydrated.get(expected_id).ok_or_else(|| {
+            MemoryError::InvalidArg(format!(
+                "recall coverage expected-id invariant: reviewed expected row is absent from the inspected database: {expected_id}"
+            ))
+        })?;
+        let planned_canonical =
+            canonical_resolution(supersession_links, reviewed_equivalences, expected_id)?;
+        cases.push(probe_entry(conn, store, options, entry, planned_canonical)?);
+    }
+
+    let probed = cases
+        .iter()
+        .filter(|case| {
+            matches!(
+                case.outcome,
+                RecallCoverageOutcome::Surfaced | RecallCoverageOutcome::NotSurfaced
+            )
+        })
+        .count();
+    let unprobeable = cases
+        .iter()
+        .filter(|case| case.outcome == RecallCoverageOutcome::Unprobeable)
+        .count();
+    let vector_unavailable = cases
+        .iter()
+        .filter(|case| case.outcome == RecallCoverageOutcome::VectorUnavailable)
+        .count();
+    let exact_metrics = RecallCoverageMetrics::from_hit_ranks(
+        probed,
+        cases
+            .iter()
+            .filter(|case| case.outcome == RecallCoverageOutcome::Surfaced)
+            .filter_map(|case| case.rank),
+    );
+    let canonical_fact_metrics = RecallCoverageMetrics::from_hit_ranks(
+        probed,
+        cases
+            .iter()
+            .filter(|case| case.canonical_fact_outcome == RecallCoverageOutcome::Surfaced)
+            .filter_map(|case| case.canonical_rank),
+    );
+
+    Ok(RecallCoverageExpectedIdLane {
+        requested: ordered_ids.len(),
+        probed,
+        unprobeable,
+        vector_unavailable,
+        exact_metrics,
+        canonical_fact_metrics,
+        cases,
+    })
+}
+
 /// Measure whether every selected never-search-surfaced row can retrieve itself.
 ///
 /// The whole operation runs inside one read transaction. It uses the existing
@@ -249,7 +727,40 @@ pub fn run_recall_coverage_probe(
     store: &MemoryStore,
     options: RecallCoverageOptions,
 ) -> Result<RecallCoverageReport, MemoryError> {
+    run_recall_coverage_probe_internal(store, options, &[], &[])
+}
+
+/// Run the offline probe with optional, explicitly reviewed equivalence sets.
+///
+/// The equivalence sets can only affect the separate canonical fact/lineage
+/// verdict. Exact target selection, exact outcome accounting, and exact ranks
+/// remain on the original path.
+pub fn run_recall_coverage_probe_with_equivalences(
+    store: &MemoryStore,
+    options: RecallCoverageOptions,
+    equivalences: &[RecallCoverageEquivalenceSet],
+) -> Result<RecallCoverageReport, MemoryError> {
+    run_recall_coverage_probe_internal(store, options, equivalences, &[])
+}
+
+/// Run both the legacy self-query lane and an independent reviewed expected-ID lane.
+pub fn run_recall_coverage_probe_with_corpus(
+    store: &MemoryStore,
+    options: RecallCoverageOptions,
+    corpus: &RecallCoverageEquivalenceCorpus,
+) -> Result<RecallCoverageReport, MemoryError> {
+    corpus.validate()?;
+    run_recall_coverage_probe_internal(store, options, &corpus.equivalences, &corpus.expected_ids)
+}
+
+fn run_recall_coverage_probe_internal(
+    store: &MemoryStore,
+    options: RecallCoverageOptions,
+    equivalences: &[RecallCoverageEquivalenceSet],
+    expected_ids: &[String],
+) -> Result<RecallCoverageReport, MemoryError> {
     options.validate()?;
+    let reviewed_equivalences = validate_reviewed_equivalences(equivalences)?;
     validate_recall_coverage_search_invariant(
         crate::search::include_superseded_env_override_active(),
     )?;
@@ -259,7 +770,7 @@ pub fn run_recall_coverage_probe(
     // options below set `record_access` false.
     let transaction = store.connection().unchecked_transaction()?;
     let all_entries = crate::db::get_all(&transaction, i64::MAX as usize, true)?;
-    let superseded = superseded_ids(&transaction)?;
+    let supersession_links = supersession_links(&transaction)?;
 
     let mut partition = RecallCoveragePartitionCounts {
         total_rows: all_entries.len(),
@@ -269,7 +780,10 @@ pub fn run_recall_coverage_probe(
     for entry in all_entries {
         if entry.archived {
             partition.archived += 1;
-        } else if superseded.contains(&entry.id) {
+        } else if supersession_links
+            .get(&entry.id)
+            .is_some_and(Option::is_some)
+        {
             partition.superseded += 1;
         } else if is_namespace_search_noise(&entry, None) {
             partition.search_noise += 1;
@@ -314,83 +828,22 @@ pub fn run_recall_coverage_probe(
                 listed_entry.id
             ))
         })?;
-        let stored_vector_present = entry.vector.is_some();
-        let Some((query_source, query)) = deterministic_self_query(entry) else {
-            unprobeable += 1;
-            targets.push(RecallCoverageTarget {
-                id: entry.id.clone(),
-                path: entry.path.clone(),
-                category: entry.category.clone(),
-                prior_scored_count: entry.scored_count,
-                query_source: None,
-                stored_vector_present,
-                outcome: RecallCoverageOutcome::Unprobeable,
-                rank: None,
-            });
-            continue;
-        };
-
-        // Construct the textual query before checking vector availability so a
-        // content-free target stays Unprobeable even if its vector leg is also
-        // unavailable. A query-bearing target without a usable vector is not
-        // lexical-only coverage evidence and must not enter hybrid_search.
-        if !store.vec_available || entry.vector.is_none() {
-            vector_unavailable += 1;
-            targets.push(RecallCoverageTarget {
-                id: entry.id.clone(),
-                path: entry.path.clone(),
-                category: entry.category.clone(),
-                prior_scored_count: entry.scored_count,
-                query_source: Some(query_source),
-                stored_vector_present,
-                outcome: RecallCoverageOutcome::VectorUnavailable,
-                rank: None,
-            });
-            continue;
+        let planned_canonical =
+            canonical_resolution(&supersession_links, &reviewed_equivalences, &entry.id)?;
+        let target = probe_entry(&transaction, store, &options, entry, planned_canonical)?;
+        match target.outcome {
+            RecallCoverageOutcome::Surfaced => {
+                probed += 1;
+                surfaced += 1;
+            }
+            RecallCoverageOutcome::NotSurfaced => {
+                probed += 1;
+                not_surfaced += 1;
+            }
+            RecallCoverageOutcome::Unprobeable => unprobeable += 1,
+            RecallCoverageOutcome::VectorUnavailable => vector_unavailable += 1,
         }
-
-        let search_options = SearchOptions {
-            top_k: options.top_k,
-            candidates_per_channel: options.candidates_per_channel,
-            path_prefix: None,
-            query_vec: entry.vector.clone(),
-            vec_available: store.vec_available,
-            record_access: false,
-            include_archived: false,
-            include_superseded: false,
-            graph_expand_hops: 0,
-            graph_relation_filter: None,
-            ..Default::default()
-        };
-        let (results, target_in_vector_candidates) =
-            crate::search::hybrid_search_with_vector_target_presence(
-                &transaction,
-                &query,
-                &search_options,
-                &entry.id,
-            )?;
-        probed += 1;
-        let rank = results
-            .iter()
-            .position(|result| result.entry.id == entry.id)
-            .map(|index| index + 1);
-        let outcome = if target_in_vector_candidates && rank.is_some() {
-            surfaced += 1;
-            RecallCoverageOutcome::Surfaced
-        } else {
-            not_surfaced += 1;
-            RecallCoverageOutcome::NotSurfaced
-        };
-        targets.push(RecallCoverageTarget {
-            id: entry.id.clone(),
-            path: entry.path.clone(),
-            category: entry.category.clone(),
-            prior_scored_count: entry.scored_count,
-            query_source: Some(query_source),
-            stored_vector_present,
-            outcome,
-            rank,
-        });
+        targets.push(target);
     }
 
     if probed != surfaced + not_surfaced
@@ -400,6 +853,29 @@ pub fn run_recall_coverage_probe(
             "recall coverage invariant: outcome accounting identity failed: selected={selected_eligible_rows} probed={probed} surfaced={surfaced} not_surfaced={not_surfaced} unprobeable={unprobeable} vector_unavailable={vector_unavailable}"
         )));
     }
+
+    let exact_metrics = RecallCoverageMetrics::from_hit_ranks(
+        probed,
+        targets
+            .iter()
+            .filter(|target| target.outcome == RecallCoverageOutcome::Surfaced)
+            .filter_map(|target| target.rank),
+    );
+    let canonical_fact_metrics = RecallCoverageMetrics::from_hit_ranks(
+        probed,
+        targets
+            .iter()
+            .filter(|target| target.canonical_fact_outcome == RecallCoverageOutcome::Surfaced)
+            .filter_map(|target| target.canonical_rank),
+    );
+    let expected_id_lane = run_expected_id_lane(
+        &transaction,
+        store,
+        &options,
+        expected_ids,
+        &supersession_links,
+        &reviewed_equivalences,
+    )?;
 
     Ok(RecallCoverageReport {
         partition,
@@ -416,8 +892,108 @@ pub fn run_recall_coverage_probe(
         unprobeable,
         vector_unavailable,
         eligible_prior_scored_count,
+        exact_metrics,
+        canonical_fact_metrics,
         targets,
+        expected_id_lane,
     })
+}
+
+fn format_candidate_legs(legs: Option<CandidateLegEvidence>) -> String {
+    match legs {
+        Some(legs) => format!(
+            "vector={} fts={} symbolic={} exact_id={}",
+            legs.vector, legs.fts, legs.symbolic, legs.exact_id
+        ),
+        None => "not_executed".to_string(),
+    }
+}
+
+/// Render a deterministic, content-free operator summary.
+pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
+    use std::fmt::Write;
+
+    let mut output = String::new();
+    writeln!(
+        output,
+        "Exact-ID Recall: {}/{} Recall@K={:.6} MRR={:.6}",
+        report.exact_metrics.hits,
+        report.exact_metrics.denominator,
+        report.exact_metrics.recall_at_k,
+        report.exact_metrics.mrr
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        output,
+        "Canonical Fact/Lineage Recall: {}/{} Recall@K={:.6} MRR={:.6}",
+        report.canonical_fact_metrics.hits,
+        report.canonical_fact_metrics.denominator,
+        report.canonical_fact_metrics.recall_at_k,
+        report.canonical_fact_metrics.mrr
+    )
+    .expect("writing to String cannot fail");
+    if report.expected_id_lane.requested > 0 {
+        writeln!(
+            output,
+            "Reviewed Expected-ID Exact Recall: {}/{} Recall@K={:.6} MRR={:.6}",
+            report.expected_id_lane.exact_metrics.hits,
+            report.expected_id_lane.exact_metrics.denominator,
+            report.expected_id_lane.exact_metrics.recall_at_k,
+            report.expected_id_lane.exact_metrics.mrr
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            output,
+            "Reviewed Expected-ID Canonical Fact/Lineage Recall: {}/{} Recall@K={:.6} MRR={:.6}",
+            report.expected_id_lane.canonical_fact_metrics.hits,
+            report.expected_id_lane.canonical_fact_metrics.denominator,
+            report.expected_id_lane.canonical_fact_metrics.recall_at_k,
+            report.expected_id_lane.canonical_fact_metrics.mrr
+        )
+        .expect("writing to String cannot fail");
+    }
+
+    for target in report
+        .targets
+        .iter()
+        .filter(|target| target.outcome != RecallCoverageOutcome::Surfaced)
+    {
+        writeln!(
+            output,
+            "miss id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
+            target.id,
+            target.outcome,
+            target.rank,
+            format_candidate_legs(target.exact_candidate_legs),
+            target.canonical_fact_outcome,
+            target.canonical_id,
+            target.matched_canonical_id,
+            target.canonical_rank,
+            format_candidate_legs(target.canonical_candidate_legs),
+            target.fact_evidence.kind,
+            target.fact_evidence.source,
+        )
+        .expect("writing to String cannot fail");
+    }
+    for target in &report.expected_id_lane.cases {
+        writeln!(
+            output,
+            "expected_id_case id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
+            target.id,
+            target.outcome,
+            target.rank,
+            format_candidate_legs(target.exact_candidate_legs),
+            target.canonical_fact_outcome,
+            target.canonical_id,
+            target.matched_canonical_id,
+            target.canonical_rank,
+            format_candidate_legs(target.canonical_candidate_legs),
+            target.fact_evidence.kind,
+            target.fact_evidence.source,
+        )
+        .expect("writing to String cannot fail");
+    }
+    output
 }
 
 #[cfg(test)]
@@ -435,5 +1011,29 @@ mod tests {
                 .contains("recall coverage invariant: TACHI_SEARCH_INCLUDE_SUPERSEDED"),
             "guard must name the invariant and environment override: {error}"
         );
+    }
+
+    #[test]
+    fn reviewed_equivalence_requires_versioned_content_free_evidence() {
+        let wrong_version = RecallCoverageEquivalenceCorpus {
+            schema_version: "unreviewed".to_string(),
+            expected_ids: Vec::new(),
+            equivalences: Vec::new(),
+        };
+        assert!(wrong_version
+            .validate()
+            .expect_err("wrong schema must fail")
+            .to_string()
+            .contains("schema_version"));
+
+        let content_shaped_source = [RecallCoverageEquivalenceSet {
+            canonical_id: "canonical".to_string(),
+            equivalent_ids: vec!["expected".to_string()],
+            evidence_source: "this looks like memory content".to_string(),
+        }];
+        assert!(validate_reviewed_equivalences(&content_shaped_source)
+            .expect_err("free-text evidence source must fail")
+            .to_string()
+            .contains("content-free reference identifier"));
     }
 }

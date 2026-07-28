@@ -173,10 +173,14 @@ pub use near_dup::{near_duplicate_raw_pairs, text_token_jaccard, NEAR_DUP_RAW_SC
 pub use noise::{is_noise_text, should_skip_query};
 pub use recall_config::RecallConfig;
 pub use recall_coverage::{
-    is_recall_coverage_path_list_only, run_recall_coverage_probe, RecallCoverageOptions,
-    RecallCoverageOutcome, RecallCoveragePartitionCounts, RecallCoveragePriorScoredCountSplit,
-    RecallCoverageQuerySource, RecallCoverageReport, RecallCoverageTarget,
-    DEFAULT_RECALL_COVERAGE_CANDIDATES_PER_CHANNEL, DEFAULT_RECALL_COVERAGE_TOP_K,
+    format_recall_coverage_human, is_recall_coverage_path_list_only, run_recall_coverage_probe,
+    run_recall_coverage_probe_with_corpus, run_recall_coverage_probe_with_equivalences,
+    RecallCoverageEquivalenceCorpus, RecallCoverageEquivalenceSet, RecallCoverageEvidenceKind,
+    RecallCoverageExpectedIdLane, RecallCoverageFactEvidence, RecallCoverageMetrics,
+    RecallCoverageOptions, RecallCoverageOutcome, RecallCoveragePartitionCounts,
+    RecallCoveragePriorScoredCountSplit, RecallCoverageQuerySource, RecallCoverageReport,
+    RecallCoverageTarget, DEFAULT_RECALL_COVERAGE_CANDIDATES_PER_CHANNEL,
+    DEFAULT_RECALL_COVERAGE_TOP_K, RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION,
 };
 pub use relation_ontology::ComponentGovernanceRelation;
 pub use scorer::{
@@ -185,9 +189,9 @@ pub use scorer::{
 };
 pub use search::{
     apply_blend_relevance, hybrid_search, hybrid_search_with_receipt,
-    merge_rerank_order_with_hybrid_floor, AccessRecordingPhaseReceipt, CandidatePhaseReceipt,
-    ChannelPhaseReceipt, FetchPhaseReceipt, FtsExpansionGroupReceipt, GraphPhaseReceipt,
-    LayerAvailability, RankPhaseReceipt, SearchOptions, SearchPhaseReceipt,
+    merge_rerank_order_with_hybrid_floor, AccessRecordingPhaseReceipt, CandidateLegEvidence,
+    CandidatePhaseReceipt, ChannelPhaseReceipt, FetchPhaseReceipt, FtsExpansionGroupReceipt,
+    GraphPhaseReceipt, LayerAvailability, RankPhaseReceipt, SearchOptions, SearchPhaseReceipt,
     SearchReceiptDatabaseScope, SearchReceiptOperation, HYBRID_HEAD_FRACTION,
 };
 pub use types::{

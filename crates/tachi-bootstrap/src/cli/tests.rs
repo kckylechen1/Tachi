@@ -14,16 +14,21 @@ fn recall_coverage_cli_requires_db_and_exposes_explicit_options() {
         "13",
         "--limit",
         "3",
+        "--equivalence-file",
+        "/tmp/equivalence.json",
+        "--human",
     ])
     .expect("recall-coverage invocation should parse");
     assert!(matches!(
         parsed.command,
-        Some(Commands::RecallCoverage {
-            db,
-            top_k: Some(7),
-            candidates_per_channel: Some(13),
-            limit: Some(3),
-        }) if db == std::path::Path::new("/tmp/coverage.db")
+        Some(Commands::RecallCoverage(args))
+            if args.db == std::path::Path::new("/tmp/coverage.db")
+                && args.top_k == Some(7)
+                && args.candidates_per_channel == Some(13)
+                && args.limit == Some(3)
+                && args.equivalence_file.as_deref()
+                    == Some(std::path::Path::new("/tmp/equivalence.json"))
+                && args.human
     ));
 
     let missing_db = Cli::try_parse_from(["tachi", "recall-coverage"])
@@ -39,7 +44,14 @@ fn recall_coverage_cli_requires_db_and_exposes_explicit_options() {
         .expect("recall-coverage subcommand")
         .render_long_help()
         .to_string();
-    for flag in ["--db", "--top-k", "--candidates-per-channel", "--limit"] {
+    for flag in [
+        "--db",
+        "--top-k",
+        "--candidates-per-channel",
+        "--limit",
+        "--equivalence-file",
+        "--human",
+    ] {
         assert!(help.contains(flag), "help must advertise {flag}");
     }
 }

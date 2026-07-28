@@ -5,6 +5,7 @@
 // This is the hottest path: all computation stays in Rust, zero JS/Python overhead.
 
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,19 @@ use self::filtering::{is_search_noise_entry, quality_multiplier, valid_at};
 pub use rerank_blend::{
     apply_blend_relevance, merge_rerank_order_with_hybrid_floor, HYBRID_HEAD_FRACTION,
 };
+
+/// Content-free evidence that one observed row entered each executed candidate leg.
+///
+/// This reports membership only. It deliberately excludes query text, memory
+/// content, vectors, and channel scores so offline coverage can explain a miss
+/// without widening the production search result schema.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CandidateLegEvidence {
+    pub vector: bool,
+    pub fts: bool,
+    pub symbolic: bool,
+    pub exact_id: bool,
+}
 
 /// Options for a hybrid search query.
 pub struct SearchOptions {
@@ -430,20 +444,20 @@ pub fn hybrid_search(
     hybrid_search_inner(conn, query, opts, false, None).map(|(results, _, _)| results)
 }
 
-/// Runs the normal hybrid pipeline and reports whether one target survived the
-/// vector channel's bounded candidate collection.
+/// Runs the normal hybrid pipeline and reports content-free candidate-leg
+/// membership for the explicitly observed row IDs.
 ///
 /// This is crate-visible only because offline recall coverage needs the
-/// channel-provenance fact without exposing candidate IDs or changing the
+/// channel-provenance facts without exposing the full candidate set or changing the
 /// production search result schema.
-pub(crate) fn hybrid_search_with_vector_target_presence(
+pub(crate) fn hybrid_search_with_candidate_leg_evidence(
     conn: &Connection,
     query: &str,
     opts: &SearchOptions,
-    target_id: &str,
-) -> Result<(Vec<SearchResult>, bool), MemoryError> {
-    hybrid_search_inner(conn, query, opts, false, Some(target_id))
-        .map(|(results, _, target_in_vector_candidates)| (results, target_in_vector_candidates))
+    observed_ids: &[String],
+) -> Result<(Vec<SearchResult>, HashMap<String, CandidateLegEvidence>), MemoryError> {
+    hybrid_search_inner(conn, query, opts, false, Some(observed_ids))
+        .map(|(results, _, evidence)| (results, evidence))
 }
 
 /// Instrumented twin of [`hybrid_search`]: returns the ranked `SearchResult`s
@@ -464,13 +478,19 @@ pub fn hybrid_search_with_receipt(
         .map(|(results, receipt, _)| (results, receipt))
 }
 
+type HybridSearchOutcome = (
+    Vec<SearchResult>,
+    SearchPhaseReceipt,
+    HashMap<String, CandidateLegEvidence>,
+);
+
 fn hybrid_search_inner(
     conn: &Connection,
     query: &str,
     opts: &SearchOptions,
     sample: bool,
-    vector_target_id: Option<&str>,
-) -> Result<(Vec<SearchResult>, SearchPhaseReceipt, bool), MemoryError> {
+    observed_ids: Option<&[String]>,
+) -> Result<HybridSearchOutcome, MemoryError> {
     let total_start = sample.then(Instant::now);
 
     let as_of_utc = opts
@@ -482,16 +502,16 @@ fn hybrid_search_inner(
         || include_superseded_env_override_active()
         || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
 
-    let (candidates, candidates_receipt) = candidates::collect_candidates(
+    let (mut candidates, candidates_receipt) = candidates::collect_candidates(
         conn,
         query,
         opts,
         include_superseded,
         as_of_utc.as_deref(),
         sample,
+        observed_ids,
     )?;
-    let target_in_vector_candidates =
-        vector_target_id.is_some_and(|target_id| candidates.vec_scores.contains_key(target_id));
+    let candidate_leg_evidence = candidates.observed_evidence.take().unwrap_or_default();
     if candidates.candidate_ids.is_empty() {
         let receipt = finish_receipt(sample, total_start, |b| {
             b.candidates = candidates_receipt;
@@ -499,7 +519,7 @@ fn hybrid_search_inner(
             // the empty-candidate early return — honest "did not execute"
             // rather than zero elapsed.
         });
-        return Ok((vec![], receipt, target_in_vector_candidates));
+        return Ok((vec![], receipt, candidate_leg_evidence));
     }
 
     // ── Bulk-fetch entries ─────────────────────────────────────────────────────
@@ -592,7 +612,7 @@ fn hybrid_search_inner(
         b.access_recording = access_receipt;
     });
 
-    Ok((results, receipt, target_in_vector_candidates))
+    Ok((results, receipt, candidate_leg_evidence))
 }
 
 /// Receipt-builder closure. Keeps the per-phase plumbing in one place so the
@@ -662,6 +682,7 @@ fn hybrid_search_with_attribution(
         include_superseded,
         as_of_utc.as_deref(),
         false,
+        None,
     )?;
     if candidates.candidate_ids.is_empty() {
         return Ok((

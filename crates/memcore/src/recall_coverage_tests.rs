@@ -1,7 +1,9 @@
 use crate::{
-    hybrid_search, is_recall_coverage_path_list_only, run_recall_coverage_probe, MemoryEntry,
-    MemoryStore, RecallCoverageOptions, RecallCoverageOutcome, RecallCoverageQuerySource,
-    SearchOptions,
+    hybrid_search, is_recall_coverage_path_list_only, run_recall_coverage_probe,
+    run_recall_coverage_probe_with_corpus, run_recall_coverage_probe_with_equivalences,
+    MemoryEntry, MemoryStore, RecallCoverageEquivalenceCorpus, RecallCoverageEquivalenceSet,
+    RecallCoverageEvidenceKind, RecallCoverageOptions, RecallCoverageOutcome,
+    RecallCoverageQuerySource, SearchOptions, RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -583,4 +585,343 @@ fn recall_coverage_reopened_read_only_preserves_all_search_mutation_surfaces() {
         before,
         "record_access must remain false: access_count, scored_count, last_access, access history, and search generation are immutable under the probe"
     );
+}
+
+fn reviewed_equivalence_fixture(
+    canonical_exists: bool,
+) -> (
+    crate::RecallCoverageReport,
+    crate::RecallCoverageReport,
+    String,
+    String,
+) {
+    const CANDIDATES_PER_CHANNEL: usize = 1;
+    const VECTOR_DIMENSIONS: usize = 1024;
+    const FIXTURES: [(&str, &str); 5] = [
+        ("fact-row-a", "aurora cobalt zephyr"),
+        ("fact-row-b", "bramble delta quartz"),
+        ("fact-row-c", "cinder fjord maple"),
+        ("fact-row-d", "ember glacial orbit"),
+        ("fact-row-e", "harbor juniper prism"),
+    ];
+
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    assert!(store.vec_available, "sqlite-vec required for fact coverage");
+    let vector = vec![0.25; VECTOR_DIMENSIONS];
+    for (id, content) in FIXTURES {
+        let mut entry = fixture_entry(id, "/notes/fact-coverage", content);
+        entry.vector = Some(vector.clone());
+        entry.access_count = 1;
+        insert(&mut store, entry);
+    }
+
+    let vector_candidates = crate::db::search_vec(
+        store.connection(),
+        &vector,
+        CANDIDATES_PER_CHANNEL,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .expect("vector candidate search");
+    let actual_canonical_id = vector_candidates
+        .keys()
+        .next()
+        .expect("one vector candidate")
+        .clone();
+    let mut omitted_ids: Vec<&str> = FIXTURES
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !vector_candidates.contains_key(*id))
+        .collect();
+    omitted_ids.sort_unstable();
+    let target_id = omitted_ids.first().expect("an omitted target").to_string();
+    store
+        .connection()
+        .execute(
+            "UPDATE memories SET access_count = 0 WHERE id = ?1",
+            [&target_id],
+        )
+        .expect("select exact target");
+
+    let canonical_id = if canonical_exists {
+        actual_canonical_id
+    } else {
+        "reviewed-canonical-row-not-in-store".to_string()
+    };
+    let equivalences = [RecallCoverageEquivalenceSet {
+        canonical_id: canonical_id.clone(),
+        equivalent_ids: vec![target_id.clone()],
+        evidence_source: "fixture:reviewed-equivalence-v1".to_string(),
+    }];
+    let exact_only = run_recall_coverage_probe(
+        &store,
+        RecallCoverageOptions {
+            top_k: 10,
+            candidates_per_channel: CANDIDATES_PER_CHANNEL,
+            limit: Some(1),
+        },
+    )
+    .expect("exact-only coverage report");
+    let report = run_recall_coverage_probe_with_equivalences(
+        &store,
+        RecallCoverageOptions {
+            top_k: 10,
+            candidates_per_channel: CANDIDATES_PER_CHANNEL,
+            limit: Some(1),
+        },
+        &equivalences,
+    )
+    .expect("fact coverage report");
+    (report, exact_only, target_id, canonical_id)
+}
+
+#[test]
+fn recall_coverage_exact_hit_populates_both_metrics_without_changing_exact_outcome() {
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    let mut entry = fixture_entry("exact-hit", "/notes/exact-hit", "ExactFactCoverageNeedle");
+    entry.vector = Some(vec![0.75; 1024]);
+    insert(&mut store, entry);
+
+    let report = run_recall_coverage_probe(&store, RecallCoverageOptions::default())
+        .expect("exact coverage");
+    let target = report.targets.first().expect("one target");
+    assert_eq!(target.outcome, RecallCoverageOutcome::Surfaced);
+    assert_eq!(target.rank, Some(1));
+    assert_eq!(
+        target.canonical_fact_outcome,
+        RecallCoverageOutcome::Surfaced
+    );
+    assert_eq!(target.canonical_id.as_deref(), Some("exact-hit"));
+    assert_eq!(target.matched_canonical_id.as_deref(), Some("exact-hit"));
+    assert_eq!(target.canonical_rank, Some(1));
+    assert_eq!(
+        target.fact_evidence.kind,
+        RecallCoverageEvidenceKind::ExactIdentity
+    );
+    assert_eq!(report.exact_metrics.denominator, 1);
+    assert_eq!(report.exact_metrics.hits, 1);
+    assert_eq!(report.exact_metrics.recall_at_k, 1.0);
+    assert_eq!(report.exact_metrics.mrr, 1.0);
+    assert_eq!(report.canonical_fact_metrics, report.exact_metrics);
+}
+
+#[test]
+fn recall_coverage_reviewed_equivalent_hit_keeps_exact_miss_red() {
+    let (report, _, target_id, canonical_id) = reviewed_equivalence_fixture(true);
+    let target = report.targets.first().expect("one target");
+
+    assert_eq!(target.id, target_id);
+    assert_eq!(target.outcome, RecallCoverageOutcome::NotSurfaced);
+    assert_eq!(report.surfaced, 0, "legacy exact total must stay red");
+    assert_eq!(report.not_surfaced, 1);
+    assert_eq!(report.exact_metrics.hits, 0);
+    assert_eq!(
+        target.canonical_fact_outcome,
+        RecallCoverageOutcome::Surfaced
+    );
+    assert_eq!(target.canonical_id.as_deref(), Some(canonical_id.as_str()));
+    assert_eq!(
+        target.matched_canonical_id.as_deref(),
+        Some(canonical_id.as_str())
+    );
+    assert!(target.canonical_rank.is_some());
+    assert_eq!(
+        target.fact_evidence.kind,
+        RecallCoverageEvidenceKind::ReviewedEquivalence
+    );
+    assert_eq!(
+        target.fact_evidence.source,
+        "fixture:reviewed-equivalence-v1"
+    );
+    assert_eq!(report.canonical_fact_metrics.hits, 1);
+    assert_eq!(report.canonical_fact_metrics.recall_at_k, 1.0);
+    assert!(
+        target
+            .canonical_candidate_legs
+            .as_ref()
+            .is_some_and(|legs| legs.vector),
+        "fact coverage must expose the executed vector candidate evidence"
+    );
+}
+
+#[test]
+fn recall_coverage_true_miss_stays_red_without_fabricated_equivalence() {
+    let (report, _, _, canonical_id) = reviewed_equivalence_fixture(false);
+    let target = report.targets.first().expect("one target");
+
+    assert_eq!(target.outcome, RecallCoverageOutcome::NotSurfaced);
+    assert_eq!(
+        target.canonical_fact_outcome,
+        RecallCoverageOutcome::NotSurfaced
+    );
+    assert_eq!(target.canonical_id.as_deref(), Some(canonical_id.as_str()));
+    assert_eq!(target.matched_canonical_id, None);
+    assert_eq!(target.canonical_rank, None);
+    assert!(target.exact_candidate_legs.is_some());
+    assert!(
+        target
+            .canonical_candidate_legs
+            .is_some_and(|legs| !legs.vector && !legs.fts && !legs.symbolic && !legs.exact_id),
+        "an executed true miss must report negative evidence for every observed candidate leg"
+    );
+    assert_eq!(
+        target.fact_evidence.kind,
+        RecallCoverageEvidenceKind::ReviewedEquivalence
+    );
+    assert_eq!(report.exact_metrics.hits, 0);
+    assert_eq!(report.canonical_fact_metrics.hits, 0);
+    assert_eq!(report.canonical_fact_metrics.recall_at_k, 0.0);
+}
+
+#[test]
+fn reviewed_equivalence_changes_only_fact_metrics_not_exact_totals() {
+    let (reviewed, exact_only, _, _) = reviewed_equivalence_fixture(true);
+    let exact_totals_bytes = |report: &crate::RecallCoverageReport| {
+        serde_json::to_vec(&json!({
+            "surfaced": report.surfaced,
+            "not_surfaced": report.not_surfaced,
+        }))
+        .expect("serialize legacy exact totals")
+    };
+    assert_eq!(
+        exact_totals_bytes(&reviewed),
+        exact_totals_bytes(&exact_only),
+        "reviewed equivalence must leave legacy surfaced/not_surfaced bytes unchanged"
+    );
+    assert_eq!(reviewed.probed, exact_only.probed);
+    assert_eq!(reviewed.surfaced, exact_only.surfaced);
+    assert_eq!(reviewed.not_surfaced, exact_only.not_surfaced);
+    assert_eq!(reviewed.unprobeable, exact_only.unprobeable);
+    assert_eq!(reviewed.vector_unavailable, exact_only.vector_unavailable);
+    assert_eq!(reviewed.targets[0].outcome, exact_only.targets[0].outcome);
+    assert_eq!(reviewed.targets[0].rank, exact_only.targets[0].rank);
+    assert_eq!(reviewed.exact_metrics, exact_only.exact_metrics);
+    assert_eq!(reviewed.exact_metrics.hits, 0);
+    assert_eq!(reviewed.canonical_fact_metrics.hits, 1);
+    assert_eq!(
+        exact_only.targets[0].fact_evidence.kind,
+        RecallCoverageEvidenceKind::ExactIdentity,
+        "without reviewed data or stored lineage, the report must not invent equivalence"
+    );
+    assert_eq!(
+        exact_only.targets[0].canonical_id,
+        Some(exact_only.targets[0].id.clone())
+    );
+    assert_eq!(exact_only.canonical_fact_metrics.hits, 0);
+}
+
+#[test]
+fn recall_coverage_json_remains_content_free_and_exposes_both_denominators() {
+    let (report, _, _, _) = reviewed_equivalence_fixture(true);
+    let output = serde_json::to_value(&report).expect("serialize report");
+    assert_eq!(output["exact_metrics"]["denominator"], 1);
+    assert_eq!(output["canonical_fact_metrics"]["denominator"], 1);
+    assert!(!output.to_string().contains("aurora cobalt zephyr"));
+}
+
+#[test]
+fn recall_coverage_human_report_is_content_free_and_shows_both_metrics() {
+    let (report, _, _, _) = reviewed_equivalence_fixture(true);
+    let output = crate::format_recall_coverage_human(&report);
+    assert!(output.contains("Exact-ID Recall: 0/1 Recall@K=0.000000 MRR=0.000000"));
+    assert!(output.contains("Canonical Fact/Lineage Recall: 1/1 Recall@K=1.000000"));
+    assert!(output.contains("evidence_source=fixture:reviewed-equivalence-v1"));
+    assert!(output.contains("exact_legs=[vector=false"));
+    assert!(!output.contains("aurora cobalt zephyr"));
+}
+
+#[test]
+fn stored_supersession_lineage_runs_end_to_end_in_independent_expected_id_lane() {
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    for (id, archived, content) in [
+        ("lineage-old", true, "obsolete cobalt origin"),
+        ("lineage-middle", true, "transition amber bridge"),
+        ("lineage-canonical", false, "current jade destination"),
+    ] {
+        let mut row = fixture_entry(id, &format!("/notes/{id}"), content);
+        row.archived = archived;
+        row.vector = Some(vec![0.5; 1024]);
+        insert(&mut store, row);
+    }
+    assert!(store
+        .supersede_memory("lineage-old", "lineage-middle")
+        .expect("link old to middle"));
+    assert!(store
+        .supersede_memory("lineage-middle", "lineage-canonical")
+        .expect("link middle to canonical"));
+
+    let baseline = run_recall_coverage_probe(&store, RecallCoverageOptions::default())
+        .expect("legacy baseline");
+    let exact_totals_bytes = |report: &crate::RecallCoverageReport| {
+        serde_json::to_vec(&json!({
+            "surfaced": report.surfaced,
+            "not_surfaced": report.not_surfaced,
+        }))
+        .expect("serialize exact totals")
+    };
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec!["lineage-old".to_string()],
+        equivalences: Vec::new(),
+    };
+    let report =
+        run_recall_coverage_probe_with_corpus(&store, RecallCoverageOptions::default(), &corpus)
+            .expect("integrated expected-id coverage");
+    assert_eq!(
+        exact_totals_bytes(&report),
+        exact_totals_bytes(&baseline),
+        "the independent expected-ID lane must leave legacy exact totals byte-for-byte unchanged"
+    );
+
+    assert_eq!(report.expected_id_lane.requested, 1);
+    assert_eq!(report.expected_id_lane.probed, 1);
+    assert_eq!(report.expected_id_lane.exact_metrics.hits, 0);
+    assert_eq!(report.expected_id_lane.canonical_fact_metrics.hits, 1);
+    let evidence = report
+        .expected_id_lane
+        .cases
+        .first()
+        .expect("one expected-id case");
+    assert_eq!(evidence.outcome, RecallCoverageOutcome::NotSurfaced);
+    assert_eq!(
+        evidence.canonical_fact_outcome,
+        RecallCoverageOutcome::Surfaced
+    );
+    assert_eq!(evidence.canonical_id.as_deref(), Some("lineage-canonical"));
+    assert_eq!(
+        evidence.matched_canonical_id.as_deref(),
+        Some("lineage-canonical")
+    );
+    assert_eq!(evidence.canonical_rank, Some(1));
+    assert_eq!(
+        evidence.fact_evidence.kind,
+        RecallCoverageEvidenceKind::StoredSupersessionLineage
+    );
+    assert_eq!(evidence.fact_evidence.source, "memories.superseded_by");
+    assert_eq!(
+        evidence.fact_evidence.lineage,
+        ["lineage-old", "lineage-middle", "lineage-canonical"]
+    );
+    assert!(
+        evidence
+            .canonical_candidate_legs
+            .is_some_and(|legs| legs.vector),
+        "the integrated lineage hit must carry executed vector-leg evidence"
+    );
+
+    let json = serde_json::to_value(&report).expect("serialize integrated report");
+    assert_eq!(json["expected_id_lane"]["exact_metrics"]["denominator"], 1);
+    assert_eq!(
+        json["expected_id_lane"]["canonical_fact_metrics"]["hits"],
+        1
+    );
+    let human = crate::format_recall_coverage_human(&report);
+    assert!(human.contains("Reviewed Expected-ID Exact Recall: 0/1"));
+    assert!(human.contains("Reviewed Expected-ID Canonical Fact/Lineage Recall: 1/1"));
+    assert!(human.contains("evidence_source=memories.superseded_by"));
+    assert!(!human.contains("obsolete cobalt origin"));
+    assert!(!human.contains("current jade destination"));
 }

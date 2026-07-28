@@ -88,7 +88,7 @@ mod commands;
 mod maintenance_actions;
 mod vault_actions;
 
-pub use commands::Commands;
+pub use commands::{Commands, RecallCoverageArgs};
 pub use maintenance_actions::{
     BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DedupeAction, DistillAction,
     EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction,

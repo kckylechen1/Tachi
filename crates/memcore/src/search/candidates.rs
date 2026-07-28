@@ -21,6 +21,10 @@ pub(super) struct CandidateSet {
     pub(super) fts_scores: HashMap<String, f64>,
     pub(super) exact_id: Option<String>,
     pub(super) candidate_ids: Vec<String>,
+    /// `None` is the normal hot path: no observer map, candidate-ID clone, or
+    /// symbolic membership scan is performed unless the caller explicitly
+    /// asks for bounded coverage evidence.
+    pub(super) observed_evidence: Option<HashMap<String, super::CandidateLegEvidence>>,
 }
 
 pub(super) fn collect_candidates(
@@ -30,6 +34,7 @@ pub(super) fn collect_candidates(
     include_superseded: bool,
     as_of_utc: Option<&str>,
     sample: bool,
+    observed_ids: Option<&[String]>,
 ) -> Result<(CandidateSet, Option<CandidatePhaseReceipt>), MemoryError> {
     let n = opts.candidates_per_channel;
     let phase_start = sample.then(Instant::now);
@@ -123,6 +128,23 @@ pub(super) fn collect_candidates(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    let observed_evidence = observed_ids.map(|ids| {
+        ids.iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    super::CandidateLegEvidence {
+                        vector: vec_scores.contains_key(id),
+                        fts: fts_scores.contains_key(id),
+                        symbolic: symbolic_candidate_entries
+                            .iter()
+                            .any(|entry| entry.id == id.as_str()),
+                        exact_id: exact_id.as_deref() == Some(id.as_str()),
+                    },
+                )
+            })
+            .collect()
+    });
 
     let receipt = phase_start.map(|s| CandidatePhaseReceipt {
         total_elapsed: s.elapsed(),
@@ -143,6 +165,7 @@ pub(super) fn collect_candidates(
             fts_scores,
             exact_id,
             candidate_ids,
+            observed_evidence,
         },
         receipt,
     ))
