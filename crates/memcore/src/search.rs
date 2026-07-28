@@ -427,7 +427,23 @@ pub fn hybrid_search(
     query: &str,
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
-    hybrid_search_inner(conn, query, opts, false).map(|(results, _)| results)
+    hybrid_search_inner(conn, query, opts, false, None).map(|(results, _, _)| results)
+}
+
+/// Runs the normal hybrid pipeline and reports whether one target survived the
+/// vector channel's bounded candidate collection.
+///
+/// This is crate-visible only because offline recall coverage needs the
+/// channel-provenance fact without exposing candidate IDs or changing the
+/// production search result schema.
+pub(crate) fn hybrid_search_with_vector_target_presence(
+    conn: &Connection,
+    query: &str,
+    opts: &SearchOptions,
+    target_id: &str,
+) -> Result<(Vec<SearchResult>, bool), MemoryError> {
+    hybrid_search_inner(conn, query, opts, false, Some(target_id))
+        .map(|(results, _, target_in_vector_candidates)| (results, target_in_vector_candidates))
 }
 
 /// Instrumented twin of [`hybrid_search`]: returns the ranked `SearchResult`s
@@ -444,7 +460,8 @@ pub fn hybrid_search_with_receipt(
     query: &str,
     opts: &SearchOptions,
 ) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
-    hybrid_search_inner(conn, query, opts, true)
+    hybrid_search_inner(conn, query, opts, true, None)
+        .map(|(results, receipt, _)| (results, receipt))
 }
 
 fn hybrid_search_inner(
@@ -452,7 +469,8 @@ fn hybrid_search_inner(
     query: &str,
     opts: &SearchOptions,
     sample: bool,
-) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
+    vector_target_id: Option<&str>,
+) -> Result<(Vec<SearchResult>, SearchPhaseReceipt, bool), MemoryError> {
     let total_start = sample.then(Instant::now);
 
     let as_of_utc = opts
@@ -472,6 +490,8 @@ fn hybrid_search_inner(
         as_of_utc.as_deref(),
         sample,
     )?;
+    let target_in_vector_candidates =
+        vector_target_id.is_some_and(|target_id| candidates.vec_scores.contains_key(target_id));
     if candidates.candidate_ids.is_empty() {
         let receipt = finish_receipt(sample, total_start, |b| {
             b.candidates = candidates_receipt;
@@ -479,7 +499,7 @@ fn hybrid_search_inner(
             // the empty-candidate early return — honest "did not execute"
             // rather than zero elapsed.
         });
-        return Ok((vec![], receipt));
+        return Ok((vec![], receipt, target_in_vector_candidates));
     }
 
     // ── Bulk-fetch entries ─────────────────────────────────────────────────────
@@ -571,7 +591,7 @@ fn hybrid_search_inner(
         b.access_recording = access_receipt;
     });
 
-    Ok((results, receipt))
+    Ok((results, receipt, target_in_vector_candidates))
 }
 
 /// Receipt-builder closure. Keeps the per-phase plumbing in one place so the

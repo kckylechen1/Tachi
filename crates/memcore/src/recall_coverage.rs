@@ -10,8 +10,8 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    hybrid_search, is_namespace_search_noise, path_in_namespace, MemoryEntry, MemoryError,
-    MemoryStore, SearchOptions,
+    is_namespace_search_noise, path_in_namespace, MemoryEntry, MemoryError, MemoryStore,
+    SearchOptions,
 };
 
 /// Default result width for the offline recall-coverage action.
@@ -135,7 +135,12 @@ pub enum RecallCoverageQuerySource {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RecallCoverageOutcome {
+    /// The target was present in the executed vector candidate set and appears
+    /// in the final hybrid top-k.
     Surfaced,
+    /// The target failed at least one vector-qualified coverage condition: it
+    /// was absent from the executed vector candidate set or from final hybrid
+    /// top-k. A lexical/symbolic-only final hit remains `NotSurfaced`.
     NotSurfaced,
     Unprobeable,
     /// A textual self-query exists, but no vector-backed hybrid probe can run.
@@ -152,6 +157,9 @@ pub struct RecallCoverageTarget {
     pub query_source: Option<RecallCoverageQuerySource>,
     pub stored_vector_present: bool,
     pub outcome: RecallCoverageOutcome,
+    /// One-based position in the final hybrid top-k, independent of vector
+    /// provenance. This can be `Some` while `outcome` is `NotSurfaced` when the
+    /// target entered the merged candidate union through lexical/symbolic only.
     pub rank: Option<usize>,
 }
 
@@ -354,13 +362,19 @@ pub fn run_recall_coverage_probe(
             graph_relation_filter: None,
             ..Default::default()
         };
-        let results = hybrid_search(&transaction, &query, &search_options)?;
+        let (results, target_in_vector_candidates) =
+            crate::search::hybrid_search_with_vector_target_presence(
+                &transaction,
+                &query,
+                &search_options,
+                &entry.id,
+            )?;
         probed += 1;
         let rank = results
             .iter()
             .position(|result| result.entry.id == entry.id)
             .map(|index| index + 1);
-        let outcome = if rank.is_some() {
+        let outcome = if target_in_vector_candidates && rank.is_some() {
             surfaced += 1;
             RecallCoverageOutcome::Surfaced
         } else {
