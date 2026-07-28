@@ -1,3 +1,4 @@
+use super::super::candidates::collect_candidates;
 use super::*;
 use super::{golden_corpus, ops_audit_corpus};
 use std::time::Duration;
@@ -132,6 +133,56 @@ fn all_misspelled_four_word_case_is_absent_from_normal_legs_then_recovers() {
     assert!(
         near_rank.is_none_or(|rank| intended_rank.unwrap() < rank),
         "negative near-neighbor must stay below the intended fact; ids={ids:?}"
+    );
+}
+
+#[test]
+fn typo_evidence_rescues_a_vector_candidate_in_the_normal_leg_dead_band() {
+    let mut conn = setup();
+    seed_typo_corpus(&mut conn);
+    const DIM: usize = 1024;
+    let query_vec = vec![0.5_f32; DIM];
+    // sqlite-vec converts L2 distance to `1 - distance / 2`. This document
+    // lands above the old typo activation gate (0.40) but below the default
+    // vector-only survival floor (0.445).
+    let mut intended = memory_entry(
+        INTENDED_ID,
+        "Persistent memory retrieval boundaries keep candidate recovery separate from final ranking policy",
+        &["persistent", "memory", "retrieval", "boundaries"],
+    );
+    intended.vector = Some(vec![0.53625_f32; DIM]);
+    upsert(&mut conn, &intended, true).unwrap();
+
+    let config = RecallConfig::default();
+    let opts = SearchOptions {
+        candidates_per_channel: 32,
+        top_k: 10,
+        query_vec: Some(query_vec),
+        vec_available: true,
+        record_access: false,
+        mmr_threshold: None,
+        recall_config: Some(config.clone()),
+        ..Default::default()
+    };
+    let (candidates, _) =
+        collect_candidates(&conn, TYPO_QUERY, &opts, false, None, false, None).unwrap();
+    let similarity = candidates.vec_scores[INTENDED_ID];
+    assert!(
+        similarity > 0.40 && similarity < config.vector_only_similarity_floor,
+        "test precondition requires the historical activation/survival dead band, got {similarity}"
+    );
+
+    let (results, receipt) = hybrid_search_with_receipt(&conn, TYPO_QUERY, &opts).unwrap();
+    let typo = receipt
+        .candidates
+        .expect("candidate phase receipt")
+        .typo_fallback
+        .expect("weak normal vector evidence must not suppress typo recovery");
+    assert!(typo.contributed_candidate_count > 0);
+    assert_eq!(
+        results.first().map(|result| result.entry.id.as_str()),
+        Some(INTENDED_ID),
+        "character evidence must rescue the intended weak-vector candidate"
     );
 }
 
