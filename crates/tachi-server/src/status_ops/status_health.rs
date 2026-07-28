@@ -29,8 +29,8 @@ pub(crate) use readiness::{agent_readiness_json, format_backfill_command};
 pub(crate) use scoring::calculate_health_score;
 pub(crate) use scoring::{calculate_health_deductions, health_score_from_deductions};
 pub(crate) use types::{
-    HealthDeduction, ProviderProbeCache, ProviderProbeReport, ProviderProbeResult,
-    ProviderRotationGroupProbe,
+    DoctorProbeCacheRefresh, HealthDeduction, ProviderProbeCache, ProviderProbeReport,
+    ProviderProbeResult, ProviderRotationGroupProbe,
 };
 pub(crate) use vault::load_keychain_vault_api_key_values;
 
@@ -61,13 +61,18 @@ pub(crate) async fn refresh_doctor_probe_cache(
     app_home: &Path,
     global_db_path: &Path,
     schema_migration: &memcore::MigrationAuthority,
-) -> Result<ProviderProbeCache, String> {
+) -> DoctorProbeCacheRefresh {
     let report = probes::run_provider_probe_report_with_migration_authority(
         global_db_path,
         schema_migration,
     )
     .await;
-    probe_cache::write_provider_probe_cache_report(app_home, global_db_path, report)
+    let cache_write =
+        probe_cache::write_provider_probe_cache_report(app_home, global_db_path, report.clone());
+    DoctorProbeCacheRefresh {
+        report,
+        cache_write,
+    }
 }
 
 /// Stable internal API for the doctor key report: collect API-key status rows

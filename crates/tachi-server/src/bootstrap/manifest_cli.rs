@@ -437,24 +437,61 @@ mod tests {
     }
 
     #[test]
-    fn doctor_run_daily_blocks_distill_owner_after_persistence_timeout() {
-        let probe_result = Ok(crate::status_ops::status_health::ProviderProbeCache {
-            last_probe_at: chrono::Utc::now().to_rfc3339(),
-            ttl_seconds: 60,
-            probes: vec![crate::status_ops::status_health::ProviderProbeResult {
-                name: crate::status_ops::status_health::PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
-                status: "timeout".to_string(),
-                message: Some("cause=provider_health_persist_join_timeout".to_string()),
-            }],
-            rotation_groups: Vec::new(),
-        });
+    fn doctor_run_daily_blocks_distill_owner_after_persistence_timeout_or_failure() {
+        for status in ["timeout", "failed"] {
+            let refresh = doctor_probe_refresh_fixture(status, Ok(()));
+            assert!(provider_persistence_receipt(&refresh)
+                .is_some_and(|receipt| receipt.status == status));
+            assert!(
+                !provider_persistence_allows_distill(&refresh),
+                "a {status} persistence phase must block the distill DB owner"
+            );
+        }
+    }
 
-        assert!(provider_persistence_receipt(&probe_result)
-            .is_some_and(|receipt| receipt.status == "timeout"));
-        assert!(
-            !provider_persistence_writer_is_terminal(&probe_result),
-            "a timed-out writer must block construction of the distill DB owner"
+    #[test]
+    fn doctor_run_daily_preserves_timeout_when_probe_cache_write_fails() {
+        let refresh = doctor_probe_refresh_fixture(
+            "timeout",
+            Err("controlled probe-cache write failure".to_string()),
         );
+
+        let summary = provider_probe_refresh_summary(&refresh);
+        assert!(summary.contains("probe cache write failed: controlled probe-cache write failure"));
+        assert!(summary.contains("provider_health_persist status=timeout"));
+        assert!(summary.contains("cause=provider_health_persist_join_timeout"));
+        assert!(
+            !provider_persistence_allows_distill(&refresh),
+            "cache-write failure must not discard the timeout receipt or permit distill"
+        );
+    }
+
+    fn doctor_probe_refresh_fixture(
+        persistence_status: &str,
+        cache_write: Result<(), String>,
+    ) -> crate::status_ops::status_health::DoctorProbeCacheRefresh {
+        let probes = vec![crate::status_ops::status_health::ProviderProbeResult {
+            name: crate::status_ops::status_health::PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
+            status: persistence_status.to_string(),
+            message: Some(format!(
+                "phase=provider_health_persist cause=provider_health_persist_join_{persistence_status}"
+            )),
+        }];
+        let report = crate::status_ops::status_health::ProviderProbeReport {
+            probes: probes.clone(),
+            rotation_groups: Vec::new(),
+        };
+        let cache_write =
+            cache_write.map(|()| crate::status_ops::status_health::ProviderProbeCache {
+                last_probe_at: chrono::Utc::now().to_rfc3339(),
+                ttl_seconds: 60,
+                probes,
+                rotation_groups: Vec::new(),
+            });
+        crate::status_ops::status_health::DoctorProbeCacheRefresh {
+            report,
+            cache_write,
+        }
     }
 }
 
@@ -505,41 +542,27 @@ async fn run_daily_pipeline_remediation(
     schema_migration: &memcore::MigrationAuthority,
 ) -> String {
     // Step 1: refresh provider probe cache.
-    let probe_result = crate::status_ops::status_health::refresh_doctor_probe_cache(
+    let probe_refresh = crate::status_ops::status_health::refresh_doctor_probe_cache(
         app_home,
         global_db_path,
         schema_migration,
     )
     .await;
-    let persistence_receipt = provider_persistence_receipt(&probe_result);
-    let probe_summary = match &probe_result {
-        Ok(cache) => {
-            let failed = cache.probes.iter().filter(|p| p.status != "ok").count();
-            let mut summary = format!(
-                "probe cache refreshed ({} probes, {failed} failed)",
-                cache.probes.len()
-            );
-            if let Some(receipt) = persistence_receipt {
-                summary.push_str(&format!(
-                    "; {} status={} {}",
-                    receipt.name,
-                    receipt.status,
-                    receipt.message.as_deref().unwrap_or("cause=unknown")
-                ));
-            }
-            summary
-        }
-        Err(e) => format!("probe cache refresh failed: {e}"),
-    };
+    let persistence_receipt = provider_persistence_receipt(&probe_refresh);
+    let probe_summary = provider_probe_refresh_summary(&probe_refresh);
 
     // Step 2: run distill batch (requires a project DB).
-    // A failed persistence writer is terminal and has released ownership, so
-    // existing distill semantics remain intact. A timed-out writer is not
-    // proven terminal: never hide that uncertainty by constructing the next
-    // write-capable DB owner (#1505).
-    let distill_summary = if !provider_persistence_writer_is_terminal(&probe_result) {
-        "distill skipped (provider_health_persist timed out; writer ownership is not terminal)"
-            .to_string()
+    // Both timeout and failure refuse the next write-capable owner. A timeout
+    // may still own the DB; a failed persistence phase did not complete the
+    // required phase contract. Cache-write failure cannot erase either typed
+    // receipt because the in-memory report is retained separately (#1505).
+    let distill_summary = if !provider_persistence_allows_distill(&probe_refresh) {
+        let status = persistence_receipt
+            .map(|receipt| receipt.status.as_str())
+            .unwrap_or("missing");
+        format!(
+            "distill skipped (provider_health_persist status={status}; second writer forbidden)"
+        )
     } else {
         match project_db_path {
             Some(_) => {
@@ -611,20 +634,49 @@ async fn run_daily_pipeline_remediation(
 }
 
 fn provider_persistence_receipt(
-    probe_result: &Result<crate::status_ops::status_health::ProviderProbeCache, String>,
+    refresh: &crate::status_ops::status_health::DoctorProbeCacheRefresh,
 ) -> Option<&crate::status_ops::status_health::ProviderProbeResult> {
-    probe_result.as_ref().ok().and_then(|cache| {
-        cache.probes.iter().find(|probe| {
-            probe.name == crate::status_ops::status_health::PROVIDER_HEALTH_PERSIST_PHASE
-        })
-    })
+    refresh
+        .report
+        .probes
+        .iter()
+        .find(|probe| probe.name == crate::status_ops::status_health::PROVIDER_HEALTH_PERSIST_PHASE)
 }
 
-fn provider_persistence_writer_is_terminal(
-    probe_result: &Result<crate::status_ops::status_health::ProviderProbeCache, String>,
+fn provider_persistence_allows_distill(
+    refresh: &crate::status_ops::status_health::DoctorProbeCacheRefresh,
 ) -> bool {
-    provider_persistence_receipt(probe_result)
-        .is_none_or(|receipt| receipt.status.as_str() != "timeout")
+    provider_persistence_receipt(refresh).is_none_or(|receipt| receipt.status.as_str() == "ok")
+}
+
+fn provider_probe_refresh_summary(
+    refresh: &crate::status_ops::status_health::DoctorProbeCacheRefresh,
+) -> String {
+    let failed = refresh
+        .report
+        .probes
+        .iter()
+        .filter(|probe| probe.status != "ok")
+        .count();
+    let mut summary = match &refresh.cache_write {
+        Ok(_) => format!(
+            "probe cache refreshed ({} probes, {failed} failed)",
+            refresh.report.probes.len()
+        ),
+        Err(error) => format!(
+            "probe cache write failed: {error} ({} probes, {failed} failed)",
+            refresh.report.probes.len()
+        ),
+    };
+    if let Some(receipt) = provider_persistence_receipt(refresh) {
+        summary.push_str(&format!(
+            "; {} status={} {}",
+            receipt.name,
+            receipt.status,
+            receipt.message.as_deref().unwrap_or("cause=unknown")
+        ));
+    }
+    summary
 }
 
 async fn collect_provider_key_report(global_db_path: &Path, probe_keys: bool) -> ProviderKeyReport {
