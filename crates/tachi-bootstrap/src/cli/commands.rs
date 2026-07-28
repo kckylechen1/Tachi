@@ -35,6 +35,21 @@ pub enum Commands {
     // are optional.
     /// Show database statistics
     Stats,
+    /// Measure self-query recall coverage for never-search-surfaced rows in one explicit DB.
+    RecallCoverage {
+        /// Existing database to inspect. This command never selects a default store.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// Hybrid result width. Omit to use the named recall-coverage default.
+        #[arg(long)]
+        top_k: Option<usize>,
+        /// Hybrid candidate width per channel. Omit to use the named recall-coverage default.
+        #[arg(long)]
+        candidates_per_channel: Option<usize>,
+        /// Deterministically probe only the first N eligible rows and report incomplete coverage.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Inspect onboarding readiness or run the interactive 5-step setup wizard
     Setup {
         /// Emit machine-readable JSON instead of the human summary
