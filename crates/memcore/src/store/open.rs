@@ -479,6 +479,7 @@ impl MemoryStore {
         }
         db::migrations::check_schema_version_gate(&conn)?;
         let stored_schema_version = db::migrations::read_schema_version(&conn)?;
+        db::migrations::validate_current_schema_integrity(&conn)?;
         let is_stamped_older_schema =
             (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version);
         if is_stamped_older_schema {
@@ -523,6 +524,7 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
             return Err(MemoryError::InvalidArg(format!(
@@ -530,6 +532,7 @@ impl MemoryStore {
                 db::migrations::EXPECTED_SCHEMA_VERSION
             )));
         }
+        db::migrations::validate_current_schema_integrity(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
         // A version stamp is not proof of shape. Prepare the complete memories
         // projection exact-dedupe reads and writes before returning a writable
@@ -1305,9 +1308,7 @@ mod exact_dedupe_open_tests {
             Err(error) => error,
         };
         assert!(
-            error
-                .to_string()
-                .contains("no such table: memory_search_generation"),
+            error.to_string().contains("no such table: hard_state"),
             "unexpected spoofed-schema refusal: {error}"
         );
 
