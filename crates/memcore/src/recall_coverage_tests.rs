@@ -1,6 +1,7 @@
 use crate::{
-    is_recall_coverage_path_list_only, run_recall_coverage_probe, MemoryEntry, MemoryStore,
-    RecallCoverageOptions, RecallCoverageOutcome, RecallCoverageQuerySource,
+    hybrid_search, is_recall_coverage_path_list_only, run_recall_coverage_probe, MemoryEntry,
+    MemoryStore, RecallCoverageOptions, RecallCoverageOutcome, RecallCoverageQuerySource,
+    SearchOptions,
 };
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -203,6 +204,121 @@ fn recall_coverage_reachable_target_surfaces_through_hybrid_kernel_without_conte
         !output.contains(content),
         "coverage output must not include a source field or generated query"
     );
+}
+
+#[test]
+fn recall_coverage_rejects_lexical_only_target_omitted_from_vector_channel() {
+    const CANDIDATES_PER_CHANNEL: usize = 1;
+    const VECTOR_DIMENSIONS: usize = 1024;
+    const FIXTURES: [(&str, &str); 5] = [
+        ("vector-tie-a", "aurora cobalt zephyr"),
+        ("vector-tie-b", "bramble delta quartz"),
+        ("vector-tie-c", "cinder fjord maple"),
+        ("vector-tie-d", "ember glacial orbit"),
+        ("vector-tie-e", "harbor juniper prism"),
+    ];
+
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    assert!(
+        store.vec_available,
+        "sqlite-vec required to distinguish vector exclusion from lexical recovery"
+    );
+    let vector = vec![0.25; VECTOR_DIMENSIONS];
+
+    assert!(FIXTURES.len() > CANDIDATES_PER_CHANNEL);
+    for (id, content) in FIXTURES {
+        let mut entry = fixture_entry(id, "/notes/vector-tie", content);
+        entry.vector = Some(vector.clone());
+        entry.access_count = 1;
+        insert(&mut store, entry);
+    }
+
+    let vector_candidates = crate::db::search_vec(
+        store.connection(),
+        &vector,
+        CANDIDATES_PER_CHANNEL,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .expect("vector candidate search");
+
+    let fixture_ids: std::collections::HashSet<&str> = FIXTURES.iter().map(|(id, _)| *id).collect();
+    let vector_candidate_ids: std::collections::HashSet<&str> =
+        vector_candidates.keys().map(String::as_str).collect();
+    let mut omitted_ids: Vec<&str> = fixture_ids
+        .difference(&vector_candidate_ids)
+        .copied()
+        .collect();
+    omitted_ids.sort_unstable();
+    let target_id = *omitted_ids
+        .first()
+        .expect("more equal-vector rows than candidate width must leave an omitted target");
+    let target_content = FIXTURES
+        .iter()
+        .find_map(|(id, content)| (*id == target_id).then_some(*content))
+        .expect("omitted target content");
+
+    let updated = store
+        .connection()
+        .execute(
+            "UPDATE memories SET access_count = 0 WHERE id = ?1",
+            [target_id],
+        )
+        .expect("select discovered target for coverage");
+    assert_eq!(updated, 1);
+
+    let second_vector_candidates = crate::db::search_vec(
+        store.connection(),
+        &vector,
+        CANDIDATES_PER_CHANNEL,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .expect("repeat vector candidate search");
+    assert!(
+        !second_vector_candidates.contains_key(target_id),
+        "discovered target must remain omitted after changing access_count only: {second_vector_candidates:?}"
+    );
+
+    let search_options = SearchOptions {
+        top_k: 2,
+        candidates_per_channel: CANDIDATES_PER_CHANNEL,
+        query_vec: Some(vector),
+        vec_available: store.vec_available,
+        record_access: false,
+        graph_expand_hops: 0,
+        ..Default::default()
+    };
+    let hybrid_results = hybrid_search(store.connection(), target_content, &search_options)
+        .expect("hybrid lexical recovery");
+    let hybrid_rank = hybrid_results
+        .iter()
+        .position(|result| result.entry.id == target_id)
+        .map(|index| index + 1)
+        .expect("the target must reach final top-k through lexical/symbolic candidates");
+
+    let report = run_recall_coverage_probe(
+        &store,
+        RecallCoverageOptions {
+            top_k: 2,
+            candidates_per_channel: CANDIDATES_PER_CHANNEL,
+            limit: Some(1),
+        },
+    )
+    .expect("coverage report");
+    let target = report.targets.first().expect("one target");
+    assert_eq!(target.id, target_id);
+    assert_eq!(target.rank, Some(hybrid_rank));
+    assert_eq!(target.outcome, RecallCoverageOutcome::NotSurfaced);
+    assert_eq!(report.probed, 1);
+    assert_eq!(report.surfaced, 0);
+    assert_eq!(report.not_surfaced, 1);
 }
 
 #[test]
