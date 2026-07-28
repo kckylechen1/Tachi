@@ -42,10 +42,12 @@
 //!
 //! # Write channel
 //!
-//! Every mutating write (create, update, archive) goes through
-//! `dispatch_cli_tool_with_migration_authority`, the exact same
+//! Every mutating write (create, update, archive) goes through the same
 //! daemon-forward-else-in-process channel `tachi remember` uses, invoking the
-//! already-daemon-recognized `save_memory` / `archive_memory` tool names —
+//! already-daemon-recognized `save_memory` / `archive_memory` tool names.
+//! Archive uses the channel's fixed `operate`-profile variant because the
+//! low-level tool is deliberately absent from the standard facade tray; that
+//! override is session-local and cannot be selected through CLI input. This is
 //! never a bespoke `cards_sync` RPC (which no running daemon would recognize
 //! and which the "refuse in-process fallback to avoid duplicate writes"
 //! guard in `tool_dispatch.rs` would then hard-fail on whenever any daemon is
@@ -79,7 +81,9 @@ use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::CardsAction;
 
 use super::super::print_pretty_json;
-use super::tool_dispatch::dispatch_cli_tool_with_migration_authority;
+use super::tool_dispatch::{
+    dispatch_cli_operate_tool_with_migration_authority, dispatch_cli_tool_with_migration_authority,
+};
 use crate::memory_ops::handle_archive_memory;
 use crate::memory_search_ops::handle_save_memory;
 use crate::tool_params::{ArchiveMemoryParams, SaveMemoryParams};
@@ -746,7 +750,7 @@ async fn sync_cards_selected(
             let mut args = serde_json::Map::new();
             args.insert("id".into(), json!(entry.id.clone()));
 
-            dispatch_cli_tool_with_migration_authority(
+            dispatch_cli_operate_tool_with_migration_authority(
                 "archive_memory",
                 args,
                 db_path,
