@@ -46,6 +46,34 @@ fn insert(store: &mut MemoryStore, entry: MemoryEntry) {
     store.upsert(&entry).expect("insert coverage fixture");
 }
 
+fn dangling_lineage_store() -> MemoryStore {
+    let mut store = MemoryStore::open_in_memory().expect("open dangling-lineage store");
+    let mut source = fixture_entry(
+        "dangling-lineage-source",
+        "/notes/dangling-lineage-source",
+        "private dangling source content sentinel",
+    );
+    source.archived = true;
+    source.vector = Some(vec![0.625; 1024]);
+    insert(&mut store, source);
+
+    let mut terminal = fixture_entry(
+        "dangling-lineage-terminal",
+        "/notes/dangling-lineage-terminal",
+        "private dangling terminal content sentinel",
+    );
+    terminal.vector = Some(vec![0.625; 1024]);
+    insert(&mut store, terminal);
+
+    assert!(store
+        .supersede_memory("dangling-lineage-source", "dangling-lineage-terminal")
+        .expect("link source to terminal"));
+    assert!(store
+        .delete("dangling-lineage-terminal")
+        .expect("delete lineage terminal"));
+    store
+}
+
 #[test]
 fn recall_coverage_path_list_only_prefixes_have_exact_boundaries() {
     for path in [
@@ -924,4 +952,143 @@ fn stored_supersession_lineage_runs_end_to_end_in_independent_expected_id_lane()
     assert!(human.contains("evidence_source=memories.superseded_by"));
     assert!(!human.contains("obsolete cobalt origin"));
     assert!(!human.contains("current jade destination"));
+}
+
+#[test]
+fn dangling_stored_lineage_without_reviewed_equivalence_fails_content_free() {
+    let store = dangling_lineage_store();
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec!["dangling-lineage-source".to_string()],
+        equivalences: Vec::new(),
+    };
+
+    let error =
+        run_recall_coverage_probe_with_corpus(&store, RecallCoverageOptions::default(), &corpus)
+            .expect_err("a missing stored-lineage terminal must fail closed");
+    let message = error.to_string();
+    assert!(message.contains("recall coverage lineage invariant: dangling superseded_by"));
+    assert!(message.contains("dangling-lineage-source"));
+    assert!(message.contains("dangling-lineage-terminal"));
+    assert!(!message.contains("private dangling source content sentinel"));
+    assert!(!message.contains("private dangling terminal content sentinel"));
+    assert!(!message.contains("StoredSupersessionLineage"));
+}
+
+#[test]
+fn stored_supersession_cycle_still_fails_content_free_end_to_end() {
+    let mut store = MemoryStore::open_in_memory().expect("open cycle-lineage store");
+    for (id, content) in [
+        ("cycle-lineage-a", "private cycle alpha content sentinel"),
+        ("cycle-lineage-b", "private cycle beta content sentinel"),
+    ] {
+        let mut row = fixture_entry(id, &format!("/notes/{id}"), content);
+        row.archived = true;
+        row.vector = Some(vec![0.375; 1024]);
+        insert(&mut store, row);
+    }
+    assert!(store
+        .supersede_memory("cycle-lineage-a", "cycle-lineage-b")
+        .expect("link cycle a to b"));
+    assert!(store
+        .supersede_memory("cycle-lineage-b", "cycle-lineage-a")
+        .expect("link cycle b to a"));
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec!["cycle-lineage-a".to_string()],
+        equivalences: Vec::new(),
+    };
+
+    let error =
+        run_recall_coverage_probe_with_corpus(&store, RecallCoverageOptions::default(), &corpus)
+            .expect_err("stored lineage cycle must keep failing closed");
+    let message = error.to_string();
+    assert!(message.contains("recall coverage lineage invariant: superseded_by cycle"));
+    assert!(message.contains("cycle-lineage-a -> cycle-lineage-b -> cycle-lineage-a"));
+    assert!(!message.contains("private cycle alpha content sentinel"));
+    assert!(!message.contains("private cycle beta content sentinel"));
+}
+
+#[test]
+fn dangling_stored_lineage_defers_to_explicit_reviewed_equivalence() {
+    let mut store = dangling_lineage_store();
+    let mut reviewed = fixture_entry(
+        "reviewed-lineage-canonical",
+        "/notes/reviewed-lineage-canonical",
+        "private reviewed canonical content sentinel",
+    );
+    reviewed.access_count = 1;
+    reviewed.vector = Some(vec![0.625; 1024]);
+    insert(&mut store, reviewed);
+
+    let baseline = run_recall_coverage_probe(&store, RecallCoverageOptions::default())
+        .expect("legacy baseline must ignore the archived dangling source");
+    let exact_totals_bytes = |report: &crate::RecallCoverageReport| {
+        serde_json::to_vec(&json!({
+            "surfaced": report.surfaced,
+            "not_surfaced": report.not_surfaced,
+        }))
+        .expect("serialize exact totals")
+    };
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec!["dangling-lineage-source".to_string()],
+        equivalences: vec![RecallCoverageEquivalenceSet {
+            canonical_id: "reviewed-lineage-canonical".to_string(),
+            equivalent_ids: vec!["dangling-lineage-source".to_string()],
+            evidence_source: "fixture:dangling-reviewed-v1".to_string(),
+        }],
+    };
+
+    let report =
+        run_recall_coverage_probe_with_corpus(&store, RecallCoverageOptions::default(), &corpus)
+            .expect("explicit reviewed evidence must survive a dangling stored link");
+    assert_eq!(
+        exact_totals_bytes(&report),
+        exact_totals_bytes(&baseline),
+        "reviewed dangling-lineage recovery must preserve legacy exact totals byte-for-byte"
+    );
+    let target = report
+        .expected_id_lane
+        .cases
+        .first()
+        .expect("one reviewed expected-id case");
+    assert_eq!(target.outcome, RecallCoverageOutcome::NotSurfaced);
+    assert_eq!(
+        target.canonical_fact_outcome,
+        RecallCoverageOutcome::Surfaced
+    );
+    assert_eq!(
+        target.canonical_id.as_deref(),
+        Some("reviewed-lineage-canonical")
+    );
+    assert_eq!(
+        target.matched_canonical_id.as_deref(),
+        Some("reviewed-lineage-canonical")
+    );
+    assert_eq!(
+        target.fact_evidence.kind,
+        RecallCoverageEvidenceKind::ReviewedEquivalence
+    );
+    assert_eq!(target.fact_evidence.source, "fixture:dangling-reviewed-v1");
+    assert_eq!(
+        target.fact_evidence.lineage,
+        ["dangling-lineage-source", "reviewed-lineage-canonical"]
+    );
+    assert!(!target
+        .fact_evidence
+        .lineage
+        .iter()
+        .any(|id| id == "dangling-lineage-terminal"));
+
+    let json = serde_json::to_string(&report).expect("serialize reviewed dangling report");
+    let human = crate::format_recall_coverage_human(&report);
+    for secret in [
+        "private dangling source content sentinel",
+        "private dangling terminal content sentinel",
+        "private reviewed canonical content sentinel",
+    ] {
+        assert!(!json.contains(secret));
+        assert!(!human.contains(secret));
+    }
 }

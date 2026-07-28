@@ -342,37 +342,55 @@ struct CanonicalResolution {
     evidence: RecallCoverageFactEvidence,
 }
 
+enum StoredLineageResolution {
+    None,
+    Authoritative(CanonicalResolution),
+    Dangling { missing_id: String },
+}
+
 fn stored_lineage_evidence_from_links(
     links: &HashMap<String, Option<String>>,
     target_id: &str,
-) -> Result<Option<CanonicalResolution>, MemoryError> {
+) -> Result<StoredLineageResolution, MemoryError> {
     let mut current = target_id.to_string();
     let mut lineage = vec![current.clone()];
     let mut seen = HashSet::from([current.clone()]);
 
-    while let Some(Some(next)) = links.get(&current) {
-        if !seen.insert(next.clone()) {
-            lineage.push(next.clone());
-            return Err(MemoryError::InvalidArg(format!(
-                "recall coverage lineage invariant: superseded_by cycle while resolving target {target_id}: {}",
-                lineage.join(" -> ")
-            )));
+    loop {
+        match links.get(&current) {
+            Some(Some(next)) => {
+                if !seen.insert(next.clone()) {
+                    lineage.push(next.clone());
+                    return Err(MemoryError::InvalidArg(format!(
+                        "recall coverage lineage invariant: superseded_by cycle while resolving target {target_id}: {}",
+                        lineage.join(" -> ")
+                    )));
+                }
+                current = next.clone();
+                lineage.push(current.clone());
+            }
+            Some(None) => break,
+            None => {
+                return Ok(StoredLineageResolution::Dangling {
+                    missing_id: current,
+                });
+            }
         }
-        current = next.clone();
-        lineage.push(current.clone());
     }
 
     if lineage.len() == 1 {
-        return Ok(None);
+        return Ok(StoredLineageResolution::None);
     }
-    Ok(Some(CanonicalResolution {
-        canonical_id: current,
-        evidence: RecallCoverageFactEvidence {
-            kind: RecallCoverageEvidenceKind::StoredSupersessionLineage,
-            source: "memories.superseded_by".to_string(),
-            lineage,
+    Ok(StoredLineageResolution::Authoritative(
+        CanonicalResolution {
+            canonical_id: current,
+            evidence: RecallCoverageFactEvidence {
+                kind: RecallCoverageEvidenceKind::StoredSupersessionLineage,
+                source: "memories.superseded_by".to_string(),
+                lineage,
+            },
         },
-    }))
+    ))
 }
 
 fn validate_reviewed_equivalences(
@@ -459,18 +477,29 @@ fn canonical_resolution(
     reviewed: &HashMap<&str, &RecallCoverageEquivalenceSet>,
     target_id: &str,
 ) -> Result<CanonicalResolution, MemoryError> {
-    if let Some(lineage) = stored_lineage_evidence_from_links(links, target_id)? {
-        return Ok(lineage);
+    let reviewed_resolution = |set: &RecallCoverageEquivalenceSet| CanonicalResolution {
+        canonical_id: set.canonical_id.clone(),
+        evidence: RecallCoverageFactEvidence {
+            kind: RecallCoverageEvidenceKind::ReviewedEquivalence,
+            source: set.evidence_source.clone(),
+            lineage: vec![target_id.to_string(), set.canonical_id.clone()],
+        },
+    };
+
+    match stored_lineage_evidence_from_links(links, target_id)? {
+        StoredLineageResolution::Authoritative(lineage) => return Ok(lineage),
+        StoredLineageResolution::Dangling { missing_id } => {
+            if let Some(set) = reviewed.get(target_id) {
+                return Ok(reviewed_resolution(set));
+            }
+            return Err(MemoryError::InvalidArg(format!(
+                "recall coverage lineage invariant: dangling superseded_by while resolving target {target_id}: missing terminal row {missing_id}"
+            )));
+        }
+        StoredLineageResolution::None => {}
     }
     if let Some(set) = reviewed.get(target_id) {
-        return Ok(CanonicalResolution {
-            canonical_id: set.canonical_id.clone(),
-            evidence: RecallCoverageFactEvidence {
-                kind: RecallCoverageEvidenceKind::ReviewedEquivalence,
-                source: set.evidence_source.clone(),
-                lineage: vec![target_id.to_string(), set.canonical_id.clone()],
-            },
-        });
+        return Ok(reviewed_resolution(set));
     }
     Ok(CanonicalResolution {
         canonical_id: target_id.to_string(),
