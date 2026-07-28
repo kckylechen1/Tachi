@@ -273,6 +273,7 @@ fn replay_row(
         scored: true,
         scored_returned: true,
         access_count_at_recall: 0,
+        typo_fallback_candidate: false,
     }
 }
 
@@ -311,6 +312,7 @@ fn multi_channel_order_and_pairwise_decay_zero_inversions_are_exact() {
         top_k: 3,
         rows: vec![first, second, third],
         displayed_count: 3,
+        typo_fallback: TypoFallbackAttribution::default(),
     };
     record_access_with_updates(
         &conn,
@@ -443,6 +445,7 @@ fn impression_insert_failure_rolls_back_access_and_group_atomically() {
         top_k: 1,
         rows: vec![row.clone(), row],
         displayed_count: 1,
+        typo_fallback: TypoFallbackAttribution::default(),
     };
     let ids = ["atomic-row".to_string()];
     assert!(record_access_with_updates(

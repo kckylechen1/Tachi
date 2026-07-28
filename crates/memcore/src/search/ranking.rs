@@ -1,7 +1,7 @@
 //! Candidate scoring and top-k ranking for hybrid search.
 
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::{
@@ -22,6 +22,7 @@ use super::{
     expansion::symbolic_query_with_expansion,
     filtering::{is_search_noise_entry, newest_by_shared_entity, quality_multiplier, valid_at},
     recall_config, resolve_weights, ChannelPhaseReceipt, RankPhaseReceipt, SearchOptions,
+    TypoFallbackAttribution,
 };
 
 pub(super) struct CandidateRanking<'a> {
@@ -30,6 +31,9 @@ pub(super) struct CandidateRanking<'a> {
     pub(super) entries_map: HashMap<String, MemoryEntry>,
     pub(super) vec_scores: &'a HashMap<String, f64>,
     pub(super) fts_scores: &'a HashMap<String, f64>,
+    pub(super) typo_scores: &'a HashMap<String, f64>,
+    pub(super) typo_candidate_ids: &'a HashSet<String>,
+    pub(super) typo_attribution: TypoFallbackAttribution,
     pub(super) exact_id: Option<&'a str>,
     pub(super) include_superseded: bool,
     pub(super) as_of_utc: Option<&'a str>,
@@ -60,11 +64,20 @@ pub(super) fn rank_candidate_entries(
         entries_map,
         vec_scores,
         fts_scores,
+        typo_scores,
+        typo_candidate_ids,
+        typo_attribution,
         exact_id,
         include_superseded,
         as_of_utc,
     } = ranking;
-    let symbolic_scores = symbolic_scores(query, &entries_map);
+    let mut symbolic_scores = symbolic_scores(query, &entries_map);
+    for (id, score) in typo_scores {
+        symbolic_scores
+            .entry(id.clone())
+            .and_modify(|existing| *existing = existing.max(*score))
+            .or_insert(*score);
+    }
     let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
     let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
     let retrieval_evidence = RetrievalEvidence {
@@ -228,6 +241,8 @@ pub(super) fn rank_candidate_entries(
             &pre_scores,
             &scores,
             &ranked_ids,
+            typo_candidate_ids,
+            typo_attribution,
             exact_id,
             include_superseded,
             &superseded_ids,
@@ -296,6 +311,8 @@ fn build_impression_payload(
     pre_scores: &HashMap<String, HybridScore>,
     final_scores: &HashMap<String, HybridScore>,
     ranked_ids: &[String],
+    typo_candidate_ids: &HashSet<String>,
+    typo_attribution: TypoFallbackAttribution,
     exact_id: Option<&str>,
     include_superseded: bool,
     superseded_ids: &std::collections::HashSet<String>,
@@ -356,6 +373,7 @@ fn build_impression_payload(
                 scored: true,
                 scored_returned: false,
                 access_count_at_recall: entries[&id].access_count,
+                typo_fallback_candidate: typo_candidate_ids.contains(&id),
             }
         })
         .collect();
@@ -385,6 +403,7 @@ fn build_impression_payload(
         top_k: opts.top_k,
         rows,
         displayed_count: 0,
+        typo_fallback: typo_attribution,
     }
 }
 
@@ -1124,12 +1143,21 @@ pub(super) mod attribution {
             entries_map,
             vec_scores,
             fts_scores,
+            typo_scores,
+            typo_candidate_ids: _,
+            typo_attribution: _,
             exact_id,
             include_superseded,
             as_of_utc,
         } = ranking;
 
-        let symbolic_scores = symbolic_scores(query, &entries_map);
+        let mut symbolic_scores = symbolic_scores(query, &entries_map);
+        for (id, score) in typo_scores {
+            symbolic_scores
+                .entry(id.clone())
+                .and_modify(|existing| *existing = existing.max(*score))
+                .or_insert(*score);
+        }
         let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
         let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
         let retrieval_evidence = RetrievalEvidence {

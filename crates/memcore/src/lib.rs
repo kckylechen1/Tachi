@@ -172,7 +172,7 @@ pub use namespace::{
 };
 pub use near_dup::{near_duplicate_raw_pairs, text_token_jaccard, NEAR_DUP_RAW_SCAN_CAP};
 pub use noise::{is_noise_text, should_skip_query};
-pub use recall_config::RecallConfig;
+pub use recall_config::{RecallConfig, TypoFallbackConfig};
 pub use recall_coverage::{
     format_recall_coverage_human, is_recall_coverage_path_list_only, run_recall_coverage_probe,
     run_recall_coverage_probe_with_corpus, run_recall_coverage_probe_with_equivalences,
@@ -197,7 +197,8 @@ pub use search::{
     merge_rerank_order_with_hybrid_floor, AccessRecordingPhaseReceipt, CandidateLegEvidence,
     CandidatePhaseReceipt, ChannelPhaseReceipt, FetchPhaseReceipt, FtsExpansionGroupReceipt,
     GraphPhaseReceipt, LayerAvailability, RankPhaseReceipt, SearchOptions, SearchPhaseReceipt,
-    SearchReceiptDatabaseScope, SearchReceiptOperation, HYBRID_HEAD_FRACTION,
+    SearchReceiptDatabaseScope, SearchReceiptOperation, TypoFallbackPhaseReceipt,
+    HYBRID_HEAD_FRACTION,
 };
 pub use types::{
     AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,
