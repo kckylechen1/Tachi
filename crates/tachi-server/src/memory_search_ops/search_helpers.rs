@@ -187,26 +187,39 @@ pub(crate) fn pattern_matches_context(pattern: &str, context: &str) -> bool {
 }
 
 pub(crate) fn normalize_json_relevance(rows: &mut [serde_json::Value]) {
-    let max_score = rows
+    let max_rank_score = rows
         .iter()
-        .filter_map(|row| row.get("relevance").and_then(serde_json::Value::as_f64))
-        .filter(|score: &f64| score.is_finite() && *score > 0.0)
+        .map(search_score)
+        .filter(|score| score.is_finite() && *score > 0.0)
         .fold(0.0_f64, f64::max);
-    if max_score <= f64::EPSILON {
-        return;
-    }
     for row in rows.iter_mut() {
+        let existing_relevance = row
+            .get("relevance")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let rank_score = search_score(row);
+        let score = row.get("score");
+        let direct_evidence = ["vector", "fts", "symbolic"]
+            .into_iter()
+            .filter_map(|key| score?.get(key).and_then(serde_json::Value::as_f64))
+            .chain(row.get("rerank_score").and_then(serde_json::Value::as_f64))
+            .filter(|score| score.is_finite())
+            .map(|score| score.clamp(0.0, 1.0))
+            .reduce(f64::max);
         let Some(obj) = row.as_object_mut() else {
             continue;
         };
-        if let Some(rel) = obj.get("relevance").and_then(serde_json::Value::as_f64) {
-            let normalized = (rel / max_score).clamp(0.0, 1.0);
-            obj.insert("relevance".into(), json!(round_score(normalized)));
+        let relevance = direct_evidence.unwrap_or_else(|| existing_relevance.clamp(0.0, 1.0));
+        obj.insert("relevance".into(), json!(round_score(relevance)));
+        if max_rank_score > f64::EPSILON {
             if let Some(score) = obj
                 .get_mut("score")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                score.insert("final".into(), json!(round_score(normalized)));
+                score.insert(
+                    "final".into(),
+                    json!(round_score((rank_score / max_rank_score).clamp(0.0, 1.0))),
+                );
             }
         }
     }
@@ -675,5 +688,35 @@ mod tests {
         normalize_search_relevance(&mut results);
         assert!((results[0].0.score.final_score - 1.0).abs() < f64::EPSILON);
         assert!((results[1].0.score.final_score - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn normalize_json_relevance_uses_absolute_evidence_and_preserves_relative_final() {
+        let mut rows = vec![
+            json!({
+                "id": "weak-vector",
+                "relevance": 1.0,
+                "score": {"vector": 0.36, "fts": 0.0, "symbolic": 0.0, "final": 1.0}
+            }),
+            json!({
+                "id": "reranked",
+                "relevance": 1.167,
+                "rerank_score": 0.92,
+                "score": {"vector": 0.20, "fts": 0.10, "symbolic": 0.30, "final": 1.167}
+            }),
+            json!({"id": "legacy-scoreless", "relevance": 0.42}),
+        ];
+
+        normalize_json_relevance(&mut rows);
+
+        assert_eq!(rows[0]["relevance"], json!(0.36));
+        assert_eq!(rows[0]["score"]["final"], json!(0.857));
+        assert_eq!(rows[1]["relevance"], json!(0.92));
+        assert_eq!(
+            rows[1]["score"]["final"],
+            json!(1.0),
+            "rerank blend final remains the response-relative ranking key"
+        );
+        assert_eq!(rows[2]["relevance"], json!(0.42));
     }
 }

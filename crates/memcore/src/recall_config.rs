@@ -22,6 +22,9 @@ const DEFAULT_RRF_K: f64 = 20.0;
 // dropped from the vector channel only (FTS/symbolic unaffected). Calibrated
 // below typical good-hit band (~0.41–0.48) to cut clearly-weak raw matches.
 const DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR: f64 = 0.35;
+// Provisional tachi#1446/#1459: rows supported only by weak vector similarity
+// are withheld before ranking can read or reinforce their display history.
+const DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR: f64 = 0.40;
 // tachi#1446 lever 1. OFF ships the pre-#1446 behavior byte-for-byte: the
 // decay channel's age reference stays `last_access`, which the recall pipeline
 // writes for every row it returns. ON moves that reference to `last_use_at`.
@@ -47,6 +50,8 @@ pub struct RecallConfig {
     pub rrf_k: f64,
     /// Minimum vector similarity for raw-tier rows in the vector channel (provisional).
     pub raw_vector_similarity_floor: f64,
+    /// Minimum vector similarity for candidates with no FTS or symbolic evidence.
+    pub vector_only_similarity_floor: f64,
     /// tachi#1446: derive the decay channel's `recency` age from
     /// `MemoryEntry::last_use_at` instead of `MemoryEntry::last_access`.
     ///
@@ -114,6 +119,7 @@ impl Default for RecallConfig {
             or_fallback_fts_max_terms: DEFAULT_OR_FALLBACK_FTS_MAX_TERMS,
             rrf_k: DEFAULT_RRF_K,
             raw_vector_similarity_floor: DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
+            vector_only_similarity_floor: DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
             use_provenance_recency: DEFAULT_USE_PROVENANCE_RECENCY,
         }
     }
@@ -226,6 +232,11 @@ impl RecallConfig {
             "TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR",
             &mut self.raw_vector_similarity_floor,
         );
+        apply_f64(
+            values,
+            "TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR",
+            &mut self.vector_only_similarity_floor,
+        );
         apply_bool(
             values,
             "TACHI_RECALL_USE_PROVENANCE_RECENCY",
@@ -273,6 +284,11 @@ impl RecallConfig {
         self.raw_vector_similarity_floor = finite_or_default(
             self.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
+        )
+        .clamp(0.0, 1.0);
+        self.vector_only_similarity_floor = finite_or_default(
+            self.vector_only_similarity_floor,
+            DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
         )
         .clamp(0.0, 1.0);
         // `use_provenance_recency` is deliberately absent here. The numeric
@@ -514,6 +530,26 @@ mod tests {
             config.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
         );
+        assert_eq!(config.vector_only_similarity_floor, 0.40);
+    }
+
+    #[test]
+    fn vector_only_similarity_floor_defaults_and_stays_in_unit_interval() {
+        let default = RecallConfig::default();
+        assert_eq!(default.vector_only_similarity_floor, 0.40);
+
+        let below = RecallConfig::from_config_env_source(
+            "TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=-0.1\n",
+        );
+        assert_eq!(below.vector_only_similarity_floor, 0.0);
+
+        let above =
+            RecallConfig::from_config_env_source("TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=1.1\n");
+        assert_eq!(above.vector_only_similarity_floor, 1.0);
+
+        let invalid =
+            RecallConfig::from_config_env_source("TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=NaN\n");
+        assert_eq!(invalid.vector_only_similarity_floor, 0.40);
     }
 
     /// tachi#1446. The knob must be inert unless a config source explicitly

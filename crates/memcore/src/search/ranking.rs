@@ -80,6 +80,16 @@ pub(super) fn rank_candidate_entries(
                     _ => return false,
                 }
             }
+            if below_vector_only_similarity_floor(
+                id,
+                vec_scores,
+                fts_scores,
+                &symbolic_scores,
+                exact_id,
+                recall_config(opts),
+            ) {
+                return false;
+            }
             true
         })
         .map(|(k, v)| (k.clone(), v))
@@ -283,6 +293,34 @@ fn symbolic_scores(
             (id.clone(), score)
         })
         .collect()
+}
+
+/// A weak vector score alone is not recall evidence strong enough to display
+/// or reinforce. Filter it before access-history reads and every subsequent
+/// ranking boost, while preserving FTS, symbolic, and exact-id candidates.
+fn below_vector_only_similarity_floor(
+    id: &str,
+    vec_scores: &HashMap<String, f64>,
+    fts_scores: &HashMap<String, f64>,
+    symbolic_scores: &HashMap<String, f64>,
+    exact_id: Option<&str>,
+    recall_config: &crate::RecallConfig,
+) -> bool {
+    if exact_id == Some(id) {
+        return false;
+    }
+    let Some(vector) = vec_scores.get(id) else {
+        return false;
+    };
+    let has_fts_evidence = fts_scores
+        .get(id)
+        .is_some_and(|score| score.is_finite() && *score > 0.0);
+    let has_symbolic_evidence = symbolic_scores
+        .get(id)
+        .is_some_and(|score| score.is_finite() && *score > 0.0);
+    *vector < recall_config.vector_only_similarity_floor
+        && !has_fts_evidence
+        && !has_symbolic_evidence
 }
 
 fn apply_precision_boosts(
@@ -903,6 +941,16 @@ pub(super) mod attribution {
                         Some(d) if d == domain => {}
                         _ => return false,
                     }
+                }
+                if below_vector_only_similarity_floor(
+                    id,
+                    vec_scores,
+                    fts_scores,
+                    &symbolic_scores,
+                    exact_id,
+                    recall_config(opts),
+                ) {
+                    return false;
                 }
                 true
             })
