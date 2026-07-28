@@ -186,6 +186,39 @@ fn print_case(
     );
 }
 
+/// Keep the diagnostic report on the exact ops-audit retrieval contract. In
+/// particular, the hindsight case is Memory-scoped; dropping that surface
+/// changes both its candidate set and the attribution being reported.
+fn ops_report_opts(case: &ops_audit_corpus::CaseSpec) -> SearchOptions {
+    ops_audit_corpus::search_opts(case.surface)
+}
+
+#[test]
+fn rank_attribution_report_preserves_ops_case_surfaces() {
+    for case in ops_audit_corpus::CASES {
+        assert_eq!(
+            ops_report_opts(case).surface,
+            case.surface,
+            "rank attribution options dropped the ops-audit surface for {}",
+            case.name
+        );
+    }
+
+    let case = ops_audit_corpus::CASES
+        .iter()
+        .find(|case| case.name == "hindsight-research-wiki")
+        .expect("hindsight-research-wiki case");
+    let mut conn = setup();
+    ops_audit_corpus::seed_corpus(&mut conn);
+    let (ranked, _) = hybrid_search_with_attribution(&conn, case.query, &ops_report_opts(case))
+        .expect("surface-equivalent rank attribution search");
+    assert_eq!(
+        ranked.first().map(|result| result.entry.id.as_str()),
+        Some(case.expected),
+        "the report must attribute the hindsight case within its canonical Memory surface"
+    );
+}
+
 /// REPORT — not a gate. Prints one JSONL object per golden_corpus /
 /// ops_audit_corpus labeled case. `#[ignore]`; see module doc for the run
 /// command.
@@ -211,20 +244,13 @@ fn rank_attribution_report() {
     let mut oconn = setup();
     ops_audit_corpus::seed_corpus(&mut oconn);
     for case in ops_audit_corpus::CASES {
-        let opts = SearchOptions {
-            top_k: 40,
-            candidates_per_channel: 128,
-            record_access: false,
-            mmr_threshold: None,
-            ..Default::default()
-        };
         print_case(
             &oconn,
             "ops_audit_corpus",
             case.name,
             case.query,
             case.expected,
-            opts,
+            ops_report_opts(case),
         );
     }
 }
