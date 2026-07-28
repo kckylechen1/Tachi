@@ -23,6 +23,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     crate::db::migrations::write_schema_version_stamp(&tx)?;
     super::validate_persistent_trigger_inventory(&tx, true)?;
     validate_recall_impression_ledger_schema(&tx)?;
+    validate_typo_fallback_attribution_schema(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -94,6 +95,7 @@ pub fn init_schema_with_label_mut(
     crate::db::migrations::write_schema_version_stamp(&tx)?;
     super::validate_persistent_trigger_inventory(&tx, true)?;
     validate_recall_impression_ledger_schema(&tx)?;
+    validate_typo_fallback_attribution_schema(&tx)?;
     tx.commit()?;
 
     remember_migration_fingerprint(conn, current_db_path)?;
@@ -434,6 +436,84 @@ pub(crate) fn migrate_recall_impression_ledger_to_v26(
          DROP TABLE recall_impression_groups_v25;",
     )?;
     validate_recall_impression_ledger_schema(conn)
+}
+
+/// Canonical v27 installer. Production callers reach this only through the
+/// sentinel-gated migration runner, after the typed migration-authority gate.
+pub(crate) fn install_typo_fallback_attribution_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    for (table, column, definition) in [
+        (
+            "recall_impression_groups",
+            "typo_fallback_activated",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_prefilter_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_compared_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_token_comparison_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_edit_cell_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_candidate_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impressions",
+            "typo_fallback_candidate",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        ensure_column(conn, table, column, definition)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_typo_fallback_attribution_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    const REQUIRED_COLUMNS: &[(&str, &str)] = &[
+        ("recall_impression_groups", "typo_fallback_activated"),
+        ("recall_impression_groups", "typo_fallback_prefilter_count"),
+        ("recall_impression_groups", "typo_fallback_compared_count"),
+        (
+            "recall_impression_groups",
+            "typo_fallback_token_comparison_count",
+        ),
+        ("recall_impression_groups", "typo_fallback_edit_cell_count"),
+        ("recall_impression_groups", "typo_fallback_candidate_count"),
+        ("recall_impressions", "typo_fallback_candidate"),
+    ];
+    for (table, column) in REQUIRED_COLUMNS {
+        let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1");
+        let present = match conn.query_row(&sql, [column], |_| Ok(())) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v27 typo fallback attribution: required column '{table}.{column}' is missing"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_recall_impression_ledger_schema(
@@ -1438,9 +1518,11 @@ mod recall_impression_schema_tests {
     }
 
     #[test]
-    fn recall_impression_schema_validation_propagates_sqlite_query_errors() {
+    fn recall_attribution_schema_validations_propagate_sqlite_query_errors() {
         let conn = Connection::open_in_memory().expect("open in-memory");
         install_recall_impression_ledger_schema(&conn).expect("install valid ledger schema");
+        install_typo_fallback_attribution_schema(&conn)
+            .expect("install valid typo attribution schema");
         let install_result = unsafe {
             rusqlite::ffi::sqlite3_set_authorizer(
                 conn.handle(),
@@ -1452,6 +1534,13 @@ mod recall_impression_schema_tests {
 
         let error = validate_recall_impression_ledger_schema(&conn)
             .expect_err("SQLite authorization errors must not become missing-object errors");
+        assert!(
+            matches!(error, MemoryError::Sqlite(_)),
+            "expected propagated SQLite error, got: {error}"
+        );
+
+        let error = validate_typo_fallback_attribution_schema(&conn)
+            .expect_err("SQLite authorization errors must not become missing-column errors");
         assert!(
             matches!(error, MemoryError::Sqlite(_)),
             "expected propagated SQLite error, got: {error}"

@@ -35,6 +35,59 @@ const DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR: f64 = 0.445;
 const DEFAULT_USE_PROVENANCE_RECENCY: bool = true;
 const DEFAULT_IMPRESSION_SAMPLE_RATE_BPS: u16 = 0;
 
+/// Provisional per-action bounds for the character-level typo candidate fallback (#1506).
+///
+/// These values are intentionally grouped instead of appearing as literals in
+/// candidate collection or ranking. The fallback is read-only and additive: it
+/// can contribute at most `max_candidates` rows after a trigram prefilter of at
+/// most `prefilter_candidate_limit` rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypoFallbackConfig {
+    pub enabled: bool,
+    pub min_query_terms: usize,
+    pub max_query_terms: usize,
+    pub min_token_chars: usize,
+    pub max_token_chars: usize,
+    pub max_query_trigrams: usize,
+    pub prefilter_candidate_limit: usize,
+    pub max_candidate_chars: usize,
+    pub max_candidate_tokens: usize,
+    pub max_edit_distance: usize,
+    pub min_token_similarity: f64,
+    pub max_candidates: usize,
+    pub max_normal_vector_similarity: f64,
+    pub max_normal_fts_score: f64,
+    pub max_normal_symbolic_score: f64,
+    pub symbolic_score_factor: f64,
+}
+
+impl Default for TypoFallbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_query_terms: 4,
+            max_query_terms: 8,
+            min_token_chars: 4,
+            max_token_chars: 24,
+            max_query_trigrams: 48,
+            prefilter_candidate_limit: 32,
+            max_candidate_chars: 4_096,
+            max_candidate_tokens: 48,
+            max_edit_distance: 2,
+            min_token_similarity: 0.70,
+            max_candidates: 8,
+            max_normal_vector_similarity: 0.40,
+            max_normal_fts_score: 0.0,
+            max_normal_symbolic_score: 0.0,
+            // The existing rich-query evidence gate requires two of four
+            // symbolic terms (coverage 0.5). At the reviewed minimum token
+            // similarity (0.70), 0.65 keeps accepted all-term typo evidence
+            // above that gate without approaching a full-strength exact match.
+            symbolic_score_factor: 0.65,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallConfig {
     pub default_weights: HybridWeights,
@@ -94,6 +147,8 @@ pub struct RecallConfig {
     /// Deterministic SHA-256 query-fingerprint sample rate in basis points.
     /// Zero is fully off.
     pub impression_sample_rate_bps: u16,
+    /// Bounded character-level candidate recovery after every normal leg is weak.
+    pub typo_fallback: TypoFallbackConfig,
 }
 
 impl Default for RecallConfig {
@@ -135,6 +190,7 @@ impl Default for RecallConfig {
             vector_only_similarity_floor: DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
             use_provenance_recency: DEFAULT_USE_PROVENANCE_RECENCY,
             impression_sample_rate_bps: DEFAULT_IMPRESSION_SAMPLE_RATE_BPS,
+            typo_fallback: TypoFallbackConfig::default(),
         }
     }
 }
@@ -266,6 +322,86 @@ impl RecallConfig {
             "TACHI_RECALL_IMPRESSION_SAMPLE_RATE_BPS",
             &mut self.impression_sample_rate_bps,
         );
+        apply_bool(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_ENABLED",
+            &mut self.typo_fallback.enabled,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MIN_QUERY_TERMS",
+            &mut self.typo_fallback.min_query_terms,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_QUERY_TERMS",
+            &mut self.typo_fallback.max_query_terms,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MIN_TOKEN_CHARS",
+            &mut self.typo_fallback.min_token_chars,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_TOKEN_CHARS",
+            &mut self.typo_fallback.max_token_chars,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_QUERY_TRIGRAMS",
+            &mut self.typo_fallback.max_query_trigrams,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_PREFILTER_CANDIDATE_LIMIT",
+            &mut self.typo_fallback.prefilter_candidate_limit,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_CANDIDATE_CHARS",
+            &mut self.typo_fallback.max_candidate_chars,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_CANDIDATE_TOKENS",
+            &mut self.typo_fallback.max_candidate_tokens,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_EDIT_DISTANCE",
+            &mut self.typo_fallback.max_edit_distance,
+        );
+        apply_f64(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MIN_TOKEN_SIMILARITY",
+            &mut self.typo_fallback.min_token_similarity,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_CANDIDATES",
+            &mut self.typo_fallback.max_candidates,
+        );
+        apply_f64(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_NORMAL_VECTOR_SIMILARITY",
+            &mut self.typo_fallback.max_normal_vector_similarity,
+        );
+        apply_f64(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_NORMAL_FTS_SCORE",
+            &mut self.typo_fallback.max_normal_fts_score,
+        );
+        apply_f64(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_MAX_NORMAL_SYMBOLIC_SCORE",
+            &mut self.typo_fallback.max_normal_symbolic_score,
+        );
+        apply_f64(
+            values,
+            "TACHI_RECALL_TYPO_FALLBACK_SYMBOLIC_SCORE_FACTOR",
+            &mut self.typo_fallback.symbolic_score_factor,
+        );
     }
 
     pub fn sanitized(mut self) -> Self {
@@ -318,6 +454,50 @@ impl RecallConfig {
         )
         .clamp(0.0, 1.0);
         self.impression_sample_rate_bps = self.impression_sample_rate_bps.min(10_000);
+        self.typo_fallback.min_query_terms = self.typo_fallback.min_query_terms.clamp(2, 16);
+        self.typo_fallback.max_query_terms = self
+            .typo_fallback
+            .max_query_terms
+            .clamp(self.typo_fallback.min_query_terms, 16);
+        self.typo_fallback.min_token_chars = self.typo_fallback.min_token_chars.clamp(3, 16);
+        self.typo_fallback.max_token_chars = self
+            .typo_fallback
+            .max_token_chars
+            .clamp(self.typo_fallback.min_token_chars, 64);
+        self.typo_fallback.max_query_trigrams = self.typo_fallback.max_query_trigrams.clamp(1, 128);
+        self.typo_fallback.prefilter_candidate_limit =
+            self.typo_fallback.prefilter_candidate_limit.clamp(1, 128);
+        self.typo_fallback.max_candidate_chars =
+            self.typo_fallback.max_candidate_chars.clamp(256, 16_384);
+        self.typo_fallback.max_candidate_tokens =
+            self.typo_fallback.max_candidate_tokens.clamp(1, 128);
+        self.typo_fallback.max_edit_distance = self.typo_fallback.max_edit_distance.clamp(1, 4);
+        self.typo_fallback.min_token_similarity = finite_or_default(
+            self.typo_fallback.min_token_similarity,
+            TypoFallbackConfig::default().min_token_similarity,
+        )
+        .clamp(0.5, 1.0);
+        self.typo_fallback.max_candidates = self.typo_fallback.max_candidates.clamp(1, 32);
+        self.typo_fallback.max_normal_vector_similarity = finite_or_default(
+            self.typo_fallback.max_normal_vector_similarity,
+            TypoFallbackConfig::default().max_normal_vector_similarity,
+        )
+        .clamp(0.0, 1.0);
+        self.typo_fallback.max_normal_fts_score = finite_or_default(
+            self.typo_fallback.max_normal_fts_score,
+            TypoFallbackConfig::default().max_normal_fts_score,
+        )
+        .clamp(0.0, 1.0);
+        self.typo_fallback.max_normal_symbolic_score = finite_or_default(
+            self.typo_fallback.max_normal_symbolic_score,
+            TypoFallbackConfig::default().max_normal_symbolic_score,
+        )
+        .clamp(0.0, 1.0);
+        self.typo_fallback.symbolic_score_factor = finite_or_default(
+            self.typo_fallback.symbolic_score_factor,
+            TypoFallbackConfig::default().symbolic_score_factor,
+        )
+        .clamp(0.0, 1.0);
         // `use_provenance_recency` is deliberately absent here. The numeric
         // knobs need a clamp because a config file can name an out-of-range or
         // NaN value; `apply_bool` has no such failure mode — it leaves the
@@ -629,6 +809,45 @@ mod tests {
                 .impression_sample_rate_bps,
             10_000
         );
+    }
+
+    #[test]
+    fn typo_fallback_config_is_named_parsed_and_bounded() {
+        let config = RecallConfig::from_config_env_source(
+            "TACHI_RECALL_TYPO_FALLBACK_ENABLED=false\n\
+             TACHI_RECALL_TYPO_FALLBACK_MIN_QUERY_TERMS=1\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_QUERY_TERMS=99\n\
+             TACHI_RECALL_TYPO_FALLBACK_MIN_TOKEN_CHARS=1\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_TOKEN_CHARS=999\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_QUERY_TRIGRAMS=999\n\
+             TACHI_RECALL_TYPO_FALLBACK_PREFILTER_CANDIDATE_LIMIT=999\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_CANDIDATE_CHARS=1\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_CANDIDATE_TOKENS=999\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_EDIT_DISTANCE=99\n\
+             TACHI_RECALL_TYPO_FALLBACK_MIN_TOKEN_SIMILARITY=0.1\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_CANDIDATES=999\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_NORMAL_VECTOR_SIMILARITY=2\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_NORMAL_FTS_SCORE=2\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_NORMAL_SYMBOLIC_SCORE=2\n\
+             TACHI_RECALL_TYPO_FALLBACK_SYMBOLIC_SCORE_FACTOR=2\n",
+        );
+        let typo = config.typo_fallback;
+        assert!(!typo.enabled);
+        assert_eq!(typo.min_query_terms, 2);
+        assert_eq!(typo.max_query_terms, 16);
+        assert_eq!(typo.min_token_chars, 3);
+        assert_eq!(typo.max_token_chars, 64);
+        assert_eq!(typo.max_query_trigrams, 128);
+        assert_eq!(typo.prefilter_candidate_limit, 128);
+        assert_eq!(typo.max_candidate_chars, 256);
+        assert_eq!(typo.max_candidate_tokens, 128);
+        assert_eq!(typo.max_edit_distance, 4);
+        assert_eq!(typo.min_token_similarity, 0.5);
+        assert_eq!(typo.max_candidates, 32);
+        assert_eq!(typo.max_normal_vector_similarity, 1.0);
+        assert_eq!(typo.max_normal_fts_score, 1.0);
+        assert_eq!(typo.max_normal_symbolic_score, 1.0);
+        assert_eq!(typo.symbolic_score_factor, 1.0);
     }
 
     #[test]
