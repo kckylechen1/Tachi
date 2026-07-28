@@ -491,6 +491,92 @@ async fn direct_tachi_search_does_not_surface_fts_errors_for_unbalanced_parenthe
 }
 
 #[tokio::test]
+async fn tachi_search_patterns_scope_can_recall_continuity_projection_rows() {
+    let server = make_server();
+    let mut pattern = make_entry("patterns-scope-projection");
+    pattern.path = "/user/patterns/projection-boundary".to_string();
+    pattern.summary = "PatternScopeProjectionNeedle durable preference".to_string();
+    pattern.text = "PatternScopeProjectionNeedle must remain explicitly searchable".to_string();
+    pattern.keywords = vec!["PatternScopeProjectionNeedle".to_string()];
+    pattern.metadata = json!({"projection_kind": "pattern"});
+    server
+        .with_global_store(|store| store.upsert(&pattern).map_err(|e| format!("seed: {e}")))
+        .expect("seed pattern projection");
+
+    let params = TachiSearchParams {
+        query: "PatternScopeProjectionNeedle".to_string(),
+        scope: "patterns".to_string(),
+        top_k: 5,
+        path_prefix: None,
+        project: None,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        context_symbols: Vec::new(),
+        agent_role: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+    };
+
+    let (sections, _, _) =
+        crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
+    let pattern_rows = sections
+        .iter()
+        .find(|(name, _)| name == "Patterns")
+        .and_then(|(_, rows)| rows.as_array())
+        .expect("patterns section");
+    assert!(pattern_rows
+        .iter()
+        .any(|row| row["id"] == json!("patterns-scope-projection")));
+}
+
+#[tokio::test]
+async fn tachi_search_memory_scope_honors_explicit_continuity_path_scope() {
+    let server = make_server();
+    let mut timeline = make_entry("memory-scope-timeline-projection");
+    timeline.path = "/timeline/session/projection-boundary".to_string();
+    timeline.summary = "TimelineScopeProjectionNeedle durable event".to_string();
+    timeline.text = "TimelineScopeProjectionNeedle must remain explicitly searchable".to_string();
+    timeline.keywords = vec!["TimelineScopeProjectionNeedle".to_string()];
+    timeline.metadata = json!({"projection_kind": "timeline"});
+    server
+        .with_global_store(|store| store.upsert(&timeline).map_err(|e| format!("seed: {e}")))
+        .expect("seed timeline projection");
+
+    let params = TachiSearchParams {
+        query: "TimelineScopeProjectionNeedle".to_string(),
+        scope: "memory".to_string(),
+        top_k: 5,
+        path_prefix: Some("/timeline".to_string()),
+        project: None,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        context_symbols: Vec::new(),
+        agent_role: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+    };
+
+    let (sections, _, _) =
+        crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
+    let memory_rows = sections
+        .iter()
+        .find(|(name, _)| name == "Memory")
+        .and_then(|(_, rows)| rows.as_array())
+        .expect("memory section");
+    assert!(memory_rows
+        .iter()
+        .any(|row| row["id"] == json!("memory-scope-timeline-projection")));
+}
+
+#[tokio::test]
 async fn direct_tachi_search_caps_large_top_k() {
     let server = make_server();
     server

@@ -106,3 +106,73 @@ fn recall_cache_variants_are_search_noise_by_default() {
         Some("/openclaw/agent-main/recall-cache")
     ));
 }
+
+#[test]
+fn continuity_projections_require_an_explicit_matching_path_scope() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "ordinary",
+        "ProjectionBoundaryNeedle ordinary memory",
+        &["projection-boundary"],
+    );
+    let mut projection = memory_entry(
+        "timeline-projection",
+        "ProjectionBoundaryNeedle continuity timeline read model",
+        &["projection-boundary"],
+    );
+    projection.path = "/timeline/session/example".to_string();
+    projection.metadata = json!({"projection_kind": "timeline"});
+    upsert(&mut conn, &projection, false).unwrap();
+
+    let unscoped = hybrid_search(
+        &conn,
+        "ProjectionBoundaryNeedle",
+        &SearchOptions {
+            top_k: 5,
+            record_access: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(unscoped.iter().any(|result| result.entry.id == "ordinary"));
+    assert!(!unscoped
+        .iter()
+        .any(|result| result.entry.id == "timeline-projection"));
+    let projection_counts: (i64, i64) = conn
+        .query_row(
+            "SELECT access_count, scored_count FROM memories WHERE id = 'timeline-projection'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(projection_counts, (0, 0));
+
+    let scoped = hybrid_search(
+        &conn,
+        "ProjectionBoundaryNeedle",
+        &SearchOptions {
+            top_k: 5,
+            path_prefix: Some("/timeline".to_string()),
+            record_access: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(scoped
+        .iter()
+        .any(|result| result.entry.id == "timeline-projection"));
+
+    assert!(!crate::is_continuity_projection_path(
+        "/timeline-notes/example"
+    ));
+    assert!(!crate::is_continuity_projection_path(
+        "/user/patternsmith/example"
+    ));
+    assert!(!crate::is_continuity_projection_path(
+        "/outcomes-old/example"
+    ));
+    assert!(!crate::is_continuity_projection_path(
+        "/project-cycles/example"
+    ));
+}

@@ -74,17 +74,7 @@ pub(super) fn event_projections(event: &TachiEventRecord) -> Vec<ProjectionKind>
 }
 
 pub(in crate::continuity_ops) fn projected_path_prefix(projection: ProjectionKind) -> &'static str {
-    match projection {
-        ProjectionKind::Pattern => "/user/patterns",
-        ProjectionKind::Timeline => "/timeline",
-        ProjectionKind::Outcome => "/outcomes",
-        ProjectionKind::Affect => "/user/affect",
-        ProjectionKind::Bonding => "/user/patterns/bonding",
-        ProjectionKind::WorldBook => "/lorebook",
-        ProjectionKind::ProjectCycle => "/project-cycle",
-        ProjectionKind::DomainProfile => "/domain-profile",
-        ProjectionKind::EvidenceGate => "/evidence-gates",
-    }
+    projection.path_prefix()
 }
 
 fn projection_category(projection: ProjectionKind) -> &'static str {

@@ -99,6 +99,13 @@ fn recall_coverage_partitions_every_row_and_keeps_mixed_populations_eligible() {
         &mut store,
         fixture_entry("search-noise", "/kanban/tasks/a", "kanban row"),
     );
+    let mut metadata_projection = fixture_entry(
+        "metadata-projection",
+        "/notes/projected",
+        "metadata-only projection row",
+    );
+    metadata_projection.metadata = json!({"projection_kind": "outcome"});
+    insert(&mut store, metadata_projection);
     insert(
         &mut store,
         fixture_entry("path-only", "/guide/coverage", "guide row"),
@@ -111,9 +118,13 @@ fn recall_coverage_partitions_every_row_and_keeps_mixed_populations_eligible() {
         ("wiki", "/wiki/coverage"),
         ("eval", "/eval/coverage"),
         ("patterns", "/user/patterns/coverage"),
+        ("timeline", "/timeline/wiki/coverage"),
+        ("outcome", "/outcomes/task/coverage"),
+        ("project-cycle", "/project-cycle/task/coverage"),
         ("rules", "/behavior/global_rules/coverage"),
         ("feedback", "/feedback/coverage"),
         ("distill", "/foundry/distill/coverage"),
+        ("root", "/"),
         ("generic", "/notes/generic"),
     ] {
         insert(
@@ -151,10 +162,10 @@ fn recall_coverage_partitions_every_row_and_keeps_mixed_populations_eligible() {
     )
     .expect("coverage report");
 
-    assert_eq!(report.partition.total_rows, 12);
+    assert_eq!(report.partition.total_rows, 17);
     assert_eq!(report.partition.archived, 1);
     assert_eq!(report.partition.superseded, 1);
-    assert_eq!(report.partition.search_noise, 1);
+    assert_eq!(report.partition.search_noise, 6);
     assert_eq!(report.partition.path_list_only, 1);
     assert_eq!(report.partition.already_surfaced, 1);
     assert_eq!(report.partition.eligible, 7);
