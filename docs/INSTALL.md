@@ -302,7 +302,7 @@ Restart `tachi serve` after changing these values.
 | `TACHI_RECALL_CONSOLIDATED_HALF_LIFE_DAYS` | `60` | Decay half-life for consolidated memories |
 | `TACHI_RECALL_PATTERN_HALF_LIFE_DAYS` | `30000` | Decay half-life for pattern memories |
 | `TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST` | `12` | Boost for exact id-like query matches |
-| `TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR` | `0.43` | Provisional floor for candidates without sufficient lexical evidence; exact-id and qualified lexical candidates bypass it |
+| `TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR` | `0.445` | Provisional floor for candidates without sufficient lexical evidence; exact-id and qualified lexical candidates bypass it |
 | `TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS` | `4` | Require two matched terms for rich-query OR fallback and weak-vector symbolic bypass; values below `2` disable |
 
 For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
