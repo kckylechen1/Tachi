@@ -134,10 +134,10 @@ pub struct AccessEventDensity {
     pub memories_total: i64,
 }
 
-/// FNV-1a 32-bit hash of a query string for query_diversity tracking.
-fn fnv1a_hash(s: &str) -> String {
+/// FNV-1a query identity shared by access history and sampled impressions.
+pub(crate) fn query_hash(query: &str) -> String {
     let mut hash: u32 = 2_166_136_261;
-    for byte in s.bytes() {
+    for byte in query.bytes() {
         hash ^= byte as u32;
         hash = hash.wrapping_mul(16_777_619);
     }
@@ -180,8 +180,16 @@ pub(crate) fn record_access(
     fts_hits: &[String],
     query: Option<&str>,
 ) -> Result<(), MemoryError> {
-    record_access_with_updates(conn, ids, ids, fts_hits, query, crate::RecallConfig::get())
-        .map(|_| ())
+    record_access_with_updates(
+        conn,
+        ids,
+        ids,
+        fts_hits,
+        query,
+        crate::RecallConfig::get(),
+        None,
+    )
+    .map(|_| ())
 }
 
 /// Bump `access_count` and `last_access` for a list of IDs after a non-empty
@@ -219,13 +227,14 @@ pub(crate) fn record_access_with_updates(
     fts_hits: &[String],
     query: Option<&str>,
     recall_config: &crate::RecallConfig,
+    impression: Option<&crate::recall_impressions::RecallImpressionPayload>,
 ) -> Result<HashMap<String, AccessUpdate>, MemoryError> {
     if displayed_ids.is_empty() && scored_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
     let now = now_utc_iso();
-    let query_hash = query.map(fnv1a_hash).unwrap_or_default();
+    let query_hash = query.map(query_hash).unwrap_or_default();
     // `record_access` is called from search paths that only hold `&Connection`.
     // The unchecked transaction keeps the access_count/history/recall updates
     // atomic without widening the public search API to require `&mut Connection`.
@@ -440,6 +449,10 @@ pub(crate) fn record_access_with_updates(
                 .collect::<Vec<_>>();
             tx.execute(&sql, params_from_iter(values.iter()))?;
         }
+    }
+
+    if let Some(payload) = impression {
+        crate::recall_impressions::insert_recall_impression(&tx, payload)?;
     }
 
     let mut updates = HashMap::with_capacity(displayed_existing_ids.len());

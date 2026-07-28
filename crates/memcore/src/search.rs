@@ -530,20 +530,27 @@ fn hybrid_search_inner(
         fetched_count: entries_map.len(),
     });
 
-    let (mut results, scored_ids, rank_receipt) = ranking::rank_candidate_entries(
-        conn,
-        ranking::CandidateRanking {
+    let capture_impression = opts.record_access
+        && crate::recall_impressions::should_sample_query(
             query,
-            opts,
-            entries_map,
-            vec_scores: &candidates.vec_scores,
-            fts_scores: &candidates.fts_scores,
-            exact_id: candidates.exact_id.as_deref(),
-            include_superseded,
-            as_of_utc: as_of_utc.as_deref(),
-        },
-        sample,
-    )?;
+            recall_config(opts).impression_sample_rate_bps,
+        );
+    let (mut results, scored_ids, rank_receipt, mut impression_payload) =
+        ranking::rank_candidate_entries(
+            conn,
+            ranking::CandidateRanking {
+                query,
+                opts,
+                entries_map,
+                vec_scores: &candidates.vec_scores,
+                fts_scores: &candidates.fts_scores,
+                exact_id: candidates.exact_id.as_deref(),
+                include_superseded,
+                as_of_utc: as_of_utc.as_deref(),
+            },
+            sample,
+            capture_impression,
+        )?;
 
     // `append_graph_expansion` mutates `results` in place and returns the
     // receipt by value, so the receipt does not borrow `results` and there is
@@ -556,6 +563,13 @@ fn hybrid_search_inner(
         as_of_utc.as_deref(),
         sample,
     )?;
+    if let Some(payload) = &mut impression_payload {
+        let displayed_ids = results
+            .iter()
+            .map(|result| result.entry.id.clone())
+            .collect::<Vec<_>>();
+        payload.finalize_displayed(&displayed_ids);
+    }
 
     // ── Record access (bump counters) ─────────────────────────────────────────
     //
@@ -582,6 +596,7 @@ fn hybrid_search_inner(
             &fts_hit_ids,
             Some(query),
             recall_config(opts),
+            impression_payload.as_ref(),
         )?;
         for r in &mut results {
             if let Some(update) = access_updates.get(&r.entry.id) {
