@@ -296,15 +296,15 @@ mod tests {
         store.upsert(&entry).expect("seed entry");
         seed_display_days(&store, &entry.id, &SIX_EXPOSURE_DAYS);
 
-        let knob_off = RecallConfig::default();
-        let knob_on = RecallConfig {
-            use_provenance_recency: true,
+        let knob_off = RecallConfig {
+            use_provenance_recency: false,
             ..RecallConfig::default()
         };
+        let knob_on = RecallConfig::default();
 
         let exposure_days = store
             .distinct_promotion_days(&entry.id, &knob_off)
-            .expect("count days at default config");
+            .expect("count days with the legacy rollback arm");
         let use_days = store
             .distinct_promotion_days(&entry.id, &knob_on)
             .expect("count days with the knob on");
@@ -317,7 +317,7 @@ mod tests {
 
         assert!(
             score_from_exposure >= PROMOTION_THRESHOLD,
-            "the defect must still be reachable at default config or this test \
+            "the defect must still be reachable through the legacy rollback arm or this test \
              is not testing anything: got {score_from_exposure}"
         );
         assert!(
@@ -327,15 +327,15 @@ mod tests {
         );
     }
 
-    /// tachi#1446 lever 6, the property that makes the change safe to land:
-    /// at default config the score the gate sees is bit-for-bit what it was
-    /// before the `event_kind` split.
+    /// tachi#1446 lever 6, the property that keeps the explicit rollback arm
+    /// safe: with the knob off, the score the gate sees is bit-for-bit what it
+    /// was before the `event_kind` split.
     ///
     /// The reference value is computed from the literal pre-#1446 unfiltered
     /// statement, not from a constant, so this fails if the filtered query ever
     /// stops covering the legacy row set.
     #[test]
-    fn default_config_promotion_score_is_unchanged_by_the_event_kind_split() {
+    fn legacy_config_promotion_score_is_unchanged_by_the_event_kind_split() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         let entry = promotion_fixture("legacy-history");
         store.upsert(&entry).expect("seed entry");
@@ -349,13 +349,16 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("unfiltered count");
-        let knob_off = RecallConfig::default();
-        let default_days = store
+        let knob_off = RecallConfig {
+            use_provenance_recency: false,
+            ..RecallConfig::default()
+        };
+        let legacy_days = store
             .distinct_promotion_days(&entry.id, &knob_off)
-            .expect("count days at default config");
+            .expect("count days with the legacy rollback arm");
 
         assert_eq!(
-            default_days, pre_1446_days as usize,
+            legacy_days, pre_1446_days as usize,
             "knob OFF must feed the gate the same day count the unfiltered \
              query fed it"
         );
@@ -363,7 +366,7 @@ mod tests {
         // literal claim being tested, and it dodges the float-comparison lint
         // without weakening the assertion to a tolerance.
         assert_eq!(
-            calculate_promotion_score(&entry, default_days).to_bits(),
+            calculate_promotion_score(&entry, legacy_days).to_bits(),
             calculate_promotion_score(&entry, pre_1446_days as usize).to_bits(),
             "and therefore the same score, and therefore the same promotion \
              decision"

@@ -196,6 +196,21 @@ pub(crate) fn normalize_json_relevance(rows: &mut [serde_json::Value]) {
         let existing_relevance = row.get("relevance").and_then(serde_json::Value::as_f64);
         let rank_score = search_score(row);
         let score = row.get("score");
+        let graph_only = score.is_some_and(|score| {
+            ["vector", "fts", "symbolic", "decay"]
+                .into_iter()
+                .all(|key| {
+                    score
+                        .get(key)
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|value| value.is_finite() && value.abs() <= f64::EPSILON)
+                })
+        }) && row
+            .get("rerank_score")
+            .and_then(serde_json::Value::as_f64)
+            .is_none_or(|value| !value.is_finite() || value <= 0.0)
+            && rank_score.is_finite()
+            && rank_score > 0.0;
         let direct_evidence = ["vector", "fts", "symbolic"]
             .into_iter()
             .filter_map(|key| score?.get(key).and_then(serde_json::Value::as_f64))
@@ -206,9 +221,12 @@ pub(crate) fn normalize_json_relevance(rows: &mut [serde_json::Value]) {
         let Some(obj) = row.as_object_mut() else {
             continue;
         };
-        if let Some(relevance) =
+        let relevance = if graph_only && max_rank_score > f64::EPSILON {
+            Some((rank_score / max_rank_score).clamp(0.0, 1.0))
+        } else {
             direct_evidence.or_else(|| existing_relevance.map(|value| value.clamp(0.0, 1.0)))
-        {
+        };
+        if let Some(relevance) = relevance {
             obj.insert("relevance".into(), json!(round_score(relevance)));
         }
         if max_rank_score > f64::EPSILON {
@@ -704,6 +722,11 @@ mod tests {
                 "rerank_score": 0.92,
                 "score": {"vector": 0.20, "fts": 0.10, "symbolic": 0.30, "final": 1.167}
             }),
+            json!({
+                "id": "graph-only",
+                "relevance": 0.0,
+                "score": {"vector": 0.0, "fts": 0.0, "symbolic": 0.0, "decay": 0.0, "final": 0.5}
+            }),
             json!({"id": "legacy-scoreless", "relevance": 0.42}),
             json!({"id": "l0-rule"}),
         ];
@@ -718,7 +741,13 @@ mod tests {
             json!(1.0),
             "rerank blend final remains the response-relative ranking key"
         );
-        assert_eq!(rows[2]["relevance"], json!(0.42));
-        assert!(rows[3].get("relevance").is_none());
+        assert_eq!(
+            rows[2]["relevance"],
+            json!(0.428),
+            "graph-only rows need response-relative relevance instead of a false zero"
+        );
+        assert_eq!(rows[2]["score"]["final"], json!(0.428));
+        assert_eq!(rows[3]["relevance"], json!(0.42));
+        assert!(rows[4].get("relevance").is_none());
     }
 }

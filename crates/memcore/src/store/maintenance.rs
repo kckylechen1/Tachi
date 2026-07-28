@@ -9,36 +9,52 @@ pub struct TierHealthCounts {
 }
 
 impl MemoryStore {
-    /// Archive low-importance memories that were never surfaced by search and
+    /// Archive stale low-value memories using the process recall configuration.
+    pub fn archive_stale_low_value_memories(&self) -> Result<usize, MemoryError> {
+        self.archive_stale_low_value_memories_with_config(crate::RecallConfig::get())
+    }
+
+    /// Archive low-importance memories that have no qualifying activity and
     /// are older than 60 days, sparing permanent/pinned/durable retention
     /// policies.
     ///
-    /// tachi#1459: the `access_count = 0` predicate below observes the search
-    /// path only; reads through path-listing routes do not increment it. "Never
-    /// accessed" here means "`hybrid_search` never returned it", so a row read
-    /// constantly through `list_by_path` / `list_by_path_recent` /
-    /// `list_memories_by_path_prefix` still qualifies. The other predicates are
-    /// what currently keep that from destroying a live row: rows under
-    /// `/handoff*` and `/kanban*` with no policy of their own are backfilled to
-    /// `pinned`, and `/wiki*` / `/guide*` to `permanent`
-    /// (`backfill_retention_defaults` in `db/schema.rs`), and the retention
-    /// filter spares those — but that is a second mechanism doing the work, not
-    /// this predicate meaning what it reads like.
-    pub fn archive_stale_low_value_memories(&self) -> Result<usize, MemoryError> {
+    /// With provenance recency enabled, only `last_use_at` protects a row:
+    /// merely displaying it in search must not turn exposure into retention.
+    /// The explicit rollback arm preserves the historical `access_count = 0`
+    /// behavior.
+    pub fn archive_stale_low_value_memories_with_config(
+        &self,
+        recall_config: &crate::RecallConfig,
+    ) -> Result<usize, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let tx = self.conn.unchecked_transaction()?;
         let archived_at = db::now_utc_iso();
-        let mut stmt = tx.prepare(
+        let (activity_predicate, receipt_predicate, activity_column) =
+            if recall_config.use_provenance_recency {
+                (
+                    "last_use_at IS NULL",
+                    "stale_low_value_never_used",
+                    "last_use_at",
+                )
+            } else {
+                (
+                    "access_count = 0",
+                    "stale_low_value_never_search_accessed",
+                    "access_count",
+                )
+            };
+        let sql = format!(
             "UPDATE memories
              SET archived = 1, updated_at = ?1, revision = revision + 1
              WHERE archived = 0
                AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned', 'durable')
                AND importance < 0.70
-               AND access_count = 0
+               AND {activity_predicate}
                AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')
-             RETURNING id",
-        )?;
+             RETURNING id"
+        );
+        let mut stmt = tx.prepare(&sql)?;
         let mut ids = stmt
             .query_map([&archived_at], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -50,7 +66,8 @@ impl MemoryStore {
                 &archived_at,
                 60,
                 serde_json::json!([{
-                    "predicate": "stale_low_value_never_search_accessed",
+                    "predicate": receipt_predicate,
+                    "activity_column": activity_column,
                     "recency_column": "created_at_or_timestamp",
                     "importance_below": 0.70,
                     "retention_scope": "not_permanent_pinned_or_durable",
@@ -58,7 +75,7 @@ impl MemoryStore {
                     "memory_ids": ids,
                 }]),
                 ids.len(),
-                "memcore::store::maintenance::MemoryStore::archive_stale_low_value_memories",
+                "memcore::store::maintenance::MemoryStore::archive_stale_low_value_memories_with_config",
             )?;
         }
         tx.commit()?;
@@ -319,6 +336,78 @@ mod tests {
     }
 
     #[test]
+    fn unattended_archival_uses_genuine_use_by_default_and_preserves_legacy_rollback() {
+        let mut provenance_store = MemoryStore::open_in_memory().expect("open provenance store");
+        for id in ["display-only", "genuinely-used"] {
+            provenance_store
+                .upsert(&test_entry(id))
+                .expect("seed provenance row");
+            backdate_created_at(&provenance_store, id);
+        }
+        provenance_store
+            .connection()
+            .execute(
+                "UPDATE memories SET access_count = 7 WHERE id = 'display-only'",
+                [],
+            )
+            .expect("record display-only exposure");
+        provenance_store
+            .connection()
+            .execute(
+                "UPDATE memories SET access_count = 1, last_use_at = '2026-01-01T00:00:00Z' WHERE id = 'genuinely-used'",
+                [],
+            )
+            .expect("record genuine use");
+
+        assert_eq!(
+            provenance_store
+                .archive_stale_low_value_memories_with_config(&crate::RecallConfig::default())
+                .expect("archive with provenance semantics"),
+            1,
+            "display-only exposure must not protect an otherwise stale low-value row"
+        );
+        assert!(
+            provenance_store
+                .get_with_options("display-only", true)
+                .unwrap()
+                .unwrap()
+                .archived
+        );
+        assert!(
+            !provenance_store
+                .get("genuinely-used")
+                .unwrap()
+                .unwrap()
+                .archived,
+            "genuine use must protect the row under the default provenance arm"
+        );
+
+        let mut legacy_store = MemoryStore::open_in_memory().expect("open legacy store");
+        legacy_store
+            .upsert(&test_entry("display-only"))
+            .expect("seed legacy row");
+        backdate_created_at(&legacy_store, "display-only");
+        legacy_store
+            .connection()
+            .execute(
+                "UPDATE memories SET access_count = 7 WHERE id = 'display-only'",
+                [],
+            )
+            .expect("record legacy exposure");
+        let legacy_config = crate::RecallConfig {
+            use_provenance_recency: false,
+            ..crate::RecallConfig::default()
+        };
+        assert_eq!(
+            legacy_store
+                .archive_stale_low_value_memories_with_config(&legacy_config)
+                .expect("archive with legacy semantics"),
+            0,
+            "the explicit rollback arm must preserve access_count behavior"
+        );
+    }
+
+    #[test]
     fn unattended_archival_is_revision_safe_and_receipted_without_noop_events() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         store.upsert(&test_entry("stale-a")).expect("seed stale-a");
@@ -377,10 +466,7 @@ mod tests {
             "timestamp must use millisecond UTC form"
         );
         let pass = &payload["passes"][0];
-        assert_eq!(
-            pass["predicate"],
-            json!("stale_low_value_never_search_accessed")
-        );
+        assert_eq!(pass["predicate"], json!("stale_low_value_never_used"));
         assert_eq!(pass["archived_count"], json!(2));
         assert_eq!(pass["memory_ids"], json!(["stale-a", "stale-b"]));
         assert_eq!(store.archive_stale_low_value_memories().unwrap(), 0);

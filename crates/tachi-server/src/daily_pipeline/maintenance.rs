@@ -236,7 +236,7 @@ async fn run_truth_maintenance_for_target(
     let recall_config = memcore::RecallConfig::get();
 
     store
-        .archive_stale_low_value_memories()
+        .archive_stale_low_value_memories_with_config(recall_config)
         .map_err(|e| format!("truth maintenance prune {}: {e}", target.label))?;
 
     // ── Self-healing: promote raw → consolidated when DB health ratio is low ──
