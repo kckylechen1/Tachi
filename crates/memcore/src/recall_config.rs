@@ -76,7 +76,11 @@ impl Default for TypoFallbackConfig {
             max_edit_distance: 2,
             min_token_similarity: 0.70,
             max_candidates: 8,
-            max_normal_vector_similarity: 0.40,
+            // Keep the activation gate aligned with the later vector-only
+            // evidence floor. A lower value creates a dead band where a weak
+            // vector candidate suppresses typo recovery and is then filtered
+            // out before ranking.
+            max_normal_vector_similarity: DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
             max_normal_fts_score: 0.0,
             max_normal_symbolic_score: 0.0,
             // The existing rich-query evidence gate requires two of four
@@ -482,7 +486,8 @@ impl RecallConfig {
             self.typo_fallback.max_normal_vector_similarity,
             TypoFallbackConfig::default().max_normal_vector_similarity,
         )
-        .clamp(0.0, 1.0);
+        .clamp(0.0, 1.0)
+        .max(self.vector_only_similarity_floor);
         self.typo_fallback.max_normal_fts_score = finite_or_default(
             self.typo_fallback.max_normal_fts_score,
             TypoFallbackConfig::default().max_normal_fts_score,
@@ -848,6 +853,16 @@ mod tests {
         assert_eq!(typo.max_normal_fts_score, 1.0);
         assert_eq!(typo.max_normal_symbolic_score, 1.0);
         assert_eq!(typo.symbolic_score_factor, 1.0);
+    }
+
+    #[test]
+    fn typo_vector_gate_cannot_fall_below_vector_only_survival_floor() {
+        let config = RecallConfig::from_config_env_source(
+            "TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=0.61\n\
+             TACHI_RECALL_TYPO_FALLBACK_MAX_NORMAL_VECTOR_SIMILARITY=0.20\n",
+        );
+        assert_eq!(config.vector_only_similarity_floor, 0.61);
+        assert_eq!(config.typo_fallback.max_normal_vector_similarity, 0.61);
     }
 
     #[test]

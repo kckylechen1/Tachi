@@ -141,13 +141,6 @@ pub(super) fn collect_candidates(
     let symbolic_candidate_count = symbolic_candidate_entries.len();
 
     let exact_id = exact_memory_id_query(query);
-    let normal_candidate_ids = vec_scores
-        .keys()
-        .chain(fts_scores.keys())
-        .chain(symbolic_candidate_entries.iter().map(|entry| &entry.id))
-        .chain(exact_id.as_ref())
-        .cloned()
-        .collect::<HashSet<_>>();
     let typo = collect_typo_fallback_candidates(
         conn,
         query,
@@ -158,7 +151,6 @@ pub(super) fn collect_candidates(
         &fts_scores,
         &symbolic_candidate_entries,
         exact_id.as_deref(),
-        &normal_candidate_ids,
         sample,
     )?;
     let TypoFallbackCandidates {
@@ -239,7 +231,6 @@ fn collect_typo_fallback_candidates(
     fts_scores: &HashMap<String, f64>,
     symbolic_entries: &[MemoryEntry],
     exact_id: Option<&str>,
-    normal_candidate_ids: &HashSet<String>,
     sample: bool,
 ) -> Result<TypoFallbackCandidates, MemoryError> {
     let config = &recall_config(opts).typo_fallback;
@@ -267,11 +258,11 @@ fn collect_typo_fallback_candidates(
         config,
     )?;
     let prefilter_candidate_count = prefilter_ids.len();
-    let new_prefilter_ids = prefilter_ids
-        .into_iter()
-        .filter(|id| !normal_candidate_ids.contains(id))
-        .collect::<Vec<_>>();
-    let entries = fetch_by_ids(conn, &new_prefilter_ids, opts.include_archived)?;
+    // A typo match is independent retrieval evidence, not merely a source of
+    // new IDs. Re-score prefiltered rows even when a weak vector leg already
+    // contributed the same ID; otherwise a candidate can suppress fallback
+    // and then be removed by the vector-only evidence floor.
+    let entries = fetch_by_ids(conn, &prefilter_ids, opts.include_archived)?;
     let compared_candidate_count = entries.len();
     let mut token_comparison_count = 0usize;
     let mut edit_cell_count = 0usize;
