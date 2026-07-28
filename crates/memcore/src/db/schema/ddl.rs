@@ -279,58 +279,6 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- access_history tables (#1289). Creating them here would `no such
         -- column`-crash init_schema_inner on a DB that predates either column.
 
-        -- Sampled, content-free recall impression ledger (tachi#1447).
-        -- It is deliberately separate from access_history: its own retention
-        -- cannot rewrite query_diversity or tier-promotion evidence.
-        CREATE TABLE IF NOT EXISTS recall_impression_groups (
-            group_id         TEXT PRIMARY KEY,
-            created_at       TEXT NOT NULL,
-            query_hash       TEXT NOT NULL,
-            weights_profile  TEXT NOT NULL,
-            semantic_weight  REAL NOT NULL,
-            fts_weight       REAL NOT NULL,
-            symbolic_weight  REAL NOT NULL,
-            decay_weight     REAL NOT NULL,
-            use_rrf          INTEGER NOT NULL CHECK (use_rrf IN (0, 1)),
-            rrf_k            REAL NOT NULL,
-            top_k            INTEGER NOT NULL,
-            candidate_count  INTEGER NOT NULL,
-            displayed_count  INTEGER NOT NULL,
-            scored_returned_count INTEGER NOT NULL,
-            replay_count     INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS idx_recall_impression_groups_created
-            ON recall_impression_groups(created_at DESC, group_id);
-        CREATE INDEX IF NOT EXISTS idx_recall_impression_groups_query_hash
-            ON recall_impression_groups(query_hash, created_at DESC);
-
-        CREATE TABLE IF NOT EXISTS recall_impressions (
-            group_id              TEXT NOT NULL,
-            memory_id             TEXT NOT NULL,
-            vector_score          REAL NOT NULL,
-            fts_score             REAL NOT NULL,
-            symbolic_score        REAL NOT NULL,
-            decay_score           REAL NOT NULL,
-            vec_rank              INTEGER,
-            fts_rank              INTEGER,
-            sym_rank              INTEGER,
-            merge_adjustment      TEXT NOT NULL CHECK (merge_adjustment IN ('none', 'exact_id', 'superseded_scale', 'exact_id_superseded_scale')),
-            pre_boost_score       REAL NOT NULL,
-            pre_boost_rank        INTEGER NOT NULL,
-            tie_break_epoch_millis INTEGER NOT NULL,
-            final_score           REAL NOT NULL,
-            final_rank            INTEGER NOT NULL,
-            scored                INTEGER NOT NULL CHECK (scored IN (0, 1)),
-            scored_returned       INTEGER NOT NULL CHECK (scored_returned IN (0, 1)),
-            access_count_at_recall INTEGER NOT NULL,
-            PRIMARY KEY (group_id, memory_id),
-            FOREIGN KEY (group_id) REFERENCES recall_impression_groups(group_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_recall_impressions_memory
-            ON recall_impressions(memory_id, group_id);
-        CREATE INDEX IF NOT EXISTS idx_recall_impressions_group_final_rank
-            ON recall_impressions(group_id, final_rank, memory_id);
-
         -- Derived items (causal extractions, distilled rules, etc.)
         CREATE TABLE IF NOT EXISTS derived_items (
             id         TEXT PRIMARY KEY,
@@ -1026,6 +974,60 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             UNIQUE(agent_identity_id, connection_id)
         );
         CREATE INDEX IF NOT EXISTS idx_identity_admissions_connection ON identity_admissions(connection_id);
+"#;
+
+/// Canonical fresh-init and v25 migration DDL for the sampled, content-free
+/// recall impression ledger (tachi#1447). Keeping one SQL definition prevents
+/// the migration path from drifting from newly provisioned databases.
+pub(super) const RECALL_IMPRESSION_LEDGER_SQL: &str = r#"
+        CREATE TABLE IF NOT EXISTS recall_impression_groups (
+            group_id         TEXT PRIMARY KEY,
+            created_at       TEXT NOT NULL,
+            query_hash       TEXT NOT NULL,
+            weights_profile  TEXT NOT NULL,
+            semantic_weight  REAL NOT NULL,
+            fts_weight       REAL NOT NULL,
+            symbolic_weight  REAL NOT NULL,
+            decay_weight     REAL NOT NULL,
+            use_rrf          INTEGER NOT NULL CHECK (use_rrf IN (0, 1)),
+            rrf_k            REAL NOT NULL,
+            top_k            INTEGER NOT NULL,
+            candidate_count  INTEGER NOT NULL,
+            displayed_count  INTEGER NOT NULL,
+            scored_returned_count INTEGER NOT NULL,
+            replay_count     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_recall_impression_groups_created
+            ON recall_impression_groups(created_at DESC, group_id);
+        CREATE INDEX IF NOT EXISTS idx_recall_impression_groups_query_hash
+            ON recall_impression_groups(query_hash, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS recall_impressions (
+            group_id              TEXT NOT NULL,
+            memory_id             TEXT NOT NULL,
+            vector_score          REAL NOT NULL,
+            fts_score             REAL NOT NULL,
+            symbolic_score        REAL NOT NULL,
+            decay_score           REAL NOT NULL,
+            vec_rank              INTEGER,
+            fts_rank              INTEGER,
+            sym_rank              INTEGER,
+            merge_adjustment      TEXT NOT NULL CHECK (merge_adjustment IN ('none', 'exact_id', 'superseded_scale', 'exact_id_superseded_scale')),
+            pre_boost_score       REAL NOT NULL,
+            pre_boost_rank        INTEGER NOT NULL,
+            tie_break_epoch_millis INTEGER NOT NULL,
+            final_score           REAL NOT NULL,
+            final_rank            INTEGER NOT NULL,
+            scored                INTEGER NOT NULL CHECK (scored IN (0, 1)),
+            scored_returned       INTEGER NOT NULL CHECK (scored_returned IN (0, 1)),
+            access_count_at_recall INTEGER NOT NULL,
+            PRIMARY KEY (group_id, memory_id),
+            FOREIGN KEY (group_id) REFERENCES recall_impression_groups(group_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_recall_impressions_memory
+            ON recall_impressions(memory_id, group_id);
+        CREATE INDEX IF NOT EXISTS idx_recall_impressions_group_final_rank
+            ON recall_impressions(group_id, final_rank, memory_id);
 "#;
 
 pub(super) const MIGRATED_INDEXES_SQL: &str = r#"

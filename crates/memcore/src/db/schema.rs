@@ -45,7 +45,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     // v23 migration's canonical guards here only after the final memories
     // table exists; operational file opens install them through v23 below.
     install_reserved_reference_guard(conn)?;
-    super::validate_persistent_trigger_inventory(conn, true)
+    super::validate_persistent_trigger_inventory(conn, true)?;
+    validate_recall_impression_ledger_schema(conn)
 }
 
 /// Initialize schema and run data migrations with a known DB label and path.
@@ -99,6 +100,7 @@ pub fn init_schema_with_label_mut(
     let report = crate::db::migrations::run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
     crate::db::migrations::write_schema_version_stamp(&tx)?;
     super::validate_persistent_trigger_inventory(&tx, true)?;
+    validate_recall_impression_ledger_schema(&tx)?;
     tx.commit()?;
 
     remember_migration_fingerprint(conn, current_db_path)?;
@@ -155,6 +157,7 @@ fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::BASE_SCHEMA_SQL)?;
+    install_recall_impression_ledger_schema(conn)?;
 
     // Legacy recall-cache rows predate database-authoritative generation
     // snapshots. The empty default is intentionally non-matching, so the first
@@ -377,6 +380,62 @@ pub(crate) fn ensure_memories_scored_count(conn: &Connection) -> Result<(), Memo
         "scored_count",
         "INTEGER NOT NULL DEFAULT 0",
     )
+}
+
+pub(crate) fn install_recall_impression_ledger_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::RECALL_IMPRESSION_LEDGER_SQL)
+}
+
+pub(crate) fn validate_recall_impression_ledger_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    const REQUIRED_OBJECTS: &[(&str, &str, &str)] = &[
+        (
+            "table",
+            "recall_impression_groups",
+            "recall_impression_groups",
+        ),
+        ("table", "recall_impressions", "recall_impressions"),
+        (
+            "index",
+            "idx_recall_impression_groups_created",
+            "recall_impression_groups",
+        ),
+        (
+            "index",
+            "idx_recall_impression_groups_query_hash",
+            "recall_impression_groups",
+        ),
+        (
+            "index",
+            "idx_recall_impressions_memory",
+            "recall_impressions",
+        ),
+        (
+            "index",
+            "idx_recall_impressions_group_final_rank",
+            "recall_impressions",
+        ),
+    ];
+
+    for (object_type, name, table) in REQUIRED_OBJECTS {
+        let present: bool = conn
+            .query_row(
+                "SELECT 1 FROM main.sqlite_schema
+                 WHERE type = ?1 AND name = ?2 AND tbl_name = ?3",
+                params![object_type, name, table],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v25 recall impression ledger: required {object_type} '{name}' on '{table}' is missing"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn install_reserved_reference_guard(conn: &Connection) -> Result<(), MemoryError> {

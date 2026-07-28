@@ -46,6 +46,7 @@
 //!   a legitimate v22 DB upgrades under migration authority while a damaged
 //!   v23 inventory is refused rather than silently repaired.
 //! - v24: `memories.scored_count` scorer-only diagnostic counter (#1459).
+//! - v25: sampled recall-impression ledger tables and indexes (#1447).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -88,7 +89,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 24;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 25;
 
 mod basic;
 mod cross_db;
@@ -162,6 +163,7 @@ pub struct MigrationReport {
     pub memories_symbolic_fts_rows: usize,
     pub reserved_reference_guards_installed: usize,
     pub scored_count_column_added: usize,
+    pub recall_impression_schema_objects_created: usize,
 }
 
 #[cfg(test)]
@@ -579,6 +581,12 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v24_memories_scored_count,
     )?
     .unwrap_or(0);
+    report.recall_impression_schema_objects_created = apply_versioned_migration(
+        conn,
+        "v25_recall_impression_ledger",
+        migrate_v25_recall_impression_ledger,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
 }
@@ -594,6 +602,12 @@ fn migrate_v23_reserved_reference_guards(conn: &Connection) -> Result<usize, Mem
 fn migrate_v24_memories_scored_count(conn: &Connection) -> Result<usize, MemoryError> {
     crate::db::schema::ensure_memories_scored_count(conn)?;
     Ok(1)
+}
+
+fn migrate_v25_recall_impression_ledger(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::install_recall_impression_ledger_schema(conn)?;
+    crate::db::schema::validate_recall_impression_ledger_schema(conn)?;
+    Ok(6)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -1758,6 +1772,8 @@ mod tests {
         "v21_identity_workclaim_spine",
         "v22_memories_symbolic_fts",
         "v23_reserved_reference_guards",
+        "v24_memories_scored_count",
+        "v25_recall_impression_ledger",
     ];
 
     /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner
@@ -1974,8 +1990,12 @@ mod tests {
         .expect("authorized v23 migration must add scored_count");
         drop(store);
         let verify = Connection::open(&path).expect("verify migrated DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), 24);
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
         assert!(was_run(&verify, "v24_memories_scored_count").unwrap());
+        assert!(was_run(&verify, "v25_recall_impression_ledger").unwrap());
         let _reserved_reference_guard = crate::db::register_reserved_reference_write_guard(&verify)
             .expect("register trigger guard function");
         let default: i64 = verify
@@ -1986,6 +2006,115 @@ mod tests {
             )
             .unwrap();
         assert_eq!(default, 0);
+    }
+
+    /// #1447: the recall-impression ledger is a v25 persistent schema change.
+    /// A stamped-v24 OpenExisting DB must not acquire its tables or indexes
+    /// unless the caller explicitly authorizes migration.
+    #[test]
+    fn v24_to_v25_recall_impressions_requires_authority_and_stamps() {
+        use crate::db::DbOpenContext;
+
+        const V25_SENTINEL: &str = "v25_recall_impression_ledger";
+        const V25_OBJECTS: &[(&str, &str)] = &[
+            ("table", "recall_impression_groups"),
+            ("table", "recall_impressions"),
+            ("index", "idx_recall_impression_groups_created"),
+            ("index", "idx_recall_impression_groups_query_hash"),
+            ("index", "idx_recall_impressions_memory"),
+            ("index", "idx_recall_impressions_group_final_rank"),
+        ];
+
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open fixture");
+            assert_eq!(
+                read_schema_version(&conn).unwrap(),
+                EXPECTED_SCHEMA_VERSION,
+                "fresh provisioning must stamp v25"
+            );
+            assert!(was_run(&conn, V25_SENTINEL).unwrap());
+            for (object_type, name) in V25_OBJECTS {
+                let present: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+                        params![object_type, name],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                assert!(present, "fresh v25 must create {object_type} {name}");
+            }
+            conn.execute(
+                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+                params![MIGRATION_NS, V25_SENTINEL],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "DROP TABLE recall_impressions;
+                 DROP TABLE recall_impression_groups;
+                 PRAGMA user_version = 24;",
+            )
+            .unwrap();
+        }
+
+        let deny_err = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_deny(),
+        ) {
+            Ok(_) => panic!("Deny must refuse stamped-v24 -> v25"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                deny_err,
+                MemoryError::SchemaMigrationOptInRequired { stored: 24, .. }
+            ),
+            "unexpected deny error: {deny_err}"
+        );
+        {
+            let inspect = Connection::open(&path).expect("inspect denied DB");
+            assert_eq!(read_schema_version(&inspect).unwrap(), 24);
+            assert!(!was_run(&inspect, V25_SENTINEL).unwrap());
+            for (object_type, name) in V25_OBJECTS {
+                let present: bool = inspect
+                    .query_row(
+                        "SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+                        params![object_type, name],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                assert!(!present, "Deny must not create {object_type} {name}");
+            }
+        }
+
+        let store = crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_allow("test:1447-v25"),
+        )
+        .expect("Allow must migrate v24 -> v25");
+        drop(store);
+
+        let verify = Connection::open(&path).expect("verify migrated DB");
+        assert_eq!(read_schema_version(&verify).unwrap(), 25);
+        assert!(was_run(&verify, V25_SENTINEL).unwrap());
+        for (object_type, name) in V25_OBJECTS {
+            let present: bool = verify
+                .query_row(
+                    "SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+                    params![object_type, name],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            assert!(present, "v25 must create {object_type} {name}");
+        }
     }
 
     #[test]
