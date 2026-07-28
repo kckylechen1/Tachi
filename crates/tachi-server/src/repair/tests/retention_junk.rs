@@ -334,6 +334,63 @@ fn r8_deletes_only_unprotected_ephemeral_junk_and_keeps_projections_consistent()
     );
 }
 
+#[test]
+fn r8_overlap_is_classified_once_and_reports_one_unique_target() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "junk-overlap.db");
+    insert_memory(
+        &conn,
+        "cache-empty-overlap",
+        "/recall-cache/hermes-turn",
+        "{}",
+        "{}",
+        Some("ephemeral"),
+        None,
+    );
+    conn.execute(
+        "UPDATE memories SET category='other', topic='hermes_turn'
+         WHERE id='cache-empty-overlap'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = JunkCleanup.dry_run(&mut ctx).unwrap();
+    assert_eq!(
+        dry.finding_total(),
+        1,
+        "overlap must count as one unique R8 target, got {dry:?}"
+    );
+    assert_eq!(
+        dry.findings
+            .iter()
+            .find(|finding| finding.kind == "foundry_recall_rerank_cache")
+            .map(|finding| finding.count),
+        Some(1),
+        "overlap must retain its cache classification"
+    );
+    assert!(
+        dry.findings
+            .iter()
+            .all(|finding| finding.kind != "empty_json_turns"),
+        "cache ownership must make the empty-turn class exclusive"
+    );
+
+    let applied = JunkCleanup.apply(&mut ctx).unwrap();
+    assert_eq!(applied.finding_total(), 1);
+    assert_eq!(applied.applied, 1);
+    let remaining: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id='cache-empty-overlap'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
 #[tokio::test]
 async fn r8_cli_backend_keeps_dry_run_non_mutating_and_apply_opt_in() {
     let dir = TempDir::new().unwrap();

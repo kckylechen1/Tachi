@@ -4,8 +4,6 @@
 //! `tachi repair dedupe exact/apply`, which archives losers through a bound
 //! plan, receipt, CAS, and restore path instead of physically deleting them.
 
-use serde_json::json;
-
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
 use memcore::namespace::RECALL_CACHE_SQL_WHERE;
 
@@ -57,6 +55,11 @@ fn empty_json_turn_sql() -> String {
               OR path LIKE '%hermes%'
               OR path LIKE '%turn%'
           )
+          -- Classification is exclusive: recall-cache namespace ownership wins
+          -- when an ephemeral row also has an empty-turn shape. This preserves
+          -- per-kind observability while keeping finding_total equal to the
+          -- unique cleanup target count used by apply.
+          AND NOT ({RECALL_CACHE_SQL_WHERE})
           AND ({EPHEMERAL_JUNK_GUARDS_SQL})
         "#
     )
@@ -163,12 +166,6 @@ impl RepairRule for JunkCleanup {
         tx.execute("DROP TABLE cleanup_targets", [])?;
         tx.commit()?;
         report.applied = target_count;
-        if target_count > 0 {
-            report.findings.push(
-                Finding::new("deleted_memory_rows", target_count)
-                    .with_detail(json!({"note": "FTS/vector/edge/access rows were cleaned first"})),
-            );
-        }
         Ok(report)
     }
 }
