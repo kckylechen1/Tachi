@@ -1,10 +1,13 @@
 //! `tachi cards sync` / `tachi cards list` (tachi#1202 Phase-1 / tachi#992).
 //!
-//! Mirrors leader-authored lane cards (`~/.agents/dispatch-ledger/cards/*.md`
+//! Mirrors leader-authored dispatch cards (`~/.agents/dispatch-ledger/cards/*.md`
 //! — markdown with an optional typed frontmatter declaration, NOT tracked in
 //! this repo) into read-only `/cards/<seat>` rows in the GLOBAL memory DB, so any
 //! agent with a Tachi connection can look up a seat's playbook without
 //! filesystem access to the leader's home directory.
+//! Typed cards distinguish model, harness, seat, and crew identities. A crew is
+//! a small agent team composed of multiple collaborating seats; it is mirrored
+//! for routing context but never projected as a single-seat prompt overlay.
 //!
 //! Deliberately distinct from the singular `tachi card` command (`cards.rs`
 //! in this same directory), which projects Tachikoma dispatch-profile cards
@@ -83,6 +86,7 @@ use crate::tool_params::{ArchiveMemoryParams, SaveMemoryParams};
 
 const CARDS_MIRROR_PATH_PREFIX: &str = "/cards";
 const CARDS_METADATA_SOURCE: &str = "dispatch-ledger";
+const SUPPORTED_CARD_KINDS: [&str; 4] = ["model", "harness", "seat", "crew"];
 
 pub(super) async fn run_cards_command(
     action: CardsAction,
@@ -384,7 +388,7 @@ fn parse_card_declaration(text: &str) -> Result<CardDeclaration, Box<dyn std::er
             .get("status")
             .ok_or("typed card frontmatter is missing status")?,
     );
-    if !matches!(kind.as_str(), "model" | "harness" | "seat") {
+    if !SUPPORTED_CARD_KINDS.contains(&kind.as_str()) {
         return Err(format!("invalid card kind {kind}").into());
     }
     if !matches!(
@@ -803,6 +807,7 @@ fn print_sync_table(rows: &[CardSyncRow]) {
 
 struct MirrorListRow {
     seat: String,
+    kind: String,
     revision: i64,
     // Mapped from `MemoryEntry::timestamp`: `handle_save_memory` stamps this
     // to `Utc::now()` on every actual write (create or update) and this
@@ -823,6 +828,12 @@ fn list_mirror_rows(
         .into_iter()
         .map(|(seat, entry)| MirrorListRow {
             seat,
+            kind: entry
+                .metadata
+                .get("card_kind")
+                .and_then(Value::as_str)
+                .unwrap_or("seat")
+                .to_string(),
             revision: entry.revision,
             updated_at: entry.timestamp,
             counter_clauses_present: entry
@@ -842,6 +853,7 @@ fn list_rows_json(rows: &[MirrorListRow]) -> Value {
             .iter()
             .map(|row| json!({
                 "seat": row.seat,
+                "kind": row.kind,
                 "revision": row.revision,
                 "updated_at": row.updated_at,
                 "counter_clauses_present": row.counter_clauses_present,
@@ -854,8 +866,8 @@ fn list_rows_json(rows: &[MirrorListRow]) -> Value {
 fn print_list_table(rows: &[MirrorListRow]) {
     println!("Dispatch-Ledger Cards (mirror rows)");
     println!(
-        "{:<28} {:<6} {:<9} {:<28}",
-        "seat", "rev", "counter", "updated_at"
+        "{:<28} {:<9} {:<6} {:<9} {:<28}",
+        "seat", "kind", "rev", "counter", "updated_at"
     );
     for row in rows {
         let counter = if row.counter_clauses_present {
@@ -869,8 +881,8 @@ fn print_list_table(rows: &[MirrorListRow]) {
             row.seat.clone()
         };
         println!(
-            "{:<28} {:<6} {:<9} {:<28}",
-            seat_label, row.revision, counter, row.updated_at
+            "{:<28} {:<9} {:<6} {:<9} {:<28}",
+            seat_label, row.kind, row.revision, counter, row.updated_at
         );
     }
 }
@@ -1099,6 +1111,40 @@ aliases: [codex-cli, codex-app-server]
             .expect("second typed sync");
         assert_eq!(find_row(&second, "grok-cli").status, "unchanged");
         assert_eq!(find_row(&second, "grok-cli").revision, 1);
+    }
+
+    #[tokio::test]
+    async fn sync_accepts_crew_as_a_typed_agent_team() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards_dir = temp.path().join("cards");
+        std::fs::create_dir_all(&cards_dir).expect("cards dir");
+        let schema_migration = memcore::MigrationAuthority::Deny;
+        write_fixture(
+            &cards_dir,
+            "kimi-crew",
+            "---\ncard_id: crew/oc-kimi-crew\nkind: crew\nstatus: active\nrole: implementer-formation\nmodel_family: kimi-k3\nharness_id: clanker/opencode\n---\n\n# Kimi Crew\n\nA small agent team.\n",
+        );
+
+        let rows = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
+            .await
+            .expect("crew cards are a supported typed identity");
+        assert_eq!(find_row(&rows, "kimi-crew").status, "created");
+
+        let mirrors = read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors");
+        let metadata = &mirrors["kimi-crew"].metadata;
+        assert_eq!(metadata["card_id"], json!("crew/oc-kimi-crew"));
+        assert_eq!(metadata["card_kind"], json!("crew"));
+        assert_eq!(metadata["card_status"], json!("active"));
+
+        let listed = list_mirror_rows(&db_path, &schema_migration).expect("list mirrors");
+        let crew = listed
+            .iter()
+            .find(|row| row.seat == "kimi-crew")
+            .expect("crew row is listed");
+        assert_eq!(crew.kind, "crew");
+        let listed_json = list_rows_json(&listed);
+        assert_eq!(listed_json["rows"][0]["kind"], json!("crew"));
     }
 
     #[tokio::test]

@@ -160,7 +160,7 @@ fn participates_in_seat_projection(entry: &memcore::MemoryEntry) -> bool {
         .and_then(serde_json::Value::as_str)
     {
         None | Some("seat") => true,
-        Some("model" | "harness") => false,
+        Some("model" | "harness" | "crew") => false,
         Some(_) => false,
     }
 }

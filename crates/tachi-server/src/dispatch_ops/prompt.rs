@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_harness_card_does_not_suppress_legacy_seat_prefix_match() {
+    fn typed_non_seat_cards_do_not_suppress_legacy_seat_prefix_match() {
         let temp = tempfile::tempdir().expect("tempdir");
         let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
         seed_seat_card(
@@ -867,6 +867,13 @@ mod tests {
             "## 反制条款\n- harness-only clause\n",
             Some("## 反制条款\n- harness-only clause"),
         );
+        seed_typed_card(
+            &server,
+            "grok-crew",
+            "crew",
+            "## 反制条款\n- crew-level clause\n",
+            Some("## 反制条款\n- crew-level clause"),
+        );
         let params = seat_card_dispatch_params("grok", None);
 
         let prompt = tokio::runtime::Runtime::new()
@@ -875,6 +882,7 @@ mod tests {
 
         assert!(prompt.contains("legacy seat clause"), "{prompt}");
         assert!(!prompt.contains("harness-only clause"), "{prompt}");
+        assert!(!prompt.contains("crew-level clause"), "{prompt}");
     }
 
     #[test]
