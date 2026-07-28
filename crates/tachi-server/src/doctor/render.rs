@@ -11,8 +11,11 @@ pub fn render_report(report: &DoctorReport) -> String {
         report.scanned_roots.join(", ")
     ));
     lines.push(format!(
-        "summary: {} dbs, {} memories, {} jobs",
-        report.summary.total_databases, report.summary.total_memories, report.summary.total_jobs,
+        "summary: {} physical dbs, {} path aliases, {} memories, {} jobs",
+        report.summary.total_databases,
+        report.summary.total_aliases,
+        report.summary.total_memories,
+        report.summary.total_jobs,
     ));
     lines.push(format!(
         "  ✅ healthy={} 🟡 vec_missing={} 🟠 wal_orphan={} 🔴 corrupt={} 🟣 legacy={} ⚪ placeholder={} 📦 backup={}",
@@ -25,6 +28,30 @@ pub fn render_report(report: &DoctorReport) -> String {
         report.summary.backup,
     ));
     lines.push(String::new());
+
+    if !report.physical_stores.is_empty() {
+        lines.push("physical stores:".to_string());
+        for store in &report.physical_stores {
+            lines.push(format!(
+                "  {} [{}] aliases={} open_path={} basis={}",
+                store.canonical_path,
+                store.physical_id,
+                store.aliases.len(),
+                store.open_path,
+                store.open_path_basis.as_str()
+            ));
+            for alias in &store.aliases {
+                lines.push(format!("    alias: {alias}"));
+            }
+            for sidecar_path in &store.sidecar_paths {
+                lines.push(format!("    sidecar-visible: {sidecar_path}"));
+            }
+            if let Some(kind) = store.open_failure_kind {
+                lines.push(format!("    inventory_failure={}", kind.as_str()));
+            }
+        }
+        lines.push(String::new());
+    }
 
     if !report.warnings.is_empty() {
         lines.push("warnings:".to_string());

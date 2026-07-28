@@ -3,7 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::classify::classify_one_with_provider;
-use super::{auto_fix_safe, DbClassification, DoctorFinding, DoctorReport, SummaryByClass};
+use super::{
+    auto_fix_safe, DbClassification, DoctorFinding, DoctorReport, JobBreakdown, SummaryByClass,
+};
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 
 // ─── Scanning ────────────────────────────────────────────────────────────────
@@ -82,7 +84,10 @@ fn walk_one(root: &Path, out: &mut Vec<PathBuf>, max_depth: usize) {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if path.is_file() {
+        let is_symlink = fs::symlink_metadata(&path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if path.is_file() || (is_symlink && is_db_candidate_filename(name)) {
             if is_db_candidate_filename(name) {
                 out.push(path);
             }
@@ -99,6 +104,9 @@ fn walk_one(root: &Path, out: &mut Vec<PathBuf>, max_depth: usize) {
 }
 
 fn is_db_candidate_filename(name: &str) -> bool {
+    if name.ends_with(".migration-marker") {
+        return false;
+    }
     if memcore::is_memory_db_filename(name) {
         return true;
     }
@@ -137,15 +145,61 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
         .into_iter()
         .filter(|path| !path_is_under(path, quarantine_root))
         .collect();
+    let inventory = crate::physical_db_identity::classify_paths(candidates);
     let routing_config = RoutingConfigProvider::new(crate::path_utils::tachi_home());
-    let findings: Vec<DoctorFinding> = candidates
-        .iter()
-        .map(|path| classify_one_with_provider(path, &routing_config))
-        .collect();
+    let mut physical_stores = inventory.stores;
+    let mut representative_findings = Vec::new();
+    let mut findings = Vec::new();
+
+    for physical_store in &mut physical_stores {
+        let open_path = PathBuf::from(&physical_store.open_path);
+        let classified = classify_one_with_provider(&open_path, &routing_config);
+        physical_store.open_failure_kind = classified
+            .error
+            .as_ref()
+            .map(|error| crate::physical_db_identity::classify_open_failure(error));
+
+        let mut representative = classified.clone();
+        representative.path = physical_store.open_path.clone();
+        representative.scope_hint =
+            super::classify::scope_hint_for(Path::new(&physical_store.open_path));
+        representative_findings.push(representative.clone());
+
+        for alias in &physical_store.aliases {
+            let mut alias_finding = classified.clone();
+            alias_finding.path = alias.clone();
+            alias_finding.scope_hint = super::classify::scope_hint_for(Path::new(alias));
+            findings.push(alias_finding);
+        }
+    }
+
+    for unresolved in inventory.unresolved_paths {
+        findings.push(DoctorFinding {
+            path: unresolved.path.display().to_string(),
+            classification: DbClassification::Corrupt,
+            file_size: 0,
+            has_wal: false,
+            mem_count: None,
+            vec_rowid_count: None,
+            none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
+            jobs: JobBreakdown::default(),
+            schema_kind: "unknown".to_string(),
+            error: Some(format!(
+                "{}: {}",
+                unresolved.failure_kind.as_str(),
+                unresolved.error
+            )),
+            scope_hint: super::classify::scope_hint_for(&unresolved.path),
+        });
+    }
+    findings.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut summary = SummaryByClass::default();
-    summary.total_databases = findings.len();
-    for f in &findings {
+    summary.total_databases = physical_stores.len();
+    summary.total_aliases = findings.len();
+    for f in &representative_findings {
         match f.classification {
             DbClassification::Healthy => summary.healthy += 1,
             DbClassification::VecExtensionMissing => summary.vec_extension_missing += 1,
@@ -162,7 +216,7 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
     }
 
     let auto_fix_actions = if options.auto_fix {
-        auto_fix_safe(&findings, quarantine_root)
+        auto_fix_safe(&representative_findings, quarantine_root)
     } else {
         Vec::new()
     };
@@ -170,6 +224,7 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
     DoctorReport {
         scanned_roots: roots.iter().map(|p| p.display().to_string()).collect(),
         findings,
+        physical_stores,
         summary,
         warnings: Vec::new(),
         auto_fix_actions,

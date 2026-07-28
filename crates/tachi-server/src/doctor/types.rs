@@ -131,6 +131,7 @@ pub struct DoctorWarning {
 pub struct DoctorReport {
     pub scanned_roots: Vec<String>,
     pub findings: Vec<DoctorFinding>,
+    pub physical_stores: Vec<crate::physical_db_identity::PhysicalDbStore>,
     pub summary: SummaryByClass,
     pub warnings: Vec<DoctorWarning>,
     pub auto_fix_actions: Vec<AutoFixAction>,
@@ -148,6 +149,7 @@ pub struct SummaryByClass {
     pub placeholder: usize,
     pub backup: usize,
     pub total_databases: usize,
+    pub total_aliases: usize,
     pub total_memories: usize,
     pub total_jobs: usize,
 }

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::super::{
-    collect_memory_db_files, open_cli_store, TidyFinding, TidyGroupSummary, TidyPlanStep,
+    collect_memory_db_files, open_cli_store_read_only, TidyFinding, TidyGroupSummary, TidyPlanStep,
     TidyReport,
 };
 use super::classify::{
@@ -18,63 +18,100 @@ pub(crate) fn build_tidy_report(
         collect_memory_db_files(root, &mut discovered, 10);
     }
 
-    discovered.sort();
-    discovered.dedup();
-
+    let inventory = crate::physical_db_identity::classify_paths(discovered);
+    let mut physical_stores = inventory.stores;
     let mut databases = Vec::new();
     let mut total_memories = 0usize;
 
-    for path in discovered {
-        let scope_suggestion = classify_tidy_scope(&path, git_root);
+    for physical_store in &mut physical_stores {
+        let path = PathBuf::from(&physical_store.open_path);
         let mut status = "ok".to_string();
         let mut entry_count = None;
         let mut vec_available = false;
-        let link_meta = std::fs::symlink_metadata(&path).ok();
-        let is_symlink = link_meta
-            .as_ref()
-            .map(|meta| meta.file_type().is_symlink())
-            .unwrap_or(false);
-        let symlink_target = if is_symlink {
-            std::fs::read_link(&path)
-                .ok()
-                .map(|target| target.display().to_string())
-        } else {
-            None
-        };
-        let target_exists = is_symlink.then(|| path.exists());
+        let mut open_failure_kind = None;
 
-        if is_symlink && !path.exists() {
-            status = "broken_symlink".to_string();
-        } else {
-            match open_cli_store(&path) {
-                Ok(store) => {
-                    vec_available = store.vec_available;
-                    match store.stats(false) {
-                        Ok(stats) => {
-                            entry_count = Some(stats.total as usize);
-                            total_memories += stats.total as usize;
-                        }
-                        Err(_) => {
-                            status = "stats_error".to_string();
-                        }
+        match open_cli_store_read_only(&path) {
+            Ok(store) => {
+                vec_available = store.vec_available;
+                match store.stats(false) {
+                    Ok(stats) => {
+                        entry_count = Some(stats.total as usize);
+                        total_memories += stats.total as usize;
+                    }
+                    Err(error) => {
+                        status = "stats_error".to_string();
+                        open_failure_kind =
+                            Some(crate::physical_db_identity::classify_memory_failure(&error));
                     }
                 }
-                Err(_) => {
-                    status = "open_error".to_string();
-                }
+            }
+            Err(error) => {
+                status = "open_error".to_string();
+                open_failure_kind = Some(
+                    error
+                        .downcast_ref::<memcore::MemoryError>()
+                        .map(crate::physical_db_identity::classify_memory_failure)
+                        .unwrap_or_else(|| {
+                            crate::physical_db_identity::classify_open_failure(error.as_ref())
+                        }),
+                );
             }
         }
+        physical_store.open_failure_kind = open_failure_kind;
 
+        for alias in &physical_store.aliases {
+            let alias_path = PathBuf::from(alias);
+            let scope_suggestion = classify_tidy_scope(&alias_path, git_root);
+            let is_symlink = std::fs::symlink_metadata(&alias_path)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false);
+            let symlink_target = is_symlink
+                .then(|| std::fs::read_link(&alias_path).ok())
+                .flatten()
+                .map(|target| target.display().to_string());
+            databases.push(TidyFinding {
+                path: alias.clone(),
+                entry_count,
+                vec_available,
+                recommended_action: tidy_recommended_action(&scope_suggestion, &status),
+                scope_suggestion,
+                status: status.clone(),
+                is_symlink,
+                symlink_target,
+                target_exists: is_symlink.then_some(true),
+                physical_id: Some(physical_store.physical_id.clone()),
+                canonical_path: Some(physical_store.canonical_path.clone()),
+                inventory_open_path: Some(physical_store.open_path.clone()),
+                is_primary_alias: alias == &physical_store.primary_path,
+                open_failure_kind,
+            });
+        }
+    }
+
+    for unresolved in inventory.unresolved_paths {
+        let scope_suggestion = classify_tidy_scope(&unresolved.path, git_root);
+        let status = if unresolved.failure_kind
+            == crate::physical_db_identity::InventoryFailureKind::BrokenSymlink
+        {
+            "broken_symlink".to_string()
+        } else {
+            "open_error".to_string()
+        };
         databases.push(TidyFinding {
-            path: path.display().to_string(),
-            entry_count,
-            vec_available,
+            path: unresolved.path.display().to_string(),
+            entry_count: None,
+            vec_available: false,
             recommended_action: tidy_recommended_action(&scope_suggestion, &status),
             scope_suggestion,
             status,
-            is_symlink,
-            symlink_target,
-            target_exists,
+            is_symlink: unresolved.is_symlink,
+            symlink_target: unresolved.symlink_target,
+            target_exists: unresolved.target_exists,
+            physical_id: None,
+            canonical_path: None,
+            inventory_open_path: None,
+            is_primary_alias: false,
+            open_failure_kind: Some(unresolved.failure_kind),
         });
     }
 
@@ -85,7 +122,7 @@ pub(crate) fn build_tidy_report(
     });
 
     let mut groups_map = std::collections::BTreeMap::<String, (usize, usize)>::new();
-    for db in &databases {
+    for db in databases.iter().filter(|db| db.is_primary_alias) {
         let key = tidy_group_key(&db.scope_suggestion);
         let entry = groups_map.entry(key).or_insert((0, 0));
         entry.0 += 1;
@@ -107,13 +144,20 @@ pub(crate) fn build_tidy_report(
     });
 
     let mut plan_map = std::collections::BTreeMap::<(usize, String, String), Vec<String>>::new();
-    for db in &databases {
+    for db in databases
+        .iter()
+        .filter(|db| db.is_primary_alias || db.physical_id.is_none())
+    {
         let key = (
             tidy_group_priority(&tidy_group_key(&db.scope_suggestion)),
             db.scope_suggestion.clone(),
             db.recommended_action.clone(),
         );
-        plan_map.entry(key).or_default().push(db.path.clone());
+        plan_map.entry(key).or_default().push(
+            db.inventory_open_path
+                .clone()
+                .unwrap_or_else(|| db.path.clone()),
+        );
     }
     let dry_run_plan = plan_map
         .into_iter()
@@ -129,7 +173,7 @@ pub(crate) fn build_tidy_report(
         .collect::<Vec<_>>();
 
     let mut next_steps = Vec::new();
-    if databases.len() > 1 {
+    if physical_stores.len() > 1 {
         next_steps.push(
             "Review scope_suggestion for each DB before adding any migration step".to_string(),
         );
@@ -159,9 +203,11 @@ pub(crate) fn build_tidy_report(
             .collect(),
         groups,
         dry_run_plan,
-        total_databases: databases.len(),
+        total_databases: physical_stores.len(),
+        total_aliases: databases.len(),
         total_memories,
         databases,
+        physical_stores,
         next_steps,
     })
 }

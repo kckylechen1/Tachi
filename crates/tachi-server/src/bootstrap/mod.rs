@@ -175,6 +175,11 @@ pub(crate) struct TidyFinding {
     pub is_symlink: bool,
     pub symlink_target: Option<String>,
     pub target_exists: Option<bool>,
+    pub physical_id: Option<String>,
+    pub canonical_path: Option<String>,
+    pub inventory_open_path: Option<String>,
+    pub is_primary_alias: bool,
+    pub open_failure_kind: Option<crate::physical_db_identity::InventoryFailureKind>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,7 +260,9 @@ pub(crate) struct TidyReport {
     pub groups: Vec<TidyGroupSummary>,
     pub dry_run_plan: Vec<TidyPlanStep>,
     pub total_databases: usize,
+    pub total_aliases: usize,
     pub total_memories: usize,
+    pub physical_stores: Vec<crate::physical_db_identity::PhysicalDbStore>,
     pub next_steps: Vec<String>,
 }
 

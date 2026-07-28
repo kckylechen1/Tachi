@@ -158,6 +158,7 @@ mod notes_ops;
 mod orchestrator_ops;
 mod path_utils;
 mod peer_ops;
+pub mod physical_db_identity;
 mod pipeline_ops;
 mod precedent_candidate_ops;
 mod precedent_ops;

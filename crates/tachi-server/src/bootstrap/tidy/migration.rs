@@ -44,11 +44,17 @@ pub(crate) fn build_migration_plan(
     let target_str = target_db.to_string_lossy().to_string();
 
     for db in &report.databases {
-        if db.status != "ok" {
+        if db.status != "ok" || !db.is_primary_alias {
             continue;
         }
         // Never migrate the target onto itself.
-        if db.path == target_str {
+        let source_path = db.inventory_open_path.as_deref().unwrap_or(&db.path);
+        if source_path == target_str
+            || crate::physical_db_identity::same_physical_file(
+                std::path::Path::new(source_path),
+                target_db,
+            )
+        {
             continue;
         }
         let should_migrate = matches!(
@@ -59,11 +65,11 @@ pub(crate) fn build_migration_plan(
             continue;
         }
 
-        let source = PathBuf::from(&db.path);
+        let source = PathBuf::from(source_path);
         let archive_path = archive_root.join(archive_relative_path(&source, home));
 
         plan.push(TidyMigration {
-            source_path: db.path.clone(),
+            source_path: source_path.to_string(),
             target_path: target_str.clone(),
             archive_path: archive_path.display().to_string(),
             scope_suggestion: db.scope_suggestion.clone(),

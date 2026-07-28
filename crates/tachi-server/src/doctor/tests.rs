@@ -254,6 +254,151 @@ fn scan_default_is_read_only() {
 
 #[cfg(unix)]
 #[test]
+fn scan_counts_path_symlink_and_hardlink_as_one_physical_database() {
+    let dir = tempdir().unwrap();
+    let real = dir.path().join("real/memory.db");
+    let symlink = dir.path().join("symlink/memory.db");
+    let hardlink = dir.path().join("hardlink/memory.db");
+    for path in [&real, &symlink, &hardlink] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    make_healthy_db(&real);
+    std::os::unix::fs::symlink(&real, &symlink).unwrap();
+    fs::hard_link(&real, &hardlink).unwrap();
+
+    let report = scan(
+        &[dir.path().to_path_buf()],
+        &dir.path().join("quarantine"),
+        ScanOptions::default(),
+    );
+
+    assert_eq!(report.summary.total_databases, 1);
+    assert_eq!(report.summary.total_aliases, 3);
+    assert_eq!(report.summary.total_memories, 2);
+    assert_eq!(report.findings.len(), 3, "all path aliases remain evidence");
+    assert_eq!(report.physical_stores.len(), 1);
+    assert_eq!(report.physical_stores[0].aliases.len(), 3);
+    let rendered = render_report(&report);
+    assert!(rendered.contains("1 physical dbs, 3 path aliases, 2 memories"));
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_keeps_broken_memory_db_alias_as_explicit_finding() {
+    let dir = tempdir().unwrap();
+    let alias = dir.path().join("broken/memory.db");
+    fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("missing/memory.db"), &alias).unwrap();
+
+    let report = scan(
+        &[dir.path().to_path_buf()],
+        &dir.path().join("quarantine"),
+        ScanOptions::default(),
+    );
+
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].path, alias.display().to_string());
+    assert!(report.findings[0]
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("broken"));
+    assert_eq!(report.summary.total_databases, 0);
+    assert_eq!(report.summary.total_aliases, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_reads_committed_wal_while_writer_owns_database() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, archived INT DEFAULT 0, domain TEXT);
+             CREATE TABLE foundry_jobs (id TEXT, status TEXT);
+             INSERT INTO memories (id, text) VALUES ('checkpointed', 'main file');
+             PRAGMA wal_checkpoint(TRUNCATE);
+             INSERT INTO memories (id, text) VALUES ('wal-row', 'committed WAL');
+             BEGIN IMMEDIATE;",
+        )
+        .unwrap();
+
+    let report = scan(
+        &[dir.path().to_path_buf()],
+        &dir.path().join("quarantine"),
+        ScanOptions::default(),
+    );
+
+    assert_eq!(report.summary.total_databases, 1);
+    assert_eq!(report.summary.total_memories, 2);
+    assert_eq!(report.findings[0].mem_count, Some(2));
+
+    writer.execute_batch("ROLLBACK").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_prefers_hardlink_alias_with_active_wal_sidecars() {
+    let dir = tempdir().unwrap();
+    let hardlink = dir.path().join("a-hardlink/memory.db");
+    let live = dir.path().join("z-live/memory.db");
+    fs::create_dir_all(hardlink.parent().unwrap()).unwrap();
+    fs::create_dir_all(live.parent().unwrap()).unwrap();
+
+    let writer = rusqlite::Connection::open(&live).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, archived INT DEFAULT 0, domain TEXT);
+             CREATE TABLE foundry_jobs (id TEXT, status TEXT);
+             INSERT INTO memories (id, text) VALUES ('checkpointed', 'main file');
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    fs::hard_link(&live, &hardlink).unwrap();
+    writer
+        .execute_batch(
+            "INSERT INTO memories (id, text) VALUES ('wal-row', 'committed WAL');
+             BEGIN IMMEDIATE;",
+        )
+        .unwrap();
+    assert!(live.with_file_name("memory.db-wal").exists());
+
+    let report = scan(
+        &[dir.path().to_path_buf()],
+        &dir.path().join("quarantine"),
+        ScanOptions::default(),
+    );
+
+    assert_eq!(report.summary.total_databases, 1);
+    assert_eq!(
+        report.summary.total_memories, 2,
+        "must read the alias owning live WAL"
+    );
+    assert_eq!(
+        report.physical_stores[0].primary_path,
+        live.display().to_string()
+    );
+    assert_eq!(
+        report.physical_stores[0].open_path_basis,
+        crate::physical_db_identity::OpenPathBasis::WalAndShmVisible
+    );
+    assert!(report.physical_stores[0]
+        .sidecar_paths
+        .contains(&live.display().to_string()));
+    assert!(!report.physical_stores[0]
+        .sidecar_paths
+        .contains(&hardlink.display().to_string()));
+
+    writer.execute_batch("ROLLBACK").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_fix_retires_old_hash_alias_without_touching_legacy() {
     with_env_lock(|| {
         let dir = tempdir().unwrap();
