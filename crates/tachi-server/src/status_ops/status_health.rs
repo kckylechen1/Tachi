@@ -23,7 +23,7 @@ pub(crate) use model::{model_lanes_json, provider_key_status_json};
 pub(crate) use probe_cache::{
     read_provider_probe_cache, refresh_provider_probe_cache, write_provider_probe_cache_report,
 };
-pub(crate) use probes::run_provider_probe_report;
+pub(crate) use probes::{run_provider_probe_report, PROVIDER_HEALTH_PERSIST_PHASE};
 pub(crate) use readiness::{agent_readiness_json, format_backfill_command};
 #[cfg(test)]
 pub(crate) use scoring::calculate_health_score;
@@ -60,8 +60,14 @@ pub(crate) fn provider_api_key_env_names() -> HashSet<String> {
 pub(crate) async fn refresh_doctor_probe_cache(
     app_home: &Path,
     global_db_path: &Path,
+    schema_migration: &memcore::MigrationAuthority,
 ) -> Result<ProviderProbeCache, String> {
-    probe_cache::refresh_provider_probe_cache(app_home, global_db_path).await
+    let report = probes::run_provider_probe_report_with_migration_authority(
+        global_db_path,
+        schema_migration,
+    )
+    .await;
+    probe_cache::write_provider_probe_cache_report(app_home, global_db_path, report)
 }
 
 /// Stable internal API for the doctor key report: collect API-key status rows

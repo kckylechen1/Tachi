@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
+use std::time::Duration;
 
 use super::inference::is_auth_error;
 use super::rotation::collect_rotation_sources;
@@ -7,8 +9,56 @@ use super::types::{ProviderProbeReport, ProviderProbeResult, ProviderRotationGro
 use super::vault::load_keychain_vault_api_key_values;
 use crate::status_ops::ApiKeyRotationMemberStatus;
 
+pub(crate) const PROVIDER_HEALTH_PERSIST_PHASE: &str = "provider_health_persist";
+const PROVIDER_HEALTH_PERSIST_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn provider_health_persist_receipt<F>(terminal: F, timeout: Duration) -> ProviderProbeResult
+where
+    F: Future<Output = Result<(), String>>,
+{
+    let started = tokio::time::Instant::now();
+    match tokio::time::timeout(timeout, terminal).await {
+        Ok(Ok(())) => ProviderProbeResult {
+            name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
+            status: "ok".to_string(),
+            message: Some(format!(
+                "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={} cause=none",
+                started.elapsed().as_millis()
+            )),
+        },
+        Ok(Err(cause)) => ProviderProbeResult {
+            name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
+            status: "failed".to_string(),
+            message: Some(format!(
+                "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={} cause={cause}",
+                started.elapsed().as_millis()
+            )),
+        },
+        Err(_) => ProviderProbeResult {
+            name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
+            status: "timeout".to_string(),
+            message: Some(format!(
+                "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={} timeout_ms={} cause=provider_health_persist_join_timeout",
+                started.elapsed().as_millis(),
+                timeout.as_millis()
+            )),
+        },
+    }
+}
+
 pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> ProviderProbeReport {
-    let llm = match probe_llm_client(global_db_path) {
+    run_provider_probe_report_with_migration_authority(
+        global_db_path,
+        &memcore::MigrationAuthority::Deny,
+    )
+    .await
+}
+
+pub(super) async fn run_provider_probe_report_with_migration_authority(
+    global_db_path: &Path,
+    migration: &memcore::MigrationAuthority,
+) -> ProviderProbeReport {
+    let llm = match probe_llm_client_with_migration_authority(global_db_path, migration) {
         Ok(client) => client,
         Err(err) => {
             return ProviderProbeReport {
@@ -146,6 +196,17 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
             message: Some("timed out after 20s".to_string()),
         },
     });
+    // The probe client is standalone and about to be dropped. Provider calls
+    // deliberately persist health off the async runtime thread during normal
+    // serving, but this one-shot phase must join those writers before doctor
+    // constructs the distill phase's write-capable MemoryServer (#1505).
+    out.push(
+        provider_health_persist_receipt(
+            llm.await_provider_health_persistence(),
+            PROVIDER_HEALTH_PERSIST_JOIN_TIMEOUT,
+        )
+        .await,
+    );
     ProviderProbeReport {
         probes: out,
         rotation_groups: run_rotation_group_probes(global_db_path).await,
@@ -190,15 +251,21 @@ pub(super) fn skipped_alias_probe_result(
     })
 }
 
-fn probe_llm_client(global_db_path: &Path) -> Result<tachi_llm::LlmClient, String> {
-    tachi_llm::LlmClient::new_with_vault_db(Some(global_db_path))
+fn probe_llm_client_with_migration_authority(
+    global_db_path: &Path,
+    migration: &memcore::MigrationAuthority,
+) -> Result<tachi_llm::LlmClient, String> {
+    tachi_llm::LlmClient::new_with_vault_db_and_migration_authority(
+        Some(global_db_path),
+        migration.clone(),
+    )
 }
 
 #[cfg(test)]
 pub(crate) fn probe_llm_client_for_tests(
     global_db_path: &Path,
 ) -> Result<tachi_llm::LlmClient, String> {
-    probe_llm_client(global_db_path)
+    probe_llm_client_with_migration_authority(global_db_path, &memcore::MigrationAuthority::Deny)
 }
 
 pub(super) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderProbeResult> {
@@ -381,4 +448,40 @@ fn classify_provider_probe_error(err: String) -> (String, Option<String>) {
         "failed"
     };
     (status.to_string(), Some(err))
+}
+
+#[cfg(test)]
+mod persistence_phase_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn persistence_join_timeout_and_failure_are_typed_receipts() {
+        let timeout = Duration::from_secs(7);
+        let timeout_receipt =
+            provider_health_persist_receipt(std::future::pending::<Result<(), String>>(), timeout)
+                .await;
+        assert_eq!(timeout_receipt.name, PROVIDER_HEALTH_PERSIST_PHASE);
+        assert_eq!(timeout_receipt.status, "timeout");
+        let timeout_json =
+            serde_json::to_value(&timeout_receipt).expect("serialize timeout receipt");
+        assert_eq!(timeout_json["name"], PROVIDER_HEALTH_PERSIST_PHASE);
+        assert_eq!(timeout_json["status"], "timeout");
+        let timeout_message = timeout_receipt.message.as_deref().expect("timeout cause");
+        assert!(timeout_message.contains("phase=provider_health_persist"));
+        assert!(timeout_message.contains("elapsed_ms=7000"));
+        assert!(timeout_message.contains("timeout_ms=7000"));
+        assert!(timeout_message.contains("cause=provider_health_persist_join_timeout"));
+
+        let failed_receipt = provider_health_persist_receipt(
+            std::future::ready(Err("controlled writer failure".to_string())),
+            timeout,
+        )
+        .await;
+        assert_eq!(failed_receipt.name, PROVIDER_HEALTH_PERSIST_PHASE);
+        assert_eq!(failed_receipt.status, "failed");
+        assert!(failed_receipt
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("cause=controlled writer failure")));
+    }
 }

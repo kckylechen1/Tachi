@@ -57,6 +57,7 @@ pub struct LlmClient {
     /// Rerank provider config resolved at construction (eager fail-closed).
     rerank_config: RerankConfig,
     vault_db_path: Option<PathBuf>,
+    vault_db_migration: memcore::MigrationAuthority,
     provider_state: Arc<RwLock<ProviderState>>,
     /// Serializes a complete provider materialization transaction across
     /// clones. It is deliberately separate from `provider_state` so refreshes

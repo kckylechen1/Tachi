@@ -119,6 +119,14 @@ pub(in crate::llm) struct ProviderHealthPersistState {
     pub(in crate::llm) last_success: Option<Instant>,
     pub(in crate::llm) last_success_at: Option<String>,
     pub(in crate::llm) last_error: Option<String>,
+    tracker: Arc<ProviderHealthPersistTracker>,
+}
+
+#[derive(Debug, Default)]
+pub(in crate::llm) struct ProviderHealthPersistTracker {
+    pending: std::sync::atomic::AtomicUsize,
+    terminal: tokio::sync::Notify,
+    first_unreported_error: std::sync::Mutex<Option<String>>,
 }
 
 impl ProviderHealthReloadState {
@@ -160,6 +168,10 @@ impl ProviderHealthReloadState {
 }
 
 impl ProviderHealthPersistState {
+    pub(in crate::llm) fn tracker(&self) -> Arc<ProviderHealthPersistTracker> {
+        Arc::clone(&self.tracker)
+    }
+
     pub(in crate::llm) fn mark_success(&mut self, now: Instant, now_utc: String) {
         self.last_attempt_at = Some(now_utc.clone());
         self.last_success = Some(now);
@@ -170,6 +182,52 @@ impl ProviderHealthPersistState {
     pub(in crate::llm) fn mark_error(&mut self, now_utc: String, error: String) {
         self.last_attempt_at = Some(now_utc);
         self.last_error = Some(error);
+    }
+}
+
+impl ProviderHealthPersistTracker {
+    pub(in crate::llm) fn begin(&self) {
+        self.pending
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    pub(in crate::llm) fn record_error(&self, error: String) {
+        let mut first_error = self
+            .first_unreported_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if first_error.is_none() {
+            *first_error = Some(error);
+        }
+    }
+
+    pub(in crate::llm) fn complete(&self) {
+        let previous = self
+            .pending
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(previous > 0, "provider-health persist tracker underflow");
+        if previous == 1 {
+            self.terminal.notify_waiters();
+        }
+    }
+
+    pub(in crate::llm) async fn wait_until_terminal(&self) -> Result<(), String> {
+        loop {
+            // Register before reading `pending` so the final completion cannot
+            // race between the zero check and waiter registration.
+            let notified = self.terminal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.pending.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                let error = self
+                    .first_unreported_error
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                return error.map_or(Ok(()), Err);
+            }
+            notified.await;
+        }
     }
 }
 

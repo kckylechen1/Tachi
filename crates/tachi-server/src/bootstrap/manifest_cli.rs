@@ -435,6 +435,27 @@ mod tests {
             "allow must re-stamp the global DB at the current schema version"
         );
     }
+
+    #[test]
+    fn doctor_run_daily_blocks_distill_owner_after_persistence_timeout() {
+        let probe_result = Ok(crate::status_ops::status_health::ProviderProbeCache {
+            last_probe_at: chrono::Utc::now().to_rfc3339(),
+            ttl_seconds: 60,
+            probes: vec![crate::status_ops::status_health::ProviderProbeResult {
+                name: crate::status_ops::status_health::PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
+                status: "timeout".to_string(),
+                message: Some("cause=provider_health_persist_join_timeout".to_string()),
+            }],
+            rotation_groups: Vec::new(),
+        });
+
+        assert!(provider_persistence_receipt(&probe_result)
+            .is_some_and(|receipt| receipt.status == "timeout"));
+        assert!(
+            !provider_persistence_writer_is_terminal(&probe_result),
+            "a timed-out writer must block construction of the distill DB owner"
+        );
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -484,53 +505,74 @@ async fn run_daily_pipeline_remediation(
     schema_migration: &memcore::MigrationAuthority,
 ) -> String {
     // Step 1: refresh provider probe cache.
-    let probe_result =
-        crate::status_ops::status_health::refresh_doctor_probe_cache(app_home, global_db_path)
-            .await;
+    let probe_result = crate::status_ops::status_health::refresh_doctor_probe_cache(
+        app_home,
+        global_db_path,
+        schema_migration,
+    )
+    .await;
+    let persistence_receipt = provider_persistence_receipt(&probe_result);
     let probe_summary = match &probe_result {
         Ok(cache) => {
             let failed = cache.probes.iter().filter(|p| p.status != "ok").count();
-            format!(
+            let mut summary = format!(
                 "probe cache refreshed ({} probes, {failed} failed)",
                 cache.probes.len()
-            )
+            );
+            if let Some(receipt) = persistence_receipt {
+                summary.push_str(&format!(
+                    "; {} status={} {}",
+                    receipt.name,
+                    receipt.status,
+                    receipt.message.as_deref().unwrap_or("cause=unknown")
+                ));
+            }
+            summary
         }
         Err(e) => format!("probe cache refresh failed: {e}"),
     };
 
     // Step 2: run distill batch (requires a project DB).
-    let distill_summary = match project_db_path {
-        Some(_) => {
-            let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
-            // Codex review (2026-07-17, checkpoint 7, MERGE-BLOCKING) + leader
-            // adjudication: `doctor --allow-schema-migration --fix --run-daily`
-            // must thread the resolved authority into this in-process open,
-            // same as every other CLI in-process DB open (#1181's frozen
-            // contract) — `MemoryServer::new` hardcodes Deny and would
-            // silently refuse the distill step on a stamped-older DB even
-            // when the operator explicitly authorized migration.
-            match crate::MemoryServer::new_with_migration_authority(
-                global_db_path.to_path_buf(),
-                project_db_path.map(|p| p.to_path_buf()),
-                schema_migration.clone(),
-            ) {
-                Ok(server) => {
-                    match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
-                        Ok(report) => {
-                            // Write success marker (same shape as the scheduler).
-                            if let Some(parent) = marker_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            let marker_body = serde_json::json!({
-                                "ts": chrono::Utc::now().to_rfc3339(),
-                                "groups_distilled": report.groups_distilled,
-                                "groups_skipped": report.groups_skipped,
-                                "fallback_used": report.fallback_used,
-                                "errors": report.errors.len(),
-                            })
-                            .to_string();
-                            let _ = std::fs::write(&marker_path, marker_body);
-                            format!(
+    // A failed persistence writer is terminal and has released ownership, so
+    // existing distill semantics remain intact. A timed-out writer is not
+    // proven terminal: never hide that uncertainty by constructing the next
+    // write-capable DB owner (#1505).
+    let distill_summary = if !provider_persistence_writer_is_terminal(&probe_result) {
+        "distill skipped (provider_health_persist timed out; writer ownership is not terminal)"
+            .to_string()
+    } else {
+        match project_db_path {
+            Some(_) => {
+                let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
+                // Codex review (2026-07-17, checkpoint 7, MERGE-BLOCKING) + leader
+                // adjudication: `doctor --allow-schema-migration --fix --run-daily`
+                // must thread the resolved authority into this in-process open,
+                // same as every other CLI in-process DB open (#1181's frozen
+                // contract) — `MemoryServer::new` hardcodes Deny and would
+                // silently refuse the distill step on a stamped-older DB even
+                // when the operator explicitly authorized migration.
+                match crate::MemoryServer::new_with_migration_authority(
+                    global_db_path.to_path_buf(),
+                    project_db_path.map(|p| p.to_path_buf()),
+                    schema_migration.clone(),
+                ) {
+                    Ok(server) => {
+                        match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
+                            Ok(report) => {
+                                // Write success marker (same shape as the scheduler).
+                                if let Some(parent) = marker_path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                let marker_body = serde_json::json!({
+                                    "ts": chrono::Utc::now().to_rfc3339(),
+                                    "groups_distilled": report.groups_distilled,
+                                    "groups_skipped": report.groups_skipped,
+                                    "fallback_used": report.fallback_used,
+                                    "errors": report.errors.len(),
+                                })
+                                .to_string();
+                                let _ = std::fs::write(&marker_path, marker_body);
+                                format!(
                                 "distill: dispatched={} distilled={} skipped={} fallback={} errors={}",
                                 report.batches_dispatched,
                                 report.groups_distilled,
@@ -538,33 +580,51 @@ async fn run_daily_pipeline_remediation(
                                 report.fallback_used,
                                 report.errors.len()
                             )
-                        }
-                        Err(e) => {
-                            // Write failure marker so status surfaces the reason.
-                            if let Some(parent) = marker_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
                             }
-                            let marker_body = serde_json::json!({
-                                "ts": chrono::Utc::now().to_rfc3339(),
-                                "error": e.to_string(),
-                                "groups_distilled": 0,
-                                "groups_skipped": 0,
-                                "fallback_used": 0,
-                                "errors": 0,
-                            })
-                            .to_string();
-                            let _ = std::fs::write(&marker_path, marker_body);
-                            format!("distill batch failed: {e}")
+                            Err(e) => {
+                                // Write failure marker so status surfaces the reason.
+                                if let Some(parent) = marker_path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                let marker_body = serde_json::json!({
+                                    "ts": chrono::Utc::now().to_rfc3339(),
+                                    "error": e.to_string(),
+                                    "groups_distilled": 0,
+                                    "groups_skipped": 0,
+                                    "fallback_used": 0,
+                                    "errors": 0,
+                                })
+                                .to_string();
+                                let _ = std::fs::write(&marker_path, marker_body);
+                                format!("distill batch failed: {e}")
+                            }
                         }
                     }
+                    Err(e) => format!("distill skipped (server init failed): {e}"),
                 }
-                Err(e) => format!("distill skipped (server init failed): {e}"),
             }
+            None => "distill skipped (no project DB)".to_string(),
         }
-        None => "distill skipped (no project DB)".to_string(),
     };
 
     format!("  {probe_summary}\n  {distill_summary}")
+}
+
+fn provider_persistence_receipt(
+    probe_result: &Result<crate::status_ops::status_health::ProviderProbeCache, String>,
+) -> Option<&crate::status_ops::status_health::ProviderProbeResult> {
+    probe_result.as_ref().ok().and_then(|cache| {
+        cache.probes.iter().find(|probe| {
+            probe.name == crate::status_ops::status_health::PROVIDER_HEALTH_PERSIST_PHASE
+        })
+    })
+}
+
+fn provider_persistence_writer_is_terminal(
+    probe_result: &Result<crate::status_ops::status_health::ProviderProbeCache, String>,
+) -> bool {
+    provider_persistence_receipt(probe_result)
+        .is_none_or(|receipt| receipt.status.as_str() != "timeout")
 }
 
 async fn collect_provider_key_report(global_db_path: &Path, probe_keys: bool) -> ProviderKeyReport {
