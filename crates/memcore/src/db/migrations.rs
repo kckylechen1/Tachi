@@ -2214,46 +2214,77 @@ mod tests {
         (bytes, schema, version, sentinels)
     }
 
-    fn assert_current_v25_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("memory.db");
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let store =
-                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision current v25 fixture");
-            drop(store);
-            let conn = Connection::open(&path).expect("open fixture for corruption");
-            conn.execute_batch(corruption_sql).expect("corrupt fixture");
-        }
-        let before = current_schema_snapshot(&path);
+    type ExistingOpen = fn(&str) -> Result<crate::MemoryStore, MemoryError>;
 
-        let error = match crate::MemoryStore::open_with_label_and_context(
-            &path_str,
+    fn open_mutating_existing_deny(path: &str) -> Result<crate::MemoryStore, MemoryError> {
+        crate::MemoryStore::open_with_label_and_context(
+            path,
             "global",
             &DbOpenContext::open_existing_deny(),
-        ) {
-            Ok(_) => panic!("stamped-current corrupt v25 DB must fail without repair"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains(expected),
-            "unexpected corruption error: {error}"
-        );
+        )
+    }
 
-        let after = current_schema_snapshot(&path);
-        assert_eq!(
-            after.0, before.0,
-            "failed current open must be byte-identical"
-        );
-        assert_eq!(
-            after.1, before.1,
-            "failed current open must not repair schema"
-        );
-        assert_eq!(after.2, before.2, "failed current open must not re-stamp");
-        assert_eq!(
-            after.3, before.3,
-            "failed current open must not repair migration sentinels"
+    fn current_existing_openers() -> [(&'static str, ExistingOpen); 3] {
+        [
+            ("mutating", open_mutating_existing_deny),
+            ("read-only", crate::MemoryStore::open_read_only),
+            (
+                "existing-read-write",
+                crate::MemoryStore::open_existing_read_write,
+            ),
+        ]
+    }
+
+    fn assert_current_v25_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
+        let mut unexpected_acceptances = Vec::new();
+        for (surface, open) in current_existing_openers() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join(format!("{surface}.db"));
+            let path_str = path.to_string_lossy().to_string();
+            {
+                let store = crate::MemoryStore::open_with_context(
+                    &path_str,
+                    &DbOpenContext::create_fresh(),
+                )
+                .expect("provision current v25 fixture");
+                drop(store);
+                let conn = Connection::open(&path).expect("open fixture for corruption");
+                conn.execute_batch(corruption_sql).expect("corrupt fixture");
+            }
+            let before = current_schema_snapshot(&path);
+
+            match open(&path_str) {
+                Ok(store) => {
+                    drop(store);
+                    unexpected_acceptances.push(surface);
+                }
+                Err(error) => assert!(
+                    error.to_string().contains(expected),
+                    "unexpected {surface} corruption error: {error}"
+                ),
+            }
+
+            let after = current_schema_snapshot(&path);
+            assert_eq!(
+                after.0, before.0,
+                "failed {surface} current open must be byte-identical"
+            );
+            assert_eq!(
+                after.1, before.1,
+                "failed {surface} current open must not repair schema"
+            );
+            assert_eq!(
+                after.2, before.2,
+                "failed {surface} current open must not re-stamp"
+            );
+            assert_eq!(
+                after.3, before.3,
+                "failed {surface} current open must not repair migration sentinels"
+            );
+        }
+        assert!(
+            unexpected_acceptances.is_empty(),
+            "stamped-current corrupt v25 DB was accepted by {unexpected_acceptances:?}"
         );
     }
 
@@ -2279,24 +2310,35 @@ mod tests {
     }
 
     #[test]
-    fn valid_stamped_current_v25_reopens_without_migration() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("memory.db");
-        let path_str = path.to_string_lossy().to_string();
-        let store =
-            crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                .expect("provision current v25 fixture");
-        drop(store);
-        let before = current_schema_snapshot(&path);
+    fn valid_stamped_current_v25_reopens_on_all_existing_surfaces() {
+        for (surface, open) in current_existing_openers() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join(format!("{surface}.db"));
+            let path_str = path.to_string_lossy().to_string();
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision current v25 fixture");
+            drop(store);
+            let before = current_schema_snapshot(&path);
 
-        let reopened =
-            crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::open_existing_deny())
-                .expect("valid current v25 must reopen");
-        drop(reopened);
-        let after = current_schema_snapshot(&path);
-        assert_eq!(after.1, before.1);
-        assert_eq!(after.2, EXPECTED_SCHEMA_VERSION);
-        assert_eq!(after.3, before.3);
+            let reopened = open(&path_str)
+                .unwrap_or_else(|error| panic!("valid current v25 {surface} reopen: {error}"));
+            drop(reopened);
+
+            let after = current_schema_snapshot(&path);
+            assert_eq!(
+                after.1, before.1,
+                "valid {surface} open must preserve schema"
+            );
+            assert_eq!(
+                after.2, before.2,
+                "valid {surface} open must preserve version"
+            );
+            assert_eq!(
+                after.3, before.3,
+                "valid {surface} open must preserve migration sentinels"
+            );
+        }
     }
 
     #[test]

@@ -413,14 +413,16 @@ pub(crate) fn validate_recall_impression_ledger_schema(
     ];
 
     for (object_type, name, table) in REQUIRED_OBJECTS {
-        let present: bool = conn
-            .query_row(
-                "SELECT 1 FROM main.sqlite_schema
+        let present = match conn.query_row(
+            "SELECT 1 FROM main.sqlite_schema
                  WHERE type = ?1 AND name = ?2 AND tbl_name = ?3",
-                params![object_type, name, table],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
+            params![object_type, name, table],
+            |_| Ok(()),
+        ) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
         if !present {
             return Err(MemoryError::InvalidArg(format!(
                 "incomplete v25 recall impression ledger: required {object_type} '{name}' on '{table}' is missing"
@@ -1307,6 +1309,49 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     s.push(".");
     s.push(suffix);
     PathBuf::from(s)
+}
+
+#[cfg(test)]
+mod recall_impression_schema_tests {
+    use std::ffi::{c_char, c_int, c_void};
+
+    use super::*;
+
+    unsafe extern "C" fn deny_schema_reads(
+        _state: *mut c_void,
+        action: c_int,
+        _arg1: *const c_char,
+        _arg2: *const c_char,
+        _database: *const c_char,
+        _accessor: *const c_char,
+    ) -> c_int {
+        if action == rusqlite::ffi::SQLITE_READ {
+            rusqlite::ffi::SQLITE_DENY
+        } else {
+            rusqlite::ffi::SQLITE_OK
+        }
+    }
+
+    #[test]
+    fn recall_impression_schema_validation_propagates_sqlite_query_errors() {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        install_recall_impression_ledger_schema(&conn).expect("install valid ledger schema");
+        let install_result = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(
+                conn.handle(),
+                Some(deny_schema_reads),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(install_result, rusqlite::ffi::SQLITE_OK);
+
+        let error = validate_recall_impression_ledger_schema(&conn)
+            .expect_err("SQLite authorization errors must not become missing-object errors");
+        assert!(
+            matches!(error, MemoryError::Sqlite(_)),
+            "expected propagated SQLite error, got: {error}"
+        );
+    }
 }
 
 #[cfg(test)]
