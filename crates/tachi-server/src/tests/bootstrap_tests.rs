@@ -8,6 +8,14 @@ mod setup_report;
 mod tidy_apply;
 mod tidy_report;
 
+fn authorized_plan_sources(
+    plan: &[crate::bootstrap::TidyMigration],
+) -> std::collections::BTreeSet<String> {
+    plan.iter()
+        .map(|migration| migration.source_path.clone())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5: fragment-DB consolidation (`tachi tidy --execute`)
 // ---------------------------------------------------------------------------

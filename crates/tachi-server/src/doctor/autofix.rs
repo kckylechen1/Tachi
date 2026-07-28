@@ -1,6 +1,7 @@
 use chrono::Utc;
 #[cfg(all(test, unix))]
 use std::cell::Cell;
+use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -22,8 +23,49 @@ thread_local! {
 // ─── Auto-fix ────────────────────────────────────────────────────────────────
 
 /// Apply the SAFE auto-fix categories: quarantine placeholders, copy-checkpoint
-/// WAL orphans. Returns the action log. `quarantine_root` is created if needed.
+/// WAL orphans. Each finding path supplied to this compatibility entry point
+/// is an explicit caller authorization. Inventory callers must use
+/// `auto_fix_authorized` with a separately derived discovered-path set.
 pub fn auto_fix_safe(findings: &[DoctorFinding], quarantine_root: &Path) -> Vec<AutoFixAction> {
+    apply_explicitly_authorized(findings, quarantine_root)
+}
+
+pub(crate) fn auto_fix_authorized(
+    findings: &[DoctorFinding],
+    authorized_paths: &BTreeSet<String>,
+    quarantine_root: &Path,
+) -> Vec<AutoFixAction> {
+    let mut actions = Vec::new();
+    let mut authorized_findings = Vec::new();
+
+    for f in findings {
+        if authorized_paths.contains(&f.path) {
+            authorized_findings.push(f.clone());
+            continue;
+        }
+
+        if matches!(
+            f.classification,
+            DbClassification::Placeholder | DbClassification::WalOrphan
+        ) {
+            actions.push(AutoFixAction {
+                path: f.path.clone(),
+                action: "doctor_autofix".to_string(),
+                outcome: "skipped".to_string(),
+                note: "invariant: doctor mutation path must be an exact discovered primary alias"
+                    .to_string(),
+                destination: None,
+            });
+        }
+    }
+    actions.extend(super::auto_fix_safe(&authorized_findings, quarantine_root));
+    actions
+}
+
+fn apply_explicitly_authorized(
+    findings: &[DoctorFinding],
+    quarantine_root: &Path,
+) -> Vec<AutoFixAction> {
     let mut actions = Vec::new();
     let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
 

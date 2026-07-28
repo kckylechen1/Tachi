@@ -152,6 +152,9 @@ fn tidy_report_counts_physical_db_once_across_path_symlink_and_hardlink() {
         .expect("identity-aware tidy report");
     assert_eq!(report.total_databases, 1, "physical DBs, not path aliases");
     assert_eq!(report.total_aliases, 3);
+    assert_eq!(report.resolved_aliases, 3);
+    assert_eq!(report.unresolved_paths, 0);
+    assert_eq!(report.path_appearances, 3);
     assert_eq!(
         report.total_memories, 1,
         "physical rows must be counted once"
@@ -167,6 +170,9 @@ fn tidy_report_counts_physical_db_once_across_path_symlink_and_hardlink() {
     assert_eq!(doctor.summary.total_databases, report.total_databases);
     assert_eq!(doctor.summary.total_memories, report.total_memories);
     assert_eq!(doctor.summary.total_aliases, report.total_aliases);
+    assert_eq!(doctor.summary.resolved_aliases, report.resolved_aliases);
+    assert_eq!(doctor.summary.unresolved_paths, report.unresolved_paths);
+    assert_eq!(doctor.summary.path_appearances, report.path_appearances);
 
     let target = root.join(".tachi/global/memory.db");
     let archive = root.join(".tachi/archive/test");
@@ -185,6 +191,9 @@ fn tidy_report_counts_physical_db_once_across_path_symlink_and_hardlink() {
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["total_databases"], 1);
     assert_eq!(json["total_aliases"], 3);
+    assert_eq!(json["resolved_aliases"], 3);
+    assert_eq!(json["unresolved_paths"], 0);
+    assert_eq!(json["path_appearances"], 3);
     assert_eq!(
         json["physical_stores"][0]["aliases"]
             .as_array()
@@ -192,6 +201,34 @@ fn tidy_report_counts_physical_db_once_across_path_symlink_and_hardlink() {
             .len(),
         3
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn tidy_report_does_not_count_unresolved_paths_as_aliases() {
+    let root = crate::utils::test_fixture_path(format!(
+        "tachi-tidy-unresolved-count-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let broken = root.join(".tachi/global/memory.db");
+    std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(root.join("missing.sqlite"), &broken).unwrap();
+
+    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
+    assert_eq!(report.total_databases, 0);
+    assert_eq!(report.total_aliases, 0);
+    assert_eq!(report.resolved_aliases, 0);
+    assert_eq!(report.unresolved_paths, 1);
+    assert_eq!(report.path_appearances, 1);
+    assert_eq!(report.databases.len(), 1);
+
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["total_aliases"], 0);
+    assert_eq!(json["resolved_aliases"], 0);
+    assert_eq!(json["unresolved_paths"], 1);
+    assert_eq!(json["path_appearances"], 1);
 
     let _ = std::fs::remove_dir_all(&root);
 }

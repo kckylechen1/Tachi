@@ -5,8 +5,12 @@ pub(super) fn render_tidy_report(report: &TidyReport) -> String {
         "tachi tidy".to_string(),
         format!("scanned roots: {}", report.scanned_roots.join(", ")),
         format!(
-            "found {} physical databases, {} path aliases, {} memories",
-            report.total_databases, report.total_aliases, report.total_memories
+            "found {} physical databases, {} resolved aliases, {} unresolved paths, {} path appearances, {} memories",
+            report.total_databases,
+            report.resolved_aliases,
+            report.unresolved_paths,
+            report.path_appearances,
+            report.total_memories
         ),
         String::new(),
     ];

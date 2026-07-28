@@ -149,7 +149,15 @@ pub struct SummaryByClass {
     pub placeholder: usize,
     pub backup: usize,
     pub total_databases: usize,
+    /// Resolved discovered aliases belonging to a physical store. Unresolved
+    /// paths are deliberately excluded. Retained as a compatibility field;
+    /// new consumers should prefer `resolved_aliases`.
     pub total_aliases: usize,
+    pub resolved_aliases: usize,
+    pub unresolved_paths: usize,
+    /// All discovered path appearances: resolved aliases plus unresolved
+    /// paths.
+    pub path_appearances: usize,
     pub total_memories: usize,
     pub total_jobs: usize,
 }

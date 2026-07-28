@@ -30,8 +30,10 @@ fn tidy_execute_migrates_rows_and_archives_source() {
         interactive: false,
         app_home: app_home.clone(),
     };
+    let authorized_sources = authorized_plan_sources(&plan);
     let dry_summary =
-        crate::bootstrap::execute_tidy_migrations(&plan, &dry_cfg).expect("dry-run summary");
+        crate::bootstrap::execute_tidy_migrations(&plan, &dry_cfg, &authorized_sources)
+            .expect("dry-run summary");
     assert!(dry_summary.dry_run);
     assert_eq!(dry_summary.migrated_count, 0);
     assert_eq!(dry_summary.outcomes.len(), 2);
@@ -65,8 +67,8 @@ fn tidy_execute_migrates_rows_and_archives_source() {
         interactive: false,
         app_home: app_home.clone(),
     };
-    let summary =
-        crate::bootstrap::execute_tidy_migrations(&plan, &exec_cfg).expect("execute summary");
+    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &exec_cfg, &authorized_sources)
+        .expect("execute summary");
     let exec_messages: Vec<&str> = summary
         .outcomes
         .iter()
@@ -101,6 +103,82 @@ fn tidy_execute_migrates_rows_and_archives_source() {
         .dbs
         .iter()
         .any(|e| e.path.contains("global") && e.path.ends_with("memory.db")));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn tidy_execute_never_archives_symlink_target_selected_as_inventory_open_path() {
+    let root = crate::utils::test_fixture_path(format!(
+        "tachi-tidy-symlink-auth-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let home = root.join("home");
+    let app_home = home.join(".tachi");
+    let target_db = app_home.join("global/memory.db");
+    let real_db = root.join("outside/real-store.sqlite");
+    let alias = home.join(".openclaw/core/extensions/tachi/data/agents/legacy-link/memory.db");
+    std::fs::create_dir_all(real_db.parent().unwrap()).expect("create real DB parent");
+    std::fs::create_dir_all(alias.parent().unwrap()).expect("create alias parent");
+
+    let mut real_store = MemoryStore::open(real_db.to_str().unwrap()).expect("open real DB");
+    real_store
+        .upsert(&make_entry("symlink-authority-row"))
+        .expect("seed real DB");
+    drop(real_store);
+    std::os::unix::fs::symlink(&real_db, &alias).expect("create discovered alias");
+
+    let report = crate::bootstrap::build_tidy_report(&[home.clone()], None).expect("report");
+    let archive_root = app_home.join("archive/ts-symlink-auth");
+    let plan = crate::bootstrap::build_migration_plan(&report, &target_db, &archive_root, &home);
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].source_path, alias.display().to_string());
+    let canonical_real_db = std::fs::canonicalize(&real_db).expect("canonical real DB");
+    assert_eq!(
+        report.databases[0].inventory_open_path.as_deref(),
+        canonical_real_db.to_str(),
+        "fixture must force the read probe through the real target"
+    );
+
+    let authorized_sources = crate::bootstrap::authorized_migration_sources(&report);
+    let cfg = crate::bootstrap::MigrationConfig {
+        target_db: target_db.clone(),
+        manifest_path: app_home.join("manifest.json"),
+        dry_run: false,
+        interactive: false,
+        app_home: app_home.clone(),
+    };
+
+    let mut probe_path_plan = plan.clone();
+    probe_path_plan[0].source_path = real_db.display().to_string();
+    let refused =
+        crate::bootstrap::execute_tidy_migrations(&probe_path_plan, &cfg, &authorized_sources)
+            .expect("unauthorized probe path must produce a refusal outcome");
+    assert_eq!(refused.failed_count, 1);
+    assert!(refused.outcomes[0]
+        .message
+        .contains("exact discovered primary alias"));
+    assert!(real_db.exists(), "refusal must not archive the real target");
+    assert!(alias.is_symlink(), "refusal must not move the alias either");
+
+    let executed = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorized_sources)
+        .expect("authorized alias migration");
+    assert_eq!(executed.migrated_count, 1, "{executed:?}");
+    assert!(
+        real_db.exists(),
+        "authorized alias must not move its target"
+    );
+    assert!(
+        std::fs::symlink_metadata(&plan[0].archive_path)
+            .expect("archived alias")
+            .file_type()
+            .is_symlink(),
+        "archive operation must move the discovered symlink itself"
+    );
+    assert!(std::fs::symlink_metadata(&alias).is_err());
+    let target = MemoryStore::open_read_only(target_db.to_str().unwrap()).expect("open target");
+    assert_eq!(target.stats(true).unwrap().total, 1);
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -168,8 +246,13 @@ fn tidy_execute_rolls_back_when_source_db_is_owned() {
         crate::db_ownership::DbOwnership::Owned,
     ));
 
-    let summary = crate::bootstrap::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg)
-        .expect("execute summary");
+    let authorized_sources = authorized_plan_sources(std::slice::from_ref(&migration));
+    let summary = crate::bootstrap::execute_tidy_migrations(
+        std::slice::from_ref(&migration),
+        &cfg,
+        &authorized_sources,
+    )
+    .expect("execute summary");
 
     assert_eq!(summary.migrated_count, 0, "must not report migrated");
     assert_eq!(summary.failed_count, 1, "must report failed (refused)");
@@ -259,8 +342,13 @@ fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
         crate::db_ownership::DbOwnership::Unknown("lsof unavailable: test".to_string()),
     ));
 
-    let summary = crate::bootstrap::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg)
-        .expect("execute summary");
+    let authorized_sources = authorized_plan_sources(std::slice::from_ref(&migration));
+    let summary = crate::bootstrap::execute_tidy_migrations(
+        std::slice::from_ref(&migration),
+        &cfg,
+        &authorized_sources,
+    )
+    .expect("execute summary");
 
     assert_eq!(summary.failed_count, 1);
     let outcome = &summary.outcomes[0];
@@ -343,8 +431,13 @@ fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
         app_home: app_home.clone(),
     };
 
-    let summary = crate::bootstrap::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg)
-        .expect("execute summary");
+    let authorized_sources = authorized_plan_sources(std::slice::from_ref(&migration));
+    let summary = crate::bootstrap::execute_tidy_migrations(
+        std::slice::from_ref(&migration),
+        &cfg,
+        &authorized_sources,
+    )
+    .expect("execute summary");
 
     assert_eq!(summary.migrated_count, 0, "must not report migrated");
     assert_eq!(summary.failed_count, 1, "must report failed (refused)");
@@ -472,8 +565,13 @@ fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
     let _outer_lock = crate::daemon_lock::DualDaemonLock::acquire(&app_home, &target_db)
         .expect("outer lock on target scope must succeed (nothing else holds it)");
 
-    let summary = crate::bootstrap::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg)
-        .expect("execute summary");
+    let authorized_sources = authorized_plan_sources(std::slice::from_ref(&migration));
+    let summary = crate::bootstrap::execute_tidy_migrations(
+        std::slice::from_ref(&migration),
+        &cfg,
+        &authorized_sources,
+    )
+    .expect("execute summary");
 
     drop(_outer_lock);
 

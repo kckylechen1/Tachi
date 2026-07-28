@@ -204,6 +204,111 @@ fn auto_fix_quarantines_placeholder() {
     assert!(!p.exists(), "original placeholder should have been moved");
 }
 
+#[cfg(unix)]
+#[test]
+fn auto_fix_quarantines_discovered_placeholder_symlink_without_moving_target() {
+    let dir = tempdir().unwrap();
+    let real = dir.path().join("outside/real-placeholder.sqlite");
+    let alias = dir.path().join("scan/memory.db");
+    fs::create_dir_all(real.parent().unwrap()).unwrap();
+    fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    fs::File::create(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+    let report = scan(
+        &[alias.parent().unwrap().to_path_buf()],
+        &dir.path().join("quarantine"),
+        ScanOptions {
+            auto_fix: true,
+            max_depth: 5,
+        },
+    );
+
+    assert_eq!(report.summary.placeholder, 1);
+    assert_eq!(report.auto_fix_actions.len(), 1);
+    assert_eq!(report.auto_fix_actions[0].path, alias.display().to_string());
+    assert_eq!(report.auto_fix_actions[0].outcome, "ok");
+    assert!(real.exists(), "autofix must not move the symlink target");
+    assert_eq!(fs::metadata(&real).unwrap().len(), 0);
+    assert!(
+        fs::symlink_metadata(&alias).is_err(),
+        "only the discovered alias may be quarantined"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_quarantines_discovered_placeholder_hardlink_only() {
+    let dir = tempdir().unwrap();
+    let real = dir.path().join("outside/real-placeholder.sqlite");
+    let alias = dir.path().join("scan/memory.db");
+    fs::create_dir_all(real.parent().unwrap()).unwrap();
+    fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    fs::File::create(&real).unwrap();
+    fs::hard_link(&real, &alias).unwrap();
+
+    let report = scan(
+        &[alias.parent().unwrap().to_path_buf()],
+        &dir.path().join("quarantine"),
+        ScanOptions {
+            auto_fix: true,
+            max_depth: 5,
+        },
+    );
+
+    assert_eq!(report.auto_fix_actions.len(), 1);
+    assert_eq!(report.auto_fix_actions[0].path, alias.display().to_string());
+    assert_eq!(report.auto_fix_actions[0].outcome, "ok");
+    assert!(
+        real.exists(),
+        "the undiscovered hardlink must remain intact"
+    );
+    assert!(fs::symlink_metadata(&alias).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_refuses_wal_checkpoint_when_only_symlink_target_has_sidecars() {
+    let dir = tempdir().unwrap();
+    let real = dir.path().join("outside/real-live.sqlite");
+    let alias = dir.path().join("scan/memory.db");
+    fs::create_dir_all(real.parent().unwrap()).unwrap();
+    fs::create_dir_all(alias.parent().unwrap()).unwrap();
+
+    let writer = rusqlite::Connection::open(&real).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, archived INT DEFAULT 0, domain TEXT);
+             CREATE TABLE foundry_jobs (id TEXT, status TEXT);
+             INSERT INTO memories (id, text) VALUES ('wal-row', 'committed WAL');",
+        )
+        .unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    assert!(super::classify::sidecar(&real, "-wal").exists());
+    assert!(!super::classify::sidecar(&alias, "-wal").exists());
+
+    let report = scan(
+        &[alias.parent().unwrap().to_path_buf()],
+        &dir.path().join("quarantine"),
+        ScanOptions {
+            auto_fix: true,
+            max_depth: 5,
+        },
+    );
+
+    assert_eq!(report.summary.wal_orphan, 1);
+    assert_eq!(report.auto_fix_actions.len(), 1);
+    let action = &report.auto_fix_actions[0];
+    assert_eq!(action.path, alias.display().to_string());
+    assert_eq!(action.action, "checkpoint_wal_copy");
+    assert_eq!(action.outcome, "skipped");
+    assert!(action.note.contains("read-only inventory open path"));
+    assert!(real.exists());
+    assert!(alias.is_symlink());
+}
+
 #[test]
 fn scan_ignores_own_quarantine_root() {
     let dir = tempdir().unwrap();
@@ -274,12 +379,17 @@ fn scan_counts_path_symlink_and_hardlink_as_one_physical_database() {
 
     assert_eq!(report.summary.total_databases, 1);
     assert_eq!(report.summary.total_aliases, 3);
+    assert_eq!(report.summary.resolved_aliases, 3);
+    assert_eq!(report.summary.unresolved_paths, 0);
+    assert_eq!(report.summary.path_appearances, 3);
     assert_eq!(report.summary.total_memories, 2);
     assert_eq!(report.findings.len(), 3, "all path aliases remain evidence");
     assert_eq!(report.physical_stores.len(), 1);
     assert_eq!(report.physical_stores[0].aliases.len(), 3);
     let rendered = render_report(&report);
-    assert!(rendered.contains("1 physical dbs, 3 path aliases, 2 memories"));
+    assert!(rendered.contains(
+        "1 physical dbs, 3 resolved aliases, 0 unresolved paths, 3 path appearances, 2 memories"
+    ));
 }
 
 #[cfg(unix)]
@@ -304,7 +414,10 @@ fn scan_keeps_broken_memory_db_alias_as_explicit_finding() {
         .unwrap_or_default()
         .contains("broken"));
     assert_eq!(report.summary.total_databases, 0);
-    assert_eq!(report.summary.total_aliases, 1);
+    assert_eq!(report.summary.total_aliases, 0);
+    assert_eq!(report.summary.resolved_aliases, 0);
+    assert_eq!(report.summary.unresolved_paths, 1);
+    assert_eq!(report.summary.path_appearances, 1);
 }
 
 #[cfg(unix)]
@@ -371,7 +484,10 @@ fn scan_prefers_hardlink_alias_with_active_wal_sidecars() {
     let report = scan(
         &[dir.path().to_path_buf()],
         &dir.path().join("quarantine"),
-        ScanOptions::default(),
+        ScanOptions {
+            auto_fix: true,
+            max_depth: 10,
+        },
     );
 
     assert_eq!(report.summary.total_databases, 1);
@@ -393,6 +509,13 @@ fn scan_prefers_hardlink_alias_with_active_wal_sidecars() {
     assert!(!report.physical_stores[0]
         .sidecar_paths
         .contains(&hardlink.display().to_string()));
+    assert!(report.auto_fix_actions.iter().any(|action| {
+        action.action == "checkpoint_wal_copy" && action.path == live.display().to_string()
+    }));
+    assert!(!report
+        .auto_fix_actions
+        .iter()
+        .any(|action| action.path == hardlink.display().to_string()));
 
     writer.execute_batch("ROLLBACK").unwrap();
 }

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use super::super::{
@@ -25,6 +26,24 @@ pub(crate) struct MigrationConfig {
     pub app_home: PathBuf,
 }
 
+/// Exact discovered aliases that may be used as mutation sources.
+///
+/// This deliberately does not canonicalize: a canonical path or an
+/// inventory-selected `open_path` is read-only evidence, not authority to
+/// rename, remove, or archive the file it resolves to.
+pub(crate) fn authorized_migration_sources(report: &TidyReport) -> BTreeSet<String> {
+    report
+        .databases
+        .iter()
+        .filter(|db| {
+            db.status == "ok"
+                && db.is_primary_alias
+                && db.recommended_action == "review_for_legacy_migration"
+        })
+        .map(|db| db.path.clone())
+        .collect()
+}
+
 /// Build the list of source DBs that are candidates for fragment-consolidation
 /// migration into a single target DB. Pure function — no I/O.
 ///
@@ -47,8 +66,11 @@ pub(crate) fn build_migration_plan(
         if db.status != "ok" || !db.is_primary_alias {
             continue;
         }
+        // Mutation authority is the exact discovered primary alias. The
+        // inventory open path may follow a symlink or select another
+        // hardlink for WAL visibility and must remain read-only evidence.
+        let source_path = db.path.as_str();
         // Never migrate the target onto itself.
-        let source_path = db.inventory_open_path.as_deref().unwrap_or(&db.path);
         if source_path == target_str
             || crate::physical_db_identity::same_physical_file(
                 std::path::Path::new(source_path),
@@ -101,6 +123,7 @@ fn archive_relative_path(source: &std::path::Path, home: &std::path::Path) -> Pa
 pub(crate) fn execute_tidy_migrations(
     plan: &[TidyMigration],
     cfg: &MigrationConfig,
+    authorized_sources: &BTreeSet<String>,
 ) -> Result<TidyExecuteSummary, Box<dyn std::error::Error>> {
     let mut outcomes = Vec::new();
     let mut migrated = 0usize;
@@ -128,6 +151,21 @@ pub(crate) fn execute_tidy_migrations(
     }
 
     for migration in plan {
+        if !authorized_sources.contains(&migration.source_path) {
+            failed += 1;
+            outcomes.push(TidyMigrationOutcome {
+                source_path: migration.source_path.clone(),
+                target_path: migration.target_path.clone(),
+                archive_path: None,
+                status: "failed".to_string(),
+                rows_before_target: 0,
+                rows_after_target: 0,
+                rows_copied: 0,
+                message: "invariant: tidy mutation source must be an exact discovered primary alias; read-only inventory open paths are not mutation authority".to_string(),
+            });
+            continue;
+        }
+
         // Interactive confirm.
         if cfg.interactive {
             let prompt = format!(

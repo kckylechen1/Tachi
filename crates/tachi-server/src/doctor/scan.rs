@@ -2,9 +2,10 @@ use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::autofix::auto_fix_authorized;
 use super::classify::classify_one_with_provider;
 use super::{
-    auto_fix_safe, DbClassification, DoctorFinding, DoctorReport, JobBreakdown, SummaryByClass,
+    AutoFixAction, DbClassification, DoctorFinding, DoctorReport, JobBreakdown, SummaryByClass,
 };
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 
@@ -146,9 +147,18 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
         .filter(|path| !path_is_under(path, quarantine_root))
         .collect();
     let inventory = crate::physical_db_identity::classify_paths(candidates);
+    let resolved_aliases = inventory
+        .stores
+        .iter()
+        .map(|store| store.aliases.len())
+        .sum::<usize>();
+    let unresolved_path_count = inventory.unresolved_paths.len();
     let routing_config = RoutingConfigProvider::new(crate::path_utils::tachi_home());
     let mut physical_stores = inventory.stores;
-    let mut representative_findings = Vec::new();
+    let mut read_representative_findings = Vec::new();
+    let mut mutation_authorized_findings = Vec::new();
+    let mut mutation_authorized_paths = std::collections::BTreeSet::new();
+    let mut mutation_refusals = Vec::new();
     let mut findings = Vec::new();
 
     for physical_store in &mut physical_stores {
@@ -159,11 +169,51 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
             .as_ref()
             .map(|error| crate::physical_db_identity::classify_open_failure(error));
 
-        let mut representative = classified.clone();
-        representative.path = physical_store.open_path.clone();
-        representative.scope_hint =
+        let mut read_representative = classified.clone();
+        read_representative.path = physical_store.open_path.clone();
+        read_representative.scope_hint =
             super::classify::scope_hint_for(Path::new(&physical_store.open_path));
-        representative_findings.push(representative.clone());
+        read_representative_findings.push(read_representative);
+
+        // Autofix authority is the exact discovered primary alias. The
+        // representative/open path above may be a canonical symlink target
+        // or a different hardlink selected for WAL visibility and is
+        // read-only evidence only.
+        if physical_store
+            .aliases
+            .contains(&physical_store.primary_path)
+        {
+            let mut mutation_finding = classified.clone();
+            mutation_finding.path = physical_store.primary_path.clone();
+            mutation_finding.scope_hint =
+                super::classify::scope_hint_for(Path::new(&physical_store.primary_path));
+
+            if mutation_finding.classification == DbClassification::WalOrphan
+                && !physical_store
+                    .sidecar_paths
+                    .contains(&physical_store.primary_path)
+            {
+                mutation_refusals.push(AutoFixAction {
+                    path: physical_store.primary_path.clone(),
+                    action: "checkpoint_wal_copy".to_string(),
+                    outcome: "skipped".to_string(),
+                    note: "invariant: WAL is visible only through the read-only inventory open path; the discovered primary alias has no matching sidecar evidence and is not authorized for checkpoint mutation".to_string(),
+                    destination: None,
+                });
+            } else {
+                mutation_authorized_paths.insert(mutation_finding.path.clone());
+                mutation_authorized_findings.push(mutation_finding);
+            }
+        } else {
+            mutation_refusals.push(AutoFixAction {
+                path: physical_store.primary_path.clone(),
+                action: "doctor_autofix".to_string(),
+                outcome: "skipped".to_string(),
+                note: "invariant: doctor mutation path must be an exact discovered primary alias"
+                    .to_string(),
+                destination: None,
+            });
+        }
 
         for alias in &physical_store.aliases {
             let mut alias_finding = classified.clone();
@@ -198,8 +248,11 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
 
     let mut summary = SummaryByClass::default();
     summary.total_databases = physical_stores.len();
-    summary.total_aliases = findings.len();
-    for f in &representative_findings {
+    summary.total_aliases = resolved_aliases;
+    summary.resolved_aliases = resolved_aliases;
+    summary.unresolved_paths = unresolved_path_count;
+    summary.path_appearances = resolved_aliases + unresolved_path_count;
+    for f in &read_representative_findings {
         match f.classification {
             DbClassification::Healthy => summary.healthy += 1,
             DbClassification::VecExtensionMissing => summary.vec_extension_missing += 1,
@@ -216,7 +269,13 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
     }
 
     let auto_fix_actions = if options.auto_fix {
-        auto_fix_safe(&representative_findings, quarantine_root)
+        let mut actions = auto_fix_authorized(
+            &mutation_authorized_findings,
+            &mutation_authorized_paths,
+            quarantine_root,
+        );
+        actions.extend(mutation_refusals);
+        actions
     } else {
         Vec::new()
     };

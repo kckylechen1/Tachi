@@ -61,8 +61,9 @@ impl InventoryFailureKind {
 pub struct PhysicalDbStore {
     pub physical_id: String,
     pub canonical_path: String,
-    /// Path used for read-only SQLite probes. This may differ from the
-    /// deterministic display path when a hardlink alias owns live WAL/SHM.
+    /// Path used only for read-only SQLite probes. This may differ from the
+    /// deterministic display path when a symlink target or hardlink alias
+    /// owns live WAL/SHM. It never grants rename/remove/checkpoint authority.
     pub open_path: String,
     pub open_path_basis: OpenPathBasis,
     /// Candidate paths with a visible non-empty WAL and/or SHM sidecar.

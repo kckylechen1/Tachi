@@ -11,9 +11,11 @@ pub fn render_report(report: &DoctorReport) -> String {
         report.scanned_roots.join(", ")
     ));
     lines.push(format!(
-        "summary: {} physical dbs, {} path aliases, {} memories, {} jobs",
+        "summary: {} physical dbs, {} resolved aliases, {} unresolved paths, {} path appearances, {} memories, {} jobs",
         report.summary.total_databases,
-        report.summary.total_aliases,
+        report.summary.resolved_aliases,
+        report.summary.unresolved_paths,
+        report.summary.path_appearances,
         report.summary.total_memories,
         report.summary.total_jobs,
     ));

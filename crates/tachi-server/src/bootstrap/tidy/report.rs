@@ -19,6 +19,12 @@ pub(crate) fn build_tidy_report(
     }
 
     let inventory = crate::physical_db_identity::classify_paths(discovered);
+    let resolved_aliases = inventory
+        .stores
+        .iter()
+        .map(|store| store.aliases.len())
+        .sum::<usize>();
+    let unresolved_path_count = inventory.unresolved_paths.len();
     let mut physical_stores = inventory.stores;
     let mut databases = Vec::new();
     let mut total_memories = 0usize;
@@ -153,11 +159,7 @@ pub(crate) fn build_tidy_report(
             db.scope_suggestion.clone(),
             db.recommended_action.clone(),
         );
-        plan_map.entry(key).or_default().push(
-            db.inventory_open_path
-                .clone()
-                .unwrap_or_else(|| db.path.clone()),
-        );
+        plan_map.entry(key).or_default().push(db.path.clone());
     }
     let dry_run_plan = plan_map
         .into_iter()
@@ -204,7 +206,10 @@ pub(crate) fn build_tidy_report(
         groups,
         dry_run_plan,
         total_databases: physical_stores.len(),
-        total_aliases: databases.len(),
+        total_aliases: resolved_aliases,
+        resolved_aliases,
+        unresolved_paths: unresolved_path_count,
+        path_appearances: resolved_aliases + unresolved_path_count,
         total_memories,
         databases,
         physical_stores,
