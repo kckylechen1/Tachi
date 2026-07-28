@@ -135,6 +135,38 @@ use symbolic_fts::*;
 const MIGRATION_NS: &str = "migrations";
 const SANITY_QUARANTINE_FRACTION: f64 = 0.5;
 
+/// Canonical sentinel inventory for a database stamped at
+/// [`EXPECTED_SCHEMA_VERSION`]. A current stamp is a claim that every
+/// migration completed; an absent sentinel is corruption, never permission to
+/// rerun migration work during an ordinary same-version open.
+pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
+    "v1_path_normalize_legacy",
+    "v2_scope_self_normalize",
+    "v3_handoff_path_standardize",
+    "v4_quarantine_cross_db_rows",
+    "v5_drop_hypertachi_legacy_columns",
+    "v6_fold_persons_into_entities",
+    "v7_reconcile_legacy_memory_columns",
+    "v8_drop_legacy_persons_column",
+    "v9_relocate_and_drop_location",
+    "v10_drop_pack_tables",
+    "v11_drop_domains_table",
+    "v12_session_claims_unique_identity",
+    "v13_hard_state_ns_updated_index",
+    "v14_dispatch_outcomes_reported_outcome",
+    "v15_exec_envs_env_class",
+    "v16_dispatch_outcomes_identity_receipt",
+    "v17_dispatch_outcomes_attribution_basis",
+    "v18_dispatch_adjudications",
+    "v19_idless_memory_identity",
+    "v20_mirror_eval",
+    "v21_identity_workclaim_spine",
+    "v22_memories_symbolic_fts",
+    "v23_reserved_reference_guards",
+    "v24_memories_scored_count",
+    "v25_recall_impression_ledger",
+];
+
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct MigrationReport {
     pub paths_normalized: usize,
@@ -243,6 +275,25 @@ pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
         )));
     }
     Ok(())
+}
+
+/// Fail closed when a database claims the current schema version but lacks
+/// evidence or persistent objects required by that claim. This is a read-only
+/// preflight: callers run it before backup, connection PRAGMAs, transactions,
+/// idempotent DDL, migration execution, or version stamping.
+pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(), MemoryError> {
+    if read_schema_version(conn)? != EXPECTED_SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    for key in MIGRATION_SENTINEL_KEYS {
+        if !was_run(conn, key)? {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete current schema v{EXPECTED_SCHEMA_VERSION}: required migration sentinel '{key}' is missing"
+            )));
+        }
+    }
+    crate::db::schema::validate_recall_impression_ledger_schema(conn)
 }
 
 /// #1119 typed schema-migration gate. Runs at the DB-open funnel
@@ -405,6 +456,7 @@ pub fn run_data_migrations(
     current_db_path: &Path,
 ) -> Result<MigrationReport, MemoryError> {
     check_schema_version_gate(conn)?;
+    validate_current_schema_integrity(conn)?;
 
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let report = run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
@@ -646,7 +698,8 @@ mod tests {
         register_sqlite_vec();
         let conn = Connection::open(tmp.path()).expect("open");
         let _ = try_load_sqlite_vec(&conn);
-        init_schema(&conn).expect("init_schema");
+        crate::db::schema::init_unversioned_schema_for_migration_tests(&conn)
+            .expect("init unversioned migration fixture");
         (conn, tmp)
     }
 
@@ -1283,6 +1336,7 @@ mod tests {
             [],
         )
         .unwrap();
+        write_schema_version(&conn, 12).unwrap();
         assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
         assert!(
             !was_run(&conn, "v13_hard_state_ns_updated_index").unwrap(),
@@ -1343,6 +1397,38 @@ mod tests {
         run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
 
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn private_fresh_init_installs_v25_through_migration_once() {
+        let _ = crate::db::enable_simple_auto_extension();
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        let _ = try_load_sqlite_vec(&conn);
+
+        init_schema(&conn).expect("initialize current private schema");
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+        let sentinel_version: i64 = conn
+            .query_row(
+                "SELECT version FROM hard_state
+                 WHERE namespace = ?1 AND key = 'v25_recall_impression_ledger'",
+                [MIGRATION_NS],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel_version, 1);
+        crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
+
+        init_schema(&conn).expect("valid current private schema reopens idempotently");
+        let sentinel_version_after: i64 = conn
+            .query_row(
+                "SELECT version FROM hard_state
+                 WHERE namespace = ?1 AND key = 'v25_recall_impression_ledger'",
+                [MIGRATION_NS],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel_version_after, 1, "v25 migration must run once");
     }
 
     #[test]
@@ -1422,7 +1508,7 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         assert_eq!(read_schema_version(&conn).unwrap(), 0);
 
-        for key in ALL_MIGRATION_SENTINEL_KEYS {
+        for key in MIGRATION_SENTINEL_KEYS {
             assert!(!was_run(&conn, key).unwrap(), "sentinel {key} pre-seeded?");
             mark_run(&conn, key).unwrap();
         }
@@ -1487,14 +1573,14 @@ mod tests {
     /// The frozen assertion this REPLACES (old route:
     /// `opt_in_gate_with_is_noop_for_fresh_db`, which inferred "fresh" from a
     /// `sqlite_master` table count). New semantics: a full-schema DB that still
-    /// reads `user_version == 0` — exactly what `init_schema` / `open_test_db`
-    /// produces — is a build, not a migration, under `CreateFresh`. Intent
+    /// reads `user_version == 0` — exactly what the unversioned migration-test
+    /// fixture produces — is a build, not a migration, under `CreateFresh`. Intent
     /// carries "I am creating", so no authority is needed and DB content is
     /// never consulted (owner ruling A: `init_schema`'s product IS fresh).
     #[test]
     fn create_fresh_needs_no_authority_regardless_of_db_content() {
         let (conn, tmp) = open_test_db();
-        // Full tables present (open_test_db ran init_schema) but user_version==0.
+        // Full pre-versioned tables are present but user_version==0.
         assert_eq!(read_schema_version(&conn).unwrap(), 0);
         let ctx = DbOpenContext::create_fresh();
         check_db_open_context_gate(&conn, tmp.path(), &ctx)
@@ -1744,38 +1830,6 @@ mod tests {
 
     // --- #984 F3(e): EXPECTED_SCHEMA_VERSION invariant ----------------------
 
-    /// All sentinel keys `run_data_migrations` gates on, in the same order
-    /// the runner checks them. Shared by the "genuine existing sentinels"
-    /// fixture above and the invariant test below so both stay in lockstep
-    /// with the runner's actual migration list.
-    const ALL_MIGRATION_SENTINEL_KEYS: &[&str] = &[
-        "v1_path_normalize_legacy",
-        "v2_scope_self_normalize",
-        "v3_handoff_path_standardize",
-        "v4_quarantine_cross_db_rows",
-        "v5_drop_hypertachi_legacy_columns",
-        "v6_fold_persons_into_entities",
-        "v7_reconcile_legacy_memory_columns",
-        "v8_drop_legacy_persons_column",
-        "v9_relocate_and_drop_location",
-        "v10_drop_pack_tables",
-        "v11_drop_domains_table",
-        "v12_session_claims_unique_identity",
-        "v13_hard_state_ns_updated_index",
-        "v14_dispatch_outcomes_reported_outcome",
-        "v15_exec_envs_env_class",
-        "v16_dispatch_outcomes_identity_receipt",
-        "v17_dispatch_outcomes_attribution_basis",
-        "v18_dispatch_adjudications",
-        "v19_idless_memory_identity",
-        "v20_mirror_eval",
-        "v21_identity_workclaim_spine",
-        "v22_memories_symbolic_fts",
-        "v23_reserved_reference_guards",
-        "v24_memories_scored_count",
-        "v25_recall_impression_ledger",
-    ];
-
     /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner
     /// *itself* produces — not a hand-maintained duplicate list — by running
     /// the real `run_data_migrations` against a fresh DB and counting the
@@ -1786,9 +1840,9 @@ mod tests {
     /// then fails this test — silently under-stamping newly-migrated DBs
     /// would otherwise defeat the #984 gate for the new migration.
     ///
-    /// `ALL_MIGRATION_SENTINEL_KEYS` above is a separate, hand-maintained
-    /// list used only to seed the "genuine existing sentinels" fixture; this
-    /// test intentionally does not depend on it being complete or in sync.
+    /// `MIGRATION_SENTINEL_KEYS` is also exercised by current-schema preflight;
+    /// this count check stays independent so runner additions cannot be hidden
+    /// by forgetting to update both the stamp and inventory.
     #[test]
     fn expected_schema_version_matches_migration_count() {
         let (mut conn, tmp) = open_test_db();
@@ -1809,6 +1863,17 @@ mod tests {
              sentinel migrations run_data_migrations actually marks run ({sentinel_count}) — \
              bump the const (and add a vN doc line) when a new migration is appended"
         );
+        assert_eq!(
+            MIGRATION_SENTINEL_KEYS.len(),
+            EXPECTED_SCHEMA_VERSION as usize,
+            "current-schema sentinel inventory must cover every version"
+        );
+        for key in MIGRATION_SENTINEL_KEYS {
+            assert!(
+                was_run(&conn, key).unwrap(),
+                "current-schema preflight key '{key}' is not written by the migration runner"
+            );
+        }
     }
 
     /// #1331 BUG 3: stamped-v21 DBs must not silently acquire
@@ -2115,6 +2180,123 @@ mod tests {
                 .unwrap_or(false);
             assert!(present, "v25 must create {object_type} {name}");
         }
+    }
+
+    fn current_schema_snapshot(path: &Path) -> (Vec<u8>, Vec<String>, u32, Vec<String>) {
+        let bytes = std::fs::read(path).expect("read database bytes");
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open snapshot read-only");
+        let mut schema_stmt = conn
+            .prepare(
+                "SELECT type || char(31) || name || char(31) || tbl_name || char(31) || COALESCE(sql, '')
+                 FROM sqlite_schema ORDER BY type, name, tbl_name",
+            )
+            .unwrap();
+        let schema = schema_stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(schema_stmt);
+        let mut sentinel_stmt = conn
+            .prepare(
+                "SELECT key || char(31) || value_json || char(31) || version || char(31) || created_at || char(31) || updated_at
+                 FROM hard_state WHERE namespace = ?1 ORDER BY key",
+            )
+            .unwrap();
+        let sentinels = sentinel_stmt
+            .query_map([MIGRATION_NS], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(sentinel_stmt);
+        let version = read_schema_version(&conn).unwrap();
+        (bytes, schema, version, sentinels)
+    }
+
+    fn assert_current_v25_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("memory.db");
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision current v25 fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open fixture for corruption");
+            conn.execute_batch(corruption_sql).expect("corrupt fixture");
+        }
+        let before = current_schema_snapshot(&path);
+
+        let error = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_deny(),
+        ) {
+            Ok(_) => panic!("stamped-current corrupt v25 DB must fail without repair"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected corruption error: {error}"
+        );
+
+        let after = current_schema_snapshot(&path);
+        assert_eq!(
+            after.0, before.0,
+            "failed current open must be byte-identical"
+        );
+        assert_eq!(
+            after.1, before.1,
+            "failed current open must not repair schema"
+        );
+        assert_eq!(after.2, before.2, "failed current open must not re-stamp");
+        assert_eq!(
+            after.3, before.3,
+            "failed current open must not repair migration sentinels"
+        );
+    }
+
+    #[test]
+    fn stamped_current_v25_missing_ledger_table_or_index_is_refused_without_repair() {
+        assert_current_v25_corruption_is_not_repaired(
+            "DROP TABLE recall_impressions;",
+            "recall_impressions",
+        );
+        assert_current_v25_corruption_is_not_repaired(
+            "DROP INDEX idx_recall_impression_groups_query_hash;",
+            "idx_recall_impression_groups_query_hash",
+        );
+    }
+
+    #[test]
+    fn stamped_current_v25_missing_sentinel_is_refused_without_repair() {
+        assert_current_v25_corruption_is_not_repaired(
+            "DELETE FROM hard_state
+             WHERE namespace = 'migrations' AND key = 'v25_recall_impression_ledger';",
+            "v25_recall_impression_ledger",
+        );
+    }
+
+    #[test]
+    fn valid_stamped_current_v25_reopens_without_migration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("memory.db");
+        let path_str = path.to_string_lossy().to_string();
+        let store =
+            crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                .expect("provision current v25 fixture");
+        drop(store);
+        let before = current_schema_snapshot(&path);
+
+        let reopened =
+            crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::open_existing_deny())
+                .expect("valid current v25 must reopen");
+        drop(reopened);
+        let after = current_schema_snapshot(&path);
+        assert_eq!(after.1, before.1);
+        assert_eq!(after.2, EXPECTED_SCHEMA_VERSION);
+        assert_eq!(after.3, before.3);
     }
 
     #[test]

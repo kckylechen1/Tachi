@@ -8,45 +8,37 @@ use super::common::normalize_utc_iso;
 
 mod ddl;
 
-/// Bare, transaction-less schema init: applies connection PRAGMAs then runs
-/// [`init_schema_inner`] directly on `conn`.
-///
-/// ## Why the missing outer transaction is safe here (#1289 Claim1)
-///
-/// `init_schema_inner` performs its `session_claims` dedup
-/// ([`crate::db::migrations::dedupe_session_claims_identity_conflicts`]) and
-/// the `CREATE UNIQUE INDEX idx_session_claims_identity_active`
-/// (`MIGRATED_INDEXES_SQL`) as two separate connection ops. If a *concurrent*
-/// writer could insert a fresh duplicate active claim between them, the index
-/// build would fail — so that pair would need a transaction to be race-free.
-/// It is not wrapped here because this entry point is only ever reached where
-/// there is NO concurrent writer:
-///
-/// - The sole production caller is [`crate::MemoryStore::open_in_memory`],
-///   which builds a plain `Connection::open_in_memory()` — a private,
-///   single-connection, non-shared-cache DB that no other connection can write
-///   to, so the interleaving window cannot exist.
-/// - Every file-backed production open routes through
-///   [`init_schema_with_label_mut`] instead, which runs `init_schema_inner` +
-///   `run_data_migrations_in_tx` + the version stamp inside ONE
-///   `BEGIN IMMEDIATE` transaction (#984 F1 round 3) — already atomic against
-///   concurrent writers.
-/// - All remaining callers are `#[cfg(test)]` single-threaded fixtures.
-///
-/// A caller that ever wires this bare path onto a *shared* file/in-memory DB
-/// with concurrent writers must switch to [`init_schema_with_label_mut`]'s
-/// transactional entry instead.
+/// Initialize a private fresh schema and run the same sentinel migrations used
+/// by file-backed provisioning. The sole production caller is
+/// [`crate::MemoryStore::open_in_memory`]; tests also use this as the complete
+/// current-schema constructor.
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
+    super::ensure_reserved_reference_write_guard(conn)?;
+    crate::db::migrations::check_schema_version_gate(conn)?;
+    crate::db::migrations::validate_current_schema_integrity(conn)?;
+    apply_connection_pragmas(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    init_schema_inner(&tx)?;
+    crate::db::migrations::run_data_migrations_in_tx(&tx, "global", Path::new(":memory:"))?;
+    crate::db::migrations::write_schema_version_stamp(&tx)?;
+    super::validate_persistent_trigger_inventory(&tx, true)?;
+    validate_recall_impression_ledger_schema(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Build the pre-sentinel fixture used only by migration unit tests. Production
+/// fresh initialization must use [`init_schema`] so versioned schema is never
+/// installed outside the migration runner.
+#[cfg(test)]
+pub(crate) fn init_unversioned_schema_for_migration_tests(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     apply_connection_pragmas(conn)?;
     init_schema_inner(conn)?;
-    // This bare entry point is fresh, private in-memory/test setup and does
-    // not participate in the file-backed version-stamp lifecycle. Mirror the
-    // v23 migration's canonical guards here only after the final memories
-    // table exists; operational file opens install them through v23 below.
     install_reserved_reference_guard(conn)?;
-    super::validate_persistent_trigger_inventory(conn, true)?;
-    validate_recall_impression_ledger_schema(conn)
+    super::validate_persistent_trigger_inventory(conn, true)
 }
 
 /// Initialize schema and run data migrations with a known DB label and path.
@@ -90,6 +82,7 @@ pub fn init_schema_with_label_mut(
     // stamped older DB must refuse before `init_schema_inner`'s idempotent
     // DDL or the final `write_schema_version_stamp` touches the file.
     crate::db::migrations::check_db_open_context_gate(conn, current_db_path, ctx)?;
+    crate::db::migrations::validate_current_schema_integrity(conn)?;
     maybe_backup_before_migration(conn, current_db_path)?;
     apply_connection_pragmas(conn)?;
 
@@ -149,7 +142,6 @@ fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::BASE_SCHEMA_SQL)?;
-    install_recall_impression_ledger_schema(conn)?;
 
     // Legacy recall-cache rows predate database-authoritative generation
     // snapshots. The empty default is intentionally non-matching, so the first
