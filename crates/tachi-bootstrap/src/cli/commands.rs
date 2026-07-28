@@ -188,8 +188,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: CardAction,
     },
-    /// Sync/list dispatch-ledger LANE cards (`~/.agents/dispatch-ledger/cards/*.md`,
-    /// leader-authored model/vendor playbooks — see `tachi#1202`) as read-only
+    /// Sync/list typed dispatch-ledger cards (`~/.agents/dispatch-ledger/cards/*.md`,
+    /// leader-authored model/harness/seat/crew playbooks — see `tachi#1202`) as read-only
     /// `/cards/<seat>` mirror rows in the GLOBAL memory DB. Distinct from the
     /// singular `Card` command above, which projects Tachikoma dispatch-profile
     /// cards (`tachi_task(action='profiles')`) and is unrelated data.

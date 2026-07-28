@@ -46,7 +46,7 @@ Plus two bookkeeping sections: **eval evidence rows** (one line per adjudicated 
 ## 5. Granularity and thresholds
 
 - **Vendor key is family-level** (`glm`, `codex`, `gemini`), matching the projection machinery (#738): cards survive version bumps; note version-specific evidence inline ("GLM-5 era", "o3 era"). Version pinning/staleness flags are a pending machine feature (#734-C3c) — until then, date + era labels are the manual substitute.
-- **Three card layers, never mixed**: model cards (reasoning behavior), harness cards (opencode, Trae — wrapper behavior + variance), seat cards (role×vendor, e.g. haiku-as-igniter). A row about a harness running an unknown backend goes on the harness card.
+- **Four card layers, never mixed**: model cards (reasoning behavior), harness cards (opencode, Trae — wrapper behavior + variance), seat cards (one role×vendor binding, e.g. haiku-as-igniter), and crew cards (a small agent team composed of multiple collaborating seats). A row about a harness running an unknown backend goes on the harness card; a crew-level orchestration rule goes on the crew card and is never projected as if it described one seat.
 - **Card threshold: ≥2 independent strong items.** One item → the shared thin-stubs file, with an explicit "what would promote this" note (e.g. "deepseek: run a seeded-bug review probe to test reviewer strictness before promotion").
 - **New-card checklist**: frontmatter (name/description with the routing gist), the four fields (empty sections stay absent, not padded), 一句话路由, `[[links]]` to related cards, index line in the card store's index file.
 

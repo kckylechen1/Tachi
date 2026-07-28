@@ -1,10 +1,13 @@
 //! `tachi cards sync` / `tachi cards list` (tachi#1202 Phase-1 / tachi#992).
 //!
-//! Mirrors leader-authored lane cards (`~/.agents/dispatch-ledger/cards/*.md`
+//! Mirrors leader-authored dispatch cards (`~/.agents/dispatch-ledger/cards/*.md`
 //! — markdown with an optional typed frontmatter declaration, NOT tracked in
 //! this repo) into read-only `/cards/<seat>` rows in the GLOBAL memory DB, so any
 //! agent with a Tachi connection can look up a seat's playbook without
 //! filesystem access to the leader's home directory.
+//! Typed cards distinguish model, harness, seat, and crew identities. A crew is
+//! a small agent team composed of multiple collaborating seats; it is mirrored
+//! for routing context but never projected as a single-seat prompt overlay.
 //!
 //! Deliberately distinct from the singular `tachi card` command (`cards.rs`
 //! in this same directory), which projects Tachikoma dispatch-profile cards
@@ -39,10 +42,12 @@
 //!
 //! # Write channel
 //!
-//! Every mutating write (create, update, archive) goes through
-//! `dispatch_cli_tool_with_migration_authority`, the exact same
+//! Every mutating write (create, update, archive) goes through the same
 //! daemon-forward-else-in-process channel `tachi remember` uses, invoking the
-//! already-daemon-recognized `save_memory` / `archive_memory` tool names —
+//! already-daemon-recognized `save_memory` / `archive_memory` tool names.
+//! Archive uses the channel's fixed `operate`-profile variant because the
+//! low-level tool is deliberately absent from the standard facade tray; that
+//! override is session-local and cannot be selected through CLI input. This is
 //! never a bespoke `cards_sync` RPC (which no running daemon would recognize
 //! and which the "refuse in-process fallback to avoid duplicate writes"
 //! guard in `tool_dispatch.rs` would then hard-fail on whenever any daemon is
@@ -76,13 +81,16 @@ use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::CardsAction;
 
 use super::super::print_pretty_json;
-use super::tool_dispatch::dispatch_cli_tool_with_migration_authority;
+use super::tool_dispatch::{
+    dispatch_cli_operate_tool_with_migration_authority, dispatch_cli_tool_with_migration_authority,
+};
 use crate::memory_ops::handle_archive_memory;
 use crate::memory_search_ops::handle_save_memory;
 use crate::tool_params::{ArchiveMemoryParams, SaveMemoryParams};
 
 const CARDS_MIRROR_PATH_PREFIX: &str = "/cards";
 const CARDS_METADATA_SOURCE: &str = "dispatch-ledger";
+const SUPPORTED_CARD_KINDS: [&str; 4] = ["model", "harness", "seat", "crew"];
 
 pub(super) async fn run_cards_command(
     action: CardsAction,
@@ -116,6 +124,23 @@ pub(super) async fn run_cards_command(
             .await
             {
                 Ok(row) => {
+                    let current = match read_card_file(&dir, &outcome.seat) {
+                        Ok(file) => file,
+                        Err(error) => return mirror_pending(&outcome, error.to_string()),
+                    };
+                    if current.hash != outcome.source_hash
+                        || row.content_hash != outcome.source_hash
+                    {
+                        return mirror_pending(&outcome, "mirror/canonical hash mismatch".into());
+                    }
+                    let card_kind = current.declaration.kind.as_deref().unwrap_or("seat");
+                    if !crate::dispatch_ops::card_kind_participates_in_seat_projection(
+                        current.declaration.kind.as_deref(),
+                    ) {
+                        return print_pretty_json(
+                            &json!({"schema_version":"tachi.cards.apply.v1","source_status":outcome.source_status,"seat":outcome.seat,"card_kind":card_kind,"source_hash":outcome.source_hash,"mirror_status":"synced","mirror_content_hash":row.content_hash,"mirror_revision":row.revision,"projection_status":"not_applicable"}),
+                        );
+                    }
                     let server =
                         match crate::cli_client::build_in_process_server_with_migration_authority(
                             db_path,
@@ -125,18 +150,12 @@ pub(super) async fn run_cards_command(
                             Ok(server) => server,
                             Err(error) => return mirror_pending(&outcome, error.to_string()),
                         };
-                    let current = match read_card_file(&dir, &outcome.seat) {
-                        Ok(file) => file,
-                        Err(error) => return mirror_pending(&outcome, error.to_string()),
-                    };
                     match crate::dispatch_ops::resolve_exact_seat_card_readiness(
                         &server,
                         &outcome.seat,
                     ) {
                         Some(readiness)
-                            if current.hash == outcome.source_hash
-                                && row.content_hash == outcome.source_hash
-                                && readiness.source_hash == outcome.source_hash
+                            if readiness.source_hash == outcome.source_hash
                                 && readiness.complete_projection =>
                         {
                             print_pretty_json(
@@ -384,7 +403,7 @@ fn parse_card_declaration(text: &str) -> Result<CardDeclaration, Box<dyn std::er
             .get("status")
             .ok_or("typed card frontmatter is missing status")?,
     );
-    if !matches!(kind.as_str(), "model" | "harness" | "seat") {
+    if !SUPPORTED_CARD_KINDS.contains(&kind.as_str()) {
         return Err(format!("invalid card kind {kind}").into());
     }
     if !matches!(
@@ -492,7 +511,8 @@ fn scan_card_files(dir: &Path) -> Result<Vec<CardFile>, Box<dyn std::error::Erro
     Ok(files)
 }
 
-/// Direct-store snapshot of every current `/cards/<seat>` mirror row
+/// Direct-store snapshot of every current dispatch-ledger `/cards/<seat>`
+/// mirror row
 /// (archived included — needed to tell "already archived, still missing" from
 /// "freshly archived this run" and to un-archive a row whose file reappears).
 /// Keyed by seat; if duplicates ever exist for one seat (should not happen by
@@ -516,6 +536,9 @@ fn read_existing_mirrors(
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let mut map: BTreeMap<String, memcore::MemoryEntry> = BTreeMap::new();
     for entry in entries {
+        if entry.metadata.get("source").and_then(Value::as_str) != Some(CARDS_METADATA_SOURCE) {
+            continue;
+        }
         let Some(seat) = seat_from_mirror_path(&entry.path) else {
             continue;
         };
@@ -742,7 +765,7 @@ async fn sync_cards_selected(
             let mut args = serde_json::Map::new();
             args.insert("id".into(), json!(entry.id.clone()));
 
-            dispatch_cli_tool_with_migration_authority(
+            dispatch_cli_operate_tool_with_migration_authority(
                 "archive_memory",
                 args,
                 db_path,
@@ -803,6 +826,7 @@ fn print_sync_table(rows: &[CardSyncRow]) {
 
 struct MirrorListRow {
     seat: String,
+    kind: String,
     revision: i64,
     // Mapped from `MemoryEntry::timestamp`: `handle_save_memory` stamps this
     // to `Utc::now()` on every actual write (create or update) and this
@@ -823,6 +847,12 @@ fn list_mirror_rows(
         .into_iter()
         .map(|(seat, entry)| MirrorListRow {
             seat,
+            kind: entry
+                .metadata
+                .get("card_kind")
+                .and_then(Value::as_str)
+                .unwrap_or("seat")
+                .to_string(),
             revision: entry.revision,
             updated_at: entry.timestamp,
             counter_clauses_present: entry
@@ -842,6 +872,7 @@ fn list_rows_json(rows: &[MirrorListRow]) -> Value {
             .iter()
             .map(|row| json!({
                 "seat": row.seat,
+                "kind": row.kind,
                 "revision": row.revision,
                 "updated_at": row.updated_at,
                 "counter_clauses_present": row.counter_clauses_present,
@@ -854,8 +885,8 @@ fn list_rows_json(rows: &[MirrorListRow]) -> Value {
 fn print_list_table(rows: &[MirrorListRow]) {
     println!("Dispatch-Ledger Cards (mirror rows)");
     println!(
-        "{:<28} {:<6} {:<9} {:<28}",
-        "seat", "rev", "counter", "updated_at"
+        "{:<28} {:<9} {:<6} {:<9} {:<28}",
+        "seat", "kind", "rev", "counter", "updated_at"
     );
     for row in rows {
         let counter = if row.counter_clauses_present {
@@ -869,8 +900,8 @@ fn print_list_table(rows: &[MirrorListRow]) {
             row.seat.clone()
         };
         println!(
-            "{:<28} {:<6} {:<9} {:<28}",
-            seat_label, row.revision, counter, row.updated_at
+            "{:<28} {:<9} {:<6} {:<9} {:<28}",
+            seat_label, row.kind, row.revision, counter, row.updated_at
         );
     }
 }
@@ -1102,6 +1133,40 @@ aliases: [codex-cli, codex-app-server]
     }
 
     #[tokio::test]
+    async fn sync_accepts_crew_as_a_typed_agent_team() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards_dir = temp.path().join("cards");
+        std::fs::create_dir_all(&cards_dir).expect("cards dir");
+        let schema_migration = memcore::MigrationAuthority::Deny;
+        write_fixture(
+            &cards_dir,
+            "kimi-crew",
+            "---\ncard_id: crew/oc-kimi-crew\nkind: crew\nstatus: active\nrole: implementer-formation\nmodel_family: kimi-k3\nharness_id: clanker/opencode\n---\n\n# Kimi Crew\n\nA small agent team.\n",
+        );
+
+        let rows = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
+            .await
+            .expect("crew cards are a supported typed identity");
+        assert_eq!(find_row(&rows, "kimi-crew").status, "created");
+
+        let mirrors = read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors");
+        let metadata = &mirrors["kimi-crew"].metadata;
+        assert_eq!(metadata["card_id"], json!("crew/oc-kimi-crew"));
+        assert_eq!(metadata["card_kind"], json!("crew"));
+        assert_eq!(metadata["card_status"], json!("active"));
+
+        let listed = list_mirror_rows(&db_path, &schema_migration).expect("list mirrors");
+        let crew = listed
+            .iter()
+            .find(|row| row.seat == "kimi-crew")
+            .expect("crew row is listed");
+        assert_eq!(crew.kind, "crew");
+        let listed_json = list_rows_json(&listed);
+        assert_eq!(listed_json["rows"][0]["kind"], json!("crew"));
+    }
+
+    #[tokio::test]
     async fn sync_full_transition_matrix() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (app_home, db_path) = app_home_and_db(temp.path());
@@ -1207,6 +1272,53 @@ aliases: [codex-cli, codex-app-server]
         assert!(
             rows5.iter().all(|row| row.seat != "grok-4.5"),
             "an already-archived, still-missing seat should not reappear in the report: {rows5:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_sync_never_archives_unowned_rows_under_cards_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards_dir = temp.path().join("cards");
+        std::fs::create_dir_all(&cards_dir).expect("cards dir");
+        let schema_migration = memcore::MigrationAuthority::Deny;
+
+        let server = crate::cli_client::build_in_process_server_with_migration_authority(
+            &db_path,
+            None,
+            schema_migration.clone(),
+        )
+        .expect("server");
+        let params: SaveMemoryParams = serde_json::from_value(json!({
+            "text": "ordinary global wiki row in an overlapping path",
+            "path": "/cards/not-a-dispatch-ledger-mirror",
+            "scope": "global",
+            "category": "wiki",
+            "force": true
+        }))
+        .expect("save params");
+        let saved = handle_save_memory(&server, params)
+            .await
+            .expect("save unowned row");
+        let saved_id = serde_json::from_str::<Value>(&saved).expect("save JSON")["id"]
+            .as_str()
+            .expect("saved id")
+            .to_string();
+
+        let rows = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
+            .await
+            .expect("empty-source sync");
+        assert!(
+            rows.is_empty(),
+            "cards sync must not claim or archive a row it does not own: {rows:?}"
+        );
+        let preserved = server
+            .with_global_store_read(|store| store.get(&saved_id).map_err(|e| e.to_string()))
+            .expect("read preserved row")
+            .expect("unowned row remains present");
+        assert!(
+            !preserved.archived,
+            "path overlap alone must never grant cards sync lifecycle authority"
         );
     }
 

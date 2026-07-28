@@ -25,7 +25,8 @@ pub(crate) use detect::{
 pub(crate) use forward::maybe_forward_write;
 pub(crate) use forward::{maybe_forward_server_read, maybe_forward_server_write};
 pub(crate) use transport::{
-    call_daemon_tool, call_daemon_tool_raw, list_daemon_tools, DaemonCallError,
+    call_daemon_tool, call_daemon_tool_raw, call_daemon_tool_with_profile, list_daemon_tools,
+    DaemonCallError,
 };
 
 #[cfg(test)]

@@ -142,6 +142,65 @@ where
     F: FnOnce(MemoryServer, serde_json::Map<String, serde_json::Value>) -> Fut,
     Fut: std::future::Future<Output = Result<String, String>>,
 {
+    dispatch_cli_tool_with_profile_and_migration_authority(
+        tool_name,
+        args,
+        global_db,
+        project_db,
+        app_home,
+        schema_migration,
+        None,
+        in_process,
+    )
+    .await
+}
+
+/// Dispatch one trusted CLI maintenance operation through an `operate`
+/// profile MCP session. This is intentionally not caller-configurable: the
+/// local cards reconciler uses it for `archive_memory`, which is hidden from
+/// the standard tray but must still be executed by the canonical daemon
+/// writer. The daemon's default profile and every ordinary CLI call remain
+/// unchanged.
+pub(super) async fn dispatch_cli_operate_tool_with_migration_authority<F, Fut>(
+    tool_name: &str,
+    args: serde_json::Map<String, serde_json::Value>,
+    global_db: &PathBuf,
+    project_db: Option<&PathBuf>,
+    app_home: &PathBuf,
+    schema_migration: &MigrationAuthority,
+    in_process: F,
+) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: FnOnce(MemoryServer, serde_json::Map<String, serde_json::Value>) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    dispatch_cli_tool_with_profile_and_migration_authority(
+        tool_name,
+        args,
+        global_db,
+        project_db,
+        app_home,
+        schema_migration,
+        Some(tachi_hub::ToolProfile::operate()),
+        in_process,
+    )
+    .await
+}
+
+async fn dispatch_cli_tool_with_profile_and_migration_authority<F, Fut>(
+    tool_name: &str,
+    args: serde_json::Map<String, serde_json::Value>,
+    global_db: &PathBuf,
+    project_db: Option<&PathBuf>,
+    app_home: &PathBuf,
+    schema_migration: &MigrationAuthority,
+    daemon_profile: Option<tachi_hub::ToolProfile>,
+    in_process: F,
+) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: FnOnce(MemoryServer, serde_json::Map<String, serde_json::Value>) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
     let read_fallback = cli_tool_allows_read_fallback(tool_name);
     // Compute the CLI's named project once (tachi#1224: see
     // `daemon_forward_named_project` for what feeds this and why). The
@@ -158,11 +217,12 @@ where
             global_db,
             project_db.map(|path| path.as_path()),
         ) {
-            match crate::cli_client::call_daemon_tool(
+            match crate::cli_client::call_daemon_tool_with_profile(
                 &info,
                 tool_name,
                 args.clone(),
                 cli_named_project.as_deref(),
+                daemon_profile,
             )
             .await
             {
@@ -185,11 +245,12 @@ where
                 eprintln!(
                     "[cli] daemon project DB scope differs; forwarding via named project '{named_project}'"
                 );
-                match crate::cli_client::call_daemon_tool(
+                match crate::cli_client::call_daemon_tool_with_profile(
                     &info,
                     tool_name,
                     daemon_args,
                     cli_named_project.as_deref(),
+                    daemon_profile,
                 )
                 .await
                 {
@@ -247,7 +308,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{cli_tool_allows_read_fallback, daemon_forward_named_project};
-    use crate::bootstrap::cli_tool::tool_dispatch::dispatch_cli_tool;
+    use crate::bootstrap::cli_tool::tool_dispatch::{
+        dispatch_cli_operate_tool_with_migration_authority, dispatch_cli_tool,
+    };
     use crate::test_support::EnvRestore;
     use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
@@ -416,6 +479,135 @@ mod tests {
             ct,
             handle,
         )
+    }
+
+    /// Card reconciliation is a trusted local CLI operation that must archive
+    /// stale global mirrors through the daemon even when that daemon's default
+    /// profile is `standard`. The default call remains unable to see the
+    /// low-level `archive_memory` tool; only the explicit, fixed `operate`
+    /// dispatch path may elevate this one MCP session.
+    #[test]
+    fn trusted_cli_operate_dispatch_reaches_archive_without_widening_standard_profile() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _is_daemon = EnvRestore::set("TACHI_DAEMON", "1");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        let _disable_auto = EnvRestore::set("TACHI_DISABLE_AUTO_DAEMON", "1");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        let (ct, daemon_task, stale_id) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let mut seed_args = serde_json::Map::new();
+            seed_args.insert(
+                "text".to_string(),
+                serde_json::json!("stale card mirror for operate-profile archive test"),
+            );
+            seed_args.insert(
+                "path".to_string(),
+                serde_json::json!("/cards/stale-operate-test"),
+            );
+            seed_args.insert("scope".to_string(), serde_json::json!("global"));
+            seed_args.insert("category".to_string(), serde_json::json!("wiki"));
+            seed_args.insert("force".to_string(), serde_json::json!(true));
+            let seed_params: tachi_params::SaveMemoryParams =
+                serde_json::from_value(serde_json::Value::Object(seed_args))
+                    .expect("seed save params");
+            let seed_body = crate::memory_search_ops::handle_save_memory(&server, seed_params)
+                .await
+                .expect("seed stale mirror");
+            let seed_json: serde_json::Value =
+                serde_json::from_str(&seed_body).expect("seed save JSON");
+            let stale_id = seed_json["id"]
+                .as_str()
+                .expect("seed memory id")
+                .to_string();
+            let (daemon_info, ct, daemon_task) =
+                spawn_global_only_http_daemon(server, &global).await;
+
+            let port = daemon_info
+                .url
+                .split(':')
+                .nth(2)
+                .and_then(|s| s.split('/').next())
+                .and_then(|s| s.parse::<u16>().ok())
+                .expect("daemon port");
+            let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&tachi_home, &global);
+            std::fs::create_dir_all(pid_path.parent().expect("pid parent")).expect("pid parent");
+            std::fs::write(
+                &pid_path,
+                serde_json::json!({
+                    "pid": std::process::id(),
+                    "port": port,
+                    "url": daemon_info.url,
+                    "global_db": global.display().to_string(),
+                    "project_db": serde_json::Value::Null,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+                .to_string(),
+            )
+            .expect("pid file");
+
+            let mut ordinary_args = serde_json::Map::new();
+            ordinary_args.insert("id".to_string(), serde_json::json!(&stale_id));
+            let ordinary = crate::cli_client::call_daemon_tool(
+                &daemon_info,
+                "archive_memory",
+                ordinary_args,
+                None,
+            )
+            .await
+            .expect_err("standard profile must keep archive_memory hidden");
+            assert!(
+                ordinary.to_string().contains("tool not found"),
+                "unexpected standard-profile rejection: {ordinary}"
+            );
+
+            let mut args = serde_json::Map::new();
+            args.insert("id".to_string(), serde_json::json!(&stale_id));
+            let body = dispatch_cli_operate_tool_with_migration_authority(
+                "archive_memory",
+                args,
+                &global,
+                None,
+                &tachi_home,
+                &memcore::MigrationAuthority::Deny,
+                |_server, _args| Box::pin(async { Err("in-process fallback must not run".into()) }),
+            )
+            .await
+            .expect("trusted operate dispatch should reach daemon archive_memory");
+            let parsed: serde_json::Value = serde_json::from_str(&body).expect("archive JSON");
+            assert_eq!(parsed["archived"], serde_json::json!(true));
+            assert_eq!(parsed["db"], serde_json::json!("global"));
+
+            (ct, daemon_task, stale_id)
+        });
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+        let archived: i64 = rusqlite::Connection::open(&global)
+            .expect("open global db")
+            .query_row(
+                "SELECT archived FROM memories WHERE id = ?1",
+                [&stale_id],
+                |row| row.get(0),
+            )
+            .expect("read archived flag");
+        assert_eq!(
+            archived, 1,
+            "operate-profile archive must commit exactly once"
+        );
     }
 
     /// F7 regression: the CLI named-project forwarding path must declare its

@@ -103,6 +103,9 @@ pub(crate) fn resolve_exact_seat_card_readiness(
         return None;
     }
     let entry = exact[0];
+    if !participates_in_seat_projection(entry) {
+        return None;
+    }
     readiness_from_entry(seat, entry)
 }
 
@@ -154,13 +157,18 @@ fn counter_clauses_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
 }
 
 fn participates_in_seat_projection(entry: &memcore::MemoryEntry) -> bool {
-    match entry
-        .metadata
-        .get("card_kind")
-        .and_then(serde_json::Value::as_str)
-    {
+    card_kind_participates_in_seat_projection(
+        entry
+            .metadata
+            .get("card_kind")
+            .and_then(serde_json::Value::as_str),
+    )
+}
+
+pub(crate) fn card_kind_participates_in_seat_projection(kind: Option<&str>) -> bool {
+    match kind {
         None | Some("seat") => true,
-        Some("model" | "harness") => false,
+        Some("model" | "harness" | "crew") => false,
         Some(_) => false,
     }
 }
@@ -352,6 +360,18 @@ mod tests {
             "counter_clauses": 42,
         });
         assert_eq!(counter_clauses_from_metadata(&metadata), None);
+    }
+
+    #[test]
+    fn typed_non_seat_kinds_are_not_apply_readiness_targets() {
+        assert!(card_kind_participates_in_seat_projection(None));
+        assert!(card_kind_participates_in_seat_projection(Some("seat")));
+        for kind in ["model", "harness", "crew", "unknown"] {
+            assert!(
+                !card_kind_participates_in_seat_projection(Some(kind)),
+                "typed non-seat kind {kind} must never be reported as seat projection-ready"
+            );
+        }
     }
 
     #[test]

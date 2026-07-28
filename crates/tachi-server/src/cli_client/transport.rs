@@ -155,12 +155,29 @@ pub(crate) async fn call_daemon_tool(
     arguments: serde_json::Map<String, Value>,
     proxy_project: Option<&str>,
 ) -> Result<String, DaemonCallError> {
+    call_daemon_tool_with_profile(info, tool_name, arguments, proxy_project, None).await
+}
+
+/// Call a daemon tool with an optional, typed profile bound at MCP initialize.
+///
+/// Ordinary CLI and proxy calls use [`call_daemon_tool`] and therefore inherit
+/// the daemon's default profile. The override exists for narrow trusted CLI
+/// maintenance flows whose required native tool is deliberately absent from
+/// the standard facade tray. The daemon still parses and authorizes the
+/// profile; in particular, HTTP direct-connect continues to reject `admin`.
+pub(crate) async fn call_daemon_tool_with_profile(
+    info: &DaemonInfo,
+    tool_name: &str,
+    arguments: serde_json::Map<String, Value>,
+    proxy_project: Option<&str>,
+    profile: Option<tachi_hub::ToolProfile>,
+) -> Result<String, DaemonCallError> {
     let (daemon_tool, daemon_args) = remap_daemon_tool(tool_name, arguments);
     let mut params = CallToolRequestParams::new(daemon_tool.clone());
     if !daemon_args.is_empty() {
         params = params.with_arguments(daemon_args);
     }
-    let result = call_daemon_tool_raw(info, params, proxy_project).await?;
+    let result = call_daemon_tool_raw_with_profile(info, params, proxy_project, profile).await?;
     if result.is_error.unwrap_or(false) {
         let err_text =
             first_text_block(&result.content).unwrap_or_else(|| "<no error text>".to_string());
@@ -209,6 +226,17 @@ pub(crate) async fn call_daemon_tool_raw(
         .0
 }
 
+async fn call_daemon_tool_raw_with_profile(
+    info: &DaemonInfo,
+    params: CallToolRequestParams,
+    proxy_project: Option<&str>,
+    profile: Option<tachi_hub::ToolProfile>,
+) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
+    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, profile)
+        .await
+        .0
+}
+
 /// Same transport path as [`call_daemon_tool_raw`], plus handshake/call phase
 /// timings for #1255 concurrency receipts. Always returns phases (even on error)
 /// so a harness can emit a complete receipt set.
@@ -216,6 +244,18 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
+) -> (
+    Result<rmcp::model::CallToolResult, DaemonCallError>,
+    DaemonCallPhaseTiming,
+) {
+    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, None).await
+}
+
+async fn call_daemon_tool_raw_with_phases_and_profile(
+    info: &DaemonInfo,
+    params: CallToolRequestParams,
+    proxy_project: Option<&str>,
+    profile: Option<tachi_hub::ToolProfile>,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
@@ -237,6 +277,30 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
                 return (
                     Err(DaemonCallError::BeforeDispatch(format!(
                         "invalid proxy project header value: {e}"
+                    ))),
+                    DaemonCallPhaseTiming {
+                        handshake_ms: 0,
+                        call_ms: 0,
+                        total_ms,
+                    },
+                );
+            }
+        }
+    }
+    if let Some(profile) = profile {
+        let profile = profile.as_str();
+        match HeaderValue::from_str(&profile) {
+            Ok(value) => {
+                headers.insert(
+                    HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
+                    value,
+                );
+            }
+            Err(e) => {
+                let total_ms = elapsed_ms(started);
+                return (
+                    Err(DaemonCallError::BeforeDispatch(format!(
+                        "invalid proxy profile header value: {e}"
                     ))),
                     DaemonCallPhaseTiming {
                         handshake_ms: 0,
