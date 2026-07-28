@@ -304,6 +304,7 @@ Restart `tachi serve` after changing these values.
 | `TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST` | `12` | Boost for exact id-like query matches |
 | `TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR` | `0.445` | Provisional floor for candidates without sufficient lexical evidence; exact-id and qualified lexical candidates bypass it |
 | `TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS` | `4` | Require two matched terms for rich-query OR fallback and weak-vector symbolic bypass; values below `2` disable |
+| `TACHI_RECALL_USE_PROVENANCE_RECENCY` | `true` | Use explicit caller-recorded use events for recency, promotion, and retention; set `false` to restore legacy display/access semantics |
 
 For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
 `SYMBOLIC`, `DECAY`, or `USE_RRF`; grouped defaults above are listed in that

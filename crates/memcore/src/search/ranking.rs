@@ -719,10 +719,10 @@ fn char_ngrams(text: &str, n: usize) -> std::collections::HashSet<String> {
 /// base-level-activation floor is allowed to see, for both the production
 /// ranker and its `#[cfg(test)]` attribution twin.
 ///
-/// Off (default): `access_history` rows written by the search path itself,
+/// Off (rollback): `access_history` rows written by the search path itself,
 /// i.e. the pre-#1446 behaviour, byte-identical because every row that
 /// predates the `event_kind` column carries `display`.
-/// On: rows written by `db::record_memory_use` only, so the system's own act
+/// On (default): rows written by `db::record_memory_use` only, so the system's own act
 /// of displaying a result can no longer be read back as evidence about the
 /// memory — at the floor (`scorer::default_decay_score_actr_with_config`), at
 /// the decay frequency term (lever 2) and at [`apply_access_feedback`]
