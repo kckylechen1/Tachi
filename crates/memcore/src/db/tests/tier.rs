@@ -62,25 +62,35 @@ fn record_access_promotion_gate_raw_to_consolidated() {
     // Need: recall_count >= 3 AND query_diversity >= 3
     // Call 3 times with distinct queries and id in fts_hits each time
     let id = "tier-promo-1".to_string();
-    record_access(
+    let legacy_config = crate::RecallConfig {
+        use_provenance_recency: false,
+        ..crate::RecallConfig::default()
+    };
+    record_access_with_updates(
         &conn,
+        std::slice::from_ref(&id),
         std::slice::from_ref(&id),
         std::slice::from_ref(&id),
         Some("q-alpha"),
+        &legacy_config,
     )
     .unwrap();
-    record_access(
+    record_access_with_updates(
         &conn,
+        std::slice::from_ref(&id),
         std::slice::from_ref(&id),
         std::slice::from_ref(&id),
         Some("q-beta"),
+        &legacy_config,
     )
     .unwrap();
-    record_access(
+    record_access_with_updates(
         &conn,
         std::slice::from_ref(&id),
         std::slice::from_ref(&id),
+        std::slice::from_ref(&id),
         Some("q-gamma"),
+        &legacy_config,
     )
     .unwrap();
 

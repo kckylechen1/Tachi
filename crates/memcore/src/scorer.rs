@@ -154,12 +154,11 @@ fn default_decay_score_with_config(
     // constant, so decay stops discriminating between candidates at all
     // (measured in `search/tests/exposure_loop.rs`).
     //
-    // With `use_provenance_recency` ON the reference is `last_use_at`, which no
-    // write path touches as of this commit. An entry therefore falls through to
-    // exactly the same content-derived references an unexposed entry uses
-    // today — the leading `[YYYY-MM-DD]` event date, then `timestamp` — which
-    // is the point: what a search displayed can no longer be read back as
-    // evidence about the memory.
+    // With `use_provenance_recency` ON the reference is `last_use_at`, which is
+    // written only by the explicit caller-use path. An entry with no recorded
+    // use therefore falls through to the same content-derived references an
+    // unexposed entry uses — the leading `[YYYY-MM-DD]` event date, then
+    // `timestamp` — so a search display cannot become evidence about memory use.
     //
     // OFF is byte-identical to the pre-#1446 chain; only the first link of the
     // `or_else` fallthrough differs between the two arms.

@@ -17,8 +17,8 @@ use super::*;
 use crate::facade_memory_ops::consolidate_ops::merge_into_for_project;
 use crate::memory_ops::{handle_archive_memory, handle_delete_memory, handle_memory_gc};
 use crate::memory_search_ops::{
-    handle_save_memory, handle_search_memory, handle_search_memory_with_access,
-    RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
+    handle_save_memory, handle_search_memory, RecallCacheRaceHook, RecallCacheRacePoint,
+    RecallCacheTestOverride,
 };
 use crate::test_support::EnvRestore;
 use crate::tool_params::{ArchiveMemoryParams, DeleteMemoryParams};
@@ -1005,7 +1005,7 @@ async fn raw_memcore_write_in_one_server_invalidates_another_servers_warm_cache(
 }
 
 #[tokio::test]
-async fn access_feedback_in_one_store_invalidates_another_servers_warm_ranking() {
+async fn genuine_use_feedback_in_one_store_invalidates_another_servers_warm_ranking() {
     let (writer, _temp_home) = make_server_with_temp_home();
     let _cache = RecallCacheTestOverride::enabled();
     let reader = crate::server_state::MemoryServer::new(writer.global_db_path_buf(), None)
@@ -1039,16 +1039,16 @@ async fn access_feedback_in_one_store_invalidates_another_servers_warm_ranking()
         .to_string();
 
     let warmed = search_rows(&reader, &needle).await;
-    let warmed_target_relevance = warmed
+    let warmed_target_rank_score = warmed
         .iter()
         .find(|row| row["id"] == target_id)
-        .and_then(|row| row["relevance"].as_f64())
-        .expect("warm target relevance");
-    let warmed_control_relevance = warmed
+        .and_then(|row| row["score"]["final"].as_f64())
+        .expect("warm target rank score");
+    let warmed_control_rank_score = warmed
         .iter()
         .find(|row| row["id"] == control_id)
-        .and_then(|row| row["relevance"].as_f64())
-        .expect("warm control relevance");
+        .and_then(|row| row["score"]["final"].as_f64())
+        .expect("warm control rank score");
     let warmed_order = warmed
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
@@ -1056,16 +1056,19 @@ async fn access_feedback_in_one_store_invalidates_another_servers_warm_ranking()
     let cache_entries = global_recall_cache_entries(&reader);
     assert!(cache_entries > 0, "ranking query must warm the cache");
 
-    for query in [
-        format!("{needle} alpha"),
-        format!("{needle} beta"),
-        format!("{needle} gamma"),
-    ] {
-        let mut access_params = json_search_params(&query);
-        access_params.path_prefix = Some("/scratch/cache-generation/access-target".to_string());
-        handle_search_memory_with_access(&writer, access_params, false, true)
-            .await
-            .expect("record access, recall, and query diversity in writer B");
+    let now = chrono::Utc::now();
+    for days_ago in [2_i64, 1, 0] {
+        let used_at = (now - chrono::Duration::days(days_ago)).to_rfc3339();
+        writer
+            .with_global_store(|store| {
+                memcore::db::record_memory_use(
+                    store.connection(),
+                    std::slice::from_ref(&target_id),
+                    &used_at,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("record genuine use through raw memcore in writer B");
     }
 
     let access_state = writer
@@ -1076,15 +1079,16 @@ async fn access_feedback_in_one_store_invalidates_another_servers_warm_ranking()
                 .ok_or_else(|| "access target disappeared".to_string())
         })
         .expect("load access feedback state");
-    assert!(access_state.access_count >= 3);
-    assert!(access_state.recall_count >= 3);
-    assert!(access_state.query_diversity >= 3);
-    assert_eq!(access_state.tier, "consolidated");
+    assert_eq!(access_state.access_count, 0);
+    assert_eq!(access_state.recall_count, 0);
+    assert_eq!(access_state.query_diversity, 0);
+    assert_eq!(access_state.tier, "raw");
+    assert!(access_state.last_use_at.is_some());
 
     assert_eq!(
         global_recall_cache_entries(&reader),
         cache_entries,
-        "raw access feedback must prove generation validation, not manual eviction"
+        "raw use feedback must prove generation validation, not manual eviction"
     );
     let refreshed = search_rows(&reader, &needle).await;
     let refreshed_target = refreshed
@@ -1095,20 +1099,26 @@ async fn access_feedback_in_one_store_invalidates_another_servers_warm_ranking()
         .iter()
         .find(|row| row["id"] == control_id)
         .expect("refreshed control row");
+    let refreshed_target_rank_score = refreshed_target["score"]["final"]
+        .as_f64()
+        .expect("refreshed target rank score");
+    let refreshed_control_rank_score = refreshed_control["score"]["final"]
+        .as_f64()
+        .expect("refreshed control rank score");
     let refreshed_order = refreshed
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
         .collect::<Vec<_>>();
     assert!(
-        refreshed_target["relevance"].as_f64() != Some(warmed_target_relevance)
-            || refreshed_control["relevance"].as_f64() != Some(warmed_control_relevance)
+        refreshed_target_rank_score != warmed_target_rank_score
+            || refreshed_control_rank_score != warmed_control_rank_score
             || refreshed_order != warmed_order,
-        "access feedback must recompute the changed score instead of replaying the warm row: warm={warmed:#?} refreshed={refreshed:#?}"
+        "genuine use feedback must recompute the changed score instead of replaying the warm row: warm={warmed:#?} refreshed={refreshed:#?}"
     );
     assert_eq!(
         refreshed.first().and_then(|row| row["id"].as_str()),
         Some(target_id.as_str()),
-        "access_count and promoted tier must participate in refreshed ordering"
+        "genuine-use provenance must participate in refreshed ordering"
     );
 }
 

@@ -322,8 +322,8 @@ pub struct MemoryEntry {
     /// recall pipeline, so no amount of searching can set it.
     ///
     /// Read by `scorer::default_decay_score_with_config` as the recency age
-    /// reference **only** when `RecallConfig::use_provenance_recency` is on
-    /// (default off). With it off, decay reads `last_access` exactly as
+    /// reference when `RecallConfig::use_provenance_recency` is on (the
+    /// default). With it off, decay reads `last_access` exactly as
     /// before. `scorer::surprise_score_with_config` reads its NULL-ness as
     /// "never used" under the same knob.
     ///

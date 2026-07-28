@@ -63,6 +63,7 @@ pub mod near_dup;
 pub mod noise;
 pub mod path_router;
 pub mod recall_config;
+pub mod recall_coverage;
 pub mod relation_ontology;
 pub mod scorer;
 pub mod search;
@@ -170,6 +171,12 @@ pub use namespace::{
 pub use near_dup::{near_duplicate_raw_pairs, text_token_jaccard, NEAR_DUP_RAW_SCAN_CAP};
 pub use noise::{is_noise_text, should_skip_query};
 pub use recall_config::RecallConfig;
+pub use recall_coverage::{
+    is_recall_coverage_path_list_only, run_recall_coverage_probe, RecallCoverageOptions,
+    RecallCoverageOutcome, RecallCoveragePartitionCounts, RecallCoveragePriorScoredCountSplit,
+    RecallCoverageQuerySource, RecallCoverageReport, RecallCoverageTarget,
+    DEFAULT_RECALL_COVERAGE_CANDIDATES_PER_CHANNEL, DEFAULT_RECALL_COVERAGE_TOP_K,
+};
 pub use relation_ontology::ComponentGovernanceRelation;
 pub use scorer::{
     generic_precision_multiplier, surprise_score, surprise_score_with_config, DecayPolicy,
@@ -222,6 +229,10 @@ pub struct MemoryStore {
 
 #[cfg(test)]
 mod test_fixtures;
+
+#[cfg(test)]
+#[path = "recall_coverage_tests.rs"]
+mod recall_coverage_tests;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

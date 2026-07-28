@@ -233,9 +233,10 @@ async fn run_truth_maintenance_for_target(
     };
     let store = MemoryStore::open_with_label(db_path, &target.label)
         .map_err(|e| format!("open maintenance DB {}: {e}", target.label))?;
+    let recall_config = memcore::RecallConfig::get();
 
     store
-        .archive_stale_low_value_memories()
+        .archive_stale_low_value_memories_with_config(recall_config)
         .map_err(|e| format!("truth maintenance prune {}: {e}", target.label))?;
 
     // ── Self-healing: promote raw → consolidated when DB health ratio is low ──
@@ -249,7 +250,7 @@ async fn run_truth_maintenance_for_target(
     };
     if health_ratio < 0.35 && counts.total_active > 0 {
         let promoted = store
-            .promote_diversely_recalled_raw_memories()
+            .promote_diversely_recalled_raw_memories(recall_config)
             .map_err(|e| format!("self-heal promote raw memories {}: {e}", target.label))?;
         if promoted > 0 {
             eprintln!(
@@ -286,7 +287,6 @@ async fn run_truth_maintenance_for_target(
     // once outside the loop: the arm is a property of the configuration, not of
     // the candidate, and re-resolving it per entry would let a mid-run config
     // reload promote two candidates under two different rules.
-    let recall_config = memcore::RecallConfig::get();
     let promotion_candidates = store
         .promotion_candidate_entries_for_config(200, recall_config)
         .map_err(|e| format!("scan promotion candidates {}: {e}", target.label))?;

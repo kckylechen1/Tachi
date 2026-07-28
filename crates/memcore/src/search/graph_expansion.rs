@@ -39,6 +39,21 @@ pub(super) fn append_graph_expansion(
         return Ok(((), receipt));
     }
 
+    // Graph is a bounded fallback channel, not a second unbounded result set.
+    // Ranking has already truncated the primary set to `top_k`; once those
+    // slots are full, appended neighbors would be invisible to the caller but
+    // would still be recorded as displays by `hybrid_search` below this phase.
+    let remaining_slots = opts.top_k.saturating_sub(results.len());
+    if remaining_slots == 0 {
+        let receipt = phase_start.map(|s| GraphPhaseReceipt {
+            enabled: true,
+            failed: false,
+            elapsed: s.elapsed(),
+            expanded_count: 0,
+        });
+        return Ok(((), receipt));
+    }
+
     let seed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
     let rel_filter = opts.graph_relation_filter.as_deref();
 
@@ -132,6 +147,7 @@ pub(super) fn append_graph_expansion(
             (b.1.score.final_score, b.0, b.1.entry.id.as_str()),
         )
     });
+    new_entries.truncate(remaining_slots);
 
     let expanded_count = new_entries.len();
     results.extend(new_entries.into_iter().map(|(_, sr)| sr));

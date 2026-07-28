@@ -253,7 +253,7 @@ fn seed_archivable(
     id: &str,
     importance: f64,
     retention_policy: Option<&str>,
-    last_access: Option<&str>,
+    last_use_at: Option<&str>,
 ) {
     let mut entry = make_entry(id, &format!("archivable row {id}"));
     entry.importance = importance;
@@ -263,9 +263,9 @@ fn seed_archivable(
         "UPDATE memories
             SET timestamp = '2000-01-01T00:00:00.000Z',
                 updated_at = '2000-01-01T00:00:00.000Z',
-                last_access = ?2
+                last_use_at = ?2
           WHERE id = ?1",
-        params![id, last_access],
+        params![id, last_use_at],
     )
     .unwrap();
 }
@@ -326,7 +326,7 @@ fn gc_archival_writes_a_receipt_naming_rows_predicate_and_threshold() {
     );
     assert_eq!(
         fired[0]["predicate"],
-        json!("durable_never_accessed_by_timestamp")
+        json!("durable_never_used_by_timestamp")
     );
     assert_eq!(fired[0]["recency_column"], json!("timestamp"));
     assert_eq!(fired[0]["importance_below"], json!(0.3));
@@ -413,6 +413,32 @@ fn gc_archival_writes_no_receipt_when_nothing_qualifies() {
 }
 
 #[test]
+fn gc_archival_does_not_treat_display_as_use() {
+    let mut conn = make_conn();
+    seed_archivable(&mut conn, "gc-display-only", 0.2, Some("durable"), None);
+    conn.execute(
+        "UPDATE memories SET last_access = '2999-01-01T00:00:00.000Z' WHERE id = 'gc-display-only'",
+        [],
+    )
+    .unwrap();
+
+    assert_eq!(
+        archive_stale_memories(&conn, 90).unwrap(),
+        1,
+        "a fresh display timestamp must not protect an old, low-value memory that has no genuine use event"
+    );
+    let receipts = gc_archival_receipts(&conn);
+    let fired = receipts[0].payload["passes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pass| pass["archived_count"].as_u64() == Some(1))
+        .unwrap();
+    assert_eq!(fired["recency_column"], json!("timestamp"));
+    assert_eq!(fired["predicate"], json!("durable_never_used_by_timestamp"));
+}
+
+#[test]
 fn gc_archival_spares_exempt_rows_and_leaves_them_out_of_the_receipt() {
     let mut conn = make_conn();
     seed_archivable(&mut conn, "gc-arch-permanent", 0.1, Some("permanent"), None);
@@ -465,15 +491,15 @@ fn gc_archival_receipt_attributes_each_row_to_the_predicate_that_took_it() {
             .clone()
     };
     assert_eq!(
-        ids_for("ephemeral_stale_by_last_access"),
+        ids_for("ephemeral_stale_by_last_use"),
         json!(["gc-arch-ephemeral"])
     );
     assert_eq!(
-        ids_for("durable_never_accessed_by_timestamp"),
+        ids_for("durable_never_used_by_timestamp"),
         json!(["gc-arch-durable"])
     );
     assert_eq!(
-        ids_for("durable_stale_by_last_access"),
+        ids_for("durable_stale_by_last_use"),
         json!([]),
         "a predicate that took nothing must report an empty list, not be omitted"
     );
@@ -498,7 +524,7 @@ fn gc_archival_receipt_names_every_row_beyond_the_former_sample_boundary() {
     let passes = receipt[0].payload["passes"].as_array().unwrap();
     let pass = passes
         .iter()
-        .find(|pass| pass["predicate"] == json!("durable_never_accessed_by_timestamp"))
+        .find(|pass| pass["predicate"] == json!("durable_never_used_by_timestamp"))
         .unwrap();
     let ids: Vec<String> = serde_json::from_value(pass["memory_ids"].clone()).unwrap();
     assert_eq!(pass["archived_count"], json!(expected_ids.len()));

@@ -54,13 +54,27 @@ fn graph_expansion_orders_neighbors_by_spreading_activation() {
     )
     .unwrap();
 
-    let opts = SearchOptions {
+    let bounded_opts = SearchOptions {
         top_k: 1,
         record_access: false,
         graph_expand_hops: 1,
         ..Default::default()
     };
-    let results = hybrid_search(&conn, "TrendLock", &opts).unwrap();
+    let bounded = hybrid_search(&conn, "TrendLock", &bounded_opts).unwrap();
+    assert_eq!(
+        bounded
+            .iter()
+            .map(|result| result.entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["seed"],
+        "graph expansion may fill unused top_k slots, but must not append hidden rows after the ranked set is already full"
+    );
+
+    let expanded_opts = SearchOptions {
+        top_k: 3,
+        ..bounded_opts
+    };
+    let results = hybrid_search(&conn, "TrendLock", &expanded_opts).unwrap();
     let ids = results
         .iter()
         .map(|result| result.entry.id.as_str())
@@ -110,7 +124,7 @@ fn receipt_covers_graph_enabled_and_disabled_branches() {
     // graph_expansion.rs:24-26 falls through, expansion runs and surfaces
     // the "support" neighbor.
     let opts_on = SearchOptions {
-        top_k: 1,
+        top_k: 2,
         record_access: false,
         graph_expand_hops: 1,
         ..Default::default()

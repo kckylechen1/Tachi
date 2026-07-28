@@ -198,7 +198,7 @@ fn graph_expansion_does_not_leak_cross_surface_neighbors() {
     .unwrap();
 
     let opts = |surface: Option<Surface>| SearchOptions {
-        top_k: 1,
+        top_k: 2,
         candidates_per_channel: 10,
         record_access: false,
         graph_expand_hops: 1,

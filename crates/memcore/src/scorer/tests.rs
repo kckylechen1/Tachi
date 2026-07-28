@@ -316,16 +316,16 @@ fn use_provenance_recency_moves_the_age_reference_off_last_access() {
     entry.timestamp = (Utc::now() - chrono::Duration::days(240)).to_rfc3339();
     entry.last_access = Some(Utc::now().to_rfc3339());
 
-    let off = RecallConfig::default();
-    let on = RecallConfig {
-        use_provenance_recency: true,
+    let off = RecallConfig {
+        use_provenance_recency: false,
         ..RecallConfig::default()
     };
+    let on = RecallConfig::default();
 
     let with_knob_off = decay_score_with_config(&entry, &off);
     assert!(
         with_knob_off > 0.99,
-        "default config must keep reading last_access: a row touched a moment ago has \
+        "explicit legacy config must keep reading last_access: a row touched a moment ago has \
          age_days ~ 0, so recency ~ 1.0; got {with_knob_off}"
     );
 
@@ -352,7 +352,7 @@ fn use_provenance_recency_moves_the_age_reference_off_last_access() {
     let off_after_write = decay_score_with_config(&entry, &off);
     assert!(
         off_after_write > 0.99,
-        "writing last_use_at must not change what default config reads; got {off_after_write}"
+        "writing last_use_at must not change what explicit legacy config reads; got {off_after_write}"
     );
 }
 
@@ -372,11 +372,11 @@ fn use_provenance_recency_moves_the_age_reference_off_last_access() {
 /// loses it.
 #[test]
 fn use_provenance_recency_moves_the_overlooked_bonus_off_exposure() {
-    let off = RecallConfig::default();
-    let on = RecallConfig {
-        use_provenance_recency: true,
+    let off = RecallConfig {
+        use_provenance_recency: false,
         ..RecallConfig::default()
     };
+    let on = RecallConfig::default();
 
     // Same everything except the two provenance columns. `importance = 0.8`
     // clears the `> 0.7` gate; `avg_importance = 0.8` zeroes component 1, and
@@ -409,7 +409,7 @@ fn use_provenance_recency_moves_the_overlooked_bonus_off_exposure() {
     // 0.20 * 0.3 = 0.06 is the whole magnitude of this lever.
     assert!(
         (baseline - score(&exposed_only, &off) - 0.06).abs() < 1e-12,
-        "control: at default config, exposure alone must cost exactly the 0.06 overlooked \
+        "control: under explicit legacy config, exposure alone must cost exactly the 0.06 overlooked \
          component ({baseline} vs {})",
         score(&exposed_only, &off)
     );
@@ -430,7 +430,7 @@ fn use_provenance_recency_moves_the_overlooked_bonus_off_exposure() {
     // The default path is indifferent to the new column, in both directions.
     assert!(
         (score(&genuinely_used, &off) - score(&exposed_only, &off)).abs() < 1e-12,
-        "writing last_use_at must not change what default config computes"
+        "writing last_use_at must not change what explicit legacy config computes"
     );
     assert!(
         (surprise_score(&never_touched, 0.8, 0, 2) - baseline).abs() < 1e-12,
@@ -642,6 +642,29 @@ fn graph_spreading_activation_uses_weighted_seeds_and_converging_paths() {
     assert!(!activation.contains_key("weak"));
     assert!(activation["shared"] > activation["weak-only"]);
     assert!(activation["shared"] > 0.45);
+}
+
+#[test]
+fn graph_spreading_activation_rejects_non_finite_edge_weight() {
+    use crate::types::MemoryEdge;
+
+    let seeds = HashMap::from([("seed".to_string(), 1.0)]);
+    let edges = vec![MemoryEdge {
+        source_id: "seed".to_string(),
+        target_id: "poisoned".to_string(),
+        relation: "supports".to_string(),
+        weight: f64::NAN,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    }];
+
+    let activation = graph_spreading_activation_with_seed_weights(&seeds, &edges, 1, 0.5);
+    assert!(
+        !activation.contains_key("poisoned"),
+        "non-finite legacy/imported edge weights must be inert rather than propagate NaN"
+    );
 }
 
 /// tachi#718 CP2 — a score tie must break by TRUE instant, not lexical string

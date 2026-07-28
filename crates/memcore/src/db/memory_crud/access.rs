@@ -180,7 +180,8 @@ pub(crate) fn record_access(
     fts_hits: &[String],
     query: Option<&str>,
 ) -> Result<(), MemoryError> {
-    record_access_with_updates(conn, ids, ids, fts_hits, query).map(|_| ())
+    record_access_with_updates(conn, ids, ids, fts_hits, query, crate::RecallConfig::get())
+        .map(|_| ())
 }
 
 /// Bump `access_count` and `last_access` for a list of IDs after a non-empty
@@ -217,6 +218,7 @@ pub(crate) fn record_access_with_updates(
     scored_ids: &[String],
     fts_hits: &[String],
     query: Option<&str>,
+    recall_config: &crate::RecallConfig,
 ) -> Result<HashMap<String, AccessUpdate>, MemoryError> {
     if displayed_ids.is_empty() && scored_ids.is_empty() {
         return Ok(HashMap::new());
@@ -422,20 +424,22 @@ pub(crate) fn record_access_with_updates(
     // also one-way here: nothing in this function demotes a row whose counters
     // later fall back below the thresholds (`gc_tables`' reconciliation can
     // lower `query_diversity` after the fact).
-    for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE) {
-        let placeholders = numbered_placeholders(1, batch.len());
-        let sql = format!(
-            "UPDATE memories SET tier = 'consolidated'
-             WHERE id IN ({placeholders})
-               AND tier = 'raw'
-               AND recall_count >= 3
-               AND query_diversity >= 3"
-        );
-        let values = batch
-            .iter()
-            .map(|id| Value::Text((*id).to_string()))
-            .collect::<Vec<_>>();
-        tx.execute(&sql, params_from_iter(values.iter()))?;
+    if !recall_config.use_provenance_recency {
+        for batch in displayed_existing_ids.chunks(IN_BATCH_SIZE) {
+            let placeholders = numbered_placeholders(1, batch.len());
+            let sql = format!(
+                "UPDATE memories SET tier = 'consolidated'
+                 WHERE id IN ({placeholders})
+                   AND tier = 'raw'
+                   AND recall_count >= 3
+                   AND query_diversity >= 3"
+            );
+            let values = batch
+                .iter()
+                .map(|id| Value::Text((*id).to_string()))
+                .collect::<Vec<_>>();
+            tx.execute(&sql, params_from_iter(values.iter()))?;
+        }
     }
 
     let mut updates = HashMap::with_capacity(displayed_existing_ids.len());

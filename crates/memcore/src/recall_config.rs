@@ -16,18 +16,23 @@ const DEFAULT_ID_LIKE_EXACT_MATCH_BOOST: f64 = 12.0;
 // adversarial corpus: 0 hit→miss, 1 miss→hit, 30 unchanged.
 const DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR: f64 = 0.55;
 const DEFAULT_OR_FALLBACK_FTS_MAX_TERMS: usize = 8;
+// Rich queries make a one-token OR fallback hit weak evidence. Once the
+// bounded fallback query reaches this many terms, require a matching pair.
+// Short queries preserve #708's one-token recovery behavior.
+const DEFAULT_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS: usize = 4;
 // Phase C lever (#708): lower k sharpens RRF so single-channel precision wins more often.
 const DEFAULT_RRF_K: f64 = 20.0;
 // Provisional #1242: raw-tier vector hits below this cosine-similarity floor are
 // dropped from the vector channel only (FTS/symbolic unaffected). Calibrated
 // below typical good-hit band (~0.41–0.48) to cut clearly-weak raw matches.
 const DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR: f64 = 0.35;
-// tachi#1446 lever 1. OFF ships the pre-#1446 behavior byte-for-byte: the
-// decay channel's age reference stays `last_access`, which the recall pipeline
-// writes for every row it returns. ON moves that reference to `last_use_at`.
-// Default off until a write path for genuine use events exists — with the
-// column uniformly NULL, ON means "recency is content-derived only".
-const DEFAULT_USE_PROVENANCE_RECENCY: bool = false;
+// Provisional tachi#1446/#1459: rows supported only by weak vector similarity
+// are withheld before ranking can read or reinforce their display history.
+const DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR: f64 = 0.445;
+// tachi#1446. Display is not evidence of use. The safe default keeps ranking
+// and irreversible promotion on caller-initiated `use` events; operators can
+// explicitly select `false` as a short-lived rollback to the legacy behavior.
+const DEFAULT_USE_PROVENANCE_RECENCY: bool = true;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallConfig {
@@ -43,10 +48,18 @@ pub struct RecallConfig {
     pub id_like_exact_match_boost: f64,
     pub or_fallback_fts_score_factor: f64,
     pub or_fallback_fts_max_terms: usize,
+    /// Query-term count at which metadata-aware candidate eligibility requires
+    /// at least two lexical matches for generic weak-evidence rows. Values
+    /// below 2 disable the pair requirement. OR fallback itself remains broad
+    /// enough to fetch candidates whose category and importance are needed by
+    /// later ranking gates.
+    pub or_fallback_fts_pair_min_query_terms: usize,
     /// Reciprocal Rank Fusion k (classic is 60). Lower values amplify top ranks.
     pub rrf_k: f64,
     /// Minimum vector similarity for raw-tier rows in the vector channel (provisional).
     pub raw_vector_similarity_floor: f64,
+    /// Minimum vector similarity for candidates with no FTS or symbolic evidence.
+    pub vector_only_similarity_floor: f64,
     /// tachi#1446: derive the decay channel's `recency` age from
     /// `MemoryEntry::last_use_at` instead of `MemoryEntry::last_access`.
     ///
@@ -56,8 +69,8 @@ pub struct RecallConfig {
     /// displaying a result set resets every displayed row's age to zero at
     /// once — measured effect is not inflation but range collapse: the decay
     /// channel stops discriminating between candidates (see
-    /// `search/tests/exposure_loop.rs`). Off by default; #1446 commit 1 lands
-    /// the mechanism and the proof, not a ranking-semantics change.
+    /// `search/tests/exposure_loop.rs`). On by default; `false` is retained as
+    /// an explicit rollback arm, not as the normal runtime.
     ///
     /// **This knob is no longer ranking-only.** tachi#1446 lever 6 hangs the
     /// durable-promotion ratchet off it as well
@@ -112,8 +125,10 @@ impl Default for RecallConfig {
             id_like_exact_match_boost: DEFAULT_ID_LIKE_EXACT_MATCH_BOOST,
             or_fallback_fts_score_factor: DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR,
             or_fallback_fts_max_terms: DEFAULT_OR_FALLBACK_FTS_MAX_TERMS,
+            or_fallback_fts_pair_min_query_terms: DEFAULT_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS,
             rrf_k: DEFAULT_RRF_K,
             raw_vector_similarity_floor: DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
+            vector_only_similarity_floor: DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
             use_provenance_recency: DEFAULT_USE_PROVENANCE_RECENCY,
         }
     }
@@ -220,11 +235,21 @@ impl RecallConfig {
             "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
             &mut self.or_fallback_fts_max_terms,
         );
+        apply_usize(
+            values,
+            "TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS",
+            &mut self.or_fallback_fts_pair_min_query_terms,
+        );
         apply_f64(values, "TACHI_RECALL_RRF_K", &mut self.rrf_k);
         apply_f64(
             values,
             "TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR",
             &mut self.raw_vector_similarity_floor,
+        );
+        apply_f64(
+            values,
+            "TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR",
+            &mut self.vector_only_similarity_floor,
         );
         apply_bool(
             values,
@@ -266,6 +291,8 @@ impl RecallConfig {
         )
         .clamp(0.0, 1.0);
         self.or_fallback_fts_max_terms = self.or_fallback_fts_max_terms.clamp(1, 32);
+        self.or_fallback_fts_pair_min_query_terms =
+            self.or_fallback_fts_pair_min_query_terms.clamp(0, 32);
         if !self.rrf_k.is_finite() || self.rrf_k < 1.0 {
             self.rrf_k = DEFAULT_RRF_K;
         }
@@ -273,6 +300,11 @@ impl RecallConfig {
         self.raw_vector_similarity_floor = finite_or_default(
             self.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
+        )
+        .clamp(0.0, 1.0);
+        self.vector_only_similarity_floor = finite_or_default(
+            self.vector_only_similarity_floor,
+            DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
         )
         .clamp(0.0, 1.0);
         // `use_provenance_recency` is deliberately absent here. The numeric
@@ -511,26 +543,45 @@ mod tests {
             DEFAULT_OR_FALLBACK_FTS_MAX_TERMS
         );
         assert_eq!(
+            config.or_fallback_fts_pair_min_query_terms,
+            DEFAULT_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS
+        );
+        assert_eq!(
             config.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
         );
+        assert_eq!(config.vector_only_similarity_floor, 0.445);
     }
 
-    /// tachi#1446. The knob must be inert unless a config source explicitly
-    /// turns it on, and an unrecognized value must land on OFF rather than on
-    /// "whatever `parse` did" — this is the switch that changes what ranking
-    /// reads, so its fail direction is the shipped behavior.
     #[test]
-    fn use_provenance_recency_defaults_off_and_is_opt_in() {
-        assert!(!RecallConfig::default().use_provenance_recency);
-        // A `const` block, not a runtime `assert!`: the value is known at
-        // compile time, so flipping the const fails the build rather than a
-        // test run — strictly earlier than the tripwire this replaced, and it
-        // is what `clippy::assertions_on_constants` asks for under `-D warnings`.
+    fn vector_only_similarity_floor_defaults_and_stays_in_unit_interval() {
+        let default = RecallConfig::default();
+        assert_eq!(default.vector_only_similarity_floor, 0.445);
+
+        let below = RecallConfig::from_config_env_source(
+            "TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=-0.1\n",
+        );
+        assert_eq!(below.vector_only_similarity_floor, 0.0);
+
+        let above =
+            RecallConfig::from_config_env_source("TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=1.1\n");
+        assert_eq!(above.vector_only_similarity_floor, 1.0);
+
+        let invalid =
+            RecallConfig::from_config_env_source("TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=NaN\n");
+        assert_eq!(invalid.vector_only_similarity_floor, 0.445);
+    }
+
+    /// tachi#1446. Use provenance is the safe default; operators can still
+    /// explicitly restore the legacy display-provenance behavior for rollback.
+    /// An unrecognized value must leave the safe default in place.
+    #[test]
+    fn use_provenance_recency_defaults_on_with_explicit_legacy_rollback() {
+        assert!(RecallConfig::default().use_provenance_recency);
         const {
             assert!(
-                !DEFAULT_USE_PROVENANCE_RECENCY,
-                "flipping this const is a ranking-semantics change, not a config tweak"
+                DEFAULT_USE_PROVENANCE_RECENCY,
+                "display provenance must not silently become the production default again"
             )
         };
 
@@ -543,7 +594,7 @@ mod tests {
         let junk =
             RecallConfig::from_config_env_source("TACHI_RECALL_USE_PROVENANCE_RECENCY=maybe\n");
         assert!(
-            !junk.use_provenance_recency,
+            junk.use_provenance_recency,
             "an unparseable value must leave the default in place"
         );
     }
@@ -560,6 +611,7 @@ mod tests {
             TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST=15
             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.22
             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
+            TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS=6
             TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR=0.28
             "#,
         );
@@ -575,6 +627,7 @@ mod tests {
         assert_eq!(config.id_like_exact_match_boost, 15.0);
         assert_eq!(config.or_fallback_fts_score_factor, 0.22);
         assert_eq!(config.or_fallback_fts_max_terms, 4);
+        assert_eq!(config.or_fallback_fts_pair_min_query_terms, 6);
         assert_eq!(config.raw_vector_similarity_floor, 0.28);
     }
 
@@ -620,6 +673,7 @@ mod tests {
             TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES=0
             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=NaN
             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=0
+            TACHI_RECALL_OR_FALLBACK_FTS_PAIR_MIN_QUERY_TERMS=99
             TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR=NaN
             "#,
         );
@@ -640,6 +694,7 @@ mod tests {
             RecallConfig::default().or_fallback_fts_score_factor
         );
         assert_eq!(config.or_fallback_fts_max_terms, 1);
+        assert_eq!(config.or_fallback_fts_pair_min_query_terms, 32);
         assert_eq!(
             config.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
