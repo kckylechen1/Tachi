@@ -32,12 +32,17 @@ use super::{
 /// loop below exits immediately, so this costs exactly one query, same as
 /// before tachi#1245.
 const VEC_OVERFETCH_MULTIPLIER: usize = 4;
-/// Caps the widen loop at `top_k * 4^3` (64x) in the worst case: enough
+/// sqlite-vec 0.1.9 rejects vec0 KNN queries above this value
+/// (`SQLITE_VEC_VEC0_K_MAX` in the pinned dependency). Keep the over-fetch
+/// loop inside the dependency's executable domain instead of letting a narrow
+/// post-JOIN filter turn an otherwise valid search into a runtime error.
+const SQLITE_VEC_KNN_MAX_K: usize = 4096;
+/// Caps the widen loop at three retries and the sqlite-vec KNN ceiling: enough
 /// headroom to survive the measured 54%-archived corpus (needs ~2x) with
 /// margin for corpora that are far more archived-heavy, while keeping a
 /// near-fully-archived table from turning every query into an effectively
 /// unbounded scan -- it degrades to "as many live rows as vec0 turns up in
-/// 4 bounded passes", not "scan every row looking for a live one".
+/// four bounded passes", not "scan every row looking for a live one".
 const VEC_OVERFETCH_MAX_ATTEMPTS: usize = 3;
 
 /// KNN vector search via sqlite-vec.
@@ -59,7 +64,7 @@ pub fn search_vec(
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
 
-    let mut k_fetch = top_k;
+    let mut k_fetch = top_k.min(SQLITE_VEC_KNN_MAX_K);
     let mut rows = run_search_vec_query(
         conn,
         &blob,
@@ -85,7 +90,13 @@ pub fn search_vec(
             if rows.len() >= top_k {
                 break;
             }
-            k_fetch = k_fetch.saturating_mul(VEC_OVERFETCH_MULTIPLIER);
+            let widened_k = k_fetch
+                .saturating_mul(VEC_OVERFETCH_MULTIPLIER)
+                .min(SQLITE_VEC_KNN_MAX_K);
+            if widened_k == k_fetch {
+                break;
+            }
+            k_fetch = widened_k;
             rows = run_search_vec_query(
                 conn,
                 &blob,
