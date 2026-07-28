@@ -36,24 +36,9 @@ fn is_continuity_projection_row(row: &Value) -> bool {
         return true;
     }
 
-    row.get("path").and_then(Value::as_str).is_some_and(|path| {
-        path == "/lorebook"
-            || path.starts_with("/lorebook/")
-            || path == "/user/patterns"
-            || path.starts_with("/user/patterns/")
-            || path == "/user/affect"
-            || path.starts_with("/user/affect/")
-            || path == "/timeline"
-            || path.starts_with("/timeline/")
-            || path == "/outcomes"
-            || path.starts_with("/outcomes/")
-            || path == "/project-cycle"
-            || path.starts_with("/project-cycle/")
-            || path == "/domain-profile"
-            || path.starts_with("/domain-profile/")
-            || path == "/evidence-gates"
-            || path.starts_with("/evidence-gates/")
-    })
+    row.get("path")
+        .and_then(Value::as_str)
+        .is_some_and(memcore::is_continuity_projection_path)
 }
 
 fn is_pattern_row(row: &Value) -> bool {
@@ -66,11 +51,17 @@ fn is_pattern_row(row: &Value) -> bool {
         .is_some_and(|path| path == "/user/patterns" || path.starts_with("/user/patterns/"))
 }
 
-fn parse_memory_rows(raw: String, top_k: usize) -> Value {
+fn parse_memory_rows(raw: String, top_k: usize, path_prefix: Option<&str>) -> Value {
     let Ok(mut rows) = serde_json::from_str::<Vec<Value>>(&raw) else {
         return Value::Array(vec![]);
     };
-    rows.retain(|row| !is_wiki_row(row) && !is_continuity_projection_row(row));
+    rows.retain(|row| {
+        let projection_is_explicitly_scoped =
+            row.get("path").and_then(Value::as_str).is_some_and(|path| {
+                memcore::path_prefix_opts_into_continuity_projection(path, path_prefix)
+            });
+        !is_wiki_row(row) && (!is_continuity_projection_row(row) || projection_is_explicitly_scoped)
+    });
     rows.truncate(top_k);
     Value::Array(rows)
 }
@@ -169,8 +160,12 @@ pub(crate) async fn collect_tachi_search_sections(
             // must opt in explicitly.
             format: Some("json".to_string()),
         };
+        let memory_path_prefix = mem_params.path_prefix.clone();
         match handle_search_memory_with_access(server, mem_params, false, true).await {
-            Ok(raw) => sections.push(("Memory".to_string(), parse_memory_rows(raw, top_k))),
+            Ok(raw) => sections.push((
+                "Memory".to_string(),
+                parse_memory_rows(raw, top_k, memory_path_prefix.as_deref()),
+            )),
             Err(e) => sections.push(("Memory".to_string(), Value::String(format!("Error: {e}")))),
         }
     }

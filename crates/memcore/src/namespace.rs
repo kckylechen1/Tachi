@@ -3,7 +3,7 @@
 //! These helpers keep cache/wiki/task namespace rules in one place so search,
 //! status, and repair surfaces do not each grow their own partial string list.
 
-use crate::types::MemoryEntry;
+use crate::types::{MemoryEntry, ProjectionKind};
 
 pub const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 
@@ -256,6 +256,30 @@ pub fn is_anchor_entry(entry: &MemoryEntry) -> bool {
     path_in_namespace(&entry.path, "/anchors") || entry.id.starts_with("anchor:")
 }
 
+pub fn is_continuity_projection_path(path: &str) -> bool {
+    ProjectionKind::ALL
+        .iter()
+        .any(|projection| path_in_namespace(path, projection.path_prefix()))
+}
+
+pub fn is_continuity_projection_entry(entry: &MemoryEntry) -> bool {
+    entry
+        .metadata
+        .get("projection_kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        || is_continuity_projection_path(&entry.path)
+}
+
+pub fn path_prefix_opts_into_continuity_projection(path: &str, path_prefix: Option<&str>) -> bool {
+    path_prefix.is_some_and(|prefix| {
+        ProjectionKind::ALL.iter().any(|projection| {
+            let namespace = projection.path_prefix();
+            path_in_namespace(prefix, namespace) && path_in_namespace(path, namespace)
+        })
+    })
+}
+
 pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
@@ -267,5 +291,7 @@ pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>)
         || (!path_prefix_opts_into_recall_cache(path_prefix) && is_recall_cache_entry(entry))
         || (!kanban_scoped && is_kanban_entry(entry))
         || (!handoff_scoped && is_handoff_entry(entry))
+        || (!path_prefix_opts_into_continuity_projection(&entry.path, path_prefix)
+            && is_continuity_projection_entry(entry))
         || is_anchor_entry(entry)
 }

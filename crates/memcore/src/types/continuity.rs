@@ -134,6 +134,18 @@ pub enum ProjectionKind {
 }
 
 impl ProjectionKind {
+    pub const ALL: [Self; 9] = [
+        Self::Pattern,
+        Self::Timeline,
+        Self::Outcome,
+        Self::Affect,
+        Self::Bonding,
+        Self::WorldBook,
+        Self::ProjectCycle,
+        Self::DomainProfile,
+        Self::EvidenceGate,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pattern => "pattern",
@@ -160,6 +172,20 @@ impl ProjectionKind {
             "domain_profile" => Some(Self::DomainProfile),
             "evidence_gate" => Some(Self::EvidenceGate),
             _ => None,
+        }
+    }
+
+    pub fn path_prefix(&self) -> &'static str {
+        match self {
+            Self::Pattern => "/user/patterns",
+            Self::Timeline => "/timeline",
+            Self::Outcome => "/outcomes",
+            Self::Affect => "/user/affect",
+            Self::Bonding => "/user/patterns/bonding",
+            Self::WorldBook => "/lorebook",
+            Self::ProjectCycle => "/project-cycle",
+            Self::DomainProfile => "/domain-profile",
+            Self::EvidenceGate => "/evidence-gates",
         }
     }
 }
