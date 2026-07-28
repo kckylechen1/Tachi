@@ -499,6 +499,7 @@ fn rank_map(
         .collect()
 }
 
+#[cfg(test)]
 fn blend_rrf_with_vector_signal(
     id: &str,
     rrf_score: f64,
@@ -508,7 +509,6 @@ fn blend_rrf_with_vector_signal(
     let Some(cosine) = vec_scores.get(id).copied().map(normalize) else {
         return rrf_score;
     };
-
     rrf_score * (1.0 + 0.15 * vec_weight.clamp(0.0, 1.0) * cosine)
 }
 
@@ -517,6 +517,61 @@ fn retrieval_rrf_weight(weight: f64, total: f64) -> f64 {
         0.0
     } else {
         weight / total
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreBoostAdjustment {
+    None,
+    ExactId,
+    SupersededScale,
+    ExactIdSupersededScale,
+}
+
+/// Canonical pure fusion operation used by both production ranking and replay.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fuse_pre_boost_score(
+    vector: f64,
+    fts: f64,
+    symbolic: f64,
+    decay: f64,
+    vec_rank: Option<usize>,
+    fts_rank: Option<usize>,
+    sym_rank: Option<usize>,
+    weights: &HybridWeights,
+    rrf_k: f64,
+) -> f64 {
+    if weights.use_rrf {
+        let rrf_k = rrf_k.max(1.0);
+        let total = (weights.semantic + weights.fts + weights.symbolic).max(0.0);
+        let part = |rank: Option<usize>, weight: f64| {
+            rank.map(|rank| retrieval_rrf_weight(weight, total) / (rrf_k + rank as f64))
+                .unwrap_or(0.0)
+        };
+        let vec_weight = retrieval_rrf_weight(weights.semantic, total);
+        let rrf = part(vec_rank, weights.semantic)
+            + part(fts_rank, weights.fts)
+            + part(sym_rank, weights.symbolic);
+        let blended = if vec_rank.is_some() {
+            rrf * (1.0 + 0.15 * vec_weight.clamp(0.0, 1.0) * vector)
+        } else {
+            rrf
+        };
+        blended + weights.decay * decay / rrf_k
+    } else {
+        weights.semantic * vector
+            + weights.fts * fts
+            + weights.symbolic * symbolic
+            + weights.decay * decay
+    }
+}
+
+pub(crate) fn apply_pre_boost_adjustment(score: f64, adjustment: PreBoostAdjustment) -> f64 {
+    match adjustment {
+        PreBoostAdjustment::None => score,
+        PreBoostAdjustment::ExactId => 10.0,
+        PreBoostAdjustment::SupersededScale => score * 0.3,
+        PreBoostAdjustment::ExactIdSupersededScale => 3.0,
     }
 }
 
@@ -602,38 +657,20 @@ pub fn hybrid_score_with_policy(
             })
             .unwrap_or(0.0);
 
-        let final_score = if weights.use_rrf {
-            // Reciprocal Rank Fusion: rewards agreement across channels
-            // without overtrusting raw score calibration differences.
-            let rrf_k = decay_policy_context.recall_config.rrf_k.max(1.0);
-            let retrieval_weight_total =
-                (weights.semantic + weights.fts + weights.symbolic).max(0.0);
-            let vec_weight = retrieval_rrf_weight(weights.semantic, retrieval_weight_total);
-            let fts_weight = retrieval_rrf_weight(weights.fts, retrieval_weight_total);
-            let symbolic_weight = retrieval_rrf_weight(weights.symbolic, retrieval_weight_total);
-            let vec_part = vec_ranks
+        let final_score = fuse_pre_boost_score(
+            vs,
+            fs,
+            ss,
+            ds,
+            vec_ranks.as_ref().and_then(|ranks| ranks.get(id)).copied(),
+            fts_ranks.as_ref().and_then(|ranks| ranks.get(id)).copied(),
+            symbolic_ranks
                 .as_ref()
                 .and_then(|ranks| ranks.get(id))
-                .map(|rank| vec_weight / (rrf_k + *rank as f64))
-                .unwrap_or(0.0);
-            let fts_part = fts_ranks
-                .as_ref()
-                .and_then(|ranks| ranks.get(id))
-                .map(|rank| fts_weight / (rrf_k + *rank as f64))
-                .unwrap_or(0.0);
-            let symbolic_part = symbolic_ranks
-                .as_ref()
-                .and_then(|ranks| ranks.get(id))
-                .map(|rank| symbolic_weight / (rrf_k + *rank as f64))
-                .unwrap_or(0.0);
-            let rrf_score = vec_part + fts_part + symbolic_part;
-            let blended = blend_rrf_with_vector_signal(id, rrf_score, vec_scores, vec_weight);
-            // Decay re-injected as a proportional bonus so recency still
-            // influences ranking in RRF mode (scaled to the RRF score range).
-            blended + weights.decay * ds / rrf_k
-        } else {
-            weights.semantic * vs + weights.fts * fs + weights.symbolic * ss + weights.decay * ds
-        };
+                .copied(),
+            weights,
+            decay_policy_context.recall_config.rrf_k,
+        );
 
         out.insert(
             id.clone(),

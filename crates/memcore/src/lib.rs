@@ -64,6 +64,7 @@ pub mod noise;
 pub mod path_router;
 pub mod recall_config;
 pub mod recall_coverage;
+mod recall_impressions;
 pub mod relation_ontology;
 pub mod scorer;
 pub mod search;
@@ -181,6 +182,10 @@ pub use recall_coverage::{
     RecallCoveragePriorScoredCountSplit, RecallCoverageQuerySource, RecallCoverageReport,
     RecallCoverageTarget, DEFAULT_RECALL_COVERAGE_CANDIDATES_PER_CHANNEL,
     DEFAULT_RECALL_COVERAGE_TOP_K, RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION,
+};
+pub use recall_impressions::{
+    increment_recall_impression_replay_count, replay_recall_impression_group,
+    RecallReplayCandidate, RecallReplayReport,
 };
 pub use relation_ontology::ComponentGovernanceRelation;
 pub use scorer::{

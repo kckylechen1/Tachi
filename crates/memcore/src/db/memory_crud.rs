@@ -13,11 +13,11 @@ mod read;
 mod search;
 mod update;
 
-pub(crate) use access::record_access_with_updates;
 pub use access::{
     access_event_density, get_access_times, get_use_access_times, record_memory_use,
     AccessEventDensity, AccessEventKind,
 };
+pub(crate) use access::{query_hash, record_access_with_updates};
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{

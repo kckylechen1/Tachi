@@ -70,6 +70,7 @@ fn record_access_deduplicates_repeated_ids_before_incrementing() {
         &ids,
         Some("DuplicateAccessProbe"),
         &RecallConfig::default(),
+        None,
     )
     .unwrap();
 
@@ -112,9 +113,16 @@ fn record_access_scored_only_deduplicates_and_ignores_missing_ids() {
         "scored-only-direct".to_string(),
         "missing-scored-id".to_string(),
     ];
-    let updates =
-        record_access_with_updates(&conn, &[], &scored_ids, &[], None, &RecallConfig::default())
-            .unwrap();
+    let updates = record_access_with_updates(
+        &conn,
+        &[],
+        &scored_ids,
+        &[],
+        None,
+        &RecallConfig::default(),
+        None,
+    )
+    .unwrap();
     assert!(
         updates.is_empty(),
         "scored-only rows are not displayed updates"

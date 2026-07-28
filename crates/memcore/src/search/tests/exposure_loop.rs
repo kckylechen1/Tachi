@@ -1086,6 +1086,7 @@ fn measure_l3_tier_ratchet() {
             &ids,
             Some("l3 promotion gate probe"),
             &legacy,
+            None,
         )
         .expect("record_access_with_updates");
 
