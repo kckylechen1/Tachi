@@ -124,6 +124,23 @@ pub(super) async fn run_cards_command(
             .await
             {
                 Ok(row) => {
+                    let current = match read_card_file(&dir, &outcome.seat) {
+                        Ok(file) => file,
+                        Err(error) => return mirror_pending(&outcome, error.to_string()),
+                    };
+                    if current.hash != outcome.source_hash
+                        || row.content_hash != outcome.source_hash
+                    {
+                        return mirror_pending(&outcome, "mirror/canonical hash mismatch".into());
+                    }
+                    let card_kind = current.declaration.kind.as_deref().unwrap_or("seat");
+                    if !crate::dispatch_ops::card_kind_participates_in_seat_projection(
+                        current.declaration.kind.as_deref(),
+                    ) {
+                        return print_pretty_json(
+                            &json!({"schema_version":"tachi.cards.apply.v1","source_status":outcome.source_status,"seat":outcome.seat,"card_kind":card_kind,"source_hash":outcome.source_hash,"mirror_status":"synced","mirror_content_hash":row.content_hash,"mirror_revision":row.revision,"projection_status":"not_applicable"}),
+                        );
+                    }
                     let server =
                         match crate::cli_client::build_in_process_server_with_migration_authority(
                             db_path,
@@ -133,18 +150,12 @@ pub(super) async fn run_cards_command(
                             Ok(server) => server,
                             Err(error) => return mirror_pending(&outcome, error.to_string()),
                         };
-                    let current = match read_card_file(&dir, &outcome.seat) {
-                        Ok(file) => file,
-                        Err(error) => return mirror_pending(&outcome, error.to_string()),
-                    };
                     match crate::dispatch_ops::resolve_exact_seat_card_readiness(
                         &server,
                         &outcome.seat,
                     ) {
                         Some(readiness)
-                            if current.hash == outcome.source_hash
-                                && row.content_hash == outcome.source_hash
-                                && readiness.source_hash == outcome.source_hash
+                            if readiness.source_hash == outcome.source_hash
                                 && readiness.complete_projection =>
                         {
                             print_pretty_json(
@@ -500,7 +511,8 @@ fn scan_card_files(dir: &Path) -> Result<Vec<CardFile>, Box<dyn std::error::Erro
     Ok(files)
 }
 
-/// Direct-store snapshot of every current `/cards/<seat>` mirror row
+/// Direct-store snapshot of every current dispatch-ledger `/cards/<seat>`
+/// mirror row
 /// (archived included — needed to tell "already archived, still missing" from
 /// "freshly archived this run" and to un-archive a row whose file reappears).
 /// Keyed by seat; if duplicates ever exist for one seat (should not happen by
@@ -524,6 +536,9 @@ fn read_existing_mirrors(
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let mut map: BTreeMap<String, memcore::MemoryEntry> = BTreeMap::new();
     for entry in entries {
+        if entry.metadata.get("source").and_then(Value::as_str) != Some(CARDS_METADATA_SOURCE) {
+            continue;
+        }
         let Some(seat) = seat_from_mirror_path(&entry.path) else {
             continue;
         };
@@ -1257,6 +1272,53 @@ aliases: [codex-cli, codex-app-server]
         assert!(
             rows5.iter().all(|row| row.seat != "grok-4.5"),
             "an already-archived, still-missing seat should not reappear in the report: {rows5:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_sync_never_archives_unowned_rows_under_cards_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards_dir = temp.path().join("cards");
+        std::fs::create_dir_all(&cards_dir).expect("cards dir");
+        let schema_migration = memcore::MigrationAuthority::Deny;
+
+        let server = crate::cli_client::build_in_process_server_with_migration_authority(
+            &db_path,
+            None,
+            schema_migration.clone(),
+        )
+        .expect("server");
+        let params: SaveMemoryParams = serde_json::from_value(json!({
+            "text": "ordinary global wiki row in an overlapping path",
+            "path": "/cards/not-a-dispatch-ledger-mirror",
+            "scope": "global",
+            "category": "wiki",
+            "force": true
+        }))
+        .expect("save params");
+        let saved = handle_save_memory(&server, params)
+            .await
+            .expect("save unowned row");
+        let saved_id = serde_json::from_str::<Value>(&saved).expect("save JSON")["id"]
+            .as_str()
+            .expect("saved id")
+            .to_string();
+
+        let rows = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
+            .await
+            .expect("empty-source sync");
+        assert!(
+            rows.is_empty(),
+            "cards sync must not claim or archive a row it does not own: {rows:?}"
+        );
+        let preserved = server
+            .with_global_store_read(|store| store.get(&saved_id).map_err(|e| e.to_string()))
+            .expect("read preserved row")
+            .expect("unowned row remains present");
+        assert!(
+            !preserved.archived,
+            "path overlap alone must never grant cards sync lifecycle authority"
         );
     }
 
