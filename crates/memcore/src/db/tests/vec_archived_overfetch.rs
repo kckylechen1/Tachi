@@ -196,6 +196,37 @@ fn fewer_live_rows_than_top_k_returns_all_of_them_without_looping_forever() {
     }
 }
 
+/// Production `tachi_search(top_k=10, enable_rerank=true)` expands its memory
+/// candidate budget to 90 before entering MemCore. A narrow path can contain
+/// fewer rows than that budget, so every over-fetch pass runs. The final
+/// `90 * 4^3 = 5760` request exceeds sqlite-vec 0.1.9's hard KNN limit of
+/// 4096 unless the widening loop stops at the dependency boundary.
+#[test]
+fn widening_stops_at_sqlite_vec_knn_limit_when_filtered_corpus_is_smaller_than_top_k() {
+    let mut conn = make_conn();
+    require_vec_table(&conn);
+
+    let mut timeline = make_entry("timeline-only", "continuity timeline memory");
+    timeline.path = "/timeline/probe".to_string();
+    timeline.vector = Some(uniform_vec(QUERY_VALUE));
+    upsert(&mut conn, &timeline, true).unwrap();
+
+    let results = search_vec(
+        &conn,
+        &uniform_vec(QUERY_VALUE),
+        90,
+        false,
+        true,
+        Some("/timeline"),
+        None,
+        None,
+    )
+    .expect("bounded widening must not ask sqlite-vec for k > 4096");
+
+    assert_eq!(results.len(), 1);
+    assert!(results.contains_key("timeline-only"));
+}
+
 /// Regression guard: when nothing is actually filtered post-JOIN (no
 /// archived/superseded/path/as_of rows exist to exclude, and no anchors),
 /// behavior is unchanged -- the naive top_k window IS the final result.
