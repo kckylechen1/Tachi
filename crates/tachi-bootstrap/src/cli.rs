@@ -92,9 +92,9 @@ pub use commands::Commands;
 pub use maintenance_actions::{
     BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DedupeAction, DistillAction,
     EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction,
-    ManifestAction, McpAction, PokeAction, QuarantineAction, RepairAction, RescueAction,
-    SkillSurfaceAction, WatcherAction, WikiAction, WorktreeAction, WorktreeOpenArgs,
-    DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
+    LifecycleConsistencyAction, ManifestAction, McpAction, PokeAction, QuarantineAction,
+    RepairAction, RescueAction, SkillSurfaceAction, WatcherAction, WikiAction, WorktreeAction,
+    WorktreeOpenArgs, DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
 };
 pub use vault_actions::{EnvAction, VaultAction, VaultIntakeAction};
 

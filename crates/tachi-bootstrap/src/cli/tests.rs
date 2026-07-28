@@ -255,6 +255,75 @@ fn exact_dedupe_cli_is_nested_under_repair_dedupe() {
 }
 
 #[test]
+fn lifecycle_consistency_cli_exposes_plan_apply_restore_boundaries() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "lifecycle",
+        "plan",
+        "--db",
+        "project:test",
+        "--output",
+        "plan.json",
+        "--json",
+    ])
+    .expect("lifecycle plan should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Lifecycle {
+                action: LifecycleConsistencyAction::Plan { db, output, json: true }
+            }), ..
+        }) if db == "project:test" && output == std::path::Path::new("plan.json")
+    ));
+
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "lifecycle",
+        "apply",
+        "--db",
+        "project:test",
+        "--plan",
+        "plan.json",
+        "--receipt-out",
+        "receipt.json",
+    ])
+    .expect("lifecycle apply parses without confirmation for runtime refusal");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Lifecycle {
+                action: LifecycleConsistencyAction::Apply { db, plan, yes: false, receipt_out }
+            }), ..
+        }) if db == "project:test"
+            && plan == std::path::Path::new("plan.json")
+            && receipt_out == std::path::Path::new("receipt.json")
+    ));
+
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "lifecycle",
+        "restore",
+        "--db",
+        "project:test",
+        "--receipt",
+        "receipt.json",
+        "--yes",
+    ])
+    .expect("lifecycle restore should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Lifecycle {
+                action: LifecycleConsistencyAction::Restore { db, receipt, yes: true }
+            }), ..
+        }) if db == "project:test" && receipt == std::path::Path::new("receipt.json")
+    ));
+}
+
+#[test]
 fn capture_archive_commands_parse_and_mutations_require_confirm() {
     let plan = Cli::try_parse_from([
         "tachi",

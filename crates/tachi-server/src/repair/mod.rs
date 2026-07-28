@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::manifest::{DbEntry, Manifest};
-use tachi_bootstrap::cli::{DedupeAction, QuarantineAction, RepairAction};
+use tachi_bootstrap::cli::{
+    DedupeAction, LifecycleConsistencyAction, QuarantineAction, RepairAction,
+};
 
 pub mod domain;
 pub mod edges;
@@ -50,6 +52,7 @@ pub mod integrity;
 pub mod inventory;
 pub mod jobs;
 pub mod junk;
+pub mod lifecycle_consistency;
 pub mod memory_hygiene;
 pub mod plan_c;
 pub mod quarantine;
@@ -213,6 +216,20 @@ pub async fn run_repair(
                 } => exact_dedupe::apply(&db, &plan, yes, &receipt_out, app_home),
                 DedupeAction::Restore { db, receipt, yes } => {
                     exact_dedupe::restore(&db, &receipt, yes, app_home)
+                }
+            },
+            RepairAction::Lifecycle { action } => match action {
+                LifecycleConsistencyAction::Plan { db, output, json } => {
+                    lifecycle_consistency::plan(&db, &output, json, app_home)
+                }
+                LifecycleConsistencyAction::Apply {
+                    db,
+                    plan,
+                    yes,
+                    receipt_out,
+                } => lifecycle_consistency::apply(&db, &plan, yes, &receipt_out, app_home),
+                LifecycleConsistencyAction::Restore { db, receipt, yes } => {
+                    lifecycle_consistency::restore(&db, &receipt, yes, app_home)
                 }
             },
             RepairAction::Quarantine { action } => run_quarantine(action, app_home, json_out).await,
