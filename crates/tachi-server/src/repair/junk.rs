@@ -1,8 +1,13 @@
-//! R8 — deterministic junk memory cleanup.
+//! R8 — conservative ephemeral junk cleanup.
+//!
+//! Exact duplicates are deliberately outside this rule. Operators must use
+//! `tachi repair dedupe exact/apply`, which archives losers through a bound
+//! plan, receipt, CAS, and restore path instead of physically deleting them.
 
 use serde_json::json;
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
+use memcore::namespace::RECALL_CACHE_SQL_WHERE;
 
 pub struct JunkCleanup;
 
@@ -16,46 +21,46 @@ fn has_table(ctx: &DbContext, name: &str) -> bool {
         .is_ok()
 }
 
-const DUPLICATE_OLD_SQL: &str = r#"
-    SELECT id FROM (
-        SELECT
-            id,
-            ROW_NUMBER() OVER (
-                PARTITION BY text, path, scope, COALESCE(domain, '')
-                ORDER BY COALESCE(NULLIF(timestamp, ''), '') DESC, revision DESC, id DESC
-            ) AS rn
-        FROM memories
-        WHERE TRIM(COALESCE(text, '')) <> ''
-          AND LENGTH(TRIM(text)) >= 20
+// Invariant: R8 may physically delete only active, non-protected rows that
+// carry no evidence of being recalled or genuinely used. `scored_count` is
+// intentionally absent because it is scorer-only instrumentation, not recall
+// or use evidence. Keep both junk shapes behind this same guard.
+const EPHEMERAL_JUNK_GUARDS_SQL: &str = r#"
+    archived = 0
+    AND superseded_by IS NULL
+    AND COALESCE(retention_policy, '') NOT IN ('pinned', 'permanent')
+    AND COALESCE(access_count, 0) = 0
+    AND COALESCE(recall_count, 0) = 0
+    AND COALESCE(query_diversity, 0) = 0
+    AND last_access IS NULL
+    AND last_use_at IS NULL
+    AND NOT EXISTS (
+        SELECT 1 FROM access_history
+        WHERE access_history.memory_id = memories.id
     )
-    WHERE rn > 1
 "#;
 
-const RERANK_CACHE_SQL: &str = r#"
-    SELECT id FROM memories
-    WHERE id = 'foundry_recall_rerank_cache'
-       OR id LIKE 'foundry:recall-cache:%'
-       OR source = 'foundry_recall_rerank_cache'
-       OR topic = 'foundry_recall_rerank_cache'
-       OR topic = 'recall_rerank_cache'
-       OR path = '/recall-cache'
-       OR path LIKE '%/recall-cache'
-       OR path LIKE '%/recall-cache/%'
-       OR path LIKE '%foundry_recall_rerank_cache%'
-       OR json_extract(metadata, '$.recall_rerank_cache') = 1
-       OR json_extract(metadata, '$.cache_key') = 'foundry_recall_rerank_cache'
-"#;
+fn rerank_cache_sql() -> String {
+    format!(
+        "SELECT id FROM memories WHERE ({RECALL_CACHE_SQL_WHERE}) AND ({EPHEMERAL_JUNK_GUARDS_SQL})"
+    )
+}
 
-const EMPTY_JSON_TURN_SQL: &str = r#"
-    SELECT id FROM memories
-    WHERE TRIM(COALESCE(text, '')) IN ('{}', '[]')
-      AND (
-          category IN ('hermes_turn', 'other', 'fact')
-          OR topic IN ('hermes_turn', 'turn', 'interaction')
-          OR path LIKE '%hermes%'
-          OR path LIKE '%turn%'
-      )
-"#;
+fn empty_json_turn_sql() -> String {
+    format!(
+        r#"
+        SELECT id FROM memories
+        WHERE TRIM(COALESCE(text, '')) IN ('{{}}', '[]')
+          AND (
+              category IN ('hermes_turn', 'other', 'fact')
+              OR topic IN ('hermes_turn', 'turn', 'interaction')
+              OR path LIKE '%hermes%'
+              OR path LIKE '%turn%'
+          )
+          AND ({EPHEMERAL_JUNK_GUARDS_SQL})
+        "#
+    )
+}
 
 fn count_query(ctx: &DbContext, sql: &str) -> Result<usize, RepairError> {
     let count_sql = format!("SELECT COUNT(*) FROM ({sql})");
@@ -76,25 +81,20 @@ impl RepairRule for JunkCleanup {
     }
 
     fn name(&self) -> &'static str {
-        "Junk cleanup"
+        "Ephemeral junk cleanup; exact duplicates use repair dedupe exact/apply"
     }
 
     fn dry_run(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut report = RuleReport::new(self.id(), self.name(), ctx.label.clone());
         push_count(
             &mut report,
-            "duplicate_text_old_versions",
-            count_query(ctx, DUPLICATE_OLD_SQL)?,
-        );
-        push_count(
-            &mut report,
             "foundry_recall_rerank_cache",
-            count_query(ctx, RERANK_CACHE_SQL)?,
+            count_query(ctx, &rerank_cache_sql())?,
         );
         push_count(
             &mut report,
             "empty_json_turns",
-            count_query(ctx, EMPTY_JSON_TURN_SQL)?,
+            count_query(ctx, &empty_json_turn_sql())?,
         );
         Ok(report)
     }
@@ -109,15 +109,17 @@ impl RepairRule for JunkCleanup {
         let tx = ctx.conn.transaction()?;
         tx.execute_batch("CREATE TEMP TABLE cleanup_targets(id TEXT PRIMARY KEY);")?;
         tx.execute(
-            &format!("INSERT OR IGNORE INTO cleanup_targets {DUPLICATE_OLD_SQL}"),
+            &format!(
+                "INSERT OR IGNORE INTO cleanup_targets {}",
+                rerank_cache_sql()
+            ),
             [],
         )?;
         tx.execute(
-            &format!("INSERT OR IGNORE INTO cleanup_targets {RERANK_CACHE_SQL}"),
-            [],
-        )?;
-        tx.execute(
-            &format!("INSERT OR IGNORE INTO cleanup_targets {EMPTY_JSON_TURN_SQL}"),
+            &format!(
+                "INSERT OR IGNORE INTO cleanup_targets {}",
+                empty_json_turn_sql()
+            ),
             [],
         )?;
         let target_count = tx.query_row("SELECT COUNT(*) FROM cleanup_targets", [], |row| {
