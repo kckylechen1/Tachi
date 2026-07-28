@@ -45,6 +45,7 @@
 //! - v23: canonical reserved evidence-reference guard triggers — versioned so
 //!   a legitimate v22 DB upgrades under migration authority while a damaged
 //!   v23 inventory is refused rather than silently repaired.
+//! - v24: `memories.scored_count` scorer-only diagnostic counter (#1459).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -87,7 +88,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 23;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 24;
 
 mod basic;
 mod cross_db;
@@ -160,6 +161,7 @@ pub struct MigrationReport {
     pub identity_workclaim_columns_added: usize,
     pub memories_symbolic_fts_rows: usize,
     pub reserved_reference_guards_installed: usize,
+    pub scored_count_column_added: usize,
 }
 
 #[cfg(test)]
@@ -571,6 +573,12 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v23_reserved_reference_guards,
     )?
     .unwrap_or(0);
+    report.scored_count_column_added = apply_versioned_migration(
+        conn,
+        "v24_memories_scored_count",
+        migrate_v24_memories_scored_count,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
 }
@@ -581,6 +589,11 @@ fn migrate_v23_reserved_reference_guards(conn: &Connection) -> Result<usize, Mem
     test_hooks::fail_after_v23_guard_install()?;
     crate::db::validate_persistent_trigger_inventory(conn, true)?;
     Ok(2)
+}
+
+fn migrate_v24_memories_scored_count(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::ensure_memories_scored_count(conn)?;
+    Ok(1)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -1868,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    fn v22_to_v23_installs_reserved_reference_guards_and_stamps() {
+    fn v22_to_current_installs_reserved_reference_guards_and_scored_count() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path().to_path_buf();
         let path_str = path.to_string_lossy().to_string();
@@ -1896,12 +1909,16 @@ mod tests {
             "guide-project",
             &DbOpenContext::open_existing_allow("test:v23-evidence-guards"),
         )
-        .expect("authorized v22 migration must install evidence guards");
+        .expect("authorized v22 migration must install current schema additions");
         drop(store);
 
         let verify = Connection::open(&path).expect("verify migrated DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), 23);
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
         assert!(was_run(&verify, "v23_reserved_reference_guards").unwrap());
+        assert!(was_run(&verify, "v24_memories_scored_count").unwrap());
         let trigger_count: i64 = verify
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema
@@ -1915,6 +1932,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(trigger_count, 2, "v23 canonical guard inventory");
+        let scored_count_column: bool = verify
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('memories') WHERE name = 'scored_count'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(
+            scored_count_column,
+            "v24 scored_count column must be present"
+        );
+    }
+
+    #[test]
+    fn v23_to_v24_adds_scored_count_with_default_and_sentinel() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open fixture");
+            conn.execute("ALTER TABLE memories DROP COLUMN scored_count", [])
+                .expect("simulate v23 memories table");
+            conn.execute(
+                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+                params![MIGRATION_NS, "v24_memories_scored_count"],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA user_version = 23;").unwrap();
+        }
+
+        let store = crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "guide-project",
+            &DbOpenContext::open_existing_allow("test:v24-scored-count"),
+        )
+        .expect("authorized v23 migration must add scored_count");
+        drop(store);
+        let verify = Connection::open(&path).expect("verify migrated DB");
+        assert_eq!(read_schema_version(&verify).unwrap(), 24);
+        assert!(was_run(&verify, "v24_memories_scored_count").unwrap());
+        let _reserved_reference_guard = crate::db::register_reserved_reference_write_guard(&verify)
+            .expect("register trigger guard function");
+        let default: i64 = verify
+            .query_row(
+                "INSERT INTO memories (id, timestamp) VALUES ('scored-default', '2026-01-01T00:00:00Z') RETURNING scored_count",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default, 0);
     }
 
     #[test]
@@ -2034,7 +2105,7 @@ mod tests {
     }
 
     #[test]
-    fn stamped_v23_with_missing_search_generation_trigger_is_refused_without_repair() {
+    fn stamped_current_with_missing_search_generation_trigger_is_refused_without_repair() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path().to_path_buf();
         let path_str = path.to_string_lossy().to_string();
@@ -2044,7 +2115,7 @@ mod tests {
                     .expect("provision current fixture");
             drop(store);
             let conn = Connection::open(&path).expect("open current fixture");
-            assert_eq!(read_schema_version(&conn).unwrap(), 23);
+            assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
             let guard_trigger_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_schema
@@ -2063,7 +2134,7 @@ mod tests {
         }
 
         let err = match crate::MemoryStore::open(&path_str) {
-            Ok(_) => panic!("a damaged v23 DB must not repair its search-generation trigger"),
+            Ok(_) => panic!("a damaged current DB must not repair its search-generation trigger"),
             Err(error) => error,
         };
         let message = err.to_string();
@@ -2075,7 +2146,10 @@ mod tests {
         );
 
         let verify = Connection::open(&path).expect("verify refused DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), 23);
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
         let trigger_present: bool = verify
             .query_row(
                 "SELECT 1 FROM sqlite_schema

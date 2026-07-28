@@ -1362,6 +1362,7 @@ mod tests {
             summary: "same-path summary".into(),
             timestamp: "2025-01-01T00:00:00Z".into(),
             access_count: 0,
+            scored_count: 0,
             recall_count: 0,
             query_diversity: 0,
             ..test_entry()
@@ -2263,6 +2264,7 @@ mod tests {
             scope: "general".into(),
             archived: false,
             access_count: 0,
+            scored_count: 0,
             last_access: None,
             last_use_at: None,
             revision: 1,

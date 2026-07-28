@@ -20,6 +20,7 @@ fn vector_health_entry(id: &str, source: &str, vector: Option<Vec<f32>>) -> Memo
         scope: "general".to_string(),
         archived: false,
         access_count: 0,
+        scored_count: 0,
         last_access: None,
         last_use_at: None,
         revision: 1,

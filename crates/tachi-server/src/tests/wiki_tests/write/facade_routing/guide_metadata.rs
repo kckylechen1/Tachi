@@ -76,7 +76,11 @@ async fn tachi_wiki_write_preserves_guide_path_and_applies_to_metadata() {
 
 #[tokio::test]
 async fn v22_named_project_write_migrates_before_guide_pattern_and_reference_reads() {
-    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home_and_migration_authority(
+        memcore::MigrationAuthority::Allow {
+            approved_by: "test:v22-guide-to-current".to_string(),
+        },
+    );
     let project = format!("v22-guide-{}", uuid::Uuid::new_v4().simple());
     let db_path = crate::path_utils::plan_c_global_db_path(&project);
     std::fs::create_dir_all(db_path.parent().expect("named project parent"))
@@ -108,9 +112,15 @@ async fn v22_named_project_write_migrates_before_guide_pattern_and_reference_rea
             ["v23_reserved_reference_guards"],
         )
         .unwrap();
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = 'migrations' AND key = ?1",
+            ["v24_memories_scored_count"],
+        )
+        .unwrap();
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
              DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
+             ALTER TABLE memories DROP COLUMN scored_count;
              PRAGMA user_version = 22;",
         )
         .unwrap();
@@ -168,5 +178,8 @@ async fn v22_named_project_write_migrates_before_guide_pattern_and_reference_rea
     let version: i64 = verify
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 23);
+    assert_eq!(
+        version,
+        i64::from(memcore::db::migrations::EXPECTED_SCHEMA_VERSION)
+    );
 }

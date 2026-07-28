@@ -177,6 +177,7 @@ pub(super) fn merge_capture_entries(
         },
         archived: false,
         access_count: existing.access_count,
+        scored_count: existing.scored_count,
         last_access: existing.last_access.clone(),
         last_use_at: existing.last_use_at.clone(),
         revision: existing.revision + 1,
@@ -421,5 +422,23 @@ pub(super) fn queue_capture_enrichment(
             entry_id = %entry.id,
             "failed to queue capture enrichment"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_capture_entries_preserves_existing_diagnostic_counts() {
+        let mut existing = crate::tests::make_entry("existing");
+        existing.access_count = 3;
+        existing.scored_count = 7;
+        let incoming = crate::tests::make_entry("incoming");
+
+        let merged = merge_capture_entries(&existing, &incoming, 0.9);
+
+        assert_eq!(merged.access_count, 3);
+        assert_eq!(merged.scored_count, 7);
     }
 }

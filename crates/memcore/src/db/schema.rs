@@ -163,6 +163,7 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "archived", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "memories", "created_at", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "updated_at", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_memories_scored_count(conn)?;
     ensure_column(conn, "memories", "revision", "INTEGER NOT NULL DEFAULT 1")?;
     ensure_column(conn, "memories", "valid_from", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "valid_until", "TEXT")?;
@@ -358,6 +359,16 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
     Ok(())
+}
+
+/// Keep the scorer-only diagnostic column total for legacy databases.
+pub(crate) fn ensure_memories_scored_count(conn: &Connection) -> Result<(), MemoryError> {
+    ensure_column(
+        conn,
+        "memories",
+        "scored_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
 }
 
 pub(crate) fn install_reserved_reference_guard(conn: &Connection) -> Result<(), MemoryError> {
@@ -798,6 +809,11 @@ fn backfill_retention_defaults(conn: &Connection) -> Result<(), MemoryError> {
 }
 
 fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), MemoryError> {
+    let scored_count_expr = if has_column(conn, "memories", "scored_count")? {
+        "COALESCE(scored_count, 0)"
+    } else {
+        "0"
+    };
     let recall_count_expr = if has_column(conn, "memories", "recall_count")? {
         "COALESCE(recall_count, 0)"
     } else {
@@ -858,6 +874,7 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
             created_at   TEXT NOT NULL DEFAULT '',
             updated_at   TEXT NOT NULL DEFAULT '',
             access_count INTEGER NOT NULL DEFAULT 0,
+            scored_count INTEGER NOT NULL DEFAULT 0,
             last_access  TEXT,
             last_use_at  TEXT,
             revision     INTEGER NOT NULL DEFAULT 1,
@@ -881,14 +898,14 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
         INSERT INTO memories_new
             (id, path, summary, text, importance, timestamp, valid_from, valid_until,
              category, topic, keywords, entities, source, scope, archived,
-             created_at, updated_at, access_count, last_access, last_use_at, revision,
+              created_at, updated_at, access_count, scored_count, last_access, last_use_at, revision,
              metadata, retention_policy, domain, superseded_by, idless_identity,
              recall_count, query_diversity, tier)
         SELECT
              id, path, summary, text, importance, timestamp,
              COALESCE(NULLIF(valid_from, ''), timestamp), NULLIF(valid_until, ''),
              category, topic, keywords, entities, source, scope, archived,
-             created_at, updated_at, access_count, last_access, __LAST_USE_AT_EXPR__, revision,
+              created_at, updated_at, access_count, __SCORED_COUNT_EXPR__, last_access, __LAST_USE_AT_EXPR__, revision,
              metadata, retention_policy, domain, superseded_by, __IDLESS_IDENTITY_EXPR__,
              __RECALL_COUNT_EXPR__, __QUERY_DIVERSITY_EXPR__, __TIER_EXPR__
         FROM memories;
@@ -914,6 +931,7 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
 
         "#
         .replace("__RECALL_COUNT_EXPR__", recall_count_expr)
+        .replace("__SCORED_COUNT_EXPR__", scored_count_expr)
         .replace("__QUERY_DIVERSITY_EXPR__", query_diversity_expr)
         .replace("__TIER_EXPR__", tier_expr)
         .replace("__IDLESS_IDENTITY_EXPR__", idless_identity_expr)

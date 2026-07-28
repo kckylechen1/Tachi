@@ -137,6 +137,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
                 -- (kanban, handoffs, briefings, cards mirror, GC scans) reads
                 -- zero here no matter how often it is read.
                 access_count    INTEGER NOT NULL DEFAULT 0,
+                scored_count    INTEGER NOT NULL DEFAULT 0,
                 last_access     TEXT,
                 -- tachi#1446: exposure-free recency reference. Nothing writes
                 -- it yet; `last_access` above is written for every row a search

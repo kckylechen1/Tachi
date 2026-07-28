@@ -289,6 +289,17 @@ pub struct MemoryEntry {
     #[serde(default)]
     pub access_count: i64,
 
+    /// Number of searches in which this entry reached hybrid scoring after
+    /// eligibility filters, regardless of MMR or `top_k` display selection.
+    ///
+    /// This is scorer-only instrumentation, not retrieval or use evidence.
+    /// It is written only when `hybrid_search` records access, and no ranking,
+    /// lifecycle, GC, or save policy reads it; persisting a scored-only loser
+    /// advances the DB-authoritative search generation but changes no ranking
+    /// or policy result.
+    #[serde(default)]
+    pub scored_count: i64,
+
     /// Last time `hybrid_search` returned this entry (ISO 8601), None if it
     /// never has.
     ///

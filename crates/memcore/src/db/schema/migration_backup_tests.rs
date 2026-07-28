@@ -11,14 +11,14 @@ fn open_without_label_also_backs_up_before_migration() {
     // the branches are ever split again.
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("cp1.db");
-    seed_pre_v23_fixture(&db_path);
+    seed_v22_fixture(&db_path);
 
     {
         let conn = Connection::open(&db_path).expect("open");
         assert_eq!(
             crate::db::migrations::read_schema_version(&conn).expect("read v22 stamp"),
-            crate::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
-            "fixture must be a genuine pre-v23 database"
+            22,
+            "fixture must be a genuine v22 database"
         );
         crate::db::validate_persistent_trigger_inventory(&conn, false)
             .expect("pre-v23 fixture has no unexpected trigger definitions");
@@ -36,15 +36,15 @@ fn open_without_label_also_backs_up_before_migration() {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .find(|path| path.to_string_lossy().contains("migration-bak"))
-        .expect("unlabelled authorized migration must back up before v23");
+        .expect("unlabelled authorized migration must back up before v22 migration");
     let backup = Connection::open(&backup_path).expect("open pre-migration backup");
     assert_eq!(
         crate::db::migrations::read_schema_version(&backup).expect("read backup version"),
-        crate::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
-        "backup must preserve the pre-v23 stamp"
+        22,
+        "backup must preserve the v22 stamp"
     );
     crate::db::validate_persistent_trigger_inventory(&backup, false)
-        .expect("backup must preserve the authentic pre-v23 trigger inventory");
+        .expect("backup must preserve the authentic v22 trigger inventory");
 
     assert_eq!(
         crate::db::migrations::read_schema_version(store.connection())
@@ -56,27 +56,29 @@ fn open_without_label_also_backs_up_before_migration() {
         .expect("migrated database must have the complete current trigger inventory");
 }
 
-fn seed_pre_v23_fixture(db_path: &Path) {
-    // v23 added only these guard triggers and its migration sentinel. Removing
-    // exactly that atomic migration result produces a legitimate v22 database;
-    // a stamped-current database with the guards missing would instead be a
-    // damaged v23 file that the pre-open inventory validation must refuse.
+fn seed_v22_fixture(db_path: &Path) {
+    // v23 added the guard triggers and v24 added `scored_count`; removing both
+    // atomic migration results produces a legitimate v22 database. A
+    // stamped-current database with the guards missing would instead be damaged
+    // and the pre-open inventory validation must refuse it.
     let path = db_path.to_str().expect("path");
     drop(
         crate::MemoryStore::open_with_context(path, &crate::db::DbOpenContext::create_fresh())
             .expect("provision current fixture"),
     );
 
-    let conn = Connection::open(db_path).expect("open v22 fixture");
+    let conn = Connection::open(db_path).expect("open current fixture for v22 seeding");
+    conn.execute("ALTER TABLE memories DROP COLUMN scored_count", [])
+        .expect("remove v24 scored_count column");
     conn.execute_batch(
         "DROP TRIGGER memories_reserved_refs_insert_guard;
          DROP TRIGGER memories_reserved_refs_update_guard;
          DELETE FROM hard_state
           WHERE namespace = 'migrations'
-            AND key = 'v23_reserved_reference_guards';
-         PRAGMA user_version = 22;",
+             AND key IN ('v23_reserved_reference_guards', 'v24_memories_scored_count');
+          PRAGMA user_version = 22;",
     )
-    .expect("remove only v23 migration effects");
+    .expect("remove v23 and v24 migration effects");
 
     // A matching marker must not suppress backup for an authorized version
     // migration. This makes the test discriminate the version-migration path

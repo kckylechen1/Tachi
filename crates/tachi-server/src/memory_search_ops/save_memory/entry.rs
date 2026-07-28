@@ -153,6 +153,7 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
         scope: requested_scope,
         archived: false,
         access_count: 0,
+        scored_count: 0,
         last_access: None,
         last_use_at: None,
         revision: 1,

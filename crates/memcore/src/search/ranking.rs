@@ -29,11 +29,13 @@ pub(super) struct CandidateRanking<'a> {
     pub(super) as_of_utc: Option<&'a str>,
 }
 
+type RankedEntries = (Vec<SearchResult>, Vec<String>, Option<RankPhaseReceipt>);
+
 pub(super) fn rank_candidate_entries(
     conn: &Connection,
     ranking: CandidateRanking<'_>,
     sample: bool,
-) -> Result<(Vec<SearchResult>, Option<RankPhaseReceipt>), MemoryError> {
+) -> Result<RankedEntries, MemoryError> {
     let phase_start = sample.then(Instant::now);
     let CandidateRanking {
         query,
@@ -105,7 +107,7 @@ pub(super) fn rank_candidate_entries(
             mmr_enabled: opts.mmr_threshold.is_some(),
             ranked_result_count: 0,
         });
-        return Ok((vec![], receipt));
+        return Ok((vec![], vec![], receipt));
     }
 
     let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
@@ -145,6 +147,16 @@ pub(super) fn rank_candidate_entries(
         &entries_ref,
         &mut scores,
     );
+
+    // The scorer invariant: these are exactly the post-merge/post-boost score
+    // keys, before MMR or `top_k` can remove displayed results. Sorting makes
+    // the persistence input deterministic; keys are inherently deduplicated.
+    let mut scored_ids: Vec<String> = scores
+        .keys()
+        .filter(|id| entries_ref.contains_key(*id))
+        .cloned()
+        .collect();
+    scored_ids.sort();
 
     // Decorate each candidate with its parsed instant once (epoch millis), then
     // sort — the comparator compares the pre-parsed key, never the raw string
@@ -199,7 +211,7 @@ pub(super) fn rank_candidate_entries(
         mmr_enabled,
         ranked_result_count,
     });
-    Ok((results, receipt))
+    Ok((results, scored_ids, receipt))
 }
 
 /// Pure merge of the four channel scores (vector/FTS/symbolic + ACT-R decay)
@@ -1043,6 +1055,7 @@ mod tests {
             scope: "general".to_string(),
             archived: false,
             access_count: 0,
+            scored_count: 0,
             last_access: None,
             last_use_at: None,
             revision: 1,
