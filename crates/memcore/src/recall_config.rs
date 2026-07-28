@@ -28,7 +28,7 @@ const DEFAULT_RRF_K: f64 = 20.0;
 const DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR: f64 = 0.35;
 // Provisional tachi#1446/#1459: rows supported only by weak vector similarity
 // are withheld before ranking can read or reinforce their display history.
-const DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR: f64 = 0.45;
+const DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR: f64 = 0.43;
 // tachi#1446 lever 1. OFF ships the pre-#1446 behavior byte-for-byte: the
 // decay channel's age reference stays `last_access`, which the recall pipeline
 // writes for every row it returns. ON moves that reference to `last_use_at`.
@@ -550,13 +550,13 @@ mod tests {
             config.raw_vector_similarity_floor,
             DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
         );
-        assert_eq!(config.vector_only_similarity_floor, 0.45);
+        assert_eq!(config.vector_only_similarity_floor, 0.43);
     }
 
     #[test]
     fn vector_only_similarity_floor_defaults_and_stays_in_unit_interval() {
         let default = RecallConfig::default();
-        assert_eq!(default.vector_only_similarity_floor, 0.45);
+        assert_eq!(default.vector_only_similarity_floor, 0.43);
 
         let below = RecallConfig::from_config_env_source(
             "TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=-0.1\n",
@@ -569,7 +569,7 @@ mod tests {
 
         let invalid =
             RecallConfig::from_config_env_source("TACHI_RECALL_VECTOR_ONLY_SIMILARITY_FLOOR=NaN\n");
-        assert_eq!(invalid.vector_only_similarity_floor, 0.45);
+        assert_eq!(invalid.vector_only_similarity_floor, 0.43);
     }
 
     /// tachi#1446. The knob must be inert unless a config source explicitly
