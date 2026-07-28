@@ -193,10 +193,7 @@ pub(crate) fn normalize_json_relevance(rows: &mut [serde_json::Value]) {
         .filter(|score| score.is_finite() && *score > 0.0)
         .fold(0.0_f64, f64::max);
     for row in rows.iter_mut() {
-        let existing_relevance = row
-            .get("relevance")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0);
+        let existing_relevance = row.get("relevance").and_then(serde_json::Value::as_f64);
         let rank_score = search_score(row);
         let score = row.get("score");
         let direct_evidence = ["vector", "fts", "symbolic"]
@@ -209,8 +206,11 @@ pub(crate) fn normalize_json_relevance(rows: &mut [serde_json::Value]) {
         let Some(obj) = row.as_object_mut() else {
             continue;
         };
-        let relevance = direct_evidence.unwrap_or_else(|| existing_relevance.clamp(0.0, 1.0));
-        obj.insert("relevance".into(), json!(round_score(relevance)));
+        if let Some(relevance) =
+            direct_evidence.or_else(|| existing_relevance.map(|value| value.clamp(0.0, 1.0)))
+        {
+            obj.insert("relevance".into(), json!(round_score(relevance)));
+        }
         if max_rank_score > f64::EPSILON {
             if let Some(score) = obj
                 .get_mut("score")
@@ -705,6 +705,7 @@ mod tests {
                 "score": {"vector": 0.20, "fts": 0.10, "symbolic": 0.30, "final": 1.167}
             }),
             json!({"id": "legacy-scoreless", "relevance": 0.42}),
+            json!({"id": "l0-rule"}),
         ];
 
         normalize_json_relevance(&mut rows);
@@ -718,5 +719,6 @@ mod tests {
             "rerank blend final remains the response-relative ranking key"
         );
         assert_eq!(rows[2]["relevance"], json!(0.42));
+        assert!(rows[3].get("relevance").is_none());
     }
 }
