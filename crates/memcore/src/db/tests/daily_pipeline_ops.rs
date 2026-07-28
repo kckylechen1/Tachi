@@ -174,8 +174,11 @@ fn off_arm_equals_the_pre_1446_unfiltered_count_on_display_only_history() {
             |row| row.get(0),
         )
         .unwrap();
-    let off = count_distinct_promotion_days(&conn, "legacy", &crate::RecallConfig::default())
-        .expect("days");
+    let off_config = crate::RecallConfig {
+        use_provenance_recency: false,
+        ..crate::RecallConfig::default()
+    };
+    let off = count_distinct_promotion_days(&conn, "legacy", &off_config).expect("days");
 
     assert_eq!(
         off, unfiltered as usize,
@@ -221,8 +224,11 @@ fn use_arm_ignores_display_days_and_off_arm_preserves_mixed_history() {
             .expect("days");
     let used = count_distinct_access_days_of_kind(&conn, "mixed", Some(AccessEventKind::Use))
         .expect("days");
-    let off = count_distinct_promotion_days(&conn, "mixed", &crate::RecallConfig::default())
-        .expect("days");
+    let off_config = crate::RecallConfig {
+        use_provenance_recency: false,
+        ..crate::RecallConfig::default()
+    };
+    let off = count_distinct_promotion_days(&conn, "mixed", &off_config).expect("days");
     let unfiltered: i64 = conn
         .query_row(
             "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",

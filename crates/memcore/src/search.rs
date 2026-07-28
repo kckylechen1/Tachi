@@ -532,6 +532,7 @@ fn hybrid_search_inner(
             &scored_ids,
             &fts_hit_ids,
             Some(query),
+            recall_config(opts),
         )?;
         for r in &mut results {
             if let Some(update) = access_updates.get(&r.entry.id) {

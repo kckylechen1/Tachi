@@ -92,7 +92,13 @@ impl MemoryStore {
     /// batch twin of the inline gate in `db::record_access_with_updates` and it
     /// inherits the same partial view — it can only fail to promote a
     /// path-listed memory, never promote one on evidence it did not earn.
-    pub fn promote_diversely_recalled_raw_memories(&self) -> Result<usize, MemoryError> {
+    pub fn promote_diversely_recalled_raw_memories(
+        &self,
+        recall_config: &crate::RecallConfig,
+    ) -> Result<usize, MemoryError> {
+        if recall_config.use_provenance_recency {
+            return Ok(0);
+        }
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         Ok(self.conn.execute(
@@ -439,7 +445,10 @@ mod tests {
         assert_eq!(counts.consolidated, 1);
 
         let promoted = store
-            .promote_diversely_recalled_raw_memories()
+            .promote_diversely_recalled_raw_memories(&crate::RecallConfig {
+                use_provenance_recency: false,
+                ..crate::RecallConfig::default()
+            })
             .expect("promote raw");
         assert_eq!(promoted, 1);
         let entry = store
@@ -582,11 +591,11 @@ mod tests {
                 .unwrap();
         }
 
-        let off = crate::RecallConfig::default();
-        let on = crate::RecallConfig {
-            use_provenance_recency: true,
-            ..off.clone()
+        let off = crate::RecallConfig {
+            use_provenance_recency: false,
+            ..crate::RecallConfig::default()
         };
+        let on = crate::RecallConfig::default();
         let off_ids: Vec<String> = store
             .promotion_candidate_entries_for_config(1, &off)
             .unwrap()
@@ -650,34 +659,32 @@ mod tests {
     }
 
     /// tachi#1446 lever 6: the arm the promotion ratchet reads is decided by
-    /// `RecallConfig::use_provenance_recency`, and OFF is the default.
+    /// `RecallConfig::use_provenance_recency`, and use provenance is the default.
     ///
     /// This is the knob wiring under test in isolation, because the production
     /// call site reads `RecallConfig::get()` — a process-wide `OnceLock` that
     /// cannot be set per-test without cross-test interference.
     #[test]
-    fn promotion_arm_follows_use_provenance_recency_and_defaults_to_unfiltered() {
+    fn promotion_arm_follows_use_provenance_recency_and_defaults_to_use() {
         let default_config = crate::RecallConfig::default();
         assert!(
-            !default_config.use_provenance_recency,
-            "lever 6 shares the lever 2-5 knob, which must stay opt-in"
+            default_config.use_provenance_recency,
+            "display provenance must not feed the irreversible promotion default"
         );
         assert_eq!(
             AccessEventKind::for_promotion(&default_config),
-            None,
-            "at default config the promotion ratchet must read exactly the row \
-             set it read before tachi#1446"
+            Some(AccessEventKind::Use),
+            "the default promotion ratchet must read caller-initiated use days"
         );
 
-        let on = crate::RecallConfig {
-            use_provenance_recency: true,
+        let legacy = crate::RecallConfig {
+            use_provenance_recency: false,
             ..crate::RecallConfig::default()
         };
         assert_eq!(
-            AccessEventKind::for_promotion(&on),
-            Some(AccessEventKind::Use),
-            "with the knob on, only caller-initiated use days may feed an \
-             irreversible promotion"
+            AccessEventKind::for_promotion(&legacy),
+            None,
+            "the explicit rollback arm preserves the historical unfiltered row set"
         );
     }
 
@@ -708,18 +715,18 @@ mod tests {
                 .expect("insert display row");
         }
 
-        let off = crate::RecallConfig::default();
-        let on = crate::RecallConfig {
-            use_provenance_recency: true,
+        let off = crate::RecallConfig {
+            use_provenance_recency: false,
             ..crate::RecallConfig::default()
         };
+        let on = crate::RecallConfig::default();
 
         assert_eq!(
             store
                 .distinct_promotion_days("shown-often", &off)
                 .expect("count days"),
             6,
-            "default config keeps counting the six display days, unchanged"
+            "explicit legacy config keeps counting the six display days"
         );
         assert_eq!(
             store

@@ -78,8 +78,15 @@ fn record_access_with_updates_returns_post_write_access_fields() {
     upsert(&mut conn, &e, false).unwrap();
 
     let ids = ["touch-return".to_string()];
-    let updates =
-        record_access_with_updates(&conn, &ids, &ids, &[], None).expect("record access updates");
+    let updates = record_access_with_updates(
+        &conn,
+        &ids,
+        &ids,
+        &[],
+        None,
+        &crate::RecallConfig::default(),
+    )
+    .expect("record access updates");
     let update = updates.get("touch-return").expect("updated row");
     let db_update: AccessUpdate = conn
         .query_row(
@@ -112,6 +119,7 @@ fn record_access_with_updates_ignores_missing_ids() {
         &["touch-present".to_string(), "touch-missing".to_string()],
         &[],
         None,
+        &crate::RecallConfig::default(),
     )
     .expect("missing rows should not abort accounting");
 
@@ -125,6 +133,59 @@ fn record_access_with_updates_ignores_missing_ids() {
         )
         .unwrap();
     assert_eq!(missing_history, 0);
+}
+
+#[test]
+fn display_counters_do_not_promote_tier_under_the_safe_default() {
+    let mut conn = make_conn();
+    let e = make_entry("display-only-promotion", "display-only promotion target");
+    upsert(&mut conn, &e, false).unwrap();
+    let ids = ["display-only-promotion".to_string()];
+    let safe = crate::RecallConfig::default();
+
+    for query in [
+        "display query one",
+        "display query two",
+        "display query three",
+    ] {
+        record_access_with_updates(&conn, &ids, &ids, &ids, Some(query), &safe).unwrap();
+    }
+    let tier: String = conn
+        .query_row(
+            "SELECT tier FROM memories WHERE id = ?1",
+            params!["display-only-promotion"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tier, "raw",
+        "three displays from three query hashes are still display evidence and must not ratchet tier"
+    );
+
+    let legacy = crate::RecallConfig {
+        use_provenance_recency: false,
+        ..safe
+    };
+    record_access_with_updates(
+        &conn,
+        &ids,
+        &ids,
+        &ids,
+        Some("legacy rollback query"),
+        &legacy,
+    )
+    .unwrap();
+    let legacy_tier: String = conn
+        .query_row(
+            "SELECT tier FROM memories WHERE id = ?1",
+            params!["display-only-promotion"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        legacy_tier, "consolidated",
+        "the explicit rollback arm must preserve the historical display-driven gate"
+    );
 }
 
 #[test]

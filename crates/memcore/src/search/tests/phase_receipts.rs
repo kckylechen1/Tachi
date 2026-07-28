@@ -891,7 +891,7 @@ fn graph_timer_reports_live_elapsed_on_the_enabled_path() {
     .unwrap();
 
     let opts = SearchOptions {
-        top_k: 1,
+        top_k: 2,
         record_access: false,
         graph_expand_hops: 1,
         ..Default::default()
@@ -944,7 +944,7 @@ fn receipt_marks_best_effort_graph_query_failure_distinct_from_zero_expansion() 
         .expect("break only graph expansion");
 
     let opts = SearchOptions {
-        top_k: 1,
+        top_k: 2,
         record_access: false,
         graph_expand_hops: 1,
         ..Default::default()

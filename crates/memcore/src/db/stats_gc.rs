@@ -130,7 +130,7 @@ pub const GC_MEMORY_ARCHIVED_EVENT_TYPE: &str = "memory.gc_archived";
 /// diverge with nothing to catch it.
 struct ArchivalPass {
     /// Stable identifier for this predicate, recorded in the receipt.
-    name: &'static str,
+    name: String,
     /// Column supplying this predicate's staleness reference.
     recency_column: &'static str,
     /// Rows qualify strictly below this importance.
@@ -249,6 +249,17 @@ pub(crate) fn write_gc_archived_receipt(
 /// mean anything: four autocommit statements could half-apply and leave a
 /// receipt describing an archival that partially rolled back.
 pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64, MemoryError> {
+    archive_stale_memories_with_config(conn, stale_days, crate::RecallConfig::get())
+}
+
+/// Configurable twin used by discrimination tests and explicit rollback.
+/// Use provenance is the normal arm; `false` preserves the historical
+/// display-derived GC clock byte-for-byte.
+pub fn archive_stale_memories_with_config(
+    conn: &Connection,
+    stale_days: u32,
+    recall_config: &crate::RecallConfig,
+) -> Result<u64, MemoryError> {
     // `unchecked_transaction` takes `&Connection`, which keeps this function's
     // signature — and `MemoryStore::archive_stale_memories`'s `&self` — intact.
     // It rolls back on drop, so any `?` below abandons the whole sweep.
@@ -276,21 +287,24 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
     // `last_access` falling back to `timestamp` — so a bumped `updated_at`
     // cannot make a later-restored row look spuriously fresh in search.
     //
-    // The `WHERE` clauses below are unchanged: this commit records what the
-    // predicates did, it does not touch what they select (tachi#1458 owns
-    // whether GC should reap by display or by use).
+    let (recency_column, stale_suffix, never_suffix) = if recall_config.use_provenance_recency {
+        ("last_use_at", "last_use", "never_used")
+    } else {
+        ("last_access", "last_access", "never_accessed")
+    };
+
     let passes = [
         // Durable (NULL or 'durable'): standard thresholds
         ArchivalPass {
-            name: "durable_stale_by_last_access",
-            recency_column: "last_access",
+            name: format!("durable_stale_by_{stale_suffix}"),
+            recency_column,
             importance_below: 0.5,
             retention_scope: "durable_or_unset",
             sql: format!(
                 "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
                  WHERE archived = 0
-                   AND last_access IS NOT NULL
-                   AND unixepoch(last_access) < unixepoch('now', '-' || ?1 || ' days')
+                   AND {recency_column} IS NOT NULL
+                   AND unixepoch({recency_column}) < unixepoch('now', '-' || ?1 || ' days')
                    AND importance < 0.5
                    AND (retention_policy IS NULL OR retention_policy = 'durable')
                    {exempt_clause}
@@ -298,14 +312,14 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
             ),
         },
         ArchivalPass {
-            name: "durable_never_accessed_by_timestamp",
+            name: format!("durable_{never_suffix}_by_timestamp"),
             recency_column: "timestamp",
             importance_below: 0.3,
             retention_scope: "durable_or_unset",
             sql: format!(
                 "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
                  WHERE archived = 0
-                   AND last_access IS NULL
+                   AND {recency_column} IS NULL
                    AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                    AND importance < 0.3
                    AND (retention_policy IS NULL OR retention_policy = 'durable')
@@ -315,32 +329,34 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
         },
         // Ephemeral: more aggressive thresholds (importance < 0.7 / < 0.5)
         ArchivalPass {
-            name: "ephemeral_stale_by_last_access",
-            recency_column: "last_access",
+            name: format!("ephemeral_stale_by_{stale_suffix}"),
+            recency_column,
             importance_below: 0.7,
             retention_scope: "ephemeral",
-            sql: "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
+            sql: format!(
+                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
                   WHERE archived = 0
-                    AND last_access IS NOT NULL
-                    AND unixepoch(last_access) < unixepoch('now', '-' || ?1 || ' days')
+                    AND {recency_column} IS NOT NULL
+                    AND unixepoch({recency_column}) < unixepoch('now', '-' || ?1 || ' days')
                     AND importance < 0.7
                     AND retention_policy = 'ephemeral'
                   RETURNING id"
-                .to_string(),
+            ),
         },
         ArchivalPass {
-            name: "ephemeral_never_accessed_by_timestamp",
+            name: format!("ephemeral_{never_suffix}_by_timestamp"),
             recency_column: "timestamp",
             importance_below: 0.5,
             retention_scope: "ephemeral",
-            sql: "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
+            sql: format!(
+                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
                   WHERE archived = 0
-                    AND last_access IS NULL
+                    AND {recency_column} IS NULL
                     AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                     AND importance < 0.5
                     AND retention_policy = 'ephemeral'
                   RETURNING id"
-                .to_string(),
+            ),
         },
     ];
 

@@ -121,8 +121,13 @@ pub fn graph_spreading_activation_with_seed_weights(
                 if seeds.contains(target) {
                     continue;
                 }
+                let edge_weight = if edge.weight.is_finite() {
+                    edge.weight.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let propagated = parent_activation
-                    * edge.weight.clamp(0.0, 1.0)
+                    * edge_weight
                     * decay
                     * graph_relation_activation_weight(&edge.relation);
                 if propagated <= 0.0 {

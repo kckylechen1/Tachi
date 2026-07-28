@@ -883,6 +883,14 @@ fn golden_corpus_report() {
         eprintln!(
             "slice {slice:?}: r@1={r1:.3} r@3={r3:.3} r@10={r10:.3} mrr={mrr:.3} | orf r@3={r3o:.3}"
         );
+        for spec in QUERIES.iter().filter(|spec| spec.slice == slice) {
+            eprintln!(
+                "  query={:?} expected={} rank={:?}",
+                spec.query,
+                spec.expected,
+                rank_of(&conn, spec, None)
+            );
+        }
     }
     eprintln!(
         "overall MRR default={:.3} or_fallback0.55={:.3}",

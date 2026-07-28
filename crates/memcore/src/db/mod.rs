@@ -172,7 +172,10 @@ pub use state::{
     set_state, set_state_if_version, StateRow,
 };
 pub(crate) use stats_gc::write_gc_archived_receipt;
-pub use stats_gc::{archive_stale_memories, gc_tables, stats, GC_MEMORY_ARCHIVED_EVENT_TYPE};
+pub use stats_gc::{
+    archive_stale_memories, archive_stale_memories_with_config, gc_tables, stats,
+    GC_MEMORY_ARCHIVED_EVENT_TYPE,
+};
 #[cfg(feature = "admin")]
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,

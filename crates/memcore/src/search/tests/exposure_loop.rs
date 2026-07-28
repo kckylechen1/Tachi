@@ -1,5 +1,5 @@
-//! Exposure-loop magnitude harness — tachi#1446 commit 0 (measurement) plus
-//! commit 1's RED/GREEN regression pair.
+//! Exposure-loop magnitude harness — tachi#1446 measurement, default-runtime
+//! regression gate, and explicit legacy rollback controls.
 //!
 //! # What this is
 //! `hybrid_search` bumps an access record for **every row it returns**
@@ -10,17 +10,13 @@
 //! formulas. This module converts those hand-derivations into corpus
 //! measurements, so priority is fixed by evidence rather than arithmetic.
 //!
-//! **Nothing in commit 0 fixed the loop.** The three `measure_*` tests are
-//! green-today instruments. The fourth test,
-//! [`exposure_alone_must_not_change_rank`], is the regression gate for the fix
-//! and is **RED on purpose** at default config (`#[ignore]`d, see its own doc).
-//!
-//! Commit 1 added the fifth test,
-//! [`use_provenance_recency_keeps_exposure_out_of_rank`] — the same scenario
-//! with `RecallConfig::use_provenance_recency` on, which is **GREEN**. The
-//! RED/GREEN pair is the proof: the defect is real at shipped config, and that
-//! one switch is what removes it. The default is unchanged, so the fourth test
-//! stays red and stays ignored until the knob flips.
+//! The three `measure_*` tests preserve the historical magnitude evidence on
+//! an explicit legacy configuration. [`exposure_alone_must_not_change_rank`]
+//! is the permanent default-runtime gate: it runs unignored with use
+//! provenance enabled and requires byte-identical order across repeated
+//! exposure-only searches. The remaining tests keep the legacy arm as a
+//! control so accidentally deleting a ranking lever cannot masquerade as a
+//! successful provenance switch.
 //!
 //! # The three levers (verified at `e75478ed9`)
 //!
@@ -133,11 +129,7 @@
 //! # How to run (Oz)
 //!     cargo nextest run -p memcore measure_l1 measure_l2 measure_l3
 //!     cargo nextest run -p memcore use_provenance          # EXPECTED GREEN (all)
-//!     cargo nextest run -p memcore exposure_alone_must_not_change_rank \
-//!         --run-ignored only          # EXPECTED RED — see that test's doc
-//!
-//! Note the second and third commands must be run separately: an unfiltered
-//! `--run-ignored only` name filter matches both tests by prefix.
+//!     cargo nextest run -p memcore exposure_alone_must_not_change_rank
 //!
 //! The `use_provenance` filter above covers commit 1's pair-half plus commit
 //! 2's per-lever tests at the bottom of this file; the overlooked-bonus lever
@@ -390,7 +382,7 @@ fn search_options(profile: Profile, top_k: usize, record_access: bool) -> Search
 
 /// The same options [`search_options`] builds, with a caller-supplied
 /// `RecallConfig` substituted. Built *from* `search_options` rather than beside
-/// it so the two arms of the RED/GREEN pair below cannot drift apart in any
+/// it so the default and explicit-configuration paths cannot drift apart in any
 /// field except the one under test.
 fn search_options_with_recall_config(
     profile: Profile,
@@ -404,7 +396,7 @@ fn search_options_with_recall_config(
     }
 }
 
-/// `RecallConfig::default()` with tachi#1446's lever-1 knob on.
+/// The production-default use-provenance configuration.
 ///
 /// Trap 1 again, in its sharpest form: `TACHI_RECALL_USE_PROVENANCE_RECENCY`
 /// cannot reach this crate's tests at all (`RecallConfig::load` short-circuits
@@ -415,20 +407,24 @@ fn search_options_with_recall_config(
 /// (`search.rs:83`), the same channel the profiles use.
 fn use_provenance_recency_config() -> RecallConfig {
     assert!(
-        !RecallConfig::default().use_provenance_recency,
-        "the knob must be OFF by default — if it were not, this test and its RED sibling would \
-         be running the same configuration and the pair would prove nothing"
+        RecallConfig::default().use_provenance_recency,
+        "display provenance must not become the default again"
     );
-    RecallConfig {
-        use_provenance_recency: true,
-        ..RecallConfig::default()
-    }
+    RecallConfig::default()
 }
 
 /// Rank the whole corpus (no truncation) with the access write path OFF, so a
 /// measurement never perturbs the thing it is measuring.
 fn rank_all(conn: &Connection, profile: Profile) -> Vec<SearchResult> {
-    let opts = search_options(profile, SEEDS.len(), false);
+    let opts = search_options_with_recall_config(
+        profile,
+        SEEDS.len(),
+        false,
+        RecallConfig {
+            use_provenance_recency: false,
+            ..RecallConfig::default()
+        },
+    );
     let ranked = hybrid_search(conn, QUERY, &opts).expect("hybrid_search");
     assert_eq!(
         ranked.len(),
@@ -1079,8 +1075,19 @@ fn measure_l3_tier_ratchet() {
         // id sees this hash for the first time, which is the
         // `HAVING COUNT(*) = 1` condition that increments `query_diversity`
         // (`access.rs:156-190`).
-        record_access_with_updates(&conn, &ids, &ids, &ids, Some("l3 promotion gate probe"))
-            .expect("record_access_with_updates");
+        let legacy = RecallConfig {
+            use_provenance_recency: false,
+            ..RecallConfig::default()
+        };
+        record_access_with_updates(
+            &conn,
+            &ids,
+            &ids,
+            &ids,
+            Some("l3 promotion gate probe"),
+            &legacy,
+        )
+        .expect("record_access_with_updates");
 
         assert_eq!(
             read_promotion_counters(&conn, L3_SUBJECT),
@@ -1188,7 +1195,7 @@ fn measure_l3_tier_ratchet() {
 // The regression gate
 // ---------------------------------------------------------------------------
 
-/// **RED TODAY, ON PURPOSE — tachi#1446.**
+/// Permanent default-runtime regression gate for tachi#1446.
 ///
 /// Runs one query, then runs the *same* query again through the real
 /// `record_access` write path (`search.rs:497-511`), and asserts the returned
@@ -1206,14 +1213,11 @@ fn measure_l3_tier_ratchet() {
 /// matching row that the decay gradient had been holding down climbs past
 /// fresher neighbours. That is the loop: being shown is what earns the rank.
 ///
-/// `#[ignore]` so it does not red the suite before the fix exists. When the
-/// exposure loop is cut, delete the `#[ignore]` and this becomes the permanent
-/// regression gate. **Do not weaken the assertion to make it green** — a
+/// **Do not weaken the assertion to make it green** — a
 /// top-K-membership check, a sorted-set comparison, or a tolerance would all
 /// pass while the defect is fully intact. The frozen claim is byte-identical
 /// ordering.
 #[test]
-#[ignore = "tachi#1446: RED by design — exposure currently changes rank. Un-ignore when the loop is cut; do not weaken the assertion."]
 fn exposure_alone_must_not_change_rank() {
     let conn = seeded_connection();
 
@@ -1244,15 +1248,13 @@ fn exposure_alone_must_not_change_rank() {
     );
 }
 
-/// **GREEN — the other half of the pair, tachi#1446 commit 1.**
+/// **Explicit use-provenance path — tachi#1446.**
 ///
 /// Byte-for-byte the same scenario as [`exposure_alone_must_not_change_rank`]
 /// above: same corpus, same query, same two `record_access`-on calls, same
-/// profile, same `top_k`. The *only* difference is
-/// `RecallConfig::use_provenance_recency`. That test is RED at default config
-/// and this one is green with the knob on, so the pair is the proof: the defect
-/// is real, and this specific switch is what removes it. Neither test alone
-/// says that — a lone green could be green because the fixture is weak.
+/// profile, same `top_k`. This sibling injects the current default explicitly,
+/// so it guards the configuration-aware code path as well as the ordinary
+/// default path above.
 ///
 /// The mechanism is a read swap, not a write. `default_decay_score_with_config`
 /// takes the age reference from `last_use_at` instead of `last_access`, and
@@ -1385,13 +1387,13 @@ fn use_provenance_recency_keeps_display_events_out_of_the_actr_floor() {
         table(&after_on)
     );
 
-    // Control: the very same rows, read at default config, are exactly the
+    // Control: the very same rows, read with the explicit legacy config, are exactly the
     // defect — so this fixture is not merely inert.
     let after_off = rank_all(&conn, Profile::Default);
     let off_decay = decay_of(&after_off, &subject);
     assert!(
         off_decay > base_decay + 0.5,
-        "control failed: at default config five display events must lift the ACT-R floor far \
+        "control failed: with legacy config five display events must lift the ACT-R floor far \
          above the importance floor ({base_decay} -> {off_decay}). If this stops holding the \
          knob-on assertion above proves nothing.\n{}",
         table(&after_off)
@@ -1445,14 +1447,14 @@ fn use_provenance_recency_moves_the_decay_frequency_term_off_exposure() {
         table(&after_on)
     );
 
-    // Control: at default config the same counter multiplies decay by exactly
+    // Control: with the explicit legacy config the same counter multiplies decay by exactly
     // `1 + 0.2*log10(101) = 1.400862`.
     let after_off = rank_all(&conn, Profile::Default);
     let observed_ratio = decay_of(&after_off, &subject) / base_decay;
     let expected_ratio = 1.0 + 0.2 * 101.0_f64.log10();
     assert!(
         (observed_ratio - expected_ratio).abs() < 1e-6,
-        "control failed: at default config access_count=100 must multiply this unfloored \
+        "control failed: with legacy config access_count=100 must multiply this unfloored \
          candidate's decay by exactly {expected_ratio}, measured {observed_ratio}\n{}",
         table(&after_off)
     );
@@ -1528,19 +1530,16 @@ fn use_provenance_recency_moves_the_access_feedback_multiplier_off_exposure() {
     }
 }
 
-/// **Knob OFF is unchanged — the redline, as an assertion.**
+/// **The explicit legacy rollback remains behavior-compatible.**
 ///
 /// Everything tachi#1446's write path adds (`event_kind = 'use'` rows and a
-/// non-NULL `last_use_at`) must be invisible at default config. If it were
-/// not, the new signal would be feeding the very channel this issue exists to
-/// cut, on every deployment that never turns the knob on — and every golden in
-/// the repo would move.
+/// non-NULL `last_use_at`) must be invisible when the rollback switch is OFF.
 ///
 /// The mutations here are deliberately the *loudest* the write path can
 /// produce: a `last_use_at` of now (maximum lever-1 leverage on a floored
 /// candidate) and five recent use events (maximum ACT-R leverage).
 #[test]
-fn use_provenance_writes_are_invisible_at_default_config() {
+fn use_provenance_writes_are_invisible_with_legacy_config() {
     let conn = seeded_connection();
 
     let before = rank_all(&conn, Profile::Default);
@@ -1564,7 +1563,7 @@ fn use_provenance_writes_are_invisible_at_default_config() {
             .iter()
             .map(|r| r.entry.id.as_str())
             .collect::<Vec<_>>(),
-        "default-config ordering moved after a use-provenance write\nbefore:\n{}\nafter:\n{}",
+        "legacy-config ordering moved after a use-provenance write\nbefore:\n{}\nafter:\n{}",
         table(&before),
         table(&after)
     );
@@ -1572,14 +1571,14 @@ fn use_provenance_writes_are_invisible_at_default_config() {
         let moved = (final_of(&after, &r.entry.id) - r.score.final_score).abs();
         assert!(
             moved < CLOCK_TOLERANCE,
-            "{} moved by {moved} at default config after a use-provenance write — the display \
+            "{} moved by {moved} with legacy config after a use-provenance write — the display \
              read (`get_access_times`) is letting `event_kind = 'use'` rows through, or a \
-             default-config lever is reading `last_use_at`",
+             legacy-config lever is reading `last_use_at`",
             r.entry.id
         );
     }
     assert!(
         (decay_of(&after, &subject) - decay_of(&before, &subject)).abs() < CLOCK_TOLERANCE,
-        "the subject's decay channel moved at default config"
+        "the subject's decay channel moved with legacy config"
     );
 }

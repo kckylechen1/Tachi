@@ -145,7 +145,7 @@ fn scorer_count_respects_record_access_and_excludes_graph_only_results() {
     )
     .unwrap();
     let no_record = SearchOptions {
-        top_k: 1,
+        top_k: 2,
         record_access: false,
         graph_expand_hops: 1,
         ..Default::default()

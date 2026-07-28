@@ -392,8 +392,8 @@ fn rich_query_abstains_on_one_term_noise_but_keeps_multi_term_partial_recall() {
         "the qualified multi-term partial target must enter through OR fallback"
     );
     assert!(
-        !candidates.fts_scores.contains_key("one-term-noise"),
-        "the rich-query OR fallback itself must reject one-term noise"
+        candidates.fts_scores.contains_key("one-term-noise"),
+        "candidate collection must retain partial FTS evidence until memory metadata is available"
     );
     let results = hybrid_search(&conn, query, &opts).unwrap();
 

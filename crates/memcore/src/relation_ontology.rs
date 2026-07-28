@@ -42,8 +42,10 @@
 //!   `distilled_from` / `supersedes` literals;
 //! - `tachi-server`'s `repair::plan_c::copy_common_rows` — column-wise merge
 //!   of an attached alias DB.
+//! - `scripts/migrate_antigravity_split.py` — an offline migration that copies
+//!   the source tuple's stored relation and weight; it is not a runtime writer.
 //!
-//! None of the three takes a relation from a request/caller string — the
+//! None of the four takes a relation from a request/caller string — the
 //! first two carry an already-stored value or an [`ONTOLOGY_V1`] literal
 //! (`distilled_from`, `supersedes`), the third copies rows out of another
 //! Tachi DB file — so the ontology stays closed against *newly minted* wild

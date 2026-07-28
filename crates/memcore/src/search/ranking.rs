@@ -31,6 +31,11 @@ pub(super) struct CandidateRanking<'a> {
 
 type RankedEntries = (Vec<SearchResult>, Vec<String>, Option<RankPhaseReceipt>);
 
+/// Importance floor for the decision prior. This is candidate eligibility,
+/// not retrieval evidence: the later topical-evidence gate still decides
+/// whether the prior may alter rank.
+const DECISION_IMPORTANCE_FLOOR: f64 = 0.85;
+
 pub(super) fn rank_candidate_entries(
     conn: &Connection,
     ranking: CandidateRanking<'_>,
@@ -48,7 +53,17 @@ pub(super) fn rank_candidate_entries(
         as_of_utc,
     } = ranking;
     let symbolic_scores = symbolic_scores(query, &entries_map);
+    let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
     let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
+    let retrieval_evidence = RetrievalEvidence {
+        vec_scores,
+        fts_scores,
+        symbolic_scores: &symbolic_scores,
+        exact_id,
+        recall_config: recall_config(opts),
+        minimum_symbolic_coverage,
+        requires_pair_evidence,
+    };
     let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
     // Per #1097 D3: `get_superseded_ids` (ranking.rs:47) is one of two DB I/O
     // hot spots inside `rank_candidate_entries`. Time it on its own so a
@@ -81,15 +96,7 @@ pub(super) fn rank_candidate_entries(
                     _ => return false,
                 }
             }
-            if below_minimum_retrieval_evidence(
-                id,
-                vec_scores,
-                fts_scores,
-                &symbolic_scores,
-                exact_id,
-                recall_config(opts),
-                minimum_symbolic_coverage,
-            ) {
+            if below_minimum_retrieval_evidence(id, e, &retrieval_evidence) {
                 return false;
             }
             true
@@ -301,46 +308,67 @@ fn symbolic_scores(
 /// strong enough to display or reinforce. Filter it before access-history
 /// reads and every subsequent ranking boost, while preserving exact IDs,
 /// qualified FTS hits, strong vectors, and sufficient symbolic coverage.
+struct RetrievalEvidence<'a> {
+    vec_scores: &'a HashMap<String, f64>,
+    fts_scores: &'a HashMap<String, f64>,
+    symbolic_scores: &'a HashMap<String, f64>,
+    exact_id: Option<&'a str>,
+    recall_config: &'a crate::RecallConfig,
+    minimum_symbolic_coverage: f64,
+    requires_pair_evidence: bool,
+}
+
 fn below_minimum_retrieval_evidence(
     id: &str,
-    vec_scores: &HashMap<String, f64>,
-    fts_scores: &HashMap<String, f64>,
-    symbolic_scores: &HashMap<String, f64>,
-    exact_id: Option<&str>,
-    recall_config: &crate::RecallConfig,
-    minimum_symbolic_coverage: f64,
+    entry: &MemoryEntry,
+    evidence: &RetrievalEvidence<'_>,
 ) -> bool {
-    if exact_id == Some(id) {
+    if evidence.exact_id == Some(id) {
         return false;
     }
-    let has_fts_evidence = fts_scores
+    let has_fts_evidence = evidence
+        .fts_scores
         .get(id)
         .is_some_and(|score| score.is_finite() && *score > 0.0);
-    if has_fts_evidence {
-        return false;
-    }
-    let vector_is_strong = vec_scores.get(id).is_some_and(|score| {
-        score.is_finite() && *score >= recall_config.vector_only_similarity_floor
-    });
-    if vector_is_strong {
-        return false;
-    }
-    let symbolic = symbolic_scores
+    let symbolic = evidence
+        .symbolic_scores
         .get(id)
         .copied()
         .filter(|score| score.is_finite())
         .unwrap_or(0.0);
-    symbolic + f64::EPSILON < minimum_symbolic_coverage
+    let has_minimum_symbolic_coverage =
+        symbolic + f64::EPSILON >= evidence.minimum_symbolic_coverage;
+    if has_fts_evidence
+        && (!evidence.requires_pair_evidence
+            || has_minimum_symbolic_coverage
+            || is_high_importance_decision(entry))
+    {
+        return false;
+    }
+    let vector_is_strong = evidence.vec_scores.get(id).is_some_and(|score| {
+        score.is_finite() && *score >= evidence.recall_config.vector_only_similarity_floor
+    });
+    if vector_is_strong {
+        return false;
+    }
+    !has_minimum_symbolic_coverage
 }
 
-fn minimum_symbolic_query_coverage(query: &str, recall_config: &crate::RecallConfig) -> f64 {
+fn query_requires_pair_evidence(query: &str, recall_config: &crate::RecallConfig) -> bool {
     let query_term_count = crate::scorer::tokenize(query)
         .into_iter()
         .collect::<std::collections::HashSet<_>>()
         .len();
-    let required_symbolic_matches = if recall_config.or_fallback_fts_pair_min_query_terms >= 2
+    recall_config.or_fallback_fts_pair_min_query_terms >= 2
         && query_term_count >= recall_config.or_fallback_fts_pair_min_query_terms
-    {
+}
+
+fn is_high_importance_decision(entry: &MemoryEntry) -> bool {
+    entry.category.eq_ignore_ascii_case("decision") && entry.importance >= DECISION_IMPORTANCE_FLOOR
+}
+
+fn minimum_symbolic_query_coverage(query: &str, recall_config: &crate::RecallConfig) -> f64 {
+    let required_symbolic_matches = if query_requires_pair_evidence(query, recall_config) {
         2.0
     } else {
         1.0
@@ -495,8 +523,6 @@ fn apply_decision_boost(
     entries_ref: &HashMap<String, &MemoryEntry>,
     scores: &mut HashMap<String, HybridScore>,
 ) {
-    /// importance floor for decision promotion (matches ops-audit decision seeds).
-    const DECISION_IMPORTANCE_FLOOR: f64 = 0.85;
     /// provisional decision boost (tachi#708/#896 same-store precision).
     const DECISION_BOOST: f64 = 1.55;
 
@@ -506,9 +532,7 @@ fn apply_decision_boost(
     let q_tokens = distinct_expanded_query_tokens(query);
 
     for (id, entry) in entries_ref {
-        if !(entry.category.eq_ignore_ascii_case("decision")
-            && entry.importance >= DECISION_IMPORTANCE_FLOOR)
-        {
+        if !is_high_importance_decision(entry) {
             continue;
         }
         if let Some(score) = scores.get_mut(id) {
@@ -944,7 +968,17 @@ pub(super) mod attribution {
         } = ranking;
 
         let symbolic_scores = symbolic_scores(query, &entries_map);
+        let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
         let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
+        let retrieval_evidence = RetrievalEvidence {
+            vec_scores,
+            fts_scores,
+            symbolic_scores: &symbolic_scores,
+            exact_id,
+            recall_config: recall_config(opts),
+            minimum_symbolic_coverage,
+            requires_pair_evidence,
+        };
         let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
         let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec)?;
 
@@ -975,15 +1009,7 @@ pub(super) mod attribution {
                         _ => return false,
                     }
                 }
-                if below_minimum_retrieval_evidence(
-                    id,
-                    vec_scores,
-                    fts_scores,
-                    &symbolic_scores,
-                    exact_id,
-                    recall_config(opts),
-                    minimum_symbolic_coverage,
-                ) {
+                if below_minimum_retrieval_evidence(id, e, &retrieval_evidence) {
                     return false;
                 }
                 true
