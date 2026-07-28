@@ -151,9 +151,10 @@ fn load_relevant_rows(conn: &rusqlite::Connection) -> Result<Vec<FrozenLifecycle
             OR id IN (SELECT superseded_by FROM memories WHERE superseded_by IS NOT NULL)
          ORDER BY id",
     )?;
-    Ok(statement
+    let rows = statement
         .query_map([], frozen_from_row)?
-        .collect::<Result<Vec<_>, _>>()?)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 fn load_row(
@@ -878,6 +879,15 @@ mod tests {
             .unwrap();
     }
 
+    fn bump_revision(store: &MemoryStore, id: &str) {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+        store
+            .conn
+            .execute("UPDATE memories SET revision=revision+1 WHERE id=?1", [id])
+            .unwrap();
+    }
+
     #[test]
     fn plans_and_applies_one_way_active_superseded_drift() {
         let (_dir, mut store, identity) = fixture(&["loser", "winner"]);
@@ -892,7 +902,7 @@ mod tests {
         let row = load_row(&store.conn, "loser").unwrap().unwrap();
         assert!(row.archived);
         assert_eq!(row.superseded_by.as_deref(), Some("winner"));
-        assert_eq!(result.receipt.rows[0].before.archived, false);
+        assert!(!result.receipt.rows[0].before.archived);
     }
 
     #[test]
@@ -985,10 +995,7 @@ mod tests {
         set_state(&store, "a", false, Some("winner"));
         set_state(&store, "b", false, Some("winner"));
         let plan = store.plan_lifecycle_consistency(identity).unwrap();
-        store
-            .conn
-            .execute("UPDATE memories SET revision=revision+1 WHERE id='b'", [])
-            .unwrap();
+        bump_revision(&store, "b");
         let error = store.apply_lifecycle_consistency(&plan).unwrap_err();
         assert!(error.to_string().contains("frozen row drifted: b"));
         assert!(!load_row(&store.conn, "a").unwrap().unwrap().archived);
@@ -1027,10 +1034,7 @@ mod tests {
         set_state(&store, "b", false, Some("winner"));
         let plan = store.plan_lifecycle_consistency(identity).unwrap();
         let applied = store.apply_lifecycle_consistency(&plan).unwrap();
-        store
-            .conn
-            .execute("UPDATE memories SET revision=revision+1 WHERE id='b'", [])
-            .unwrap();
+        bump_revision(&store, "b");
         let error = store
             .restore_lifecycle_consistency(&applied.receipt)
             .unwrap_err();
@@ -1046,13 +1050,7 @@ mod tests {
         set_state(&store, "loser", true, Some("winner"));
         let plan = store.plan_lifecycle_consistency(identity).unwrap();
         let applied = store.apply_lifecycle_consistency(&plan).unwrap();
-        store
-            .conn
-            .execute(
-                "UPDATE memories SET revision=revision+1 WHERE id='loser'",
-                [],
-            )
-            .unwrap();
+        bump_revision(&store, "loser");
         let error = store
             .restore_lifecycle_consistency(&applied.receipt)
             .unwrap_err();

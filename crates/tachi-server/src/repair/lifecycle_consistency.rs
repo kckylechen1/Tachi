@@ -195,6 +195,7 @@ pub fn restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon_lock::{scoped_daemon_lock_path, DaemonLock};
     #[cfg(unix)]
     use crate::db_ownership::set_ownership_inject_for_test;
     use crate::manifest::{DbEntry, DbRole, Manifest};
@@ -404,5 +405,56 @@ mod tests {
             )
             .unwrap();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn apply_refuses_scoped_daemon_lock_before_receipt_or_mutation() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture(false);
+        let _holder = DaemonLock::acquire(scoped_daemon_lock_path(&app_home, &db_path))
+            .expect("hold scoped daemon lock");
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("holds scoped lock"));
+        assert!(!receipt_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_refuses_owned_database_before_receipt_or_mutation() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture(false);
+        set_ownership_inject_for_test(Some(DbOwnership::Owned));
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("owned by a live daemon"));
+        assert!(!receipt_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_fails_closed_when_database_ownership_is_unknown() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture(false);
+        set_ownership_inject_for_test(Some(DbOwnership::Unknown("injected".into())));
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ownership unknown: injected"));
+        assert!(!receipt_path.exists());
     }
 }
