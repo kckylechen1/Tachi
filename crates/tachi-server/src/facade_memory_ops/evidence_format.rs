@@ -293,8 +293,24 @@ pub(crate) fn format_extract_result(raw: &str) -> String {
         .get("facts_saved")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let inserted = value
+        .get("facts_inserted")
+        .and_then(Value::as_u64)
+        .unwrap_or(saved);
+    let existing = value
+        .get("facts_existing")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let failed = value
+        .get("facts_failed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let dropped = value
+        .get("facts_dropped")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let mut out = vec![format!(
-        "Extract facts -> {status}; extracted {extracted}, saved {saved}"
+        "Extract facts -> {status}; extracted {extracted}, saved {saved}; inserted {inserted}, existing {existing}, failed {failed}, dropped {dropped}"
     )];
     if let Some(facts) = value.get("facts").and_then(Value::as_array) {
         for (idx, fact) in facts.iter().enumerate() {
@@ -598,6 +614,28 @@ pub(crate) fn parse_evidence_array(raw: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_result_keeps_replay_safe_accounting_visible() {
+        let formatted = format_extract_result(
+            &json!({
+                "status": "completed",
+                "facts_extracted": 2,
+                "facts_saved": 0,
+                "facts_inserted": 0,
+                "facts_existing": 2,
+                "facts_failed": 0,
+                "facts_dropped": 0,
+                "facts": [],
+            })
+            .to_string(),
+        );
+
+        assert_eq!(
+            formatted,
+            "Extract facts -> completed; extracted 2, saved 0; inserted 0, existing 2, failed 0, dropped 0"
+        );
+    }
 
     #[test]
     fn compact_completion_surfaces_a_pending_canonical_outcome() {

@@ -81,7 +81,7 @@ fn tachi_memory_schema_declares_polymorphic_field_enum_values() {
     );
     assert_eq!(
         enum_values(&properties["kind"], "kind"),
-        vec!["memory", "note", "wiki"]
+        vec!["memory", "note", "wiki", "facts", "extract_facts"]
     );
     assert_eq!(
         enum_values(&properties["category"], "category"),
@@ -336,6 +336,22 @@ fn tachi_save_and_remember_importance_schema_accepts_string_or_number() {
     ))
     .expect("schema serializes");
     assert_field_accepts_string_and_number(&remember, "importance", "number");
+}
+
+#[test]
+fn tachi_save_schema_advertises_both_fact_extraction_kinds() {
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(
+        crate::tool_params::TachiSaveParams
+    ))
+    .expect("schema serializes");
+    let kinds = enum_values(&value["properties"]["kind"], "kind");
+
+    for kind in ["facts", "extract_facts"] {
+        assert!(
+            kinds.iter().any(|advertised| advertised == kind),
+            "tachi_save supports kind={kind} in its handler, so the public schema must advertise it"
+        );
+    }
 }
 
 #[test]

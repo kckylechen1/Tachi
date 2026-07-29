@@ -408,6 +408,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn extract_cli_dispatch_preserves_replay_accounting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_home = temp.path().join("home");
+        std::fs::create_dir_all(&app_home).expect("app_home dir");
+        let global_db = temp.path().join("global.db");
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "text".to_string(),
+            serde_json::json!("A replay-only CLI extraction retains its counters."),
+        );
+        args.insert("source".to_string(), serde_json::json!("cli-source"));
+
+        let body = dispatch_cli_tool(
+            "extract_facts",
+            args,
+            &global_db,
+            None,
+            &app_home,
+            |_server, _args_map| {
+                Box::pin(async move {
+                    Ok(serde_json::json!({
+                        "status": "completed",
+                        "facts_extracted": 1,
+                        "facts_saved": 0,
+                        "facts_inserted": 0,
+                        "facts_existing": 1,
+                        "facts_failed": 0,
+                        "facts_dropped": 0,
+                    })
+                    .to_string())
+                })
+            },
+        )
+        .await
+        .expect("CLI extract dispatch");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("dispatch JSON");
+
+        assert_eq!(value["facts_saved"], serde_json::json!(0));
+        assert_eq!(value["facts_inserted"], serde_json::json!(0));
+        assert_eq!(value["facts_existing"], serde_json::json!(1));
+        assert_eq!(value["facts_failed"], serde_json::json!(0));
+        assert_eq!(value["facts_dropped"], serde_json::json!(0));
+    }
+
     /// Scope guard: `tachi_wiki_search` (the read sibling of
     /// `tachi_wiki_write`, both carrying a `project` arg) must NOT gain this
     /// args-fallback — it relies on
