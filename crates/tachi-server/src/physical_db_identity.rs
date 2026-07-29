@@ -6,7 +6,7 @@
 //! when one can be resolved without mutating the filesystem.
 
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -42,6 +42,7 @@ pub enum OpenPathBasis {
 pub enum PhysicalStoreMutationState {
     Authorized,
     AmbiguousPhysicalStore,
+    PhysicalIdentityUnavailable,
 }
 
 impl PhysicalStoreMutationState {
@@ -49,6 +50,7 @@ impl PhysicalStoreMutationState {
         match self {
             Self::Authorized => "authorized",
             Self::AmbiguousPhysicalStore => "ambiguous_physical_store",
+            Self::PhysicalIdentityUnavailable => "physical_identity_unavailable",
         }
     }
 }
@@ -188,6 +190,12 @@ impl PhysicalMutationAuthority {
             &canonical_path,
             force_canonical_identity,
         );
+        if matches!(physical_identity, IdentityKey::Canonical(_)) {
+            return Err(format!(
+                "invariant: mutation authority for {} requires a stable physical file identity; canonical path alone is read-only evidence",
+                path.display()
+            ));
+        }
         let path_state = MutationPathState {
             is_symlink: link_metadata.file_type().is_symlink(),
             is_regular_file: resolved_metadata.is_file(),
@@ -294,7 +302,7 @@ struct ResolvedPath {
     canonical_path: String,
     key: IdentityKey,
     sidecar_score: u8,
-    mutation_authority: PhysicalMutationAuthority,
+    mutation_authority: Option<PhysicalMutationAuthority>,
 }
 
 pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> PhysicalDbInventory {
@@ -335,16 +343,29 @@ pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> Physic
                 .iter()
                 .flat_map(|path| {
                     [
-                        (path.path.clone(), path.sidecar_score),
+                        (path.path.clone(), path.sidecar_score, true),
                         (
                             path.canonical_path.clone(),
                             sqlite_sidecar_score(Path::new(&path.canonical_path)),
+                            false,
                         ),
                     ]
                 })
                 .collect::<Vec<_>>();
-            open_candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            open_candidates.dedup_by(|a, b| a.0 == b.0);
+            open_candidates.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| b.2.cmp(&a.2))
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            let mut seen_candidate_paths = BTreeSet::new();
+            let mut seen_sidecar_owners = BTreeSet::new();
+            open_candidates.retain(|candidate| {
+                if !seen_candidate_paths.insert(candidate.0.clone()) {
+                    return false;
+                }
+                candidate.1 == 0
+                    || seen_sidecar_owners.insert(sqlite_sidecar_owner_key(Path::new(&candidate.0)))
+            });
             let mut sidecar_paths = open_candidates
                 .iter()
                 .filter(|candidate| candidate.1 > 0)
@@ -353,7 +374,7 @@ pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> Physic
             sidecar_paths.sort();
             sidecar_paths.dedup();
             let (open_path, open_path_basis) = match open_candidates.first() {
-                Some((path, score)) if *score > 0 => {
+                Some((path, score, _)) if *score > 0 => {
                     let basis = match *score {
                         3 => OpenPathBasis::WalAndShmVisible,
                         2 => OpenPathBasis::WalVisible,
@@ -388,21 +409,22 @@ pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> Physic
                 IdentityKey::Unix { device, inode } => format!("unix:{device}:{inode}"),
                 IdentityKey::Canonical(path) => format!("path:{path}"),
             };
+            let primary_authority = paths
+                .iter()
+                .find(|path| path.path == primary_path)
+                .expect("primary alias belongs to its physical store")
+                .mutation_authority
+                .clone();
             let mutation_state = if sidecar_paths.len() > 1 {
                 PhysicalStoreMutationState::AmbiguousPhysicalStore
+            } else if primary_authority.is_none() {
+                PhysicalStoreMutationState::PhysicalIdentityUnavailable
             } else {
                 PhysicalStoreMutationState::Authorized
             };
-            let mutation_authority = (mutation_state
-                == PhysicalStoreMutationState::Authorized)
-                .then(|| {
-                    paths
-                        .iter()
-                        .find(|path| path.path == primary_path)
-                        .expect("primary alias belongs to its physical store")
-                        .mutation_authority
-                        .clone()
-                });
+            let mutation_authority = (mutation_state == PhysicalStoreMutationState::Authorized)
+                .then_some(primary_authority)
+                .flatten();
 
             PhysicalDbStore {
                 physical_id,
@@ -492,21 +514,13 @@ fn resolve_path(path: &Path) -> Result<ResolvedPath, UnresolvedDbPath> {
         });
     }
 
-    let mutation_authority = match PhysicalMutationAuthority::capture(path) {
-        Ok(authority) => authority,
-        Err(error) => {
-            return Err(UnresolvedDbPath {
-                path: path.to_path_buf(),
-                is_symlink,
-                symlink_target,
-                target_exists: is_symlink.then_some(true),
-                failure_kind: InventoryFailureKind::Other,
-                error,
-            });
-        }
-    };
-    let canonical_path = mutation_authority.canonical_path.display().to_string();
-    let key = mutation_authority.physical_identity.clone();
+    let canonical_path_buf = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let key = identity_key(&metadata, &canonical_path_buf, false);
+    let canonical_path = canonical_path_buf.display().to_string();
+    // Read-only inventory remains available when the platform cannot expose a
+    // stable physical file identity. Mutation authority does not: canonical
+    // path equality cannot detect replacement of one regular file by another.
+    let mutation_authority = PhysicalMutationAuthority::capture(path).ok();
 
     Ok(ResolvedPath {
         path: path.display().to_string(),
@@ -527,6 +541,37 @@ fn sqlite_sidecar_score(path: &Path) -> u8 {
         .map(|metadata| metadata.len() > 0)
         .unwrap_or(false);
     u8::from(visible_wal) * 2 + u8::from(visible_shm)
+}
+
+/// Identify one live WAL/SHM namespace, not merely one spelling of its main
+/// database path. On macOS `/var/...` and `/private/var/...` can name the same
+/// sidecar files; counting both would falsely turn one owner into an ambiguous
+/// store. Distinct hardlink aliases with copied sidecars retain distinct
+/// sidecar identities and therefore remain fail-closed.
+fn sqlite_sidecar_owner_key(path: &Path) -> String {
+    ["-wal", "-shm"]
+        .into_iter()
+        .filter_map(|suffix| {
+            let sidecar_path = sidecar(path, suffix);
+            let metadata = std::fs::metadata(&sidecar_path).ok()?;
+            if metadata.len() == 0 {
+                return None;
+            }
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.dev() != 0 || metadata.ino() != 0 {
+                    return Some(format!("{suffix}:{}:{}", metadata.dev(), metadata.ino()));
+                }
+            }
+
+            let canonical =
+                std::fs::canonicalize(&sidecar_path).unwrap_or_else(|_| sidecar_path.clone());
+            Some(format!("{suffix}:{}", canonical.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
@@ -635,31 +680,14 @@ mod tests {
     }
 
     #[test]
-    fn canonical_fallback_authority_refuses_replacement_and_target_equality() {
+    fn canonical_fallback_inventory_never_mints_mutation_authority() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source.db");
-        let replacement = dir.path().join("replacement.db");
-        let target = dir.path().join("target.db");
         std::fs::write(&source, b"source object").unwrap();
-        std::fs::write(&replacement, b"replacement object").unwrap();
-        std::fs::write(&target, b"target object").unwrap();
 
-        let authority = PhysicalMutationAuthority::capture_with_canonical_fallback(&source)
-            .expect("portable canonical fallback authority");
-        assert!(matches!(authority.physical_identity, IdentityKey::Canonical(_)));
-        authority
-            .revalidate_for_mutation(Some(&target))
-            .expect("distinct canonical fallback target remains valid");
-        assert!(authority
-            .revalidate_for_mutation(Some(&source))
-            .unwrap_err()
-            .contains("physically equal"));
-
-        std::fs::remove_file(&source).unwrap();
-        std::fs::rename(&replacement, &source).unwrap();
-        assert!(authority
-            .revalidate_for_mutation(Some(&target))
-            .unwrap_err()
-            .contains("canonical identity"));
+        let error = PhysicalMutationAuthority::capture_with_canonical_fallback(&source)
+            .expect_err("canonical-only evidence must never authorize mutation");
+        assert!(error.contains("stable physical file identity"));
+        assert!(error.contains("canonical path alone is read-only evidence"));
     }
 }

@@ -567,7 +567,12 @@ fn scan_marks_multiple_live_hardlink_sidecars_ambiguous_and_disables_autofix() {
         },
     );
     assert_eq!(report.summary.total_databases, 1);
-    assert_eq!(report.physical_stores[0].sidecar_paths.len(), 2);
+    assert_eq!(
+        report.physical_stores[0].sidecar_paths.len(),
+        2,
+        "sidecar owners: {:?}",
+        report.physical_stores[0].sidecar_paths
+    );
     assert_eq!(
         report.physical_stores[0].mutation_state,
         crate::physical_db_identity::PhysicalStoreMutationState::AmbiguousPhysicalStore

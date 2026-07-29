@@ -191,10 +191,7 @@ fn planned_mutation_authority_fixture(
     std::path::PathBuf,
     std::path::PathBuf,
     Vec<crate::bootstrap::TidyMigration>,
-    std::collections::BTreeMap<
-        String,
-        crate::physical_db_identity::PhysicalMutationAuthority,
-    >,
+    std::collections::BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority>,
     crate::bootstrap::MigrationConfig,
 ) {
     let root = crate::utils::test_fixture_path(format!(
@@ -213,7 +210,9 @@ fn planned_mutation_authority_fixture(
         .unwrap();
     drop(target_store);
     let mut source_store = MemoryStore::open(source.to_str().unwrap()).unwrap();
-    source_store.upsert(&make_entry("scanned-source-row")).unwrap();
+    source_store
+        .upsert(&make_entry("scanned-source-row"))
+        .unwrap();
     drop(source_store);
 
     let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
@@ -221,7 +220,11 @@ fn planned_mutation_authority_fixture(
     let plan = crate::bootstrap::build_migration_plan(&report, &target, &archive_root, &root);
     assert_eq!(plan.len(), 1, "fixture must produce one migration plan");
     let authorities = crate::bootstrap::authorized_migration_sources(&report);
-    assert_eq!(authorities.len(), 1, "fixture must bind one physical source");
+    assert_eq!(
+        authorities.len(),
+        1,
+        "fixture must bind one physical source"
+    );
     let cfg = crate::bootstrap::MigrationConfig {
         target_db: target.clone(),
         manifest_path: app_home.join("manifest.json"),
@@ -253,7 +256,10 @@ fn tidy_execute_refuses_symlink_substitution_after_scan_before_source_open() {
     assert_eq!(summary.failed_count, 1);
     assert_eq!(summary.migrated_count, 0);
     assert!(summary.outcomes[0].message.contains("canonical identity"));
-    assert!(source.is_symlink(), "substituted source must remain untouched");
+    assert!(
+        source.is_symlink(),
+        "substituted source must remain untouched"
+    );
     assert!(
         replacement.exists(),
         "replacement object must never be opened or archived"
@@ -287,7 +293,7 @@ fn tidy_execute_refuses_replaced_source_inode_after_plan_before_source_open() {
     let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorities).unwrap();
     assert_eq!(summary.failed_count, 1);
     assert_eq!(summary.migrated_count, 0);
-    assert!(summary.outcomes[0].message.contains("canonical identity"));
+    assert!(summary.outcomes[0].message.contains("physical identity"));
     assert!(source.exists(), "replacement source must remain untouched");
     assert!(
         !std::path::Path::new(&plan[0].archive_path).exists(),
