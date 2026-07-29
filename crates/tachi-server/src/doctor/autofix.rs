@@ -22,36 +22,6 @@ thread_local! {
 
 // ─── Auto-fix ────────────────────────────────────────────────────────────────
 
-/// Apply the SAFE auto-fix categories: quarantine placeholders, copy-checkpoint
-/// WAL orphans. This compatibility entry point captures a fresh physical
-/// authority for each explicit caller path. Inventory callers must use
-/// `auto_fix_authorized`, which preserves the scan-time authority instead.
-pub fn auto_fix_safe(findings: &[DoctorFinding], quarantine_root: &Path) -> Vec<AutoFixAction> {
-    let mut actions = Vec::new();
-    let mut authorized_findings = Vec::new();
-    for finding in findings {
-        match crate::physical_db_identity::PhysicalMutationAuthority::capture(Path::new(
-            &finding.path,
-        )) {
-            Ok(authority) => authorized_findings.push((finding.clone(), authority)),
-            Err(reason) => actions.push(AutoFixAction {
-                path: finding.path.clone(),
-                action: "doctor_autofix".to_string(),
-                outcome: "skipped".to_string(),
-                note: format!(
-                    "invariant: explicit doctor mutation path could not be bound to a physical object: {reason}"
-                ),
-                destination: None,
-            }),
-        }
-    }
-    actions.extend(apply_explicitly_authorized(
-        &authorized_findings,
-        quarantine_root,
-    ));
-    actions
-}
-
 pub(crate) fn auto_fix_authorized(
     findings: &[DoctorFinding],
     authorities: &BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority>,
