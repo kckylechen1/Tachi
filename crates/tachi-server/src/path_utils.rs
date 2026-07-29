@@ -60,7 +60,7 @@ pub(crate) fn manifest_db_leaf_exists(entry: &crate::manifest::DbEntry) -> Resul
         Ok(std::path::Path::new(&entry.path).exists())
     }
 }
-pub(crate) use home::tachi_home;
+pub(crate) use home::{resolve_tachi_home, tachi_home, TachiHomeSource};
 pub(crate) use named::{
     list_named_projects, list_named_projects_in_home, named_project_for_db_path,
     named_project_for_db_path_in_home, named_project_from_path_in_home,
