@@ -369,7 +369,63 @@ pub(crate) fn ensure_memories_scored_count(conn: &Connection) -> Result<(), Memo
 pub(crate) fn install_recall_impression_ledger_schema(
     conn: &Connection,
 ) -> Result<(), MemoryError> {
-    execute_batch_retry(conn, ddl::RECALL_IMPRESSION_LEDGER_SQL)
+    execute_batch_retry(conn, ddl::RECALL_IMPRESSION_LEDGER_V26_SQL)
+}
+
+/// Install the historical v25 schema only as a step in the in-order migration
+/// runner. New provisioning reaches v26 in the same transaction immediately
+/// afterward; no current database is left at this shape by this binary.
+pub(crate) fn install_v25_recall_impression_ledger_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::RECALL_IMPRESSION_LEDGER_V25_SQL)
+}
+
+/// Upgrade the v25 group table without inventing query fingerprints or replay
+/// policy for rows whose source query and historical algorithm are unavailable.
+pub(crate) fn migrate_recall_impression_ledger_to_v26(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    if !has_column(conn, "recall_impression_groups", "query_hash")? {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v25 recall impression ledger: query_hash is missing".to_string(),
+        ));
+    }
+
+    // Rebuild both tables rather than merely adding nullable columns. That
+    // preserves the v26 all-or-none policy CHECK for future writes while
+    // retaining each historical v25 group as an explicitly unversioned row.
+    // The caller's outer migration transaction makes this table swap atomic.
+    execute_batch_retry(
+        conn,
+        "ALTER TABLE recall_impressions RENAME TO recall_impressions_v25;
+         ALTER TABLE recall_impression_groups RENAME TO recall_impression_groups_v25;
+         DROP INDEX idx_recall_impression_groups_created;
+         DROP INDEX idx_recall_impression_groups_query_hash;
+         DROP INDEX idx_recall_impressions_memory;
+         DROP INDEX idx_recall_impressions_group_final_rank;",
+    )?;
+    install_recall_impression_ledger_schema(conn)?;
+    // NULL is the only honest migration value: v25 did not persist query text
+    // or replay-policy provenance, so neither can be reconstructed now.
+    conn.execute(
+        "INSERT INTO recall_impression_groups (group_id, created_at, legacy_query_bucket, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count, replay_count)
+         SELECT group_id, created_at, query_hash, NULL, NULL, NULL, NULL, NULL, NULL, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count, replay_count
+         FROM recall_impression_groups_v25",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO recall_impressions (group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall)
+         SELECT group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall
+         FROM recall_impressions_v25",
+        [],
+    )?;
+    execute_batch_retry(
+        conn,
+        "DROP TABLE recall_impressions_v25;
+         DROP TABLE recall_impression_groups_v25;",
+    )?;
+    validate_recall_impression_ledger_schema(conn)
 }
 
 pub(crate) fn validate_recall_impression_ledger_schema(
@@ -389,7 +445,7 @@ pub(crate) fn validate_recall_impression_ledger_schema(
         ),
         (
             "index",
-            "idx_recall_impression_groups_query_hash",
+            "idx_recall_impression_groups_fingerprint",
             "recall_impression_groups",
         ),
         (
@@ -402,6 +458,15 @@ pub(crate) fn validate_recall_impression_ledger_schema(
             "idx_recall_impressions_group_final_rank",
             "recall_impressions",
         ),
+    ];
+    const REQUIRED_GROUP_COLUMNS: &[&str] = &[
+        "legacy_query_bucket",
+        "query_fingerprint",
+        "fusion_policy_version",
+        "pre_boost_adjustment_version",
+        "tie_break_policy_version",
+        "candidate_policy_version",
+        "schema_identity",
     ];
 
     for (object_type, name, table) in REQUIRED_OBJECTS {
@@ -417,7 +482,14 @@ pub(crate) fn validate_recall_impression_ledger_schema(
         };
         if !present {
             return Err(MemoryError::InvalidArg(format!(
-                "incomplete v25 recall impression ledger: required {object_type} '{name}' on '{table}' is missing"
+                "incomplete v26 recall impression ledger: required {object_type} '{name}' on '{table}' is missing"
+            )));
+        }
+    }
+    for column in REQUIRED_GROUP_COLUMNS {
+        if !has_column(conn, "recall_impression_groups", column)? {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v26 recall impression ledger: required column '{column}' is missing"
             )));
         }
     }

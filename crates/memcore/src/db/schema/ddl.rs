@@ -975,10 +975,11 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_identity_admissions_connection ON identity_admissions(connection_id);
 "#;
 
-/// Canonical fresh-init and v25 migration DDL for the sampled, content-free
-/// recall impression ledger (tachi#1447). Keeping one SQL definition prevents
-/// the migration path from drifting from newly provisioned databases.
-pub(super) const RECALL_IMPRESSION_LEDGER_SQL: &str = r#"
+/// Historical v25 DDL for the sampled, content-free recall impression ledger
+/// (tachi#1447). It exists only so the versioned migration sequence can build
+/// the same v25 shape before v26 upgrades it; new databases end at
+/// [`RECALL_IMPRESSION_LEDGER_V26_SQL`].
+pub(super) const RECALL_IMPRESSION_LEDGER_V25_SQL: &str = r#"
         CREATE TABLE IF NOT EXISTS recall_impression_groups (
             group_id         TEXT PRIMARY KEY,
             created_at       TEXT NOT NULL,
@@ -1000,6 +1001,84 @@ pub(super) const RECALL_IMPRESSION_LEDGER_SQL: &str = r#"
             ON recall_impression_groups(created_at DESC, group_id);
         CREATE INDEX IF NOT EXISTS idx_recall_impression_groups_query_hash
             ON recall_impression_groups(query_hash, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS recall_impressions (
+            group_id              TEXT NOT NULL,
+            memory_id             TEXT NOT NULL,
+            vector_score          REAL NOT NULL,
+            fts_score             REAL NOT NULL,
+            symbolic_score        REAL NOT NULL,
+            decay_score           REAL NOT NULL,
+            vec_rank              INTEGER,
+            fts_rank              INTEGER,
+            sym_rank              INTEGER,
+            merge_adjustment      TEXT NOT NULL CHECK (merge_adjustment IN ('none', 'exact_id', 'superseded_scale', 'exact_id_superseded_scale')),
+            pre_boost_score       REAL NOT NULL,
+            pre_boost_rank        INTEGER NOT NULL,
+            tie_break_epoch_millis INTEGER NOT NULL,
+            final_score           REAL NOT NULL,
+            final_rank            INTEGER NOT NULL,
+            scored                INTEGER NOT NULL CHECK (scored IN (0, 1)),
+            scored_returned       INTEGER NOT NULL CHECK (scored_returned IN (0, 1)),
+            access_count_at_recall INTEGER NOT NULL,
+            PRIMARY KEY (group_id, memory_id),
+            FOREIGN KEY (group_id) REFERENCES recall_impression_groups(group_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_recall_impressions_memory
+            ON recall_impressions(memory_id, group_id);
+        CREATE INDEX IF NOT EXISTS idx_recall_impressions_group_final_rank
+            ON recall_impressions(group_id, final_rank, memory_id);
+"#;
+
+/// Canonical current (v26) DDL for the sampled, content-free recall
+/// impression ledger. `legacy_query_bucket` is v25's 32-bit FNV value after a
+/// name-correcting migration: it is non-unique compatibility evidence only,
+/// never query identity and never a join/cohort key. New groups leave it NULL
+/// and persist `query_fingerprint` instead.
+pub(super) const RECALL_IMPRESSION_LEDGER_V26_SQL: &str = r#"
+        CREATE TABLE IF NOT EXISTS recall_impression_groups (
+            group_id         TEXT PRIMARY KEY,
+            created_at       TEXT NOT NULL,
+            legacy_query_bucket TEXT,
+            query_fingerprint TEXT,
+            fusion_policy_version TEXT,
+            pre_boost_adjustment_version TEXT,
+            tie_break_policy_version TEXT,
+            candidate_policy_version TEXT,
+            schema_identity TEXT,
+            weights_profile  TEXT NOT NULL,
+            semantic_weight  REAL NOT NULL,
+            fts_weight       REAL NOT NULL,
+            symbolic_weight  REAL NOT NULL,
+            decay_weight     REAL NOT NULL,
+            use_rrf          INTEGER NOT NULL CHECK (use_rrf IN (0, 1)),
+            rrf_k            REAL NOT NULL,
+            top_k            INTEGER NOT NULL,
+            candidate_count  INTEGER NOT NULL,
+            displayed_count  INTEGER NOT NULL,
+            scored_returned_count INTEGER NOT NULL,
+            replay_count     INTEGER NOT NULL DEFAULT 0,
+            CHECK (
+                (query_fingerprint IS NULL
+                 AND fusion_policy_version IS NULL
+                 AND pre_boost_adjustment_version IS NULL
+                 AND tie_break_policy_version IS NULL
+                 AND candidate_policy_version IS NULL
+                 AND schema_identity IS NULL)
+                OR
+                (length(query_fingerprint) = 64
+                 AND fusion_policy_version IS NOT NULL
+                 AND pre_boost_adjustment_version IS NOT NULL
+                 AND tie_break_policy_version IS NOT NULL
+                 AND candidate_policy_version IS NOT NULL
+                 AND schema_identity IS NOT NULL)
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_recall_impression_groups_created
+            ON recall_impression_groups(created_at DESC, group_id);
+        CREATE INDEX IF NOT EXISTS idx_recall_impression_groups_fingerprint
+            ON recall_impression_groups(query_fingerprint, created_at DESC)
+            WHERE query_fingerprint IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS recall_impressions (
             group_id              TEXT NOT NULL,

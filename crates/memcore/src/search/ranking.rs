@@ -7,7 +7,9 @@ use std::time::Instant;
 use crate::{
     db::{get_access_times, get_superseded_ids, get_use_access_times},
     error::MemoryError,
-    recall_impressions::{RecallImpressionPayload, RecallImpressionRowDraft},
+    recall_impressions::{
+        query_fingerprint, RecallImpressionPayload, RecallImpressionRowDraft, RecallReplayPolicy,
+    },
     scorer::{
         apply_pre_boost_adjustment, cosine_similarity, is_id_like_exact_query, DecayPolicyContext,
         PreBoostAdjustment,
@@ -375,7 +377,8 @@ fn build_impression_payload(
     RecallImpressionPayload {
         group_id: uuid::Uuid::new_v4().to_string(),
         created_at: crate::db::now_utc_iso(),
-        query_hash: crate::db::query_hash(query),
+        query_fingerprint: query_fingerprint(query),
+        replay_policy: RecallReplayPolicy::current(),
         weights_profile: weights_profile.to_string(),
         weights: weights.clone(),
         rrf_k: recall_config(opts).rrf_k,
