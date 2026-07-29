@@ -16,6 +16,14 @@ use super::types::{CandidateGroup, GroupPayload};
 
 const DAILY_DISTILL_SOURCE_SET_CONTRACT: &str = "daily-distill-source-set-v1";
 
+#[derive(serde::Serialize)]
+struct DailyDistillSourceSetIdentityV1<'a> {
+    contract: &'static str,
+    path_prefix: &'a str,
+    coherence_key: &'a str,
+    source_memory_ids: &'a [String],
+}
+
 pub(super) fn normalized_source_memory_ids(group: &CandidateGroup) -> Vec<String> {
     let mut source_ids = group
         .entries
@@ -31,59 +39,123 @@ pub(super) fn stable_distill_memory_id(
     group: &CandidateGroup,
     source_memory_ids: &[String],
 ) -> String {
-    let identity = json!({
-        "contract": DAILY_DISTILL_SOURCE_SET_CONTRACT,
-        "path_prefix": group.path_prefix,
-        "coherence_key": group.coherence_key,
-        "source_memory_ids": source_memory_ids,
-    });
+    let identity = serialized_source_set_identity_bytes(group, source_memory_ids);
     format!(
         "distill:{}",
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.to_string().as_bytes())
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity)
     )
 }
 
-fn validate_existing_distill_winner(
+pub(super) fn serialized_source_set_identity_bytes(
+    group: &CandidateGroup,
+    source_memory_ids: &[String],
+) -> Vec<u8> {
+    serde_json::to_vec(&DailyDistillSourceSetIdentityV1 {
+        contract: DAILY_DISTILL_SOURCE_SET_CONTRACT,
+        path_prefix: &group.path_prefix,
+        coherence_key: &group.coherence_key,
+        source_memory_ids,
+    })
+    .expect("serializing the daily-distill v1 string payload to Vec cannot fail")
+}
+
+fn daily_distill_identity_conflict(expected_id: &str, reason: &str) -> MemoryError {
+    MemoryError::InvalidArg(format!(
+        "daily_distill_identity_conflict: daily distill source-set identity collision for {expected_id}: {reason}"
+    ))
+}
+
+pub(super) fn validate_existing_distill_winner(
     existing: &MemoryEntry,
     expected_id: &str,
+    expected_path_prefix: &str,
+    expected_coherence_key: &str,
     expected_source_ids: &[String],
 ) -> Result<(), MemoryError> {
-    let mut stored_source_ids = existing
+    let source_ids_match = existing
         .metadata
         .get("source_memory_ids")
         .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
-        .collect::<Vec<_>>();
-    stored_source_ids.sort();
-    stored_source_ids.dedup();
-    let contract_matches = existing
-        .metadata
-        .get("source_set_contract")
-        .and_then(|value| value.as_str())
-        == Some(DAILY_DISTILL_SOURCE_SET_CONTRACT);
-    let identity_matches = existing
-        .metadata
-        .get("source_set_identity")
-        .and_then(|value| value.as_str())
-        == Some(expected_id);
-    if existing.source != FOUNDRY_DISTILL_SOURCE
-        || !contract_matches
-        || !identity_matches
-        || stored_source_ids != expected_source_ids
-    {
-        return Err(MemoryError::InvalidArg(format!(
-            "daily distill source-set identity collision for {expected_id}"
-        )));
+        .is_some_and(|stored| {
+            stored.len() == expected_source_ids.len()
+                && stored
+                    .iter()
+                    .zip(expected_source_ids)
+                    .all(|(actual, expected)| actual.as_str() == Some(expected.as_str()))
+        });
+    let metadata_string_matches = |key: &str, expected: &str| {
+        existing.metadata.get(key).and_then(|value| value.as_str()) == Some(expected)
+    };
+
+    if existing.id != expected_id {
+        return Err(daily_distill_identity_conflict(
+            expected_id,
+            "row id does not match the canonical id",
+        ));
     }
+    if existing.source != FOUNDRY_DISTILL_SOURCE {
+        return Err(daily_distill_identity_conflict(
+            expected_id,
+            "row source is not foundry_distill",
+        ));
+    }
+    if !metadata_string_matches("source_set_contract", DAILY_DISTILL_SOURCE_SET_CONTRACT) {
+        return Err(daily_distill_identity_conflict(
+            expected_id,
+            "source_set_contract is missing or mismatched",
+        ));
+    }
+    if !metadata_string_matches("source_set_identity", expected_id) {
+        return Err(daily_distill_identity_conflict(
+            expected_id,
+            "source_set_identity is missing or mismatched",
+        ));
+    }
+    if !metadata_string_matches("source_path_prefix", expected_path_prefix) {
+        return Err(daily_distill_identity_conflict(
+            expected_id,
+            "source_path_prefix is missing or mismatched",
+        ));
+    }
+    if !metadata_string_matches("coherence_key", expected_coherence_key) {
+        return Err(daily_distill_identity_conflict(
+            expected_id,
+            "coherence_key is missing or mismatched",
+        ));
+    }
+    if !source_ids_match {
+        return Err(daily_distill_identity_conflict(
+            expected_id,
+            "source_memory_ids is not the exact canonical string array",
+        ));
+    }
+
+    let recomputed_id = format!(
+        "distill:{}",
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            &serde_json::to_vec(&DailyDistillSourceSetIdentityV1 {
+                contract: DAILY_DISTILL_SOURCE_SET_CONTRACT,
+                path_prefix: expected_path_prefix,
+                coherence_key: expected_coherence_key,
+                source_memory_ids: expected_source_ids,
+            })
+            .expect("serializing the validated daily-distill v1 payload cannot fail"),
+        )
+    );
+    if recomputed_id != expected_id {
+        return Err(daily_distill_identity_conflict(
+            expected_id,
+            "canonical fields do not recompute to the occupied id",
+        ));
+    }
+
     Ok(())
 }
 
-/// Claim every source before writing the candidate projection. The candidate
-/// id is generated before this transaction and `superseded_by` is deliberately
-/// not a foreign key, so the operation can fail fast on a stale source without
-/// even tentatively writing its replacement row.
+/// Claim archiveable sources only after this transaction wins the canonical
+/// insert. A stale source aborts the transaction and rolls the tentative
+/// replacement row back before any projection becomes visible.
 fn claim_distilled_sources<'a>(
     replacement: &mut ImmutableSupersessionTransaction<'_>,
     distill_entry: &MemoryEntry,
@@ -137,6 +209,9 @@ fn write_distill_entry(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
     source_entries: &[MemoryEntry],
+    expected_path_prefix: &str,
+    expected_coherence_key: &str,
+    expected_source_ids: &[String],
     derived_id: &str,
     batch_run_id: &str,
 ) -> Result<InsertMemoryResult, String> {
@@ -150,15 +225,13 @@ fn write_distill_entry(
                         entry.id
                     ))
                 })?;
-                let expected_source_ids = entry
-                    .metadata
-                    .get("source_memory_ids")
-                    .and_then(|value| value.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|value| value.as_str().map(ToOwned::to_owned))
-                    .collect::<Vec<_>>();
-                validate_existing_distill_winner(&existing, &entry.id, &expected_source_ids)?;
+                validate_existing_distill_winner(
+                    &existing,
+                    &entry.id,
+                    expected_path_prefix,
+                    expected_coherence_key,
+                    expected_source_ids,
+                )?;
                 return Ok(inserted);
             }
             let claimed_sources = claim_distilled_sources(replacement, entry, source_entries)?;
@@ -214,7 +287,7 @@ pub(crate) fn persist_distill_memory(
     let metadata = crate::provenance::inject_provenance(
         server,
         json!({
-            "source_memory_ids": source_memory_ids,
+            "source_memory_ids": source_memory_ids.clone(),
             "source_set_contract": DAILY_DISTILL_SOURCE_SET_CONTRACT,
             "source_set_identity": memory_id,
             "source_path_prefix": group.path_prefix,
@@ -271,10 +344,28 @@ pub(crate) fn persist_distill_memory(
     let derived_id = format!("derived:{memory_id}");
     let _inserted = match project {
         Some(name) => server.with_named_project_store(name, |store| {
-            write_distill_entry(store, &entry, &group.entries, &derived_id, batch_run_id)
+            write_distill_entry(
+                store,
+                &entry,
+                &group.entries,
+                &group.path_prefix,
+                &group.coherence_key,
+                &source_memory_ids,
+                &derived_id,
+                batch_run_id,
+            )
         }),
         None => server.with_project_store(|store| {
-            write_distill_entry(store, &entry, &group.entries, &derived_id, batch_run_id)
+            write_distill_entry(
+                store,
+                &entry,
+                &group.entries,
+                &group.path_prefix,
+                &group.coherence_key,
+                &source_memory_ids,
+                &derived_id,
+                batch_run_id,
+            )
         }),
     }?;
 
