@@ -576,6 +576,22 @@ pub(super) const QUERIES: &[QuerySpec] = &[
     },
 ];
 
+/// Canonical search options for one golden-corpus query. Test-only sibling
+/// measurements reuse this rather than copying the fixture's ranking surface.
+pub(super) fn search_opts(spec: &QuerySpec) -> SearchOptions {
+    SearchOptions {
+        top_k: 40,
+        // Larger than the corpus so no channel's candidate list is truncated;
+        // truncation of a BM25-tied list is a second nondeterminism source.
+        candidates_per_channel: 128,
+        record_access: false,
+        // Pure score sort — MMR reordering needs vectors we do not seed.
+        mmr_threshold: None,
+        path_prefix: (spec.slice == Slice::WikiScoped).then(|| "/wiki".to_string()),
+        ..Default::default()
+    }
+}
+
 const ALL_SLICES: [Slice; 5] = [
     Slice::Summary,
     Slice::KeywordBag,
@@ -598,18 +614,8 @@ fn rank_of(
     spec: &QuerySpec,
     recall_config: Option<RecallConfig>,
 ) -> Option<usize> {
-    let opts = SearchOptions {
-        top_k: 40,
-        // Larger than the corpus so no channel's candidate list is truncated;
-        // truncation of a BM25-tied list is a second nondeterminism source.
-        candidates_per_channel: 128,
-        record_access: false,
-        // Pure score sort — MMR reordering needs vectors we do not seed.
-        mmr_threshold: None,
-        path_prefix: (spec.slice == Slice::WikiScoped).then(|| "/wiki".to_string()),
-        recall_config,
-        ..Default::default()
-    };
+    let mut opts = search_opts(spec);
+    opts.recall_config = recall_config;
     let mut results = hybrid_search(conn, spec.query, &opts).unwrap();
     results.sort_by(|a, b| {
         b.score

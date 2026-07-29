@@ -171,23 +171,16 @@ pub(super) fn rank_candidate_entries(
     );
     let pre_boost_scores = capture_impression.then(|| scores.clone());
 
-    apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
-    apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
-    apply_access_feedback(
-        &entries_ref,
-        &access_times,
-        recall_config(opts),
-        &mut scores,
-    );
-    apply_tier_boosts(&entries_ref, &mut scores);
-    apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
-    apply_decision_boost(query, &entries_ref, &mut scores);
-    apply_lexical_overlap_boost(
+    let mut boost_observer = NoopBoostSequenceObserver;
+    let boost_context = BoostSequenceContext {
         query,
-        opts.path_prefix.as_deref(),
-        &entries_ref,
-        &mut scores,
-    );
+        opts,
+        entries_ref: &entries_ref,
+        weights: &weights,
+        access_times: &access_times,
+        superseded_ids: &superseded_ids,
+    };
+    apply_production_boost_sequence(&boost_context, &mut scores, &mut boost_observer);
 
     // The scorer invariant: these are exactly the post-merge/post-boost score
     // keys, before MMR or `top_k` can remove displayed results. Sorting makes
@@ -916,6 +909,92 @@ fn apply_lexical_overlap_boost(
     }
 }
 
+/// Test-only observers can snapshot the exact production boost sequence
+/// without owning a second list of boost calls. The default observer is a
+/// statically dispatched no-op, so it cannot alter ranking behavior or order.
+trait BoostSequenceObserver {
+    #[inline]
+    fn before_step(&mut self, _label: &'static str, _scores: &HashMap<String, HybridScore>) {}
+
+    #[inline]
+    fn after_step(&mut self, _label: &'static str, _scores: &HashMap<String, HybridScore>) {}
+}
+
+struct NoopBoostSequenceObserver;
+
+impl BoostSequenceObserver for NoopBoostSequenceObserver {}
+
+struct BoostSequenceContext<'a> {
+    query: &'a str,
+    opts: &'a SearchOptions,
+    entries_ref: &'a HashMap<String, &'a MemoryEntry>,
+    weights: &'a crate::scorer::HybridWeights,
+    access_times: &'a HashMap<String, Vec<f64>>,
+    superseded_ids: &'a HashSet<String>,
+}
+
+/// The one production-owned boost order. Measurement observers see each
+/// sequential marginal transition around the same calls production executes.
+fn apply_production_boost_sequence<O: BoostSequenceObserver>(
+    context: &BoostSequenceContext<'_>,
+    scores: &mut HashMap<String, HybridScore>,
+    observer: &mut O,
+) {
+    macro_rules! apply_step {
+        ($label:literal, $apply:expr) => {{
+            observer.before_step($label, scores);
+            $apply;
+            observer.after_step($label, scores);
+        }};
+    }
+
+    apply_step!(
+        "precision",
+        apply_precision_boosts(
+            context.query,
+            context.opts,
+            context.entries_ref,
+            context.weights,
+            scores,
+        )
+    );
+    apply_step!(
+        "quality",
+        apply_quality_boosts(
+            context.opts.path_prefix.as_deref(),
+            context.entries_ref,
+            scores,
+        )
+    );
+    apply_step!(
+        "access_feedback",
+        apply_access_feedback(
+            context.entries_ref,
+            context.access_times,
+            recall_config(context.opts),
+            scores,
+        )
+    );
+    apply_step!("tier", apply_tier_boosts(context.entries_ref, scores));
+    apply_step!(
+        "entity_recency",
+        apply_entity_recency_boosts(context.entries_ref, context.superseded_ids, scores)
+    );
+    apply_step!(
+        "decision",
+        apply_decision_boost(context.query, context.entries_ref, scores)
+    );
+    apply_step!(
+        "lexical_overlap",
+        apply_lexical_overlap_boost(
+            context.query,
+            context.opts.path_prefix.as_deref(),
+            context.entries_ref,
+            scores,
+        )
+    );
+}
+
 fn soft_token_set(text: &str) -> std::collections::HashSet<String> {
     crate::scorer::tokenize(text)
         .into_iter()
@@ -1124,26 +1203,15 @@ fn apply_mmr_diversity(
 // decomposition. See `search/tests/rank_attribution.rs` for the JSONL driver
 // that runs this against the golden_corpus / ops_audit_corpus fixtures.
 //
-// Zero production overhead: this entire module is `#[cfg(test)]`-gated (the
-// same convention `mod tests` below already uses) — a default `cargo build`
-// / `cargo build --release` / `cargo clippy` (without `--tests`) does not
-// compile any of it, so there is no runtime branch, no allocation, and no
-// code-size cost on the production path. The only non-test-gated change
-// this leaf makes to `rank_candidate_entries` above is the
-// `merge_pre_boost_scores` extraction — a pure code-motion (identical calls,
-// identical order, identical values); `rank_candidate_entries`'s own
-// behavior is unchanged.
+// The attribution module itself is `#[cfg(test)]`-gated. Production owns the
+// boost sequence and passes its statically dispatched no-op observer; the
+// calls, arguments, and order are unchanged, while test builds can snapshot
+// those same transitions without a second sequence to maintain.
 //
-// This does NOT re-derive the boost math: every step below calls the exact
-// same private `apply_*_boost` functions the production sequence
-// (ranking.rs `rank_candidate_entries`, the `apply_precision_boosts` .. `
-// apply_lexical_overlap_boost` calls) invokes, in the same order, on a
-// snapshot-observed clone of the identical pre-boost baseline
-// (`merge_pre_boost_scores`). The one thing NOT shared by construction is
-// the CALL SEQUENCE ITSELF (7 one-line calls, listed a second time below) —
-// if a future change adds/removes/reorders a boost in `rank_candidate_entries`,
-// this module's list must be updated to match by hand; there is no
-// compile-time link between the two sequences, only this comment.
+// This does NOT re-derive the boost math or its call sequence: attribution
+// passes a snapshot observer to `apply_production_boost_sequence`, the same
+// production-owned function used by `rank_candidate_entries`. A future
+// add/remove/reorder therefore changes the measured sequence with production.
 #[cfg(test)]
 pub(super) mod attribution {
     use super::*;
@@ -1159,6 +1227,8 @@ pub(super) mod attribution {
         pub(crate) label: &'static str,
         before: HashMap<String, f64>,
         after: HashMap<String, f64>,
+        before_ranks: HashMap<String, usize>,
+        after_ranks: HashMap<String, usize>,
     }
 
     impl BoostStep {
@@ -1183,11 +1253,40 @@ pub(super) mod attribution {
             self.multiplier_for(id)
                 .is_some_and(|m| (m - 1.0).abs() > 1e-9)
         }
+
+        /// Sequential marginal candidate-query observations whose exact rank
+        /// changed across this step. The same memory id in different queries
+        /// is counted once per query; this is not a unique-memory-id count.
+        pub(crate) fn sequential_changed_candidate_query_observations(&self) -> usize {
+            self.before_ranks
+                .iter()
+                .filter(|(id, rank)| self.after_ranks.get(*id) != Some(*rank))
+                .count()
+        }
+
+        /// Sequential marginal pairwise order inversions introduced by this
+        /// step, using the same score/timestamp/id total order as production.
+        pub(crate) fn sequential_pairwise_inversions(&self) -> usize {
+            let mut ids = self.before_ranks.keys().collect::<Vec<_>>();
+            ids.sort();
+            ids.iter()
+                .enumerate()
+                .flat_map(|(left_index, left)| {
+                    ids[left_index + 1..]
+                        .iter()
+                        .map(move |right| (*left, *right))
+                })
+                .filter(|(left, right)| {
+                    self.before_ranks[*left].cmp(&self.before_ranks[*right])
+                        != self.after_ranks[*left].cmp(&self.after_ranks[*right])
+                })
+                .count()
+        }
     }
 
     /// Full attribution for one ranking call: the pre-boost baseline
     /// `HybridScore` per candidate (vector/FTS/symbolic/decay merge, before
-    /// any boost), each of the 7 boost steps in production order, and the
+    /// any boost), each production boost step in production order, and the
     /// resulting final scores.
     #[derive(Debug, Clone)]
     pub(crate) struct RankAttribution {
@@ -1197,12 +1296,10 @@ pub(super) mod attribution {
     }
 
     /// Attribution twin of `rank_candidate_entries`. Re-derives the same
-    /// pre-boost baseline via the shared `merge_pre_boost_scores` (no
-    /// scoring math duplicated there), then walks the SAME 7 boost calls
-    /// `rank_candidate_entries` makes, in the SAME order, snapshotting
-    /// scores before/after each. Does not sort, apply MMR, or truncate to
-    /// `top_k` — callers that need actual production rank order should call
-    /// `hybrid_search`/`rank_candidate_entries` separately (see
+    /// pre-boost baseline via the shared `merge_pre_boost_scores`, then gives
+    /// the production boost sequence a snapshot observer. Does not sort,
+    /// apply MMR, or truncate to `top_k` — callers that need actual production
+    /// rank order should call `hybrid_search`/`rank_candidate_entries` separately (see
     /// `hybrid_search_with_attribution` in `search.rs`, which does exactly
     /// that pairing).
     pub(crate) fn rank_candidate_entries_with_attribution(
@@ -1291,7 +1388,12 @@ pub(super) mod attribution {
         );
         let base_scores = scores.clone();
 
-        let mut steps: Vec<BoostStep> = Vec::with_capacity(7);
+        struct SnapshotObserver<'entries, 'memory> {
+            entries: &'entries HashMap<String, &'memory MemoryEntry>,
+            pending: Option<(&'static str, HashMap<String, f64>)>,
+            steps: Vec<BoostStep>,
+        }
+
         fn snapshot(scores: &HashMap<String, HybridScore>) -> HashMap<String, f64> {
             scores
                 .iter()
@@ -1299,81 +1401,95 @@ pub(super) mod attribution {
                 .collect()
         }
 
-        let before = snapshot(&scores);
-        apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
-        steps.push(BoostStep {
-            label: "precision",
-            before,
-            after: snapshot(&scores),
-        });
+        fn ranks(
+            scores: &HashMap<String, f64>,
+            entries: &HashMap<String, &MemoryEntry>,
+        ) -> HashMap<String, usize> {
+            let mut ranked = scores
+                .iter()
+                .map(|(id, score)| {
+                    let timestamp = entries
+                        .get(id)
+                        .map(|entry| crate::scorer::timestamp_epoch_millis(&entry.timestamp))
+                        .unwrap_or(i64::MIN);
+                    (id, *score, timestamp)
+                })
+                .collect::<Vec<_>>();
+            ranked.sort_by(|left, right| {
+                crate::scorer::cmp_recall_rank(
+                    (left.1, left.2, left.0),
+                    (right.1, right.2, right.0),
+                )
+            });
+            ranked
+                .into_iter()
+                .enumerate()
+                .map(|(index, (id, _, _))| (id.clone(), index + 1))
+                .collect()
+        }
 
-        let before = snapshot(&scores);
-        apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "quality",
-            before,
-            after: snapshot(&scores),
-        });
+        impl<'entries, 'memory> SnapshotObserver<'entries, 'memory> {
+            fn new(entries: &'entries HashMap<String, &'memory MemoryEntry>) -> Self {
+                Self {
+                    entries,
+                    pending: None,
+                    steps: Vec::new(),
+                }
+            }
 
-        let before = snapshot(&scores);
-        apply_access_feedback(
-            &entries_ref,
-            &access_times,
-            recall_config(opts),
-            &mut scores,
-        );
-        steps.push(BoostStep {
-            label: "access_feedback",
-            before,
-            after: snapshot(&scores),
-        });
+            fn into_steps(self) -> Vec<BoostStep> {
+                assert!(
+                    self.pending.is_none(),
+                    "production boost observer ended in the middle of a step"
+                );
+                self.steps
+            }
+        }
 
-        let before = snapshot(&scores);
-        apply_tier_boosts(&entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "tier",
-            before,
-            after: snapshot(&scores),
-        });
+        impl<'entries, 'memory> BoostSequenceObserver for SnapshotObserver<'entries, 'memory> {
+            fn before_step(&mut self, label: &'static str, scores: &HashMap<String, HybridScore>) {
+                assert!(
+                    self.pending.is_none(),
+                    "production boost observer started {label} before ending the prior step"
+                );
+                self.pending = Some((label, snapshot(scores)));
+            }
 
-        let before = snapshot(&scores);
-        apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
-        steps.push(BoostStep {
-            label: "entity_recency",
-            before,
-            after: snapshot(&scores),
-        });
+            fn after_step(&mut self, label: &'static str, scores: &HashMap<String, HybridScore>) {
+                let (before_label, before) = self
+                    .pending
+                    .take()
+                    .expect("production boost observer ended a step without a snapshot");
+                assert_eq!(
+                    before_label, label,
+                    "production boost observer label mismatch"
+                );
+                let after = snapshot(scores);
+                self.steps.push(BoostStep {
+                    label,
+                    before_ranks: ranks(&before, self.entries),
+                    after_ranks: ranks(&after, self.entries),
+                    before,
+                    after,
+                });
+            }
+        }
 
-        let before = snapshot(&scores);
-        // Renamed on main when Phase 2 dissolved the research-path boost
-        // (`apply_decision_and_research_boosts` -> `apply_decision_boost`).
-        // The label moves with it: a report that still said
-        // "decision_and_research" would name a boost this build does not apply.
-        apply_decision_boost(query, &entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "decision",
-            before,
-            after: snapshot(&scores),
-        });
-
-        let before = snapshot(&scores);
-        apply_lexical_overlap_boost(
+        let mut observer = SnapshotObserver::new(&entries_ref);
+        let boost_context = BoostSequenceContext {
             query,
-            opts.path_prefix.as_deref(),
-            &entries_ref,
-            &mut scores,
-        );
-        steps.push(BoostStep {
-            label: "lexical_overlap",
-            before,
-            after: snapshot(&scores),
-        });
-
+            opts,
+            entries_ref: &entries_ref,
+            weights: &weights,
+            access_times: &access_times,
+            superseded_ids: &superseded_ids,
+        };
+        apply_production_boost_sequence(&boost_context, &mut scores, &mut observer);
         let final_scores = snapshot(&scores);
 
         Ok(RankAttribution {
             base_scores,
-            steps,
+            steps: observer.into_steps(),
             final_scores,
         })
     }
