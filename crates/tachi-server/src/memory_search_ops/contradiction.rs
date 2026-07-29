@@ -233,6 +233,68 @@ pub(crate) fn auto_contradictions_enabled() -> bool {
     )
 }
 
+#[derive(Debug)]
+struct ContradictionPersistBatchOutcome {
+    committed: usize,
+    failure: Option<String>,
+}
+
+fn persist_confirmed_contradiction_batch(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    confirmed: &[(
+        ContradictionCandidate,
+        tachi_llm::Generated<ContradictionVerification>,
+    )],
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&PathBuf>,
+) -> Result<usize, String> {
+    let persist_action = |store: &mut MemoryStore| {
+        let mut committed = 0usize;
+        for (candidate, verified) in confirmed {
+            if let Err(failure) = persist_confirmed_contradiction(store, entry, candidate, verified)
+            {
+                return Ok(ContradictionPersistBatchOutcome {
+                    committed,
+                    failure: Some(failure),
+                });
+            }
+            committed += 1;
+        }
+        Ok(ContradictionPersistBatchOutcome {
+            committed,
+            failure: None,
+        })
+    };
+
+    let outcome = if let Some(project_name) = named_project {
+        server.with_named_project_store(project_name, persist_action)
+    } else if let Some(db_path) = db_path {
+        server.with_path_store(db_path, persist_action)
+    } else {
+        server.with_store_for_scope(target_db, persist_action)
+    }?;
+
+    // Each candidate owns an independent transaction. A later failure cannot
+    // erase an earlier commit, so cache invalidation is keyed to the explicit
+    // committed count rather than the overall batch Result.
+    if outcome.committed > 0 {
+        crate::memory_search_ops::invalidate_recall_cache_after_write(
+            server,
+            "contradiction_supersede",
+        );
+    }
+
+    if let Some(failure) = outcome.failure {
+        return Err(format!(
+            "auto contradiction persistence failed after {} committed candidate(s): {failure}",
+            outcome.committed
+        ));
+    }
+    Ok(outcome.committed)
+}
+
 pub(crate) async fn apply_auto_contradiction_detection(
     server: &MemoryServer,
     entry_id: &str,
@@ -291,43 +353,20 @@ pub(crate) async fn apply_auto_contradiction_detection(
         return Ok(0);
     }
 
-    let persist_action = |store: &mut MemoryStore| {
-        let mut count = 0usize;
-        for (candidate, verified) in &confirmed {
-            persist_confirmed_contradiction(store, &entry, candidate, verified)?;
-            count += 1;
-        }
-        Ok(count)
-    };
-
-    let result = if let Some(project_name) = named_project {
-        server.with_named_project_store(project_name, persist_action)
-    } else if let Some(db_path) = db_path {
-        server.with_path_store(db_path, persist_action)
-    } else {
-        server.with_store_for_scope(target_db, persist_action)
-    };
-
-    // tachi#1435 slice 4 / #2059 codex round 2 (BUG fix): a confirmed
-    // contradiction closes the superseded memory's validity — it drops out
-    // of default search results the same way a fresh save adds a row, so a
-    // stale cached search result that still shows the old (now-superseded)
-    // row must not survive this commit either. Only invalidate on an actual
-    // persisted count > 0, sharing the same choke point + epoch bump as
-    // `save_memory`'s and the enrichment flush's invalidation.
-    if matches!(&result, Ok(count) if *count > 0) {
-        crate::memory_search_ops::invalidate_recall_cache_after_write(
-            server,
-            "contradiction_supersede",
-        );
-    }
-
-    result
+    persist_confirmed_contradiction_batch(
+        server,
+        &entry,
+        &confirmed,
+        target_db,
+        named_project,
+        db_path,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_params::SearchMemoryParams;
     use axum::{
         extract::State,
         http::StatusCode,
@@ -510,6 +549,32 @@ mod tests {
         }
     }
 
+    fn search_params_for(query: &str) -> SearchMemoryParams {
+        SearchMemoryParams {
+            query: query.to_string(),
+            query_vec: None,
+            top_k: 10,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+            format: Some("json".to_string()),
+        }
+    }
+
     #[test]
     fn should_consider_contradiction_requires_overlap_and_newer_fact() {
         let mut new_entry = test_entry("new", "Acme rollout error rate is 7%");
@@ -635,6 +700,194 @@ mod tests {
 
         primary_task.abort();
         fallback_task.abort();
+    }
+
+    /// Regression guard: each candidate commits independently, so a later CAS
+    /// failure must not suppress cache invalidation for an earlier commit.
+    #[tokio::test]
+    async fn partial_batch_failure_invalidates_cache_for_the_committed_candidate() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _cache = crate::memory_search_ops::RecallCacheTestOverride::enabled();
+        let _disable_health = crate::test_support::EnvRestore::set(
+            "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+            "1",
+        );
+        let (provider_url, provider_task) =
+            spawn_verification_provider(VerificationProviderMode::Confirmed).await;
+        let llm = verification_client(provider_url, None);
+        let server = crate::tests::make_server();
+        let needle = format!("PartialContradictionCache{}", uuid::Uuid::new_v4().simple());
+
+        let mut new_entry = test_entry("partial-new", "Acme rollout threshold is now 7%");
+        new_entry.entities = vec!["Acme".to_string()];
+        let mut first_old = test_entry(
+            "old-one",
+            &format!("{needle} Acme rollout threshold was 3%"),
+        );
+        first_old.entities = vec!["Acme".to_string()];
+        let mut second_old = test_entry("old-two", "Acme rollout threshold was 4%");
+        second_old.entities = vec!["Acme".to_string()];
+        let existing_winner = test_entry("existing-winner", "Existing lifecycle winner");
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&new_entry)
+                    .map_err(|error| error.to_string())?;
+                store
+                    .upsert(&first_old)
+                    .map_err(|error| error.to_string())?;
+                store
+                    .upsert(&second_old)
+                    .map_err(|error| error.to_string())?;
+                store
+                    .upsert(&existing_winner)
+                    .map_err(|error| error.to_string())?;
+                store
+                    .mark_superseded_closing_validity(
+                        &second_old.id,
+                        &existing_winner.id,
+                        "2026-07-30T00:00:00Z",
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("seed partial-batch fixture");
+
+        let warm = crate::memory_search_ops::handle_search_memory(
+            &server,
+            search_params_for(&needle),
+            false,
+        )
+        .await
+        .expect("warm recall cache");
+        let warm_rows: serde_json::Value = serde_json::from_str(&warm).expect("warm rows JSON");
+        assert!(
+            warm_rows
+                .as_array()
+                .expect("warm rows array")
+                .iter()
+                .any(|row| row["id"] == first_old.id),
+            "the first candidate must be present in the warmed answer"
+        );
+        let warmed_entries = server
+            .with_global_store_read(|store| {
+                store
+                    .recall_cache_stats()
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read warmed cache stats")
+            .entries;
+        assert!(
+            warmed_entries > 0,
+            "fixture must actually warm recall cache"
+        );
+
+        let first_candidate = ContradictionCandidate {
+            entry: first_old.clone(),
+            shared_entities: vec!["Acme".to_string()],
+            similarity: 0.82,
+            symbolic_score: 0.55,
+        };
+        let second_candidate = ContradictionCandidate {
+            entry: second_old.clone(),
+            shared_entities: vec!["Acme".to_string()],
+            similarity: 0.81,
+            symbolic_score: 0.54,
+        };
+        let first_verified = verify_contradiction_candidate(&llm, &new_entry, &first_candidate)
+            .await
+            .expect("first verification call")
+            .expect("first candidate confirmed");
+        let second_verified = verify_contradiction_candidate(&llm, &new_entry, &second_candidate)
+            .await
+            .expect("second verification call")
+            .expect("second candidate confirmed");
+        let confirmed = vec![
+            (first_candidate, first_verified),
+            (second_candidate, second_verified),
+        ];
+
+        let error = persist_confirmed_contradiction_batch(
+            &server,
+            &new_entry,
+            &confirmed,
+            DbScope::Global,
+            None,
+            None,
+        )
+        .expect_err("second candidate CAS failure must remain loud");
+        assert!(
+            error.contains("after 1 committed candidate(s)")
+                && error.contains("lifecycle CAS refused"),
+            "partial failure must report the committed prefix and root error: {error}"
+        );
+
+        let cache_entries = server
+            .with_global_store_read(|store| {
+                store
+                    .recall_cache_stats()
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read post-failure cache stats")
+            .entries;
+        assert_eq!(
+            cache_entries, 0,
+            "the first committed candidate must invalidate the warmed cache even though the batch returns Err"
+        );
+
+        let (first_edges, second_edges, first_winner, second_winner) = server
+            .with_global_store_read(|store| {
+                let first_edges = store
+                    .get_edges(&new_entry.id, "outgoing", None)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|edge| edge.target_id == first_old.id)
+                    .count();
+                let second_edges = store
+                    .get_edges(&new_entry.id, "outgoing", None)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|edge| edge.target_id == second_old.id)
+                    .count();
+                let first_winner = store
+                    .supersession_target(&first_old.id)
+                    .map_err(|error| error.to_string())?;
+                let second_winner = store
+                    .supersession_target(&second_old.id)
+                    .map_err(|error| error.to_string())?;
+                Ok((first_edges, second_edges, first_winner, second_winner))
+            })
+            .expect("inspect partial-batch mutations");
+        assert_eq!(
+            first_edges, 2,
+            "first candidate transaction must remain committed"
+        );
+        assert_eq!(
+            second_edges, 0,
+            "failed second candidate must leave no edges"
+        );
+        assert_eq!(first_winner, Some(Some(new_entry.id.clone())));
+        assert_eq!(second_winner, Some(Some(existing_winner.id.clone())));
+
+        let fresh = crate::memory_search_ops::handle_search_memory(
+            &server,
+            search_params_for(&needle),
+            false,
+        )
+        .await
+        .expect("fresh search after partial failure");
+        let fresh_rows: serde_json::Value = serde_json::from_str(&fresh).expect("fresh rows JSON");
+        assert!(
+            !fresh_rows
+                .as_array()
+                .expect("fresh rows array")
+                .iter()
+                .any(|row| row["id"] == first_old.id),
+            "the superseded first candidate must not survive through the stale warmed answer"
+        );
+        provider_task.abort();
     }
 
     #[tokio::test]
