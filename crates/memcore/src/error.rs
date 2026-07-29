@@ -25,6 +25,9 @@ pub enum RecallReplayCompatibilityReason {
     LegacyUnversioned,
     /// A group has only part of the required policy tuple.
     IncompletePolicy,
+    /// A versioned group lacks the canonical 64-character lowercase SHA-256
+    /// cohort identity, or carries a malformed value.
+    InvalidQueryFingerprint,
     UnsupportedFusionPolicy,
     UnsupportedPreBoostAdjustmentPolicy,
     UnsupportedTieBreakPolicy,
@@ -37,6 +40,7 @@ impl std::fmt::Display for RecallReplayCompatibilityReason {
         let reason = match self {
             Self::LegacyUnversioned => "legacy_unversioned",
             Self::IncompletePolicy => "incomplete_policy",
+            Self::InvalidQueryFingerprint => "invalid_query_fingerprint",
             Self::UnsupportedFusionPolicy => "unsupported_fusion_policy",
             Self::UnsupportedPreBoostAdjustmentPolicy => "unsupported_pre_boost_adjustment_policy",
             Self::UnsupportedTieBreakPolicy => "unsupported_tie_break_policy",

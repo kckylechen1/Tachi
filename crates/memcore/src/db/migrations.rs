@@ -2392,6 +2392,28 @@ mod tests {
     }
 
     #[test]
+    fn stamped_current_v26_malformed_replay_identity_is_refused_without_repair() {
+        assert_current_v26_corruption_is_not_repaired(
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO recall_impression_groups (
+                 group_id, created_at,
+                 fusion_policy_version, pre_boost_adjustment_version,
+                 tie_break_policy_version, candidate_policy_version, schema_identity,
+                 weights_profile, semantic_weight, fts_weight, symbolic_weight,
+                 decay_weight, use_rrf, rrf_k, top_k, candidate_count,
+                 displayed_count, scored_returned_count
+             ) VALUES (
+                 'malformed-current', '2026-07-29T00:00:00Z',
+                 'fusion-v1', 'pre-boost-adjustment-v1',
+                 'recall-rank-v1', 'candidate-set-v1', 'recall-impression-ledger-v26',
+                 'default', 0.65, 0.35, 0.0, 0.0, 0, 60.0, 10, 1, 0, 0
+             );
+             PRAGMA ignore_check_constraints = OFF;",
+            "malformed replay identity row",
+        );
+    }
+
+    #[test]
     fn stamped_current_v26_missing_sentinel_is_refused_without_repair() {
         assert_current_v26_corruption_is_not_repaired(
             "DELETE FROM hard_state

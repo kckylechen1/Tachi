@@ -118,6 +118,45 @@ fn recall_impression_fingerprint_is_sha256_not_the_legacy_bucket() {
 }
 
 #[test]
+fn current_policy_without_valid_sha256_fingerprint_is_rejected_by_schema_and_replay() {
+    const MALFORMED_GROUP_SQL: &str = "
+        INSERT INTO recall_impression_groups (
+            group_id, created_at,
+            fusion_policy_version, pre_boost_adjustment_version,
+            tie_break_policy_version, candidate_policy_version, schema_identity,
+            weights_profile, semantic_weight, fts_weight, symbolic_weight,
+            decay_weight, use_rrf, rrf_k, top_k, candidate_count,
+            displayed_count, scored_returned_count
+        ) VALUES (
+            'malformed-current', '2026-07-29T00:00:00Z',
+            'fusion-v1', 'pre-boost-adjustment-v1',
+            'recall-rank-v1', 'candidate-set-v1', 'recall-impression-ledger-v26',
+            'default', 0.65, 0.35, 0.0, 0.0, 0, 60.0, 10, 1, 0, 0
+        );";
+
+    let conn = setup();
+    let ddl_error = conn
+        .execute_batch(MALFORMED_GROUP_SQL)
+        .expect_err("v26 DDL must reject current policy without a fingerprint");
+    assert!(ddl_error.to_string().contains("CHECK constraint failed"));
+
+    conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    conn.execute_batch(MALFORMED_GROUP_SQL).unwrap();
+    conn.execute_batch("PRAGMA ignore_check_constraints = OFF;")
+        .unwrap();
+    let replay_error = crate::replay_recall_impression_group(&conn, "malformed-current")
+        .expect_err("replay must independently refuse malformed persisted identity");
+    assert!(matches!(
+        replay_error,
+        MemoryError::RecallReplayIncompatible {
+            reason: RecallReplayCompatibilityReason::InvalidQueryFingerprint,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn impression_sampling_uses_the_sha256_fingerprint_not_the_legacy_fnv_bucket() {
     // `abc` falls in FNV's first 1,000 basis points but SHA-256's 4,367th.
     // This is a behavioral discriminator: reverting sampling to query_hash
@@ -406,18 +445,16 @@ fn impression_insert_failure_rolls_back_access_and_group_atomically() {
         displayed_count: 1,
     };
     let ids = ["atomic-row".to_string()];
-    assert!(
-        record_access_with_updates(
-            &conn,
-            &ids,
-            &ids,
-            &[],
-            Some("atomic"),
-            &RecallConfig::default(),
-            Some(&payload),
-        )
-        .is_err()
-    );
+    assert!(record_access_with_updates(
+        &conn,
+        &ids,
+        &ids,
+        &[],
+        Some("atomic"),
+        &RecallConfig::default(),
+        Some(&payload),
+    )
+    .is_err());
     let (access_count, groups): (i64, i64) = conn
         .query_row(
             "SELECT access_count, (SELECT COUNT(*) FROM recall_impression_groups) FROM memories WHERE id = 'atomic-row'",
@@ -493,10 +530,23 @@ fn impression_retention_is_independent_and_memory_delete_preserves_history() {
 
 #[test]
 fn impression_inserts_are_mechanically_content_free() {
-    let sql = format!("{IMPRESSION_GROUP_INSERT_SQL} {IMPRESSION_ROW_INSERT_SQL}").to_lowercase();
+    let insert_columns = [IMPRESSION_GROUP_INSERT_SQL, IMPRESSION_ROW_INSERT_SQL]
+        .into_iter()
+        .flat_map(|sql| {
+            let open = sql.find('(').expect("INSERT has a column list");
+            let close = sql[open + 1..]
+                .find(')')
+                .map(|offset| open + 1 + offset)
+                .expect("INSERT column list is closed");
+            sql[open + 1..close]
+                .split(',')
+                .map(|column| column.trim().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
     for forbidden in [
         "query_text",
-        " text",
+        "text",
         "entity",
         "path",
         "vector_embedding",
@@ -507,7 +557,7 @@ fn impression_inserts_are_mechanically_content_free() {
         "legacy_query_bucket",
     ] {
         assert!(
-            !sql.contains(forbidden),
+            !insert_columns.iter().any(|column| column == forbidden),
             "forbidden INSERT field: {forbidden}"
         );
     }
