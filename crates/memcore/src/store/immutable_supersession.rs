@@ -53,6 +53,30 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         db::upsert_within_tx(&self.tx, entry, self.vec_available, None).map(|_| ())
     }
 
+    /// Claim a caller-stable memory id without rewriting an existing winner.
+    ///
+    /// The existence check and insert run under this transaction's
+    /// `BEGIN IMMEDIATE` writer lock. An `Existing` result performs no main,
+    /// FTS, vector, graph, derived, archive, or supersession mutation; callers
+    /// must return from the operation before invoking any other method.
+    pub fn insert_if_absent(
+        &mut self,
+        entry: &MemoryEntry,
+    ) -> Result<db::InsertMemoryResult, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let exists = self.tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
+            [&entry.id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            return Ok(db::InsertMemoryResult::Existing);
+        }
+        db::upsert_within_tx(&self.tx, entry, self.vec_available, None)?;
+        Ok(db::InsertMemoryResult::Inserted)
+    }
+
     /// Persist an entry with server-authorized, shape-validated reference
     /// appends inside the same replacement transaction.
     pub fn upsert_with_validated_reference_mutations(

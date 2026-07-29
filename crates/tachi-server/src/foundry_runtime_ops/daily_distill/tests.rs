@@ -260,6 +260,11 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
                 metadata["source_memory_ids"],
                 json!(["candidate-0", "candidate-1", "candidate-2"])
             );
+            assert_eq!(
+                metadata["source_set_contract"],
+                json!("daily-distill-source-set-v1")
+            );
+            assert_eq!(metadata["source_set_identity"], json!(memory_id));
             assert!(
                 edge_count >= 3,
                 "expected at least one distill edge per source, got {edge_count}"
@@ -359,6 +364,271 @@ fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
             Ok(())
         })
         .expect("verify guarded sources");
+}
+
+#[test]
+fn persist_distill_memory_replay_preserves_the_first_protected_source_set_output() {
+    let temp = tempfile::tempdir().expect("temp daily distill replay db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+
+    server
+        .with_project_store(|store| {
+            for entry in &entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed protected source memories");
+
+    let group = CandidateGroup {
+        group_id: "protected-replay".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries: entries.clone(),
+    };
+    let first_payload = GroupPayload {
+        summary: "first committed summary".to_string(),
+        text: "first committed distilled output".to_string(),
+        keywords: vec!["first".to_string()],
+        skip_reason: None,
+    };
+    let first_id = persist_distill_memory(
+        &server,
+        &group,
+        &first_payload,
+        "batch-first",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("persist first output");
+
+    let mut replay_group = group.clone();
+    replay_group.entries.reverse();
+    let replay_payload = GroupPayload {
+        summary: "conflicting replay summary".to_string(),
+        text: "conflicting replay output must not overwrite the winner".to_string(),
+        keywords: vec!["replay".to_string()],
+        skip_reason: None,
+    };
+    let replay_id = persist_distill_memory(
+        &server,
+        &replay_group,
+        &replay_payload,
+        "batch-replay",
+        "raw_api",
+        true,
+        None,
+    )
+    .expect("replay returns the canonical output");
+
+    assert_eq!(
+        replay_id, first_id,
+        "source ordering cannot change identity"
+    );
+    server
+        .with_project_store_read(|store| {
+            let conn = store.connection();
+            let output_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE source = 'foundry_distill'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let stored_text: String = conn
+                .query_row(
+                    "SELECT text FROM memories WHERE id = ?1",
+                    [&first_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let derived_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM derived_items", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            assert_eq!(output_count, 1);
+            assert_eq!(stored_text, first_payload.text);
+            assert_eq!(derived_count, 1);
+            Ok(())
+        })
+        .expect("verify replay did not mutate the winner");
+}
+
+#[test]
+fn persist_distill_memory_replay_finds_an_archived_canonical_output() {
+    let temp = tempfile::tempdir().expect("temp archived daily distill replay db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    server
+        .with_project_store(|store| {
+            for entry in &entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed protected source memories");
+    let group = CandidateGroup {
+        group_id: "archived-replay".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+    let payload = GroupPayload {
+        summary: "archived canonical summary".to_string(),
+        text: "archived canonical output".to_string(),
+        keywords: vec!["archived".to_string()],
+        skip_reason: None,
+    };
+    let first_id = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-archived-first",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("persist canonical output");
+    server
+        .with_project_store(|store| {
+            assert!(store.archive_memory(&first_id).map_err(|e| e.to_string())?);
+            Ok(())
+        })
+        .expect("archive canonical output");
+
+    let replay_id = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-archived-replay",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("archived replay returns canonical output");
+    assert_eq!(replay_id, first_id);
+    server
+        .with_project_store_read(|store| {
+            let state: (i64, bool) = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*), archived FROM memories WHERE source = 'foundry_distill'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(state, (1, true));
+            Ok(())
+        })
+        .expect("archived replay must not resurrect or duplicate the winner");
+}
+
+#[test]
+fn persist_distill_memory_concurrent_protected_source_set_has_one_winner() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = tempfile::tempdir().expect("temp concurrent daily distill db");
+    let global_db = temp.path().join("global.db");
+    let project_db = temp.path().join("project.db");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    {
+        let server =
+            crate::MemoryServer::new(global_db.clone(), Some(project_db.clone())).expect("server");
+        server
+            .with_project_store(|store| {
+                for entry in &entries {
+                    store.upsert(entry).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .expect("seed protected source memories");
+    }
+
+    let group = CandidateGroup {
+        group_id: "concurrent-protected".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+    let barrier = Arc::new(Barrier::new(2));
+    let mut writers = Vec::new();
+    for writer in 0..2 {
+        let global_db = global_db.clone();
+        let project_db = project_db.clone();
+        let group = group.clone();
+        let barrier = Arc::clone(&barrier);
+        writers.push(std::thread::spawn(move || {
+            let server = crate::MemoryServer::new(global_db, Some(project_db)).expect("server");
+            let payload = GroupPayload {
+                summary: format!("writer {writer} summary"),
+                text: format!("writer {writer} output"),
+                keywords: vec![format!("writer-{writer}")],
+                skip_reason: None,
+            };
+            barrier.wait();
+            persist_distill_memory(
+                &server,
+                &group,
+                &payload,
+                &format!("batch-writer-{writer}"),
+                "raw_api",
+                false,
+                None,
+            )
+            .expect("concurrent writer")
+        }));
+    }
+    let ids = writers
+        .into_iter()
+        .map(|writer| writer.join().expect("join concurrent writer"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids[0], ids[1]);
+
+    let verifier = crate::MemoryServer::new(global_db, Some(project_db)).expect("verifier");
+    verifier
+        .with_project_store_read(|store| {
+            let conn = store.connection();
+            let output_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE source = 'foundry_distill'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let derived_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM derived_items", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            let edge_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_edges WHERE source_id = ?1",
+                    [&ids[0]],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(output_count, 1);
+            assert_eq!(derived_count, 1);
+            assert_eq!(edge_count, 3);
+            Ok(())
+        })
+        .expect("verify one concurrent side-effect set");
 }
 
 #[test]

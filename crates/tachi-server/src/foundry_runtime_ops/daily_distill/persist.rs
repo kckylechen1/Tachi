@@ -4,8 +4,8 @@ use serde_json::json;
 use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 use crate::server_state::{DbScope, MemoryServer};
 use memcore::{
-    store::immutable_supersession::ImmutableSupersessionTransaction, MemoryEdge, MemoryEntry,
-    MemoryError, MemoryStore,
+    store::immutable_supersession::ImmutableSupersessionTransaction, InsertMemoryResult,
+    MemoryEdge, MemoryEntry, MemoryError, MemoryStore,
 };
 use tachi_foundry::{
     plan_daily_distill_memory, plan_distill_edges, should_archive_daily_distill_source,
@@ -13,6 +13,32 @@ use tachi_foundry::{
 };
 
 use super::types::{CandidateGroup, GroupPayload};
+
+const DAILY_DISTILL_SOURCE_SET_CONTRACT: &str = "daily-distill-source-set-v1";
+
+fn normalized_source_memory_ids(group: &CandidateGroup) -> Vec<String> {
+    let mut source_ids = group
+        .entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    source_ids.sort();
+    source_ids.dedup();
+    source_ids
+}
+
+fn stable_distill_memory_id(group: &CandidateGroup, source_memory_ids: &[String]) -> String {
+    let identity = json!({
+        "contract": DAILY_DISTILL_SOURCE_SET_CONTRACT,
+        "path_prefix": group.path_prefix,
+        "coherence_key": group.coherence_key,
+        "source_memory_ids": source_memory_ids,
+    });
+    format!(
+        "distill:{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.to_string().as_bytes())
+    )
+}
 
 /// Claim every source before writing the candidate projection. The candidate
 /// id is generated before this transaction and `superseded_by` is deliberately
@@ -73,11 +99,14 @@ fn write_distill_entry(
     source_entries: &[MemoryEntry],
     derived_id: &str,
     batch_run_id: &str,
-) -> Result<(), String> {
+) -> Result<InsertMemoryResult, String> {
     store
         .with_immutable_supersession_transaction(|replacement| {
+            let inserted = replacement.insert_if_absent(entry)?;
+            if inserted == InsertMemoryResult::Existing {
+                return Ok(inserted);
+            }
             let claimed_sources = claim_distilled_sources(replacement, entry, source_entries)?;
-            replacement.upsert(entry)?;
             for edge in plan_distill_edges(entry, source_entries, "daily_batch", &entry.timestamp) {
                 replacement.add_edge(&edge)?;
             }
@@ -92,7 +121,7 @@ fn write_distill_entry(
                 &entry.metadata,
             )?;
             archive_claimed_distilled_sources(replacement, entry, &claimed_sources, batch_run_id)?;
-            Ok(())
+            Ok(inserted)
         })
         .map_err(|e| format!("persist daily distill replacement: {e}"))
 }
@@ -114,7 +143,8 @@ pub(crate) fn persist_distill_memory(
         .unwrap_or_else(|| "tachi_scheduler".to_string());
     let timestamp = Utc::now().to_rfc3339();
     let timestamp_segment = Utc::now().format("%Y%m%dT%H%M%S").to_string();
-    let memory_id = uuid::Uuid::new_v4().to_string();
+    let source_memory_ids = normalized_source_memory_ids(group);
+    let memory_id = stable_distill_memory_id(group, &source_memory_ids);
     let plan = plan_daily_distill_memory(DailyDistillMemoryInput {
         agent_id: &agent_id,
         path_prefix: &group.path_prefix,
@@ -129,7 +159,9 @@ pub(crate) fn persist_distill_memory(
     let metadata = crate::provenance::inject_provenance(
         server,
         json!({
-            "source_memory_ids": plan.source_memory_ids,
+            "source_memory_ids": source_memory_ids,
+            "source_set_contract": DAILY_DISTILL_SOURCE_SET_CONTRACT,
+            "source_set_identity": memory_id,
             "source_path_prefix": group.path_prefix,
             "namespace_key": plan.namespace_key,
             "coherence_key": group.coherence_key,
@@ -182,7 +214,7 @@ pub(crate) fn persist_distill_memory(
     };
 
     let derived_id = format!("derived:{memory_id}");
-    match project {
+    let _inserted = match project {
         Some(name) => server.with_named_project_store(name, |store| {
             write_distill_entry(store, &entry, &group.entries, &derived_id, batch_run_id)
         }),
