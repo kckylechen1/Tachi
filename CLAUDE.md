@@ -1,8 +1,10 @@
-# Sigil — Claude/OpenCode Operating Rules
+@AGENTS.md
 
-`AGENTS.md` is the public contract: every carrier that reads instruction files in this repo (Claude, Cursor, codex, or any other backend agent) reads the same text, and it is written to be mechanism-neutral — repo redlines and role language only, zero vendor names, no assumption about how the reader got here or who is driving it.
+# Sigil — Claude Code Operating Rules
 
-**This file is Claude/OpenCode-only.** Cursor and other carriers do not load it. Anything that names a concrete tool, model, skill, or dispatch command belongs here, not in `AGENTS.md` — see `kckylechen1/tachi#871` for why the split exists and what leaks it was written to close (Cursor once mis-read `AGENTS.md`'s dispatched-lane framing as a literal instruction and went off spawning its own child job).
+`AGENTS.md` is the repo-scoped public contract for carriers that consume repository instructions. It is written to be mechanism-neutral — repo redlines and role language only, with no assumption about how a carrier loaded it or who is driving it.
+
+**This file is Claude Code-only.** OpenCode, Cursor, Codex, Amp, Kimi, Grok, and other carriers do not treat it as authority. Anything that names a concrete Claude tool, model, skill, or dispatch command belongs here, not in `AGENTS.md` — see `kckylechen1/tachi#871` for why the split exists and what leaks it was written to close.
 
 ## Dispatched-lane vs sole-session, concretely (for Claude Code)
 
@@ -25,7 +27,7 @@ Ownership is split across #954 (ask/conversation lifecycle; never dispatch from 
 
 ## Current default vendor assignment (owner-ratified; may change — the role invariant in `AGENTS.md` does not)
 
-All lanes below use Claude Code/OpenCode's native `Agent`/sub-agent mechanism by default. Do **not** translate this table into `tachi_task(action='dispatch')` merely because Tachi is connected. Tachi dispatch requires an explicit user request, durable cross-session work, cross-device/remote pickup, or an unavailable native subagent; otherwise Tachi remains memory + policy + ledger + receipts/eval.
+This is Claude Code's routing table. Use Claude Code's native `Agent`/sub-agent mechanism by default; an OpenCode lane appears only where a route explicitly names it as an execution carrier. Do **not** translate this table into `tachi_task(action='dispatch')` merely because Tachi is connected. Tachi dispatch requires an explicit user request, durable cross-session work, cross-device/remote pickup, or an unavailable native subagent; otherwise Tachi remains memory + policy + ledger + receipts/eval.
 
 - **T0 trivial**: main agent inline, zero ceremony.
 - **T1 lookup / current-state mapping**: `Explore` agent, `model: sonnet`.
@@ -53,4 +55,4 @@ Follow `AGENTS.md`'s six-router native parent/sub-issue law; do not duplicate it
 
 ## Where the rest lives
 
-Role-invariant rules (frozen-spec clauses, STOP/never-merge, verify-first, report contract) live in `AGENTS.md` and its canon doc `docs/engineering/architecture/dispatch-lifecycle.md` — read those first; they apply to every carrier and every vendor. This file only adds the Claude/OpenCode-specific "which tool plays which role, right now" mapping so a Claude session doesn't have to infer it from `AGENTS.md`'s deliberately abstract language.
+Role-invariant rules (frozen-spec clauses, STOP/never-merge, verify-first, report contract) live in `AGENTS.md` and its canon doc `docs/engineering/architecture/dispatch-lifecycle.md` — imported above and applicable to every carrier and vendor. This file only adds Claude Code's current "which tool plays which role" mapping; references to OpenCode describe lanes Claude may call, not an instruction source for OpenCode itself.

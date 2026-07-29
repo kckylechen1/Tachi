@@ -15,7 +15,7 @@
 
 Read the branch that applies to you before treating the rest of this file as literal instruction:
 
-- **You were explicitly handed a packet by a leader/dispatcher** — a background sub-task, a Tachi dispatch, or an equivalent mechanism that gave you a base SHA and a defined scope — → you are an executing lane in a dispatch loop. Obey the workspace law, report contract, and frozen-assertion law below; everything else is in the canon doc.
+- **You were explicitly handed a formal implementation or review packet by a leader/dispatcher** — repository delivery or formal review work with a base SHA and defined artifact scope — → you are an executing lane in a dispatch loop. Obey the workspace law, report contract, and frozen-assertion law below; everything else is in the canon doc. A background question, read-only check, diagnostic, or capability probe does not become an implementation lane merely because it runs asynchronously or in an Orb.
 - **You are the sole interactive session working this repo** — no external leader gave you a packet — → the sections below are not direct instructions to fabricate. Work in the current checkout as normal. Do not invent a packet, a base SHA, or a dispatch id you were never given. The frozen-assertion law and the STOP/never-merge rules still describe the standing engineering discipline for this repo and apply to your own changes regardless.
 
 ## Execution ownership: native workers first
@@ -70,7 +70,7 @@ Read the branch that applies to you before treating the rest of this file as lit
 - Canonical target: the **harness** owns spawn/wait/cancel/resume and process/session lifecycle; Tachi owns admission, policy, work claims, ledger, receipts, and eval. Current code is still migrating away from Tachi-owned execution, so do not claim the target has landed or create a new Tachi process-control surface from historical #839/#1111/#1172 designs.
 - Carrier capacity or subscription failure is a routing event, not identity loss. Preserve the same frozen contract/evidence head and reroute only through an admitted carrier/harness; never improvise credentials, silently weaken gates, or treat tone imitation as continuity.
 
-## Report contract (a delivery missing any of these is INCOMPLETE, for dispatched lanes)
+## Report contract — implementation and formal-review lanes only
 
 - Paste **verbatim `test result:` lines** for every suite the packet enumerated — not a paraphrase, not a checkbox.
 - Paste the **exact output of every CI gate** the packet lists (fmt, `clippy -D warnings`, full suite, gitleaks/audit). Do NOT self-report CI status.
@@ -78,6 +78,8 @@ Read the branch that applies to you before treating the rest of this file as lit
 - Every new/extended behavior or security test must be shown **red on the pre-fix code, green after** (discrimination check), or carry a stated structural-discrimination justification.
 - Failures carry a `LANE-FAILURE` prefix; every report echoes its **dispatch id and run-directory** (absent artifacts = a fabricated report).
 - If you spawned an untracked child job, you **own polling it to terminal state**; a bare job-id reply is a protocol violation. At a 40-minute cap, return an explicit `STILL-RUNNING job-id=…` marker.
+
+Background questions, read-only checks, diagnostics, and capability probes report only the environment, command, exit code, relevant output, conclusion scope, and untested limits.
 
 ## Frozen-assertion law
 
