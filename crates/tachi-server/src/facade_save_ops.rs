@@ -5,7 +5,9 @@
 //! delegates to [`handle_tachi_save`].
 
 use crate::copilot_ops::handle_tachi_wiki_write;
-use crate::facade_memory_ops::shape_save_facade_response;
+use crate::facade_memory_ops::{
+    format_extract_result, shape_save_facade_response, wants_full_format, wants_json,
+};
 use crate::memory_search_ops::{handle_remember, handle_save_memory_with_references};
 use crate::pipeline_ops::handle_extract_facts;
 use crate::tool_params::*;
@@ -213,6 +215,15 @@ pub(crate) fn finalize_tachi_save_response(
     raw: &str,
     echo: Option<&str>,
 ) -> Result<String, String> {
+    let kind = params.kind.as_deref().unwrap_or("");
+    if kind.eq_ignore_ascii_case("facts") || kind.eq_ignore_ascii_case("extract_facts") {
+        if wants_full_format(params.format.as_deref()) || wants_json(params.format.as_deref()) {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .map_err(|error| format!("invalid extraction response: {error}"))?;
+            return Ok(raw.to_string());
+        }
+        return Ok(format_extract_result(raw));
+    }
     shape_save_facade_response(
         raw,
         params.format.as_deref(),
@@ -337,6 +348,66 @@ fn parse_spec_pointers(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod extraction_response_tests {
+    use super::finalize_tachi_save_response;
+    use crate::tool_params::TachiSaveParams;
+    use serde_json::json;
+
+    fn extraction_response() -> String {
+        json!({
+            "status": "completed",
+            "atomized": true,
+            "source": "tachi_save",
+            "facts_extracted": 2,
+            "facts_saved": 0,
+            "facts_inserted": 0,
+            "facts_existing": 2,
+            "facts_failed": 0,
+            "facts_dropped": 0,
+            "facts": [],
+            "write_errors": [],
+            "dropped": [],
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn facts_kind_keeps_structured_replay_counters() {
+        let params: TachiSaveParams = serde_json::from_value(json!({
+            "kind": "facts",
+            "text": "Two replayed facts remain visible in structured output."
+        }))
+        .expect("facts params");
+        let raw = extraction_response();
+
+        let finalized =
+            finalize_tachi_save_response(&params, &raw, None).expect("structured response");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&finalized).expect("final JSON"),
+            serde_json::from_str::<serde_json::Value>(&raw).expect("raw JSON"),
+            "tachi_save(kind=facts) must not collapse extraction accounting into a generic save receipt"
+        );
+    }
+
+    #[test]
+    fn extract_facts_kind_renders_all_counters_for_humans() {
+        let params: TachiSaveParams = serde_json::from_value(json!({
+            "kind": "extract_facts",
+            "text": "Two replayed facts remain visible in human output.",
+            "format": "markdown"
+        }))
+        .expect("extract_facts params");
+
+        let finalized = finalize_tachi_save_response(&params, &extraction_response(), None)
+            .expect("human response");
+        assert_eq!(
+            finalized,
+            "Extract facts -> completed; extracted 2, saved 0; inserted 0, existing 2, failed 0, dropped 0"
+        );
+    }
 }
 
 #[cfg(test)]

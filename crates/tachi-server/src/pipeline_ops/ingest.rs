@@ -3,8 +3,8 @@ use serde_json::json;
 
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{
-    fact_to_entry, fact_to_entry_with_reason, ExtractFactsParams, IngestEventParams, IngestParams,
-    IngestSourceParams, WikiArtifactKindV1, WikiAuthorityV1, WikiLifecycleV1,
+    fact_to_entry, fact_to_entry_candidate_with_reason, ExtractFactsParams, IngestEventParams,
+    IngestParams, IngestSourceParams, WikiArtifactKindV1, WikiAuthorityV1, WikiLifecycleV1,
 };
 use crate::utils::{stable_hash, value_to_template_text};
 

@@ -3,7 +3,8 @@ use super::*;
 #[test]
 fn fact_to_entry_with_reason_surfaces_drop_cause() {
     use crate::tool_params::{
-        fact_to_entry, fact_to_entry_with_reason, FACT_DROP_EMPTY, FACT_DROP_TOO_SHORT,
+        fact_to_entry, fact_to_entry_candidate_with_reason, fact_to_entry_with_reason,
+        FACT_DROP_EMPTY, FACT_DROP_TOO_SHORT,
     };
 
     // Empty text -> empty_text reason.
@@ -23,5 +24,17 @@ fn fact_to_entry_with_reason_surfaces_drop_cause() {
     assert!(fact_to_entry(&short, "extraction", json!({})).is_none());
 
     // force=true bypasses the gate, so the same short fact builds an entry.
-    assert!(fact_to_entry_with_reason(&short, "extraction", json!({"force": true})).is_ok());
+    let legacy = fact_to_entry_with_reason(&short, "extraction", json!({"force": true}))
+        .expect("legacy accepted fact");
+    assert!(
+        uuid::Uuid::parse_str(&legacy.id).is_ok(),
+        "legacy/event callers must retain random UUID assignment"
+    );
+    let candidate =
+        fact_to_entry_candidate_with_reason(&short, "extraction", json!({"force": true}))
+            .expect("identity-free accepted fact");
+    assert!(
+        candidate.id.is_empty(),
+        "canonical callers assign identity only after persisted-value normalization"
+    );
 }
