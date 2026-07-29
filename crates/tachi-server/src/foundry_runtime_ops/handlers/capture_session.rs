@@ -2040,19 +2040,34 @@ mod handler_tests {
         let finish_reason = finish_reason.to_string();
         let app = Router::new().route(
             "/chat/completions",
-            post(move || {
-                let index = handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let content = contents
-                    .get(index)
-                    .or_else(|| contents.last())
-                    .expect("fake LLM requires one payload")
-                    .clone();
-                let finish_reason = finish_reason.clone();
+            post(move |Json(request): Json<serde_json::Value>| {
+                let is_capture_request = request
+                    .pointer("/messages/0/content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(crate::prompts::SESSION_CAPTURE_PROMPT);
+                let (content, response_finish_reason) = if is_capture_request {
+                    let index = handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (
+                        contents
+                            .get(index)
+                            .or_else(|| contents.last())
+                            .expect("fake LLM requires one capture payload")
+                            .clone(),
+                        finish_reason.clone(),
+                    )
+                } else {
+                    // Background enrichment and maintenance share the extract
+                    // lane in these integration tests. They may reach this
+                    // endpoint after capture has completed, but they are not a
+                    // capture sample and must not consume capture fixtures or
+                    // contaminate replay call counts.
+                    ("{}".to_string(), "stop".to_string())
+                };
                 async move {
                     Json(serde_json::json!({
                         "choices": [{
                             "message": {"role": "assistant", "content": content},
-                            "finish_reason": finish_reason
+                            "finish_reason": response_finish_reason
                         }],
                         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
                     }))
