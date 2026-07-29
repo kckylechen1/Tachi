@@ -20,8 +20,9 @@
 //! - **R6** VACUUM INTO + atomic swap. Requires daemon to not be running.
 //! - **R7** Orphan reference cleanup (memory_edges, agent_known_state,
 //!   processed_events, access_history).
-//! - **R8** Deterministic junk cleanup (exact duplicate old versions,
-//!   foundry rerank cache records, empty JSON turn records).
+//! - **R8** Conservative ephemeral recall-cache cleanup. Empty JSON turn shapes
+//!   lack canonical producer provenance and are retained. Exact duplicates use
+//!   `repair dedupe exact/apply`.
 //! - **R9** Domain normalization/backfill for missing and legacy path-like values.
 //! - **R10** Enrichment failure marker reset (explicit opt-in only).
 //! - **R11** Plan C split-brain repair: merge a stale regular alias DB into
@@ -64,7 +65,7 @@ pub use report::{Finding, ReportBuilder, RuleReport};
 /// Default ordered set of rules run when `--rule` is not supplied.
 ///
 /// R8 (junk cleanup) is intentionally **excluded** from the default sweep:
-/// even with conservative duplicate matching, it is a destructive cleanup rule
+/// even with conservative ephemeral-junk matching, it is a destructive cleanup rule
 /// and must be opted in explicitly via `--rule R8`.
 const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7", "R9", "R11"];
 
