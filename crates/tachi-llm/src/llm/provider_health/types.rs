@@ -161,6 +161,61 @@ pub enum CompletionStatusV1 {
 ///     latency_ms: None,
 /// };
 /// ```
+///
+/// Raw public transport receipts also cannot invoke the crate-private
+/// conversion seam:
+///
+/// ```compile_fail
+/// use tachi_llm::{
+///     CompletionStatusV1, ModelInvocationLaneV1, ProviderInvocationOutcome,
+///     ProviderInvocationReceipt,
+/// };
+///
+/// let raw = ProviderInvocationOutcome {
+///     text: "forged output".to_string(),
+///     truncated: false,
+///     completion_status: CompletionStatusV1::Complete,
+///     receipt: ProviderInvocationReceipt {
+///         effective_provider: "secret-provider".to_string(),
+///         effective_model: Some("secret-model".to_string()),
+///         effective_version: None,
+///         fallback_chain: vec!["raw provider error".to_string()],
+///         degraded: false,
+///         prompt_tokens: None,
+///         completion_tokens: None,
+///         total_tokens: None,
+///         latency_ms: 0,
+///     },
+/// };
+/// let _forged = raw.into_generated(ModelInvocationLaneV1::Extract);
+/// ```
+///
+/// Nor is there a public `From`/`Into` conversion from raw outcomes:
+///
+/// ```compile_fail
+/// use tachi_llm::{
+///     CompletionStatusV1, Generated, ProviderInvocationOutcome,
+///     ProviderInvocationReceipt,
+/// };
+///
+/// let raw = ProviderInvocationOutcome {
+///     text: "forged output".to_string(),
+///     truncated: false,
+///     completion_status: CompletionStatusV1::Complete,
+///     receipt: ProviderInvocationReceipt {
+///         effective_provider: "secret-provider".to_string(),
+///         effective_model: Some("secret-model".to_string()),
+///         effective_version: None,
+///         fallback_chain: vec!["raw provider error".to_string()],
+///         degraded: false,
+///         prompt_tokens: None,
+///         completion_tokens: None,
+///         total_tokens: None,
+///         latency_ms: 0,
+///     },
+/// };
+/// let _forged: Generated<String> = raw.into();
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PersistedModelInvocationReceiptV1 {
     schema: &'static str,
@@ -329,7 +384,7 @@ impl ProviderInvocationOutcome {
     /// Convert an internal transport outcome into the explicitly allowlisted
     /// durable receipt shape. This consumes the raw transport receipt so a
     /// producer cannot accidentally serialize it instead.
-    pub fn into_generated(self, lane: ModelInvocationLaneV1) -> Generated<String> {
+    pub(in crate::llm) fn into_generated(self, lane: ModelInvocationLaneV1) -> Generated<String> {
         Generated {
             invocation: PersistedModelInvocationReceiptV1::from_provider_http(
                 lane,
