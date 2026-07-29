@@ -734,6 +734,10 @@ fn recall_coverage_exact_hit_populates_both_metrics_without_changing_exact_outco
     assert_eq!(report.exact_metrics.recall_at_k, 1.0);
     assert_eq!(report.exact_metrics.mrr, 1.0);
     assert_eq!(report.canonical_fact_metrics, report.exact_metrics);
+    assert_eq!(
+        report.canonical_vector_qualified_metrics,
+        report.exact_metrics
+    );
 }
 
 #[test]
@@ -776,6 +780,182 @@ fn recall_coverage_reviewed_equivalent_hit_keeps_exact_miss_red() {
 }
 
 #[test]
+fn canonical_fact_surface_recall_does_not_require_vector_leg_membership() {
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    let mut historical = fixture_entry(
+        "lexical-canonical-old",
+        "/notes/lexical-canonical-old",
+        "lexical canonical coverage needle",
+    );
+    historical.archived = true;
+    historical.vector = Some(vec![0.25; 1024]);
+    insert(&mut store, historical);
+
+    let mut canonical = fixture_entry(
+        "lexical-canonical-active",
+        "/notes/lexical-canonical-active",
+        "lexical canonical coverage needle",
+    );
+    canonical.access_count = 1;
+    canonical.vector = Some(vec![0.75; 1024]);
+    insert(&mut store, canonical);
+
+    let mut vector_distractor = fixture_entry(
+        "lexical-vector-distractor",
+        "/notes/lexical-vector-distractor",
+        "unrelated vector distractor",
+    );
+    vector_distractor.access_count = 1;
+    vector_distractor.vector = Some(vec![0.25; 1024]);
+    insert(&mut store, vector_distractor);
+
+    assert!(store
+        .supersede_memory("lexical-canonical-old", "lexical-canonical-active")
+        .expect("link historical row to canonical row"));
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec!["lexical-canonical-old".to_string()],
+        equivalences: Vec::new(),
+    };
+    let report = run_recall_coverage_probe_with_corpus(
+        &store,
+        RecallCoverageOptions {
+            top_k: 5,
+            candidates_per_channel: 1,
+            limit: None,
+        },
+        &corpus,
+    )
+    .expect("canonical surface coverage");
+    let target = report
+        .expected_id_lane
+        .cases
+        .first()
+        .expect("one reviewed expected-id case");
+
+    assert_eq!(target.outcome, RecallCoverageOutcome::NotSurfaced);
+    assert_eq!(
+        target.canonical_fact_outcome,
+        RecallCoverageOutcome::Surfaced
+    );
+    assert_eq!(
+        target.canonical_vector_qualified_outcome,
+        RecallCoverageOutcome::NotSurfaced
+    );
+    assert!(target.canonical_rank.is_some());
+    assert!(target
+        .canonical_candidate_legs
+        .is_some_and(|legs| !legs.vector && (legs.fts || legs.symbolic)));
+    assert_eq!(report.expected_id_lane.canonical_fact_metrics.hits, 1);
+    assert_eq!(
+        report
+            .expected_id_lane
+            .canonical_vector_qualified_metrics
+            .hits,
+        0
+    );
+}
+
+#[test]
+fn stored_and_reviewed_canonical_authorities_must_agree() {
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    for (id, archived, content) in [
+        ("authority-source", true, "private authority source content"),
+        (
+            "stored-canonical",
+            false,
+            "private stored canonical content",
+        ),
+        (
+            "reviewed-canonical",
+            false,
+            "private reviewed canonical content",
+        ),
+    ] {
+        let mut entry = fixture_entry(id, &format!("/notes/{id}"), content);
+        entry.archived = archived;
+        entry.vector = Some(vec![0.5; 1024]);
+        insert(&mut store, entry);
+    }
+    assert!(store
+        .supersede_memory("authority-source", "stored-canonical")
+        .expect("link stored authority"));
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec!["authority-source".to_string()],
+        equivalences: vec![RecallCoverageEquivalenceSet {
+            canonical_id: "reviewed-canonical".to_string(),
+            equivalent_ids: vec!["authority-source".to_string()],
+            evidence_source: "fixture:authority-conflict-v1".to_string(),
+        }],
+    };
+
+    let error =
+        run_recall_coverage_probe_with_corpus(&store, RecallCoverageOptions::default(), &corpus)
+            .expect_err("conflicting authority must fail closed");
+    let message = error.to_string();
+    assert!(message.contains("recall coverage authority_conflict"));
+    assert!(message.contains("authority-source"));
+    assert!(message.contains("stored-canonical"));
+    assert!(message.contains("reviewed-canonical"));
+    assert!(message.contains("fixture:authority-conflict-v1"));
+    assert!(!message.contains("private authority source content"));
+    assert!(!message.contains("private stored canonical content"));
+    assert!(!message.contains("private reviewed canonical content"));
+}
+
+#[test]
+fn historical_expected_row_does_not_borrow_canonical_vector() {
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    let mut historical = fixture_entry(
+        "vectorless-historical",
+        "/notes/vectorless-historical",
+        "vectorless historical coverage needle",
+    );
+    historical.archived = true;
+    insert(&mut store, historical);
+    let mut canonical = fixture_entry(
+        "vector-backed-canonical",
+        "/notes/vector-backed-canonical",
+        "vectorless historical coverage needle",
+    );
+    canonical.vector = Some(vec![0.5; 1024]);
+    insert(&mut store, canonical);
+    assert!(store
+        .supersede_memory("vectorless-historical", "vector-backed-canonical")
+        .expect("link historical row"));
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec!["vectorless-historical".to_string()],
+        equivalences: Vec::new(),
+    };
+
+    let report =
+        run_recall_coverage_probe_with_corpus(&store, RecallCoverageOptions::default(), &corpus)
+            .expect("vectorless expected-id report");
+    let target = report
+        .expected_id_lane
+        .cases
+        .first()
+        .expect("one reviewed expected-id case");
+    assert_eq!(target.outcome, RecallCoverageOutcome::VectorUnavailable);
+    assert_eq!(
+        target.canonical_fact_outcome,
+        RecallCoverageOutcome::VectorUnavailable
+    );
+    assert_eq!(
+        target.canonical_vector_qualified_outcome,
+        RecallCoverageOutcome::VectorUnavailable
+    );
+    assert_eq!(report.expected_id_lane.probed, 0);
+    assert_eq!(report.expected_id_lane.vector_unavailable, 1);
+    assert_eq!(
+        report.expected_id_lane.canonical_fact_metrics.denominator,
+        0
+    );
+}
+
+#[test]
 fn recall_coverage_true_miss_stays_red_without_fabricated_equivalence() {
     let (report, _, _, canonical_id) = reviewed_equivalence_fixture(false);
     let target = report.targets.first().expect("one target");
@@ -805,7 +985,7 @@ fn recall_coverage_true_miss_stays_red_without_fabricated_equivalence() {
 }
 
 #[test]
-fn reviewed_equivalence_changes_only_fact_metrics_not_exact_totals() {
+fn reviewed_equivalence_changes_only_canonical_metrics_not_exact_totals() {
     let (reviewed, exact_only, _, _) = reviewed_equivalence_fixture(true);
     let exact_totals_bytes = |report: &crate::RecallCoverageReport| {
         serde_json::to_vec(&json!({
@@ -829,6 +1009,7 @@ fn reviewed_equivalence_changes_only_fact_metrics_not_exact_totals() {
     assert_eq!(reviewed.exact_metrics, exact_only.exact_metrics);
     assert_eq!(reviewed.exact_metrics.hits, 0);
     assert_eq!(reviewed.canonical_fact_metrics.hits, 1);
+    assert_eq!(reviewed.canonical_vector_qualified_metrics.hits, 1);
     assert_eq!(
         exact_only.targets[0].fact_evidence.kind,
         RecallCoverageEvidenceKind::ExactIdentity,
@@ -838,7 +1019,11 @@ fn reviewed_equivalence_changes_only_fact_metrics_not_exact_totals() {
         exact_only.targets[0].canonical_id,
         Some(exact_only.targets[0].id.clone())
     );
-    assert_eq!(exact_only.canonical_fact_metrics.hits, 0);
+    assert_eq!(
+        exact_only.canonical_fact_metrics.hits, 1,
+        "the exact row still surfaced through a non-vector leg"
+    );
+    assert_eq!(exact_only.canonical_vector_qualified_metrics.hits, 0);
 }
 
 #[test]
@@ -847,6 +1032,10 @@ fn recall_coverage_json_remains_content_free_and_exposes_both_denominators() {
     let output = serde_json::to_value(&report).expect("serialize report");
     assert_eq!(output["exact_metrics"]["denominator"], 1);
     assert_eq!(output["canonical_fact_metrics"]["denominator"], 1);
+    assert_eq!(
+        output["canonical_vector_qualified_metrics"]["denominator"],
+        1
+    );
     assert!(!output.to_string().contains("aurora cobalt zephyr"));
 }
 
@@ -856,6 +1045,7 @@ fn recall_coverage_human_report_is_content_free_and_shows_both_metrics() {
     let output = crate::format_recall_coverage_human(&report);
     assert!(output.contains("Exact-ID Recall: 0/1 Recall@K=0.000000 MRR=0.000000"));
     assert!(output.contains("Canonical Fact/Lineage Recall: 1/1 Recall@K=1.000000"));
+    assert!(output.contains("Canonical Vector-Qualified Recall: 1/1 Recall@K=1.000000"));
     assert!(output.contains("evidence_source=fixture:reviewed-equivalence-v1"));
     assert!(output.contains("exact_legs=[vector=false"));
     assert!(!output.contains("aurora cobalt zephyr"));

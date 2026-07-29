@@ -268,7 +268,14 @@ pub struct RecallCoverageTarget {
     /// Candidate-leg membership for the exact target when hybrid search ran.
     pub exact_candidate_legs: Option<CandidateLegEvidence>,
     /// Independent canonical fact/lineage result. This never mutates `outcome`.
+    /// A canonical fact is surfaced when the authority-selected canonical row
+    /// is present in final hybrid top-k, regardless of which candidate leg
+    /// contributed it.
     pub canonical_fact_outcome: RecallCoverageOutcome,
+    /// Stricter diagnostic retained separately from canonical fact coverage:
+    /// the canonical row must be present in both the vector candidate leg and
+    /// final hybrid top-k.
+    pub canonical_vector_qualified_outcome: RecallCoverageOutcome,
     /// Canonical row selected only through exact identity, reviewed corpus data,
     /// or stored `superseded_by` lineage.
     pub canonical_id: Option<String>,
@@ -298,6 +305,7 @@ pub struct RecallCoverageReport {
     pub eligible_prior_scored_count: RecallCoveragePriorScoredCountSplit,
     pub exact_metrics: RecallCoverageMetrics,
     pub canonical_fact_metrics: RecallCoverageMetrics,
+    pub canonical_vector_qualified_metrics: RecallCoverageMetrics,
     pub targets: Vec<RecallCoverageTarget>,
     /// Optional reviewed expected-ID lane, independent of legacy population
     /// selection and exact totals.
@@ -314,6 +322,7 @@ pub struct RecallCoverageExpectedIdLane {
     pub vector_unavailable: usize,
     pub exact_metrics: RecallCoverageMetrics,
     pub canonical_fact_metrics: RecallCoverageMetrics,
+    pub canonical_vector_qualified_metrics: RecallCoverageMetrics,
     pub cases: Vec<RecallCoverageTarget>,
 }
 
@@ -487,7 +496,17 @@ fn canonical_resolution(
     };
 
     match stored_lineage_evidence_from_links(links, target_id)? {
-        StoredLineageResolution::Authoritative(lineage) => return Ok(lineage),
+        StoredLineageResolution::Authoritative(lineage) => {
+            if let Some(set) = reviewed.get(target_id) {
+                if set.canonical_id != lineage.canonical_id {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "recall coverage authority_conflict: stored lineage resolves target {target_id} to {}, but reviewed evidence {} resolves it to {}",
+                        lineage.canonical_id, set.evidence_source, set.canonical_id
+                    )));
+                }
+            }
+            return Ok(lineage);
+        }
         StoredLineageResolution::Dangling { missing_id } => {
             if let Some(set) = reviewed.get(target_id) {
                 return Ok(reviewed_resolution(set));
@@ -560,6 +579,14 @@ fn vector_qualified_outcome(
     }
 }
 
+fn surface_outcome(rank: Option<usize>) -> RecallCoverageOutcome {
+    if rank.is_some() {
+        RecallCoverageOutcome::Surfaced
+    } else {
+        RecallCoverageOutcome::NotSurfaced
+    }
+}
+
 fn probe_entry(
     conn: &Connection,
     store: &MemoryStore,
@@ -580,6 +607,7 @@ fn probe_entry(
             rank: None,
             exact_candidate_legs: None,
             canonical_fact_outcome: RecallCoverageOutcome::Unprobeable,
+            canonical_vector_qualified_outcome: RecallCoverageOutcome::Unprobeable,
             canonical_id: Some(planned_canonical.canonical_id),
             matched_canonical_id: None,
             canonical_rank: None,
@@ -588,6 +616,12 @@ fn probe_entry(
         });
     };
 
+    // Exact and canonical results share one executed self-query. A reviewed or
+    // lineage-selected canonical row does not lend its vector to a historical
+    // expected row: doing so would change the query representation and make
+    // the two metrics incomparable. The expected-ID lane therefore reports
+    // both outcomes as vector-unavailable until the expected row itself can
+    // supply the frozen query vector.
     if !store.vec_available || entry.vector.is_none() {
         return Ok(RecallCoverageTarget {
             id: entry.id.clone(),
@@ -600,6 +634,7 @@ fn probe_entry(
             rank: None,
             exact_candidate_legs: None,
             canonical_fact_outcome: RecallCoverageOutcome::VectorUnavailable,
+            canonical_vector_qualified_outcome: RecallCoverageOutcome::VectorUnavailable,
             canonical_id: Some(planned_canonical.canonical_id),
             matched_canonical_id: None,
             canonical_rank: None,
@@ -654,7 +689,9 @@ fn probe_entry(
         .position(|result| result.entry.id == canonical.canonical_id)
         .map(|index| index + 1);
     let canonical_candidate_legs = candidate_legs.get(&canonical.canonical_id).copied();
-    let canonical_fact_outcome = vector_qualified_outcome(canonical_candidate_legs, canonical_rank);
+    let canonical_fact_outcome = surface_outcome(canonical_rank);
+    let canonical_vector_qualified_outcome =
+        vector_qualified_outcome(canonical_candidate_legs, canonical_rank);
 
     Ok(RecallCoverageTarget {
         id: entry.id.clone(),
@@ -667,6 +704,7 @@ fn probe_entry(
         rank,
         exact_candidate_legs,
         canonical_fact_outcome,
+        canonical_vector_qualified_outcome,
         matched_canonical_id: canonical_rank.map(|_| canonical.canonical_id.clone()),
         canonical_id: Some(canonical.canonical_id),
         canonical_rank,
@@ -733,6 +771,15 @@ fn run_expected_id_lane(
             .filter(|case| case.canonical_fact_outcome == RecallCoverageOutcome::Surfaced)
             .filter_map(|case| case.canonical_rank),
     );
+    let canonical_vector_qualified_metrics = RecallCoverageMetrics::from_hit_ranks(
+        probed,
+        cases
+            .iter()
+            .filter(|case| {
+                case.canonical_vector_qualified_outcome == RecallCoverageOutcome::Surfaced
+            })
+            .filter_map(|case| case.canonical_rank),
+    );
 
     Ok(RecallCoverageExpectedIdLane {
         requested: ordered_ids.len(),
@@ -741,6 +788,7 @@ fn run_expected_id_lane(
         vector_unavailable,
         exact_metrics,
         canonical_fact_metrics,
+        canonical_vector_qualified_metrics,
         cases,
     })
 }
@@ -897,6 +945,15 @@ fn run_recall_coverage_probe_internal(
             .filter(|target| target.canonical_fact_outcome == RecallCoverageOutcome::Surfaced)
             .filter_map(|target| target.canonical_rank),
     );
+    let canonical_vector_qualified_metrics = RecallCoverageMetrics::from_hit_ranks(
+        probed,
+        targets
+            .iter()
+            .filter(|target| {
+                target.canonical_vector_qualified_outcome == RecallCoverageOutcome::Surfaced
+            })
+            .filter_map(|target| target.canonical_rank),
+    );
     let expected_id_lane = run_expected_id_lane(
         &transaction,
         store,
@@ -923,6 +980,7 @@ fn run_recall_coverage_probe_internal(
         eligible_prior_scored_count,
         exact_metrics,
         canonical_fact_metrics,
+        canonical_vector_qualified_metrics,
         targets,
         expected_id_lane,
     })
@@ -961,6 +1019,15 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
         report.canonical_fact_metrics.mrr
     )
     .expect("writing to String cannot fail");
+    writeln!(
+        output,
+        "Canonical Vector-Qualified Recall: {}/{} Recall@K={:.6} MRR={:.6}",
+        report.canonical_vector_qualified_metrics.hits,
+        report.canonical_vector_qualified_metrics.denominator,
+        report.canonical_vector_qualified_metrics.recall_at_k,
+        report.canonical_vector_qualified_metrics.mrr
+    )
+    .expect("writing to String cannot fail");
     if report.expected_id_lane.requested > 0 {
         writeln!(
             output,
@@ -980,6 +1047,15 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
             report.expected_id_lane.canonical_fact_metrics.mrr
         )
         .expect("writing to String cannot fail");
+        writeln!(
+            output,
+            "Reviewed Expected-ID Canonical Vector-Qualified Recall: {}/{} Recall@K={:.6} MRR={:.6}",
+            report.expected_id_lane.canonical_vector_qualified_metrics.hits,
+            report.expected_id_lane.canonical_vector_qualified_metrics.denominator,
+            report.expected_id_lane.canonical_vector_qualified_metrics.recall_at_k,
+            report.expected_id_lane.canonical_vector_qualified_metrics.mrr
+        )
+        .expect("writing to String cannot fail");
     }
 
     for target in report
@@ -989,12 +1065,13 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
     {
         writeln!(
             output,
-            "miss id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
+            "miss id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
             target.id,
             target.outcome,
             target.rank,
             format_candidate_legs(target.exact_candidate_legs),
             target.canonical_fact_outcome,
+            target.canonical_vector_qualified_outcome,
             target.canonical_id,
             target.matched_canonical_id,
             target.canonical_rank,
@@ -1007,12 +1084,13 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
     for target in &report.expected_id_lane.cases {
         writeln!(
             output,
-            "expected_id_case id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
+            "expected_id_case id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
             target.id,
             target.outcome,
             target.rank,
             format_candidate_legs(target.exact_candidate_legs),
             target.canonical_fact_outcome,
+            target.canonical_vector_qualified_outcome,
             target.canonical_id,
             target.matched_canonical_id,
             target.canonical_rank,
