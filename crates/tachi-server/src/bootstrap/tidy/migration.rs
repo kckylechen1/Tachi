@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::super::{
@@ -26,21 +26,30 @@ pub(crate) struct MigrationConfig {
     pub app_home: PathBuf,
 }
 
-/// Exact discovered aliases that may be used as mutation sources.
+/// Scan-captured physical objects that may be used as migration sources.
 ///
-/// This deliberately does not canonicalize: a canonical path or an
-/// inventory-selected `open_path` is read-only evidence, not authority to
-/// rename, remove, or archive the file it resolves to.
-pub(crate) fn authorized_migration_sources(report: &TidyReport) -> BTreeSet<String> {
+/// The key remains the exact discovered primary alias for plan matching, but
+/// the value is the only authority accepted by the executor. A canonical path
+/// or inventory-selected `open_path` remains read-only evidence and cannot
+/// become rename/remove/archive authority.
+pub(crate) fn authorized_migration_sources(
+    report: &TidyReport,
+) -> BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority> {
     report
-        .databases
+        .physical_stores
         .iter()
-        .filter(|db| {
-            db.status == "ok"
-                && db.is_primary_alias
-                && db.recommended_action == "review_for_legacy_migration"
+        .filter_map(|store| {
+            let eligible = report.databases.iter().any(|db| {
+                db.path == store.primary_path
+                    && db.status == "ok"
+                    && db.is_primary_alias
+                    && db.recommended_action == "review_for_legacy_migration"
+            });
+            eligible
+                .then(|| store.mutation_authority.clone())
+                .flatten()
+                .map(|authority| (store.primary_path.clone(), authority))
         })
-        .map(|db| db.path.clone())
         .collect()
 }
 
@@ -70,6 +79,15 @@ pub(crate) fn build_migration_plan(
         // inventory open path may follow a symlink or select another
         // hardlink for WAL visibility and must remain read-only evidence.
         let source_path = db.path.as_str();
+        // An ambiguous physical store has independent live sidecar owners.
+        // It remains fully visible in the report, but no arbitrary alias can
+        // become a migration source until the owner adjudicates it.
+        let has_mutation_authority = report.physical_stores.iter().any(|store| {
+            store.primary_path == source_path && store.mutation_authority.is_some()
+        });
+        if !has_mutation_authority {
+            continue;
+        }
         // Never migrate the target onto itself.
         if source_path == target_str
             || crate::physical_db_identity::same_physical_file(
@@ -123,7 +141,7 @@ fn archive_relative_path(source: &std::path::Path, home: &std::path::Path) -> Pa
 pub(crate) fn execute_tidy_migrations(
     plan: &[TidyMigration],
     cfg: &MigrationConfig,
-    authorized_sources: &BTreeSet<String>,
+    authorized_sources: &BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority>,
 ) -> Result<TidyExecuteSummary, Box<dyn std::error::Error>> {
     let mut outcomes = Vec::new();
     let mut migrated = 0usize;
@@ -142,16 +160,8 @@ pub(crate) fn execute_tidy_migrations(
         });
     }
 
-    // Ensure target parent exists (needed for both real run and creating a
-    // fresh empty target DB).
-    if let Some(parent) = cfg.target_db.parent() {
-        if !cfg.dry_run {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-
     for migration in plan {
-        if !authorized_sources.contains(&migration.source_path) {
+        let Some(authority) = authorized_sources.get(&migration.source_path) else {
             failed += 1;
             outcomes.push(TidyMigrationOutcome {
                 source_path: migration.source_path.clone(),
@@ -161,10 +171,10 @@ pub(crate) fn execute_tidy_migrations(
                 rows_before_target: 0,
                 rows_after_target: 0,
                 rows_copied: 0,
-                message: "invariant: tidy mutation source must be an exact discovered primary alias; read-only inventory open paths are not mutation authority".to_string(),
+                message: "invariant: tidy mutation source must hold scan-captured physical authority; read-only inventory paths and strings alone are not mutation authority".to_string(),
             });
             continue;
-        }
+        };
 
         // Interactive confirm.
         if cfg.interactive {
@@ -193,7 +203,7 @@ pub(crate) fn execute_tidy_migrations(
             }
         }
 
-        match migrate_single_db(migration, cfg) {
+        match migrate_single_db(migration, cfg, authority) {
             Ok(outcome) => {
                 if outcome.status == "migrated" {
                     migrated += 1;
@@ -243,12 +253,17 @@ pub(crate) fn execute_tidy_migrations(
 fn migrate_single_db(
     migration: &TidyMigration,
     cfg: &MigrationConfig,
+    authority: &crate::physical_db_identity::PhysicalMutationAuthority,
 ) -> Result<TidyMigrationOutcome, Box<dyn std::error::Error>> {
     use std::collections::HashSet;
 
     let source_path = PathBuf::from(&migration.source_path);
     let target_path = cfg.target_db.clone();
 
+    // Revalidate directly before the only source open. This catches a path
+    // replacement, symlink substitution, identity drift, or source->target
+    // transition before either source or target can be opened for mutation.
+    authority.revalidate_for_mutation(Some(&target_path))?;
     let source_store = open_cli_store_read_only(&source_path)?;
     let source_count: usize = {
         let count: i64 =
@@ -271,6 +286,13 @@ fn migrate_single_db(
         });
     }
 
+    // The source was read-only, but no target write may begin if the source
+    // changed while it was being read.
+    authority.revalidate_for_mutation(Some(&target_path))?;
+    if let Some(parent) = cfg.target_db.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    authority.revalidate_for_mutation(Some(&target_path))?;
     let mut target_store = open_cli_store(&target_path)?;
     let rows_before = target_store.stats(true)?.total as usize;
 
@@ -425,6 +447,19 @@ fn migrate_single_db(
     // same rollback path used for a mid-copy SQL error above) rather than
     // leaving a copied-but-unarchived half-state; the source stays on disk
     // untouched and will simply be reconsidered by the next `tidy` run.
+    if let Err(reason) = authority.revalidate_for_mutation(Some(&target_path)) {
+        let outcome = rollback_failed_outcome(
+            migration,
+            &mut target_store,
+            &newly_inserted_ids,
+            rows_before,
+            copied,
+            source_count,
+            &reason,
+        );
+        drop(target_store);
+        return Ok(outcome);
+    }
     if let Some(reason) = archive_unsafe_reason(&source_path) {
         let outcome = rollback_failed_outcome(
             migration,
@@ -438,14 +473,28 @@ fn migrate_single_db(
         drop(target_store);
         return Ok(outcome);
     }
-    drop(target_store);
-
     // Archive the source DB file. Move (rename) when possible; fall back to
     // copy + remove across filesystems.
     let archive_path = PathBuf::from(&migration.archive_path);
     if let Some(parent) = archive_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // The previous check protects the copied rows; this final check is the
+    // last operation before the non-atomic main/WAL/SHM archive move.
+    if let Err(reason) = authority.revalidate_for_mutation(Some(&target_path)) {
+        let outcome = rollback_failed_outcome(
+            migration,
+            &mut target_store,
+            &newly_inserted_ids,
+            rows_before,
+            copied,
+            source_count,
+            &reason,
+        );
+        drop(target_store);
+        return Ok(outcome);
+    }
+    drop(target_store);
     match std::fs::rename(&source_path, &archive_path) {
         Ok(()) => {}
         Err(_) => {

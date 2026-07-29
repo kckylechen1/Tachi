@@ -318,6 +318,56 @@ fn tidy_report_prefers_hardlink_alias_with_active_wal_sidecars() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn tidy_report_refuses_mutation_authority_for_multiple_live_hardlink_sidecars() {
+    let root = crate::utils::test_fixture_path(format!(
+        "tachi-tidy-ambiguous-sidecars-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let agents = root.join(".openclaw/core/extensions/tachi/data/agents");
+    let first = agents.join("a-first/memory.db");
+    let second = agents.join("b-second/memory.db");
+    std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+
+    let mut seed = MemoryStore::open(first.to_str().unwrap()).unwrap();
+    seed.upsert(&make_entry("checkpointed")).unwrap();
+    drop(seed);
+    std::fs::hard_link(&first, &second).unwrap();
+
+    let mut owner = MemoryStore::open(first.to_str().unwrap()).unwrap();
+    owner.upsert(&make_entry("committed-in-first-wal")).unwrap();
+    let first_wal = first.with_file_name("memory.db-wal");
+    let first_shm = first.with_file_name("memory.db-shm");
+    assert!(first_wal.exists());
+    assert!(first_shm.exists());
+    std::fs::copy(&first_wal, second.with_file_name("memory.db-wal")).unwrap();
+    std::fs::copy(&first_shm, second.with_file_name("memory.db-shm")).unwrap();
+
+    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
+    assert_eq!(report.total_databases, 1);
+    assert_eq!(report.physical_stores[0].sidecar_paths.len(), 2);
+    assert_eq!(
+        report.physical_stores[0].mutation_state,
+        crate::physical_db_identity::PhysicalStoreMutationState::AmbiguousPhysicalStore
+    );
+    assert!(
+        crate::bootstrap::authorized_migration_sources(&report).is_empty(),
+        "multiple live sidecar owners must not mint a migration authority"
+    );
+    let plan = crate::bootstrap::build_migration_plan(
+        &report,
+        &root.join(".tachi/global/memory.db"),
+        &root.join(".tachi/archive/ambiguous"),
+        &root,
+    );
+    assert!(plan.is_empty(), "ambiguous store must have no mutation plan");
+
+    drop(owner);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn tidy_report_preserves_open_error_and_adds_typed_failure() {
     let root =

@@ -522,6 +522,71 @@ fn scan_prefers_hardlink_alias_with_active_wal_sidecars() {
 
 #[cfg(unix)]
 #[test]
+fn scan_marks_multiple_live_hardlink_sidecars_ambiguous_and_disables_autofix() {
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("a-first/memory.db");
+    let second = dir.path().join("b-second/memory.db");
+    fs::create_dir_all(first.parent().unwrap()).unwrap();
+    fs::create_dir_all(second.parent().unwrap()).unwrap();
+
+    let writer = rusqlite::Connection::open(&first).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, archived INT DEFAULT 0, domain TEXT);
+             CREATE TABLE foundry_jobs (id TEXT, status TEXT);
+             INSERT INTO memories (id, text) VALUES ('checkpointed', 'main file');
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    fs::hard_link(&first, &second).unwrap();
+    writer
+        .execute_batch(
+            "INSERT INTO memories (id, text) VALUES ('wal-row', 'committed WAL');
+             BEGIN IMMEDIATE;",
+        )
+        .unwrap();
+    fs::copy(
+        super::classify::sidecar(&first, "-wal"),
+        super::classify::sidecar(&second, "-wal"),
+    )
+    .unwrap();
+    fs::copy(
+        super::classify::sidecar(&first, "-shm"),
+        super::classify::sidecar(&second, "-shm"),
+    )
+    .unwrap();
+
+    let report = scan(
+        &[dir.path().to_path_buf()],
+        &dir.path().join("quarantine"),
+        ScanOptions {
+            auto_fix: true,
+            max_depth: 5,
+        },
+    );
+    assert_eq!(report.summary.total_databases, 1);
+    assert_eq!(report.physical_stores[0].sidecar_paths.len(), 2);
+    assert_eq!(
+        report.physical_stores[0].mutation_state,
+        crate::physical_db_identity::PhysicalStoreMutationState::AmbiguousPhysicalStore
+    );
+    assert!(report.auto_fix_actions.iter().any(|action| {
+        action.action == "ambiguous_physical_store"
+            && action.outcome == "skipped"
+            && action.note.contains("disables every mutation path")
+    }));
+    assert!(report
+        .auto_fix_actions
+        .iter()
+        .all(|action| action.action != "checkpoint_wal_copy"));
+
+    writer.execute_batch("ROLLBACK").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_fix_retires_old_hash_alias_without_touching_legacy() {
     with_env_lock(|| {
         let dir = tempdir().unwrap();

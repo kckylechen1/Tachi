@@ -35,12 +35,13 @@ pub fn render_report(report: &DoctorReport) -> String {
         lines.push("physical stores:".to_string());
         for store in &report.physical_stores {
             lines.push(format!(
-                "  {} [{}] aliases={} open_path={} basis={}",
+                "  {} [{}] aliases={} open_path={} basis={} mutation_state={}",
                 store.canonical_path,
                 store.physical_id,
                 store.aliases.len(),
                 store.open_path,
-                store.open_path_basis.as_str()
+                store.open_path_basis.as_str(),
+                store.mutation_state.as_str()
             ));
             for alias in &store.aliases {
                 lines.push(format!("    alias: {alias}"));

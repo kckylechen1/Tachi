@@ -1,4 +1,5 @@
 use chrono::Utc;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -157,7 +158,7 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
     let mut physical_stores = inventory.stores;
     let mut read_representative_findings = Vec::new();
     let mut mutation_authorized_findings = Vec::new();
-    let mut mutation_authorized_paths = std::collections::BTreeSet::new();
+    let mut mutation_authorities = BTreeMap::new();
     let mut mutation_refusals = Vec::new();
     let mut findings = Vec::new();
 
@@ -179,7 +180,20 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
         // representative/open path above may be a canonical symlink target
         // or a different hardlink selected for WAL visibility and is
         // read-only evidence only.
-        if physical_store
+        if physical_store.mutation_state
+            == crate::physical_db_identity::PhysicalStoreMutationState::AmbiguousPhysicalStore
+        {
+            mutation_refusals.push(AutoFixAction {
+                path: physical_store.primary_path.clone(),
+                action: "ambiguous_physical_store".to_string(),
+                outcome: "skipped".to_string(),
+                note: format!(
+                    "invariant: ambiguous_physical_store has multiple live sidecar owners ({}) and disables every mutation path until adjudicated",
+                    physical_store.sidecar_paths.join(", ")
+                ),
+                destination: None,
+            });
+        } else if physical_store
             .aliases
             .contains(&physical_store.primary_path)
         {
@@ -201,8 +215,19 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
                     destination: None,
                 });
             } else {
-                mutation_authorized_paths.insert(mutation_finding.path.clone());
-                mutation_authorized_findings.push(mutation_finding);
+                if let Some(authority) = physical_store.mutation_authority.clone() {
+                    mutation_authorities.insert(mutation_finding.path.clone(), authority);
+                    mutation_authorized_findings.push(mutation_finding);
+                } else {
+                    mutation_refusals.push(AutoFixAction {
+                        path: physical_store.primary_path.clone(),
+                        action: "doctor_autofix".to_string(),
+                        outcome: "skipped".to_string(),
+                        note: "invariant: doctor mutation path has no scan-captured physical authority"
+                            .to_string(),
+                        destination: None,
+                    });
+                }
             }
         } else {
             mutation_refusals.push(AutoFixAction {
@@ -271,7 +296,7 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
     let auto_fix_actions = if options.auto_fix {
         let mut actions = auto_fix_authorized(
             &mutation_authorized_findings,
-            &mutation_authorized_paths,
+            &mutation_authorities,
             quarantine_root,
         );
         actions.extend(mutation_refusals);

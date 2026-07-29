@@ -19,12 +19,13 @@ pub(super) fn render_tidy_report(report: &TidyReport) -> String {
         lines.push("Physical stores:".to_string());
         for store in &report.physical_stores {
             lines.push(format!(
-                "  - {} [{}] aliases={} open_path={} basis={}",
+                "  - {} [{}] aliases={} open_path={} basis={} mutation_state={}",
                 store.canonical_path,
                 store.physical_id,
                 store.aliases.len(),
                 store.open_path,
-                store.open_path_basis.as_str()
+                store.open_path_basis.as_str(),
+                store.mutation_state.as_str()
             ));
             for sidecar_path in &store.sidecar_paths {
                 lines.push(format!("      sidecar-visible: {sidecar_path}"));
