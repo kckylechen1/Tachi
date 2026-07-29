@@ -39,6 +39,13 @@ pub(super) struct CandidateRanking<'a> {
     pub(super) as_of_utc: Option<&'a str>,
 }
 
+pub(super) struct NormalCandidateEligibility<'a> {
+    pub(super) entries: &'a HashMap<String, MemoryEntry>,
+    pub(super) vec_scores: &'a HashMap<String, f64>,
+    pub(super) fts_scores: &'a HashMap<String, f64>,
+    pub(super) exact_id: Option<&'a str>,
+}
+
 type RankedEntries = (
     Vec<SearchResult>,
     Vec<String>,
@@ -566,31 +573,28 @@ pub(super) fn normal_candidates_have_final_retrieval_evidence(
     conn: &Connection,
     query: &str,
     opts: &SearchOptions,
-    entries: &HashMap<String, MemoryEntry>,
-    vec_scores: &HashMap<String, f64>,
-    fts_scores: &HashMap<String, f64>,
-    exact_id: Option<&str>,
+    candidates: NormalCandidateEligibility<'_>,
     include_superseded: bool,
     as_of_utc: Option<&str>,
 ) -> Result<bool, MemoryError> {
-    if entries.is_empty() {
+    if candidates.entries.is_empty() {
         return Ok(false);
     }
-    let symbolic_scores = symbolic_scores(query, entries);
+    let symbolic_scores = symbolic_scores(query, candidates.entries);
     let empty_typo_evidence = HashSet::new();
     let retrieval_evidence = RetrievalEvidence {
-        vec_scores,
-        fts_scores,
+        vec_scores: candidates.vec_scores,
+        fts_scores: candidates.fts_scores,
         symbolic_scores: &symbolic_scores,
         typo_evidence: &empty_typo_evidence,
-        exact_id,
+        exact_id: candidates.exact_id,
         recall_config: recall_config(opts),
         minimum_symbolic_coverage: minimum_symbolic_query_coverage(query, recall_config(opts)),
         requires_pair_evidence: query_requires_pair_evidence(query, recall_config(opts)),
     };
-    let candidate_ids = entries.keys().cloned().collect::<Vec<_>>();
+    let candidate_ids = candidates.entries.keys().cloned().collect::<Vec<_>>();
     let superseded_ids = get_superseded_ids(conn, &candidate_ids)?;
-    Ok(entries.iter().any(|(id, entry)| {
+    Ok(candidates.entries.iter().any(|(id, entry)| {
         passes_final_candidate_eligibility(
             id,
             entry,
