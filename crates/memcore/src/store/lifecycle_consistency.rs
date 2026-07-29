@@ -12,9 +12,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-pub const LIFECYCLE_CONSISTENCY_POLICY: &str = "lifecycle-consistency-v1";
+pub const LIFECYCLE_CONSISTENCY_POLICY: &str = "lifecycle-consistency-v2";
 pub const LIFECYCLE_CONSISTENCY_SCHEMA_VERSION: u32 = 1;
-pub const LIFECYCLE_CONSISTENCY_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const LIFECYCLE_CONSISTENCY_RECEIPT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +49,7 @@ pub enum LifecycleAdjudicationKind {
     SelfCycle,
     AmbiguousTwoNodeCycle,
     LongerCycle,
+    ConflictingTerminalAuthority,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,7 +91,7 @@ pub struct LifecycleReceiptRow {
     pub related_after: FrozenLifecycleRow,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleConsistencyReceipt {
     pub schema_version: u32,
@@ -98,9 +99,19 @@ pub struct LifecycleConsistencyReceipt {
     pub target_db_identity: String,
     pub plan_digest: String,
     pub applied_at: String,
+    /// `prepared` is durable before the database commit. It is recoverable
+    /// only after restore proves the DB has the exact recorded post-state.
+    pub phase: LifecycleReceiptPhase,
     pub rows: Vec<LifecycleReceiptRow>,
     pub applied_mutations: usize,
     pub receipt_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleReceiptPhase {
+    Prepared,
+    Committed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +237,189 @@ fn canonical_cycles(rows: &HashMap<String, FrozenLifecycleRow>) -> Vec<Vec<Strin
     cycles.into_values().collect()
 }
 
+/// Returns weakly connected supersession components. A component includes all
+/// rows that can influence one another's lifecycle authority, not only the
+/// rows in a cycle.
+fn lifecycle_components(rows: &HashMap<String, FrozenLifecycleRow>) -> Vec<Vec<String>> {
+    let mut neighbors = rows
+        .keys()
+        .cloned()
+        .map(|id| (id, BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for row in rows.values() {
+        if let Some(target) = row
+            .superseded_by
+            .as_ref()
+            .filter(|id| rows.contains_key(*id))
+        {
+            neighbors
+                .get_mut(&row.id)
+                .expect("every lifecycle row has a component node")
+                .insert(target.clone());
+            neighbors
+                .get_mut(target)
+                .expect("existing lifecycle target has a component node")
+                .insert(row.id.clone());
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut components = Vec::new();
+    for start in neighbors.keys() {
+        if !seen.insert(start.clone()) {
+            continue;
+        }
+        let mut pending = vec![start.clone()];
+        let mut component = Vec::new();
+        while let Some(id) = pending.pop() {
+            component.push(id.clone());
+            for next in neighbors[&id].iter().rev() {
+                if seen.insert(next.clone()) {
+                    pending.push(next.clone());
+                }
+            }
+        }
+        component.sort();
+        components.push(component);
+    }
+    components.sort();
+    components
+}
+
+/// Classify complete weak components before emitting any mutation. This is
+/// deliberately component-first: an unresolved downstream target or cycle
+/// revokes automatic authority for every row that reaches it.
+fn classify_lifecycle_components(
+    rows: &HashMap<String, FrozenLifecycleRow>,
+) -> (
+    Vec<String>,
+    Vec<LifecycleMutation>,
+    Vec<LifecycleAdjudication>,
+) {
+    let cycles = canonical_cycles(rows);
+    let mut missing_targets = BTreeSet::new();
+    let mut mutations = Vec::new();
+    let mut adjudication_required = Vec::new();
+
+    for row_ids in lifecycle_components(rows) {
+        let component = row_ids.iter().cloned().collect::<HashSet<_>>();
+        let component_cycles = cycles
+            .iter()
+            .filter(|cycle| cycle.iter().any(|id| component.contains(id)))
+            .collect::<Vec<_>>();
+        debug_assert!(component_cycles.len() <= 1);
+        let missing_in_component = row_ids
+            .iter()
+            .filter_map(|id| rows[id].superseded_by.as_ref())
+            .filter(|target| !rows.contains_key(*target))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        if !missing_in_component.is_empty() {
+            for target in missing_in_component {
+                missing_targets.insert(target.clone());
+                adjudication_required.push(LifecycleAdjudication {
+                    kind: LifecycleAdjudicationKind::MissingTarget,
+                    row_ids: row_ids.clone(),
+                    missing_target_id: Some(target),
+                });
+            }
+            continue;
+        }
+
+        let unique_cycle_winner = match component_cycles.first() {
+            Some(cycle) if cycle.len() == 1 => {
+                adjudication_required.push(LifecycleAdjudication {
+                    kind: LifecycleAdjudicationKind::SelfCycle,
+                    row_ids: row_ids.clone(),
+                    missing_target_id: None,
+                });
+                continue;
+            }
+            Some(cycle) if cycle.len() == 2 => {
+                let active = cycle
+                    .iter()
+                    .filter(|id| !rows[id.as_str()].archived)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if active.len() != 1 {
+                    adjudication_required.push(LifecycleAdjudication {
+                        kind: LifecycleAdjudicationKind::AmbiguousTwoNodeCycle,
+                        row_ids: row_ids.clone(),
+                        missing_target_id: None,
+                    });
+                    continue;
+                }
+                Some(active[0].clone())
+            }
+            Some(_) => {
+                adjudication_required.push(LifecycleAdjudication {
+                    kind: LifecycleAdjudicationKind::LongerCycle,
+                    row_ids: row_ids.clone(),
+                    missing_target_id: None,
+                });
+                continue;
+            }
+            None => {
+                let terminals = row_ids
+                    .iter()
+                    .filter(|id| rows[id.as_str()].superseded_by.is_none())
+                    .collect::<Vec<_>>();
+                if terminals.len() != 1 || rows[terminals[0].as_str()].archived {
+                    adjudication_required.push(LifecycleAdjudication {
+                        kind: LifecycleAdjudicationKind::ConflictingTerminalAuthority,
+                        row_ids: row_ids.clone(),
+                        missing_target_id: None,
+                    });
+                    continue;
+                }
+                None
+            }
+        };
+
+        for id in &row_ids {
+            let row = &rows[id];
+            let Some(target_id) = row.superseded_by.as_ref() else {
+                continue;
+            };
+            if row.archived {
+                continue;
+            }
+            if unique_cycle_winner.as_deref() == Some(row.id.as_str()) {
+                let cycle = component_cycles[0];
+                let loser = cycle
+                    .iter()
+                    .find(|id| **id != row.id)
+                    .expect("two-node cycle");
+                mutations.push(LifecycleMutation {
+                    kind: LifecycleMutationKind::ClearUniqueWinnerBacklink,
+                    row_id: row.id.clone(),
+                    related_row_id: loser.clone(),
+                });
+            } else {
+                mutations.push(LifecycleMutation {
+                    kind: LifecycleMutationKind::ArchiveOneWayLoser,
+                    row_id: row.id.clone(),
+                    related_row_id: target_id.clone(),
+                });
+            }
+        }
+    }
+
+    mutations.sort_by(|a, b| a.row_id.cmp(&b.row_id).then_with(|| a.kind.cmp(&b.kind)));
+    adjudication_required.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.row_ids.cmp(&b.row_ids))
+            .then_with(|| a.missing_target_id.cmp(&b.missing_target_id))
+    });
+    (
+        missing_targets.into_iter().collect(),
+        mutations,
+        adjudication_required,
+    )
+}
+
 impl LifecycleConsistencyPlan {
     pub fn compute_digest(&self) -> Result<String, MemoryError> {
         let mut plan = self.clone();
@@ -265,145 +459,21 @@ impl LifecycleConsistencyPlan {
             }
             prior_id = Some(&row.id);
         }
-        let mut prior_missing: Option<&str> = None;
-        for id in &self.missing_targets {
-            if id.is_empty()
-                || rows.contains_key(id.as_str())
-                || prior_missing.is_some_and(|prior| prior >= id.as_str())
-            {
-                return Err(MemoryError::InvalidArg(format!(
-                    "invalid missing lifecycle target {id}"
-                )));
-            }
-            prior_missing = Some(id);
-        }
-        let mut mutated = HashSet::new();
-        let cycle_members = canonical_cycles(
-            &self
-                .frozen_rows
-                .iter()
-                .cloned()
-                .map(|row| (row.id.clone(), row))
-                .collect(),
-        )
-        .into_iter()
-        .flatten()
-        .collect::<HashSet<_>>();
-        for mutation in &self.mutations {
-            if mutation.row_id.is_empty()
-                || mutation.related_row_id.is_empty()
-                || mutation.row_id == mutation.related_row_id
-                || !mutated.insert(mutation.row_id.as_str())
-            {
-                return Err(MemoryError::InvalidArg(format!(
-                    "invalid lifecycle mutation {}",
-                    mutation.row_id
-                )));
-            }
-            let row = rows.get(mutation.row_id.as_str()).ok_or_else(|| {
-                MemoryError::InvalidArg(format!(
-                    "lifecycle mutation row is not frozen: {}",
-                    mutation.row_id
-                ))
-            })?;
-            let related = rows.get(mutation.related_row_id.as_str()).ok_or_else(|| {
-                MemoryError::InvalidArg(format!(
-                    "lifecycle related row is not frozen: {}",
-                    mutation.related_row_id
-                ))
-            })?;
-            match mutation.kind {
-                LifecycleMutationKind::ArchiveOneWayLoser => {
-                    if row.archived
-                        || cycle_members.contains(&row.id)
-                        || row.superseded_by.as_deref() != Some(related.id.as_str())
-                        || related.superseded_by.as_deref() == Some(row.id.as_str())
-                    {
-                        return Err(MemoryError::InvalidArg(format!(
-                            "unsafe one-way lifecycle mutation {}",
-                            row.id
-                        )));
-                    }
-                }
-                LifecycleMutationKind::ClearUniqueWinnerBacklink => {
-                    if row.archived
-                        || row.superseded_by.as_deref() != Some(related.id.as_str())
-                        || !related.archived
-                        || related.superseded_by.as_deref() != Some(row.id.as_str())
-                    {
-                        return Err(MemoryError::InvalidArg(format!(
-                            "unsafe unique-winner lifecycle mutation {}",
-                            row.id
-                        )));
-                    }
-                }
-            }
-        }
-        for item in &self.adjudication_required {
-            if item.row_ids.is_empty()
-                || item.row_ids.windows(2).any(|pair| pair[0] >= pair[1])
-                || item
-                    .row_ids
-                    .iter()
-                    .any(|id| !rows.contains_key(id.as_str()))
-            {
-                return Err(MemoryError::InvalidArg(
-                    "invalid lifecycle adjudication rows".into(),
-                ));
-            }
-            match item.kind {
-                LifecycleAdjudicationKind::MissingTarget => {
-                    let Some(target) = item.missing_target_id.as_ref() else {
-                        return Err(MemoryError::InvalidArg(
-                            "missing-target adjudication lacks target id".into(),
-                        ));
-                    };
-                    if item.row_ids.len() != 1
-                        || !self.missing_targets.contains(target)
-                        || rows[item.row_ids[0].as_str()].superseded_by.as_ref() != Some(target)
-                    {
-                        return Err(MemoryError::InvalidArg(
-                            "invalid missing-target adjudication".into(),
-                        ));
-                    }
-                }
-                LifecycleAdjudicationKind::SelfCycle => {
-                    if item.missing_target_id.is_some()
-                        || item.row_ids.len() != 1
-                        || rows[item.row_ids[0].as_str()].superseded_by.as_ref()
-                            != Some(&item.row_ids[0])
-                    {
-                        return Err(MemoryError::InvalidArg(
-                            "invalid self-cycle lifecycle adjudication".into(),
-                        ));
-                    }
-                }
-                LifecycleAdjudicationKind::AmbiguousTwoNodeCycle => {
-                    if item.missing_target_id.is_some() || item.row_ids.len() != 2 {
-                        return Err(MemoryError::InvalidArg(
-                            "invalid ambiguous two-node lifecycle cycle".into(),
-                        ));
-                    }
-                    let a = rows[item.row_ids[0].as_str()];
-                    let b = rows[item.row_ids[1].as_str()];
-                    let active = usize::from(!a.archived) + usize::from(!b.archived);
-                    if a.superseded_by.as_deref() != Some(b.id.as_str())
-                        || b.superseded_by.as_deref() != Some(a.id.as_str())
-                        || active == 1
-                    {
-                        return Err(MemoryError::InvalidArg(
-                            "two-node cycle has a safe unique winner".into(),
-                        ));
-                    }
-                }
-                LifecycleAdjudicationKind::LongerCycle => {
-                    if item.missing_target_id.is_some() || item.row_ids.len() < 3 {
-                        return Err(MemoryError::InvalidArg(
-                            "invalid longer lifecycle cycle".into(),
-                        ));
-                    }
-                }
-            }
+        let owned_rows = self
+            .frozen_rows
+            .iter()
+            .cloned()
+            .map(|row| (row.id.clone(), row))
+            .collect::<HashMap<_, _>>();
+        let (expected_missing_targets, expected_mutations, expected_adjudications) =
+            classify_lifecycle_components(&owned_rows);
+        if self.missing_targets != expected_missing_targets
+            || self.mutations != expected_mutations
+            || self.adjudication_required != expected_adjudications
+        {
+            return Err(MemoryError::InvalidArg(
+                "lifecycle-consistency plan does not preserve component-wide authority".into(),
+            ));
         }
         if !valid_digest(&self.plan_digest) || self.plan_digest != self.compute_digest()? {
             return Err(MemoryError::InvalidArg(
@@ -498,6 +568,105 @@ impl LifecycleConsistencyReceipt {
         }
         Ok(())
     }
+
+    pub fn into_committed(mut self) -> Result<Self, MemoryError> {
+        if self.phase != LifecycleReceiptPhase::Prepared {
+            return Err(MemoryError::InvalidArg(
+                "lifecycle-consistency receipt is not prepared".into(),
+            ));
+        }
+        self.phase = LifecycleReceiptPhase::Committed;
+        self.receipt_digest.clear();
+        self.receipt_digest = self.compute_digest()?;
+        self.validate()?;
+        Ok(self)
+    }
+}
+
+fn prepare_receipt(
+    plan: &LifecycleConsistencyPlan,
+    applied_at: String,
+) -> Result<LifecycleConsistencyReceipt, MemoryError> {
+    let frozen = plan
+        .frozen_rows
+        .iter()
+        .cloned()
+        .map(|row| (row.id.clone(), row))
+        .collect::<HashMap<_, _>>();
+    let mut post_state = frozen.clone();
+    for mutation in &plan.mutations {
+        let before = frozen.get(&mutation.row_id).ok_or_else(|| {
+            MemoryError::InvalidArg(format!(
+                "lifecycle-consistency mutation row is not frozen: {}",
+                mutation.row_id
+            ))
+        })?;
+        let after = post_state.get_mut(&mutation.row_id).ok_or_else(|| {
+            MemoryError::InvalidArg(format!(
+                "lifecycle-consistency mutation row disappeared: {}",
+                mutation.row_id
+            ))
+        })?;
+        match mutation.kind {
+            LifecycleMutationKind::ArchiveOneWayLoser => {
+                after.archived = true;
+                if after.valid_until.is_none() {
+                    after.valid_until = Some(applied_at.clone());
+                }
+            }
+            LifecycleMutationKind::ClearUniqueWinnerBacklink => {
+                after.superseded_by = None;
+            }
+        }
+        after.updated_at = applied_at.clone();
+        after.revision = before.revision + 1;
+    }
+
+    let rows = plan
+        .mutations
+        .iter()
+        .map(|mutation| {
+            Ok(LifecycleReceiptRow {
+                kind: mutation.kind,
+                related_row_id: mutation.related_row_id.clone(),
+                before: frozen.get(&mutation.row_id).cloned().ok_or_else(|| {
+                    MemoryError::InvalidArg(format!(
+                        "lifecycle-consistency receipt row is not frozen: {}",
+                        mutation.row_id
+                    ))
+                })?,
+                after: post_state.get(&mutation.row_id).cloned().ok_or_else(|| {
+                    MemoryError::InvalidArg(format!(
+                        "lifecycle-consistency receipt row disappeared: {}",
+                        mutation.row_id
+                    ))
+                })?,
+                related_after: post_state
+                    .get(&mutation.related_row_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        MemoryError::InvalidArg(format!(
+                            "lifecycle-consistency receipt related row is not frozen: {}",
+                            mutation.related_row_id
+                        ))
+                    })?,
+            })
+        })
+        .collect::<Result<Vec<_>, MemoryError>>()?;
+    let mut receipt = LifecycleConsistencyReceipt {
+        schema_version: LIFECYCLE_CONSISTENCY_RECEIPT_SCHEMA_VERSION,
+        policy_version: LIFECYCLE_CONSISTENCY_POLICY.into(),
+        target_db_identity: plan.target_db_identity.clone(),
+        plan_digest: plan.plan_digest.clone(),
+        applied_at,
+        phase: LifecycleReceiptPhase::Prepared,
+        applied_mutations: rows.len(),
+        rows,
+        receipt_digest: String::new(),
+    };
+    receipt.receipt_digest = receipt.compute_digest()?;
+    receipt.validate()?;
+    Ok(receipt)
 }
 
 impl MemoryStore {
@@ -511,85 +680,15 @@ impl MemoryStore {
             .cloned()
             .map(|row| (row.id.clone(), row))
             .collect::<HashMap<_, _>>();
-        let cycles = canonical_cycles(&rows);
-        let cycle_members = cycles.iter().flatten().cloned().collect::<HashSet<_>>();
-        let mut mutations = Vec::new();
-        let mut adjudication_required = Vec::new();
-
-        for cycle in cycles {
-            let mut ids = cycle;
-            ids.sort();
-            if ids.len() == 1 {
-                adjudication_required.push(LifecycleAdjudication {
-                    kind: LifecycleAdjudicationKind::SelfCycle,
-                    row_ids: ids,
-                    missing_target_id: None,
-                });
-            } else if ids.len() == 2 {
-                let active = ids
-                    .iter()
-                    .filter(|id| !rows[id.as_str()].archived)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if active.len() == 1 {
-                    let winner = active[0].clone();
-                    let loser = ids.iter().find(|id| **id != winner).unwrap().clone();
-                    mutations.push(LifecycleMutation {
-                        kind: LifecycleMutationKind::ClearUniqueWinnerBacklink,
-                        row_id: winner,
-                        related_row_id: loser,
-                    });
-                } else {
-                    adjudication_required.push(LifecycleAdjudication {
-                        kind: LifecycleAdjudicationKind::AmbiguousTwoNodeCycle,
-                        row_ids: ids,
-                        missing_target_id: None,
-                    });
-                }
-            } else {
-                adjudication_required.push(LifecycleAdjudication {
-                    kind: LifecycleAdjudicationKind::LongerCycle,
-                    row_ids: ids,
-                    missing_target_id: None,
-                });
-            }
-        }
-
-        let mut missing_targets = BTreeSet::new();
-        for row in rows.values() {
-            let Some(target_id) = row.superseded_by.as_ref() else {
-                continue;
-            };
-            let Some(target) = rows.get(target_id) else {
-                missing_targets.insert(target_id.clone());
-                adjudication_required.push(LifecycleAdjudication {
-                    kind: LifecycleAdjudicationKind::MissingTarget,
-                    row_ids: vec![row.id.clone()],
-                    missing_target_id: Some(target_id.clone()),
-                });
-                continue;
-            };
-            if !row.archived
-                && !cycle_members.contains(&row.id)
-                && target.superseded_by.as_deref() != Some(row.id.as_str())
-            {
-                mutations.push(LifecycleMutation {
-                    kind: LifecycleMutationKind::ArchiveOneWayLoser,
-                    row_id: row.id.clone(),
-                    related_row_id: target.id.clone(),
-                });
-            }
-        }
-        mutations.sort_by(|a, b| a.row_id.cmp(&b.row_id).then_with(|| a.kind.cmp(&b.kind)));
-        adjudication_required
-            .sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.row_ids.cmp(&b.row_ids)));
+        let (missing_targets, mutations, adjudication_required) =
+            classify_lifecycle_components(&rows);
         let mut plan = LifecycleConsistencyPlan {
             schema_version: LIFECYCLE_CONSISTENCY_SCHEMA_VERSION,
             policy_version: LIFECYCLE_CONSISTENCY_POLICY.into(),
             target_db_identity,
             generated_at: Utc::now().to_rfc3339(),
             frozen_rows,
-            missing_targets: missing_targets.into_iter().collect(),
+            missing_targets,
             planned_mutations: mutations.len(),
             adjudication_count: adjudication_required.len(),
             mutations,
@@ -601,13 +700,37 @@ impl MemoryStore {
         Ok(plan)
     }
 
-    pub fn apply_lifecycle_consistency(
+    /// Build the content-free recovery receipt before acquiring the mutation
+    /// transaction. Callers must durably persist these exact bytes before
+    /// calling [`Self::apply_prepared_lifecycle_consistency`].
+    pub fn prepare_lifecycle_consistency_receipt(
+        &self,
+        plan: &LifecycleConsistencyPlan,
+    ) -> Result<LifecycleConsistencyReceipt, MemoryError> {
+        plan.validate()?;
+        prepare_receipt(plan, Utc::now().to_rfc3339())
+    }
+
+    pub fn apply_prepared_lifecycle_consistency(
         &mut self,
         plan: &LifecycleConsistencyPlan,
+        prepared_receipt: &LifecycleConsistencyReceipt,
     ) -> Result<LifecycleConsistencyApplyResult, MemoryError> {
         let _authorization =
             crate::db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         plan.validate()?;
+        prepared_receipt.validate()?;
+        if prepared_receipt.phase != LifecycleReceiptPhase::Prepared {
+            return Err(MemoryError::InvalidArg(
+                "lifecycle-consistency apply requires a prepared receipt".into(),
+            ));
+        }
+        let expected_receipt = prepare_receipt(plan, prepared_receipt.applied_at.clone())?;
+        if prepared_receipt != &expected_receipt {
+            return Err(MemoryError::InvalidArg(
+                "lifecycle-consistency prepared receipt does not match the frozen plan".into(),
+            ));
+        }
         let effective: String = self.conn.query_row(
             "SELECT file FROM pragma_database_list WHERE name='main'",
             [],
@@ -647,8 +770,7 @@ impl MemoryStore {
             .iter()
             .map(|row| (row.id.as_str(), row))
             .collect::<HashMap<_, _>>();
-        let now = Utc::now().to_rfc3339();
-        let mut receipt_metadata = Vec::with_capacity(plan.mutations.len());
+        let now = &prepared_receipt.applied_at;
         for mutation in &plan.mutations {
             let before = frozen[mutation.row_id.as_str()];
             let changed = match mutation.kind {
@@ -687,11 +809,6 @@ impl MemoryStore {
                     before.id
                 )));
             }
-            receipt_metadata.push((
-                mutation.kind,
-                mutation.related_row_id.clone(),
-                before.clone(),
-            ));
         }
         if projection_counts(&tx)? != projection_counts_before {
             return Err(MemoryError::InvalidArg(
@@ -699,44 +816,25 @@ impl MemoryStore {
                     .into(),
             ));
         }
-        let mut receipt_rows = Vec::with_capacity(receipt_metadata.len());
-        for (kind, related_row_id, before) in receipt_metadata {
-            let after = load_row(&tx, &before.id)?.ok_or_else(|| {
-                MemoryError::InvalidArg(format!(
-                    "lifecycle-consistency row disappeared: {}",
-                    before.id
-                ))
-            })?;
-            let related_after = load_row(&tx, &related_row_id)?.ok_or_else(|| {
-                MemoryError::InvalidArg(format!(
-                    "lifecycle-consistency related row disappeared: {related_row_id}"
-                ))
-            })?;
-            receipt_rows.push(LifecycleReceiptRow {
-                kind,
-                related_row_id,
-                before,
-                after,
-                related_after,
-            });
+        for row in &prepared_receipt.rows {
+            if load_row(&tx, &row.after.id)?.as_ref() != Some(&row.after) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "lifecycle-consistency post-apply CAS failed: {}",
+                    row.after.id
+                )));
+            }
+            if load_row(&tx, &row.related_after.id)?.as_ref() != Some(&row.related_after) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "lifecycle-consistency post-apply companion CAS failed: {}",
+                    row.related_after.id
+                )));
+            }
         }
-        let mut receipt = LifecycleConsistencyReceipt {
-            schema_version: LIFECYCLE_CONSISTENCY_RECEIPT_SCHEMA_VERSION,
-            policy_version: LIFECYCLE_CONSISTENCY_POLICY.into(),
-            target_db_identity: plan.target_db_identity.clone(),
-            plan_digest: plan.plan_digest.clone(),
-            applied_at: now,
-            applied_mutations: receipt_rows.len(),
-            rows: receipt_rows,
-            receipt_digest: String::new(),
-        };
-        receipt.receipt_digest = receipt.compute_digest()?;
-        receipt.validate()?;
         tx.commit()?;
         Ok(LifecycleConsistencyApplyResult {
             applied_mutations: plan.mutations.len(),
             adjudication_count: plan.adjudication_required.len(),
-            receipt,
+            receipt: prepared_receipt.clone(),
         })
     }
 
@@ -888,6 +986,16 @@ mod tests {
             .unwrap();
     }
 
+    fn apply_plan(
+        store: &mut MemoryStore,
+        plan: &LifecycleConsistencyPlan,
+    ) -> LifecycleConsistencyApplyResult {
+        let prepared = store.prepare_lifecycle_consistency_receipt(plan).unwrap();
+        store
+            .apply_prepared_lifecycle_consistency(plan, &prepared)
+            .unwrap()
+    }
+
     #[test]
     fn plans_and_applies_one_way_active_superseded_drift() {
         let (_dir, mut store, identity) = fixture(&["loser", "winner"]);
@@ -898,7 +1006,7 @@ mod tests {
             plan.mutations[0].kind,
             LifecycleMutationKind::ArchiveOneWayLoser
         );
-        let result = store.apply_lifecycle_consistency(&plan).unwrap();
+        let result = apply_plan(&mut store, &plan);
         let row = load_row(&store.conn, "loser").unwrap().unwrap();
         assert!(row.archived);
         assert_eq!(row.superseded_by.as_deref(), Some("winner"));
@@ -927,7 +1035,7 @@ mod tests {
             plan.mutations[0].kind,
             LifecycleMutationKind::ClearUniqueWinnerBacklink
         );
-        let applied = store.apply_lifecycle_consistency(&plan).unwrap();
+        let applied = apply_plan(&mut store, &plan);
         let winner = load_row(&store.conn, "winner").unwrap().unwrap();
         let loser = load_row(&store.conn, "loser").unwrap().unwrap();
         assert!(!winner.archived && winner.superseded_by.is_none());
@@ -955,6 +1063,17 @@ mod tests {
     }
 
     #[test]
+    fn prepared_receipt_cannot_restore_before_the_recorded_apply_state_exists() {
+        let (_dir, mut store, identity) = fixture(&["loser", "winner"]);
+        set_state(&store, "loser", false, Some("winner"));
+        let plan = store.plan_lifecycle_consistency(identity).unwrap();
+        let prepared = store.prepare_lifecycle_consistency_receipt(&plan).unwrap();
+        let error = store.restore_lifecycle_consistency(&prepared).unwrap_err();
+        assert!(error.to_string().contains("restore CAS failed: loser"));
+        assert!(!load_row(&store.conn, "loser").unwrap().unwrap().archived);
+    }
+
+    #[test]
     fn ambiguous_both_active_cycle_is_named_and_never_mutated() {
         let (_dir, mut store, identity) = fixture(&["alpha", "beta"]);
         set_state(&store, "alpha", false, Some("beta"));
@@ -967,7 +1086,7 @@ mod tests {
             LifecycleAdjudicationKind::AmbiguousTwoNodeCycle
         );
         assert_eq!(plan.adjudication_required[0].row_ids, ["alpha", "beta"]);
-        let result = store.apply_lifecycle_consistency(&plan).unwrap();
+        let result = apply_plan(&mut store, &plan);
         assert_eq!(result.applied_mutations, 0);
         assert_eq!(load_row(&store.conn, "alpha").unwrap().unwrap().revision, 1);
         assert_eq!(load_row(&store.conn, "beta").unwrap().unwrap().revision, 1);
@@ -985,8 +1104,104 @@ mod tests {
             LifecycleAdjudicationKind::MissingTarget
         );
         store.insert_if_absent(&entry("missing")).unwrap();
-        let error = store.apply_lifecycle_consistency(&plan).unwrap_err();
+        let prepared = store.prepare_lifecycle_consistency_receipt(&plan).unwrap();
+        let error = store
+            .apply_prepared_lifecycle_consistency(&plan, &prepared)
+            .unwrap_err();
         assert!(error.to_string().contains("missing target appeared"));
+    }
+
+    #[test]
+    fn component_with_active_chain_to_missing_target_is_wholly_adjudication_required() {
+        let (_dir, mut store, identity) = fixture(&["a", "b"]);
+        // A(active) -> B(active) -> MISSING. The edge-local rule would have
+        // archived A; component-wide authority must leave both rows untouched.
+        set_state(&store, "a", false, Some("b"));
+        set_state(&store, "b", false, Some("missing"));
+        let plan = store.plan_lifecycle_consistency(identity).unwrap();
+        assert!(plan.mutations.is_empty());
+        assert_eq!(plan.missing_targets, ["missing"]);
+        assert_eq!(plan.adjudication_required.len(), 1);
+        assert_eq!(
+            plan.adjudication_required[0],
+            LifecycleAdjudication {
+                kind: LifecycleAdjudicationKind::MissingTarget,
+                row_ids: vec!["a".into(), "b".into()],
+                missing_target_id: Some("missing".into()),
+            }
+        );
+        let result = apply_plan(&mut store, &plan);
+        assert_eq!(result.applied_mutations, 0);
+        assert!(!load_row(&store.conn, "a").unwrap().unwrap().archived);
+        assert!(!load_row(&store.conn, "b").unwrap().unwrap().archived);
+    }
+
+    #[test]
+    fn inbound_active_row_to_ambiguous_cycle_is_wholly_adjudication_required() {
+        let (_dir, store, identity) = fixture(&["a", "b", "c"]);
+        // A(active) -> B(active), with B(active) <-> C(active). A must not be
+        // archived merely because its direct target is currently present.
+        set_state(&store, "a", false, Some("b"));
+        set_state(&store, "b", false, Some("c"));
+        set_state(&store, "c", false, Some("b"));
+        let plan = store.plan_lifecycle_consistency(identity).unwrap();
+        assert!(plan.mutations.is_empty());
+        assert_eq!(plan.adjudication_required.len(), 1);
+        assert_eq!(
+            plan.adjudication_required[0],
+            LifecycleAdjudication {
+                kind: LifecycleAdjudicationKind::AmbiguousTwoNodeCycle,
+                row_ids: vec!["a".into(), "b".into(), "c".into()],
+                missing_target_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn no_mutated_component_contains_adjudication() {
+        let (_dir, store, identity) = fixture(&["a", "b", "safe", "winner"]);
+        set_state(&store, "a", false, Some("b"));
+        set_state(&store, "b", false, Some("missing"));
+        set_state(&store, "safe", false, Some("winner"));
+        let plan = store.plan_lifecycle_consistency(identity).unwrap();
+        let rows = plan
+            .frozen_rows
+            .iter()
+            .cloned()
+            .map(|row| (row.id.clone(), row))
+            .collect::<HashMap<_, _>>();
+        for component in lifecycle_components(&rows) {
+            let has_mutation = plan
+                .mutations
+                .iter()
+                .any(|mutation| component.contains(&mutation.row_id));
+            let has_adjudication = plan
+                .adjudication_required
+                .iter()
+                .any(|item| item.row_ids.iter().any(|row_id| component.contains(row_id)));
+            assert!(
+                !(has_mutation && has_adjudication),
+                "component {:?} must not mix automatic mutation and adjudication",
+                component
+            );
+        }
+    }
+
+    #[test]
+    fn archived_terminal_revokes_component_auto_authority() {
+        let (_dir, store, identity) = fixture(&["active", "terminal"]);
+        set_state(&store, "active", false, Some("terminal"));
+        set_state(&store, "terminal", true, None);
+        let plan = store.plan_lifecycle_consistency(identity).unwrap();
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.adjudication_required,
+            vec![LifecycleAdjudication {
+                kind: LifecycleAdjudicationKind::ConflictingTerminalAuthority,
+                row_ids: vec!["active".into(), "terminal".into()],
+                missing_target_id: None,
+            }]
+        );
     }
 
     #[test]
@@ -996,7 +1211,10 @@ mod tests {
         set_state(&store, "b", false, Some("winner"));
         let plan = store.plan_lifecycle_consistency(identity).unwrap();
         bump_revision(&store, "b");
-        let error = store.apply_lifecycle_consistency(&plan).unwrap_err();
+        let prepared = store.prepare_lifecycle_consistency_receipt(&plan).unwrap();
+        let error = store
+            .apply_prepared_lifecycle_consistency(&plan, &prepared)
+            .unwrap_err();
         assert!(error.to_string().contains("frozen row drifted: b"));
         assert!(!load_row(&store.conn, "a").unwrap().unwrap().archived);
         assert!(!load_row(&store.conn, "b").unwrap().unwrap().archived);
@@ -1033,7 +1251,7 @@ mod tests {
         set_state(&store, "a", false, Some("winner"));
         set_state(&store, "b", false, Some("winner"));
         let plan = store.plan_lifecycle_consistency(identity).unwrap();
-        let applied = store.apply_lifecycle_consistency(&plan).unwrap();
+        let applied = apply_plan(&mut store, &plan);
         bump_revision(&store, "b");
         let error = store
             .restore_lifecycle_consistency(&applied.receipt)
@@ -1049,7 +1267,7 @@ mod tests {
         set_state(&store, "winner", false, Some("loser"));
         set_state(&store, "loser", true, Some("winner"));
         let plan = store.plan_lifecycle_consistency(identity).unwrap();
-        let applied = store.apply_lifecycle_consistency(&plan).unwrap();
+        let applied = apply_plan(&mut store, &plan);
         bump_revision(&store, "loser");
         let error = store
             .restore_lifecycle_consistency(&applied.receipt)
@@ -1070,7 +1288,7 @@ mod tests {
         let plan_json = serde_json::to_string(&plan).unwrap();
         assert!(!plan_json.contains("content-loser"));
         assert!(!plan_json.contains("content-winner"));
-        let receipt = store.apply_lifecycle_consistency(&plan).unwrap().receipt;
+        let receipt = apply_plan(&mut store, &plan).receipt;
         let receipt_json = serde_json::to_string(&receipt).unwrap();
         assert!(!receipt_json.contains("content-loser"));
         assert!(!receipt_json.contains("content-winner"));

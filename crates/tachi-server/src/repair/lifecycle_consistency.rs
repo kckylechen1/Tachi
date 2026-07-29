@@ -4,11 +4,32 @@ use memcore::store::lifecycle_consistency::{
     LifecycleConsistencyPlan, LifecycleConsistencyReceipt,
 };
 use memcore::MemoryStore;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 const OPERATION: &str = "lifecycle-consistency";
+
+#[cfg(test)]
+std::thread_local! {
+    static FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+fn inject_fault_after_db_commit_before_finalization_for_test(enabled: bool) {
+    FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION.with(|fault| fault.set(enabled));
+}
+
+fn fault_after_db_commit_before_finalization() -> Result<(), &'static str> {
+    #[cfg(test)]
+    if FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION.with(|fault| fault.replace(false)) {
+        return Err("injected post-commit/pre-finalization fault");
+    }
+    Ok(())
+}
 
 fn mutation_guard(
     target: &Path,
@@ -48,6 +69,59 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>
     file.write_all(bytes)?;
     file.write_all(b"\n")?;
     file.sync_all()?;
+    Ok(())
+}
+
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn write_new_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    drop(file);
+    sync_parent_directory(path)
+}
+
+fn finalize_prepared_receipt(
+    receipt_out: &Path,
+    committed_receipt: &LifecycleConsistencyReceipt,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = serde_json::to_vec_pretty(committed_receipt)?;
+    let parent = receipt_out.parent().unwrap_or_else(|| Path::new("."));
+    let name = receipt_out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("lifecycle-consistency receipt output requires a UTF-8 filename")?;
+    let mut staged = None;
+    for attempt in 0..32 {
+        let candidate = parent.join(format!(
+            ".{name}.lifecycle-committed-{}-{attempt}",
+            std::process::id()
+        ));
+        match write_new_durable(&candidate, &bytes) {
+            Ok(()) => {
+                staged = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let staged = staged.ok_or("could not allocate lifecycle committed receipt staging path")?;
+    fs::rename(&staged, receipt_out)?;
+    sync_parent_directory(receipt_out)?;
     Ok(())
 }
 
@@ -131,37 +205,41 @@ pub fn apply(
     }
     let _lock = mutation_guard(&target, &daemon_scope, app_home)?;
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
-    // Reserve and prove the receipt destination before the DB transaction.
-    // Holding the create-new handle closes the path race that a separate
-    // existence check would leave between apply and receipt persistence.
-    let mut receipt_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(receipt_out)?;
-    let result = match store.apply_lifecycle_consistency(&plan) {
+    // The prepared receipt is the recoverable record. Its file data and
+    // directory entry are fsynced before the transaction can commit; a crash
+    // thereafter leaves a restorable `prepared` receipt whose restore path
+    // first proves the exact DB post-state with full CAS.
+    let prepared_receipt = store.prepare_lifecycle_consistency_receipt(&plan)?;
+    let prepared_json = serde_json::to_vec_pretty(&prepared_receipt)?;
+    write_new_durable(receipt_out, &prepared_json)?;
+    let mut result = match store.apply_prepared_lifecycle_consistency(&plan, &prepared_receipt) {
         Ok(result) => result,
         Err(error) => {
-            drop(receipt_file);
-            let _ = std::fs::remove_file(receipt_out);
-            return Err(error.into());
+            return Err(format!(
+                "lifecycle-consistency apply failed; prepared recovery receipt retained at {} and restore will verify actual DB state before writing: {error}",
+                receipt_out.display()
+            )
+            .into())
         }
     };
-    let receipt_json = serde_json::to_vec_pretty(&result.receipt)?;
-    if let Err(error) = receipt_file
-        .write_all(&receipt_json)
-        .and_then(|()| receipt_file.write_all(b"\n"))
-        .and_then(|()| receipt_file.sync_all())
-    {
-        let printable = String::from_utf8_lossy(&receipt_json);
-        eprintln!(
-            "CRITICAL: lifecycle-consistency apply committed {} mutation(s) but the receipt could not be durably written to {}: {error}\nReceipt JSON (save for manual `repair lifecycle restore`):\n{printable}",
+    if let Err(error) = fault_after_db_commit_before_finalization() {
+        return Err(format!(
+            "lifecycle-consistency apply committed {} mutation(s), then {error}; durable prepared recovery receipt retained at {}",
             result.applied_mutations,
-            receipt_out.display(),
-        );
-        return Err(
-            format!("lifecycle-consistency receipt write failed after commit: {error}").into(),
-        );
+            receipt_out.display()
+        )
+        .into());
     }
+    let committed_receipt = result.receipt.clone().into_committed()?;
+    if let Err(error) = finalize_prepared_receipt(receipt_out, &committed_receipt) {
+        return Err(format!(
+            "lifecycle-consistency apply committed {} mutation(s), but finalization failed: {error}; durable prepared recovery receipt remains at {}",
+            result.applied_mutations,
+            receipt_out.display()
+        )
+        .into());
+    }
+    result.receipt = committed_receipt;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
@@ -199,6 +277,7 @@ mod tests {
     #[cfg(unix)]
     use crate::db_ownership::set_ownership_inject_for_test;
     use crate::manifest::{DbEntry, DbRole, Manifest};
+    use memcore::store::lifecycle_consistency::LifecycleReceiptPhase;
     use memcore::MemoryEntry;
     use std::path::PathBuf;
 
@@ -352,6 +431,7 @@ mod tests {
         let receipt: LifecycleConsistencyReceipt =
             serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
         receipt.validate().unwrap();
+        assert_eq!(receipt.phase, LifecycleReceiptPhase::Committed);
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         let winner_target: Option<String> = conn
             .query_row(
@@ -362,6 +442,53 @@ mod tests {
             .unwrap();
         assert!(winner_target.is_none());
         drop(conn);
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        restore(&db_path.to_string_lossy(), &receipt_path, true, &app_home).unwrap();
+        let restored: Option<String> = rusqlite::Connection::open(db_path)
+            .unwrap()
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id='winner'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored.as_deref(), Some("loser"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_commit_fault_keeps_prepared_receipt_for_deterministic_restore() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture(false);
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_after_db_commit_before_finalization_for_test(true);
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected post-commit/pre-finalization fault"));
+
+        let prepared: LifecycleConsistencyReceipt =
+            serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        prepared.validate().unwrap();
+        assert_eq!(prepared.phase, LifecycleReceiptPhase::Prepared);
+        let committed_target: Option<String> = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id='winner'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(committed_target.is_none());
+
+        // A prepared record alone is not authority to write: restore first
+        // validates this exact committed state, then restores under CAS.
         set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
         restore(&db_path.to_string_lossy(), &receipt_path, true, &app_home).unwrap();
         let restored: Option<String> = rusqlite::Connection::open(db_path)
