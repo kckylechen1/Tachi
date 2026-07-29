@@ -99,6 +99,8 @@ pub use hub_db::{
     hub_set_enabled, hub_set_review, hub_upsert,
 };
 #[cfg(test)]
+pub(crate) use memory_crud::query_hash;
+#[cfg(test)]
 pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
 pub(crate) use memory_crud::search_fts_raw_match;

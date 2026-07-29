@@ -33,6 +33,7 @@ const DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR: f64 = 0.445;
 // and irreversible promotion on caller-initiated `use` events; operators can
 // explicitly select `false` as a short-lived rollback to the legacy behavior.
 const DEFAULT_USE_PROVENANCE_RECENCY: bool = true;
+const DEFAULT_IMPRESSION_SAMPLE_RATE_BPS: u16 = 0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallConfig {
@@ -90,6 +91,9 @@ pub struct RecallConfig {
     /// do not update it. So this knob chooses between two partial views, not
     /// between a partial one and a complete one.
     pub use_provenance_recency: bool,
+    /// Deterministic SHA-256 query-fingerprint sample rate in basis points.
+    /// Zero is fully off.
+    pub impression_sample_rate_bps: u16,
 }
 
 impl Default for RecallConfig {
@@ -130,6 +134,7 @@ impl Default for RecallConfig {
             raw_vector_similarity_floor: DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
             vector_only_similarity_floor: DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
             use_provenance_recency: DEFAULT_USE_PROVENANCE_RECENCY,
+            impression_sample_rate_bps: DEFAULT_IMPRESSION_SAMPLE_RATE_BPS,
         }
     }
 }
@@ -256,6 +261,11 @@ impl RecallConfig {
             "TACHI_RECALL_USE_PROVENANCE_RECENCY",
             &mut self.use_provenance_recency,
         );
+        apply_u16(
+            values,
+            "TACHI_RECALL_IMPRESSION_SAMPLE_RATE_BPS",
+            &mut self.impression_sample_rate_bps,
+        );
     }
 
     pub fn sanitized(mut self) -> Self {
@@ -307,6 +317,7 @@ impl RecallConfig {
             DEFAULT_VECTOR_ONLY_SIMILARITY_FLOOR,
         )
         .clamp(0.0, 1.0);
+        self.impression_sample_rate_bps = self.impression_sample_rate_bps.min(10_000);
         // `use_provenance_recency` is deliberately absent here. The numeric
         // knobs need a clamp because a config file can name an out-of-range or
         // NaN value; `apply_bool` has no such failure mode — it leaves the
@@ -332,6 +343,12 @@ fn apply_f64(values: &HashMap<String, String>, key: &str, target: &mut f64) {
 
 fn apply_usize(values: &HashMap<String, String>, key: &str, target: &mut usize) {
     if let Some(value) = values.get(key).and_then(|raw| raw.parse::<usize>().ok()) {
+        *target = value;
+    }
+}
+
+fn apply_u16(values: &HashMap<String, String>, key: &str, target: &mut u16) {
+    if let Some(value) = values.get(key).and_then(|raw| raw.parse::<u16>().ok()) {
         *target = value;
     }
 }
@@ -596,6 +613,21 @@ mod tests {
         assert!(
             junk.use_provenance_recency,
             "an unparseable value must leave the default in place"
+        );
+    }
+
+    #[test]
+    fn impression_sampling_is_default_off_parsed_and_bounded() {
+        assert_eq!(RecallConfig::default().impression_sample_rate_bps, 0);
+        assert_eq!(
+            RecallConfig::from_config_env_source("TACHI_RECALL_IMPRESSION_SAMPLE_RATE_BPS=2500\n")
+                .impression_sample_rate_bps,
+            2500
+        );
+        assert_eq!(
+            RecallConfig::from_config_env_source("TACHI_RECALL_IMPRESSION_SAMPLE_RATE_BPS=12000\n")
+                .impression_sample_rate_bps,
+            10_000
         );
     }
 

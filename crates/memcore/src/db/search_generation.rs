@@ -397,12 +397,15 @@ mod tests {
     #[test]
     fn committed_memory_mutations_advance_generation_but_rollback_does_not_publish_one() {
         let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
-        assert_eq!(store.search_generation().expect("initial generation"), 0);
+        let initial_generation = store.search_generation().expect("initial generation");
 
         store
             .upsert(&entry("upsert", "raw memcore upsert"))
             .expect("upsert");
-        assert_eq!(store.search_generation().expect("after upsert"), 1);
+        assert_eq!(
+            store.search_generation().expect("after upsert"),
+            initial_generation + 1
+        );
 
         store
             .connection()
@@ -413,7 +416,7 @@ mod tests {
             .expect("telemetry update");
         assert_eq!(
             store.search_generation().expect("after telemetry"),
-            2,
+            initial_generation + 2,
             "access_count changes ranking and must advance cache generation"
         );
 
@@ -425,7 +428,10 @@ mod tests {
             .execute("UPDATE memories SET archived = 1 WHERE id = 'upsert'", [])
             .expect("archive update");
         drop(archive_authorization);
-        assert_eq!(store.search_generation().expect("after archive"), 3);
+        assert_eq!(
+            store.search_generation().expect("after archive"),
+            initial_generation + 3
+        );
 
         let rollback_authorization =
             crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
@@ -443,7 +449,7 @@ mod tests {
         drop(rollback_authorization);
         assert_eq!(
             store.search_generation().expect("after rollback"),
-            3,
+            initial_generation + 3,
             "a rolled-back memory mutation must not publish a cache generation"
         );
 
@@ -451,7 +457,10 @@ mod tests {
             .connection()
             .execute("DELETE FROM memories WHERE id = 'upsert'", [])
             .expect("delete");
-        assert_eq!(store.search_generation().expect("after delete"), 4);
+        assert_eq!(
+            store.search_generation().expect("after delete"),
+            initial_generation + 4
+        );
     }
 
     #[test]

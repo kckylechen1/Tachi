@@ -7,7 +7,13 @@ use std::time::Instant;
 use crate::{
     db::{get_access_times, get_superseded_ids, get_use_access_times},
     error::MemoryError,
-    scorer::{cosine_similarity, is_id_like_exact_query, DecayPolicyContext},
+    recall_impressions::{
+        query_fingerprint, RecallImpressionPayload, RecallImpressionRowDraft, RecallReplayPolicy,
+    },
+    scorer::{
+        apply_pre_boost_adjustment, cosine_similarity, is_id_like_exact_query, DecayPolicyContext,
+        PreBoostAdjustment,
+    },
     types::{HybridScore, MemoryEntry, SearchResult},
 };
 
@@ -29,7 +35,12 @@ pub(super) struct CandidateRanking<'a> {
     pub(super) as_of_utc: Option<&'a str>,
 }
 
-type RankedEntries = (Vec<SearchResult>, Vec<String>, Option<RankPhaseReceipt>);
+type RankedEntries = (
+    Vec<SearchResult>,
+    Vec<String>,
+    Option<RankPhaseReceipt>,
+    Option<RecallImpressionPayload>,
+);
 
 /// Importance floor for the decision prior. This is candidate eligibility,
 /// not retrieval evidence: the later topical-evidence gate still decides
@@ -40,6 +51,7 @@ pub(super) fn rank_candidate_entries(
     conn: &Connection,
     ranking: CandidateRanking<'_>,
     sample: bool,
+    capture_impression: bool,
 ) -> Result<RankedEntries, MemoryError> {
     let phase_start = sample.then(Instant::now);
     let CandidateRanking {
@@ -126,7 +138,7 @@ pub(super) fn rank_candidate_entries(
             mmr_enabled: opts.mmr_threshold.is_some(),
             ranked_result_count: 0,
         });
-        return Ok((vec![], vec![], receipt));
+        return Ok((vec![], vec![], receipt, None));
     }
 
     let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
@@ -148,6 +160,7 @@ pub(super) fn rank_candidate_entries(
         include_superseded,
         &superseded_ids,
     );
+    let pre_boost_scores = capture_impression.then(|| scores.clone());
 
     apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
     apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
@@ -204,6 +217,23 @@ pub(super) fn rank_candidate_entries(
     } else {
         ranked.iter().map(|(id, _, _)| id.to_string()).collect()
     };
+    let impression = pre_boost_scores.map(|pre_scores| {
+        build_impression_payload(
+            query,
+            opts,
+            &entries_ref,
+            vec_scores,
+            fts_scores,
+            &symbolic_scores,
+            &pre_scores,
+            &scores,
+            &ranked_ids,
+            exact_id,
+            include_superseded,
+            &superseded_ids,
+            &weights,
+        )
+    });
     drop(entries_ref);
 
     let mut entries_map = entries_map;
@@ -230,7 +260,142 @@ pub(super) fn rank_candidate_entries(
         mmr_enabled,
         ranked_result_count,
     });
-    Ok((results, scored_ids, receipt))
+    Ok((results, scored_ids, receipt, impression))
+}
+
+fn score_rank_map(
+    scores: &HashMap<String, f64>,
+    entries: &HashMap<String, &MemoryEntry>,
+) -> HashMap<String, usize> {
+    let mut ranked = scores
+        .iter()
+        .map(|(id, score)| {
+            let timestamp = entries
+                .get(id)
+                .map(|entry| crate::scorer::timestamp_epoch_millis(&entry.timestamp))
+                .unwrap_or(i64::MIN);
+            (id, *score, timestamp)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| crate::scorer::cmp_recall_rank((a.1, a.2, a.0), (b.1, b.2, b.0)));
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, _, _))| (id.clone(), index + 1))
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_impression_payload(
+    query: &str,
+    opts: &SearchOptions,
+    entries: &HashMap<String, &MemoryEntry>,
+    vec_scores: &HashMap<String, f64>,
+    fts_scores: &HashMap<String, f64>,
+    symbolic_scores: &HashMap<String, f64>,
+    pre_scores: &HashMap<String, HybridScore>,
+    final_scores: &HashMap<String, HybridScore>,
+    ranked_ids: &[String],
+    exact_id: Option<&str>,
+    include_superseded: bool,
+    superseded_ids: &std::collections::HashSet<String>,
+    weights: &crate::scorer::HybridWeights,
+) -> RecallImpressionPayload {
+    #[cfg(test)]
+    IMPRESSION_PAYLOAD_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+    let vec_ranks = score_rank_map(vec_scores, entries);
+    let fts_ranks = score_rank_map(fts_scores, entries);
+    let sym_ranks = score_rank_map(symbolic_scores, entries);
+    let pre_rank_scores = pre_scores
+        .iter()
+        .filter(|(id, _)| entries.contains_key(*id))
+        .map(|(id, score)| (id.clone(), score.final_score))
+        .collect::<HashMap<_, _>>();
+    let pre_ranks = score_rank_map(&pre_rank_scores, entries);
+    let final_ranks = ranked_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.clone(), index + 1))
+        .collect::<HashMap<_, _>>();
+    let mut ids = pre_scores
+        .keys()
+        .filter(|id| entries.contains_key(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    ids.sort();
+    let rows = ids
+        .into_iter()
+        .map(|id| {
+            let pre = &pre_scores[&id];
+            let final_score = &final_scores[&id];
+            let is_exact = exact_id == Some(id.as_str());
+            let is_superseded = include_superseded && superseded_ids.contains(&id);
+            let merge_adjustment = match (is_exact, is_superseded) {
+                (true, true) => PreBoostAdjustment::ExactIdSupersededScale,
+                (true, false) => PreBoostAdjustment::ExactId,
+                (false, true) => PreBoostAdjustment::SupersededScale,
+                (false, false) => PreBoostAdjustment::None,
+            };
+            RecallImpressionRowDraft {
+                memory_id: id.clone(),
+                vector_score: pre.vector,
+                fts_score: pre.fts,
+                symbolic_score: pre.symbolic,
+                decay_score: pre.decay,
+                vec_rank: vec_ranks.get(&id).copied(),
+                fts_rank: fts_ranks.get(&id).copied(),
+                sym_rank: sym_ranks.get(&id).copied(),
+                merge_adjustment,
+                pre_boost_score: pre.final_score,
+                pre_boost_rank: pre_ranks[&id],
+                tie_break_epoch_millis: crate::scorer::timestamp_epoch_millis(
+                    &entries[&id].timestamp,
+                ),
+                final_score: final_score.final_score,
+                final_rank: final_ranks[&id],
+                scored: true,
+                scored_returned: false,
+                access_count_at_recall: entries[&id].access_count,
+            }
+        })
+        .collect();
+    let weights_profile = if opts.weights != crate::scorer::HybridWeights::default() {
+        "custom"
+    } else {
+        match opts.path_prefix.as_deref().unwrap_or("") {
+            path if path.starts_with("/guide") => "guide",
+            path if path.starts_with("/wiki")
+                || path.starts_with("/behavior")
+                || path.starts_with("/rules") =>
+            {
+                "wiki"
+            }
+            path if path.starts_with("/events") || path.starts_with("/notes") => "events_notes",
+            _ => "default",
+        }
+    };
+    RecallImpressionPayload {
+        group_id: uuid::Uuid::new_v4().to_string(),
+        created_at: crate::db::now_utc_iso(),
+        query_fingerprint: query_fingerprint(query),
+        replay_policy: RecallReplayPolicy::current(),
+        weights_profile: weights_profile.to_string(),
+        weights: weights.clone(),
+        rrf_k: recall_config(opts).rrf_k,
+        top_k: opts.top_k,
+        rows,
+        displayed_count: 0,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static IMPRESSION_PAYLOAD_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn impression_payload_constructions() -> usize {
+    IMPRESSION_PAYLOAD_CONSTRUCTIONS.with(std::cell::Cell::get)
 }
 
 /// Pure merge of the four channel scores (vector/FTS/symbolic + ACT-R decay)
@@ -268,22 +433,19 @@ fn merge_pre_boost_scores(
         DecayPolicyContext::new(recall_config(opts), decay_policy(opts)),
     );
     if let Some(exact_id) = exact_id.filter(|id| entries_ref.contains_key(*id)) {
-        scores.insert(
-            exact_id.to_string(),
-            HybridScore {
-                vector: 1.0,
-                fts: 1.0,
-                symbolic: 1.0,
-                decay: 1.0,
-                final_score: 10.0,
-            },
-        );
+        if let Some(score) = scores.get_mut(exact_id) {
+            score.final_score =
+                apply_pre_boost_adjustment(score.final_score, PreBoostAdjustment::ExactId);
+        }
     }
 
     if include_superseded {
         for id in superseded_ids {
             if let Some(score) = scores.get_mut(id) {
-                score.final_score *= 0.3;
+                score.final_score = apply_pre_boost_adjustment(
+                    score.final_score,
+                    PreBoostAdjustment::SupersededScale,
+                );
             }
         }
     }
