@@ -119,6 +119,9 @@ fn update_enrichment_fields_clears_stale_failure_metadata() {
         None,
         None,
         1,
+        None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -168,6 +171,9 @@ fn update_enrichment_fields_preserves_unresolved_keyword_failure() {
         None, // keywords not written — failure unresolved
         None,
         1,
+        None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -193,6 +199,246 @@ fn update_enrichment_fields_preserves_unresolved_keyword_failure() {
     assert!(
         metadata["enrichment"].get("last_success_at").is_some(),
         "last_success_at stamped on partial success"
+    );
+}
+
+#[test]
+fn enrichment_receipts_commit_with_matching_fields_and_preserve_other_metadata() {
+    let mut conn = make_conn();
+    let mut entry = make_entry("enrich-receipts", "field/receipt atomicity probe");
+    entry.metadata = json!({
+        "provenance": {"origin": "kept"},
+        "enrichment": {
+            "invocations": {"embedding": {"engine": "voyage"}},
+            "unrelated": "kept"
+        }
+    });
+    upsert(&mut conn, &entry, false).unwrap();
+
+    let keywords = vec!["receipt-keyword".to_string()];
+    let entities = vec!["receipt-entity".to_string()];
+    let summary_receipt = r#"{"schema":"model-invocation-v1","attempt":"summary-winner"}"#;
+    let metadata_receipt = r#"{"schema":"model-invocation-v1","attempt":"metadata-winner"}"#;
+    let keywords_receipt = r#"{"schema":"model-invocation-v1","attempt":"keywords-winner"}"#;
+
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("receipt-bearing summary"),
+        None,
+        Some(&keywords),
+        Some(&entities),
+        entry.revision,
+        Some(summary_receipt),
+        Some(metadata_receipt),
+        Some(keywords_receipt),
+    )
+    .expect("matching revision accepts field/receipt bundle"));
+
+    let (summary, stored_metadata): (String, String) = conn
+        .query_row(
+            "SELECT summary, metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&stored_metadata).unwrap();
+    assert_eq!(summary, "receipt-bearing summary");
+    assert_eq!(metadata["provenance"]["origin"], "kept");
+    assert_eq!(metadata["enrichment"]["unrelated"], "kept");
+    assert_eq!(
+        metadata["enrichment"]["invocations"]["embedding"]["engine"],
+        "voyage"
+    );
+    assert_eq!(
+        metadata["enrichment"]["invocations"]["summary"]["attempt"],
+        "summary-winner"
+    );
+    assert_eq!(
+        metadata["enrichment"]["invocations"]["metadata"]["attempt"],
+        "metadata-winner"
+    );
+    assert_eq!(
+        metadata["enrichment"]["invocations"]["keywords"]["attempt"],
+        "keywords-winner"
+    );
+}
+
+#[test]
+fn stale_or_receipt_only_enrichment_never_persists_a_receipt() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-receipt-reject", "receipt rejection probe");
+    upsert(&mut conn, &entry, false).unwrap();
+    let receipt = r#"{"schema":"model-invocation-v1","attempt":"rejected"}"#;
+
+    assert!(!update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("stale summary"),
+        None,
+        None,
+        None,
+        entry.revision + 1,
+        Some(receipt),
+        None,
+        None,
+    )
+    .expect("revision drift must be a clean rejection"));
+    let receipt_only = update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        None,
+        None,
+        None,
+        None,
+        entry.revision,
+        Some(receipt),
+        None,
+        None,
+    )
+    .expect_err("receipt-only success must be rejected");
+    assert!(receipt_only
+        .to_string()
+        .contains("receipt requires an accepted generated field"));
+
+    let (summary, metadata): (String, String) = conn
+        .query_row(
+            "SELECT summary, metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(summary, entry.summary);
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert!(
+        metadata
+            .pointer("/enrichment/invocations/summary")
+            .is_none(),
+        "rejected writes must not leave a receipt: {metadata:?}"
+    );
+}
+
+#[test]
+fn enrichment_sql_failure_rolls_back_field_and_receipt_together() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-receipt-rollback", "rollback probe");
+    upsert(&mut conn, &entry, false).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TRIGGER fail_enrichment_field_receipt_cas
+        AFTER UPDATE OF summary, metadata ON memories
+        WHEN NEW.id = 'enrich-receipt-rollback'
+        BEGIN
+            SELECT RAISE(ABORT, 'forced field/receipt CAS failure');
+        END;
+        "#,
+    )
+    .unwrap();
+    let receipt = r#"{"schema":"model-invocation-v1","attempt":"must-rollback"}"#;
+
+    let error = update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("must not commit"),
+        None,
+        None,
+        None,
+        entry.revision,
+        Some(receipt),
+        None,
+        None,
+    )
+    .expect_err("forced field/receipt CAS failure must abort the transaction");
+    assert!(error
+        .to_string()
+        .contains("forced field/receipt CAS failure"));
+
+    let (summary, metadata): (String, String) = conn
+        .query_row(
+            "SELECT summary, metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(summary, entry.summary, "field write must roll back");
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert!(
+        metadata
+            .pointer("/enrichment/invocations/summary")
+            .is_none(),
+        "receipt must roll back with its field: {metadata:?}"
+    );
+}
+
+#[test]
+fn accepted_retry_replaces_only_its_stage_receipt() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-retry-receipt", "retry attribution probe");
+    upsert(&mut conn, &entry, false).unwrap();
+    let rejected = r#"{"schema":"model-invocation-v1","attempt":"rejected-retry"}"#;
+    let accepted = r#"{"schema":"model-invocation-v1","attempt":"accepted-retry"}"#;
+    let metadata_receipt = r#"{"schema":"model-invocation-v1","attempt":"metadata-stage"}"#;
+    let entities = vec!["retry-entity".to_string()];
+
+    assert!(!update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("rejected retry summary"),
+        None,
+        None,
+        None,
+        entry.revision + 1,
+        Some(rejected),
+        None,
+        None,
+    )
+    .unwrap());
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("accepted retry summary"),
+        None,
+        None,
+        None,
+        entry.revision,
+        Some(accepted),
+        None,
+        None,
+    )
+    .unwrap());
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        None,
+        None,
+        None,
+        Some(&entities),
+        entry.revision,
+        None,
+        Some(metadata_receipt),
+        None,
+    )
+    .unwrap());
+
+    let metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        metadata["enrichment"]["invocations"]["summary"]["attempt"],
+        "accepted-retry"
+    );
+    assert_eq!(
+        metadata["enrichment"]["invocations"]["metadata"]["attempt"],
+        "metadata-stage"
+    );
+    assert!(
+        !metadata.to_string().contains("rejected-retry"),
+        "a rejected retry must never be attributed as success: {metadata:?}"
     );
 }
 

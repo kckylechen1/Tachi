@@ -1,5 +1,6 @@
 use crate::foundry_runtime_ops::enqueue_foundry_capture_maintenance;
 use crate::server_state::{DbScope, MemoryServer};
+use memcore::store::enrichment::EnrichmentInvocationReceipts;
 use memcore::{MemoryEntry, MemoryStore};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -189,7 +190,10 @@ fn external_llm_input(text: &str) -> String {
 pub(super) const ENRICH_BATCH_MAX: usize = 32;
 pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 
-type MetadataExtractionResult = (usize, Result<(Vec<String>, Vec<String>), String>);
+type MetadataExtractionResult = (
+    usize,
+    Result<tachi_llm::Generated<(Vec<String>, Vec<String>)>, String>,
+);
 
 impl MemoryServer {
     pub(crate) fn enqueue_enrichment(&self, item: EnrichmentItem) -> bool {
@@ -346,17 +350,37 @@ impl MemoryServer {
             .map(|(i, item)| {
                 let llm = self.llm.clone();
                 let text = external_llm_input(&item.text);
-                async move { (i, llm.generate_summary(&text).await) }
+                async move { (i, llm.generate_summary_with_receipt(&text).await) }
             })
             .collect();
 
-        let summary_results: Vec<(usize, Result<String, String>)> =
+        let summary_results: Vec<(usize, Result<tachi_llm::Generated<String>, String>)> =
             futures::future::join_all(summary_futures).await;
 
         let mut summaries: Vec<Option<String>> = vec![None; items.len()];
+        let mut summary_receipts: Vec<Option<serde_json::Value>> = vec![None; items.len()];
         for (idx, result) in summary_results {
             match result {
-                Ok(s) => summaries[idx] = Some(s),
+                Ok(generated) if generated.value.trim().is_empty() => {
+                    tracing::debug!(
+                        "[enrichment-batcher] summary returned no accepted field for {}",
+                        items[idx].id
+                    );
+                }
+                Ok(generated) => match serde_json::to_value(&generated.invocation) {
+                    Ok(receipt) => {
+                        summaries[idx] = Some(generated.value);
+                        summary_receipts[idx] = Some(receipt);
+                    }
+                    Err(error) => {
+                        let error = format!("serialize summary invocation receipt: {error}");
+                        tracing::warn!(
+                            "[enrichment-batcher] summary receipt failed for {}: {error}",
+                            items[idx].id
+                        );
+                        record_enrichment_failure(self, &items[idx], "summary", &error);
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         "[enrichment-batcher] summary failed for {}: {e}",
@@ -375,7 +399,7 @@ impl MemoryServer {
             .map(|(i, item)| {
                 let llm = self.llm.clone();
                 let text = external_llm_input(&item.text);
-                async move { (i, llm.extract_metadata(&text).await) }
+                async move { (i, llm.extract_metadata_with_receipt(&text).await) }
             })
             .collect();
 
@@ -384,16 +408,39 @@ impl MemoryServer {
 
         let mut keywords_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
         let mut entities_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
+        let mut metadata_receipts: Vec<Option<serde_json::Value>> = vec![None; items.len()];
         // Operator-visible keyword enrichment status per item (enriched/skipped/failed).
         let mut keyword_status_out: Vec<Option<&'static str>> = vec![None; items.len()];
         for (idx, result) in metadata_results {
             match result {
-                Ok((keywords, entities)) => {
+                Ok(generated) => {
+                    let (keywords, entities) = generated.value;
+                    let mut accepted_field = false;
                     if items[idx].keywords.is_empty() && !keywords.is_empty() {
                         keywords_out[idx] = Some(keywords);
+                        accepted_field = true;
                     }
                     if items[idx].entities.is_empty() && !entities.is_empty() {
                         entities_out[idx] = Some(entities);
+                        accepted_field = true;
+                    }
+                    if accepted_field {
+                        match serde_json::to_value(&generated.invocation) {
+                            Ok(receipt) => metadata_receipts[idx] = Some(receipt),
+                            Err(error) => {
+                                // The values were not persisted yet, so suppress them rather
+                                // than breaking the field/receipt atomic pairing.
+                                keywords_out[idx] = None;
+                                entities_out[idx] = None;
+                                let error =
+                                    format!("serialize metadata invocation receipt: {error}");
+                                tracing::warn!(
+                                    "[enrichment-batcher] metadata receipt failed for {}: {error}",
+                                    items[idx].id
+                                );
+                                record_enrichment_failure(self, &items[idx], "metadata", &error);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -444,26 +491,51 @@ impl MemoryServer {
                 Some(async move {
                     (
                         i,
-                        llm.expand_search_keywords(&text, &seed_for_llm).await,
+                        llm.expand_search_keywords_with_receipt(&text, &seed_for_llm)
+                            .await,
                         seed,
                     )
                 })
             })
             .collect();
 
-        type KeywordEnrichmentResult = (usize, Result<Vec<String>, String>, Vec<String>);
+        type KeywordEnrichmentResult = (
+            usize,
+            Result<tachi_llm::Generated<Vec<String>>, String>,
+            Vec<String>,
+        );
         let keyword_results: Vec<KeywordEnrichmentResult> =
             futures::future::join_all(keyword_futures).await;
+        let mut keyword_receipts: Vec<Option<serde_json::Value>> = vec![None; items.len()];
 
         for (idx, result, seed) in keyword_results {
             match result {
-                Ok(expanded) => {
-                    let merged = merge_enriched_keywords(&seed, &expanded);
-                    if merged.is_empty() {
+                Ok(generated) => {
+                    let merged = merge_enriched_keywords(&seed, &generated.value);
+                    let normalized_seed = merge_enriched_keywords(&seed, &[]);
+                    if merged == normalized_seed {
+                        // A blank, duplicate-only, or fully-sanitized-away
+                        // expansion did not generate an accepted field. Do
+                        // not rewrite the seed or persist a success receipt.
                         keyword_status_out[idx] = Some("skipped");
                     } else {
-                        keywords_out[idx] = Some(merged);
-                        keyword_status_out[idx] = Some("enriched");
+                        match serde_json::to_value(&generated.invocation) {
+                            Ok(receipt) => {
+                                keywords_out[idx] = Some(merged);
+                                keyword_receipts[idx] = Some(receipt);
+                                keyword_status_out[idx] = Some("enriched");
+                            }
+                            Err(error) => {
+                                let error =
+                                    format!("serialize keywords invocation receipt: {error}");
+                                tracing::warn!(
+                                    "[enrichment-batcher] keyword receipt failed for {}: {error}",
+                                    items[idx].id
+                                );
+                                keyword_status_out[idx] = Some("failed");
+                                record_enrichment_failure(self, &items[idx], "keywords", &error);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -553,6 +625,11 @@ impl MemoryServer {
             let new_keywords = keywords_out[i].as_deref();
             let new_entities = entities_out[i].as_deref();
             let keyword_status = keyword_status_out[i];
+            let receipts = EnrichmentInvocationReceipts {
+                summary: summary_receipts[i].as_ref(),
+                metadata: metadata_receipts[i].as_ref(),
+                keywords: keyword_receipts[i].as_ref(),
+            };
 
             if new_vec.is_some()
                 || new_summary.is_some()
@@ -561,13 +638,14 @@ impl MemoryServer {
             {
                 let update_action = |store: &mut MemoryStore| {
                     let updated = store
-                        .update_enrichment_fields(
+                        .update_enrichment_fields_with_receipts(
                             &item.id,
                             new_summary,
                             new_vec,
                             new_keywords,
                             new_entities,
                             item.revision,
+                            receipts,
                         )
                         .map_err(|e| format!("Failed to update enriched entry: {e}"))?;
                     if updated && new_vec.is_some() {
@@ -978,6 +1056,17 @@ mod tests {
         tokio::task::JoinHandle<()>,
         std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     ) {
+        spawn_recording_mock_extract_llm_with_finish(body, "stop").await
+    }
+
+    async fn spawn_recording_mock_extract_llm_with_finish(
+        body: serde_json::Value,
+        finish_reason: &'static str,
+    ) -> (
+        u16,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
         use axum::{routing::post, Json, Router};
 
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -997,7 +1086,7 @@ mod tests {
                                     "role": "assistant",
                                     "content": body.to_string()
                                 },
-                                "finish_reason": "stop"
+                                "finish_reason": finish_reason
                             }],
                             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
                         }))
@@ -1136,6 +1225,18 @@ mod tests {
             "mock response must parse and the keyword stage must succeed: {:?}",
             loaded.metadata
         );
+        assert_eq!(
+            loaded.metadata["enrichment"]["invocations"]["keywords"]["schema"],
+            json!("model-invocation-v1"),
+            "accepted keyword write must atomically retain its #1521 receipt: {:?}",
+            loaded.metadata
+        );
+        assert_eq!(
+            loaded.metadata["enrichment"]["invocations"]["keywords"]["lane"],
+            json!("extract"),
+            "receipt must describe the actual keyword lane: {:?}",
+            loaded.metadata
+        );
         assert!(
             loaded
                 .keywords
@@ -1163,6 +1264,140 @@ mod tests {
         assert!(
             after.contains_key(&id),
             "post-enrichment FTS must hit via generated synonym; got {after:?}"
+        );
+
+        mock.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn truncated_keyword_output_never_persists_a_field_or_receipt() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+        let (port, mock, _requests) = spawn_recording_mock_extract_llm_with_finish(
+            json!({"keywords": ["must-not-land"]}),
+            "length",
+        )
+        .await;
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let llm = tachi_llm::LlmClient::new().expect("construct mock extract lane");
+        let mut server = make_server();
+        server.replace_llm(llm);
+        let id = format!("kw-truncated-{}", uuid::Uuid::new_v4());
+        let entry = seed_entry(
+            &id,
+            "A truncated keyword response must never become durable provenance.",
+            vec!["baseline".into()],
+        );
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        assert!(batch[0].needs_keyword_enrichment);
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&id)
+                    .map_err(|e| format!("get: {e}"))
+                    .map(|entry| entry.expect("entry exists"))
+            })
+            .expect("load after truncated output");
+        assert_eq!(loaded.keywords, vec!["baseline".to_string()]);
+        assert!(
+            loaded
+                .metadata
+                .pointer("/enrichment/invocations/keywords")
+                .is_none(),
+            "truncated output must not leave a success receipt: {:?}",
+            loaded.metadata
+        );
+        assert_eq!(loaded.metadata["enrichment"]["failed_stage"], "keywords");
+
+        mock.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn empty_keyword_output_is_skipped_without_a_success_receipt() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+        let (port, mock, _requests) =
+            spawn_recording_mock_extract_llm(json!({"keywords": []})).await;
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let llm = tachi_llm::LlmClient::new().expect("construct mock extract lane");
+        let mut server = make_server();
+        server.replace_llm(llm);
+        let id = format!("kw-empty-{}", uuid::Uuid::new_v4());
+        let entry = seed_entry(
+            &id,
+            "An empty keyword response is a skip, never a durable success.",
+            vec!["baseline".into()],
+        );
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&id)
+                    .map_err(|e| format!("get: {e}"))
+                    .map(|entry| entry.expect("entry exists"))
+            })
+            .expect("load after empty output");
+        assert_eq!(loaded.keywords, vec!["baseline".to_string()]);
+        assert_eq!(loaded.metadata["enrichment"]["keywords_status"], "skipped");
+        assert!(
+            loaded
+                .metadata
+                .pointer("/enrichment/invocations/keywords")
+                .is_none(),
+            "empty output must not leave a success receipt: {:?}",
+            loaded.metadata
         );
 
         mock.abort();
@@ -1265,7 +1500,11 @@ mod tests {
         let target = seed_entry(
             &target_id,
             "Enrichment flush write-back cache-bust probe body.",
-            vec![],
+            // Keep the metadata extractor out of this keyword-only cache
+            // test. Otherwise its mock response consumes the sentinel first,
+            // and the keyword expansion is correctly classified as a
+            // duplicate-only skip rather than the write this test covers.
+            vec!["preexisting-cache-keyword".into()],
         );
         server
             .with_global_store(|store| {

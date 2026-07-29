@@ -1,4 +1,5 @@
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde_json::{Map, Value};
 
 use crate::error::MemoryError;
 use crate::types::MemorySource;
@@ -123,6 +124,7 @@ pub fn update_with_revision(
 /// Update only the enrichment fields (summary, embedding, keywords, entities) if
 /// the revision hasn't changed since the enrichment was queued. This prevents
 /// stale background enrichment from overwriting concurrent updates.
+#[allow(clippy::too_many_arguments)]
 pub fn update_enrichment_fields(
     conn: &mut Connection,
     id: &str,
@@ -131,13 +133,26 @@ pub fn update_enrichment_fields(
     new_keywords: Option<&[String]>,
     new_entities: Option<&[String]>,
     expected_revision: i64,
+    summary_receipt: Option<&str>,
+    metadata_receipt: Option<&str>,
+    keywords_receipt: Option<&str>,
 ) -> Result<bool, MemoryError> {
+    let receipts = parse_enrichment_receipts(
+        summary_receipt,
+        metadata_receipt,
+        keywords_receipt,
+        new_summary,
+        new_keywords,
+        new_entities,
+    )?;
+
     if new_summary.is_none()
         && new_vec.is_none()
         && new_keywords.is_none()
         && new_entities.is_none()
     {
-        return Ok(true); // nothing to do
+        // The pairing validation above makes receipt-only success impossible.
+        return Ok(true); // legacy no-op
     }
 
     let now = now_utc_iso();
@@ -146,43 +161,103 @@ pub fn update_enrichment_fields(
     let keywords_json = new_keywords.map(serde_json::to_string).transpose()?;
     let entities_json = new_entities.map(serde_json::to_string).transpose()?;
 
-    // Always check revision first, regardless of which fields are being updated.
-    // This prevents stale enrichment from overwriting concurrent edits.
-    let rows_affected = match (&clean_summary, &keywords_json, &entities_json) {
-        (Some(summary), Some(keywords), Some(entities)) => tx.execute(
-            "UPDATE memories SET summary = ?1, keywords = ?2, entities = ?3, updated_at = ?4 WHERE id = ?5 AND revision = ?6",
-            params![summary, keywords, entities, &now, id, expected_revision],
-        )?,
-        (Some(summary), Some(keywords), None) => tx.execute(
-            "UPDATE memories SET summary = ?1, keywords = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
-            params![summary, keywords, &now, id, expected_revision],
-        )?,
-        (Some(summary), None, Some(entities)) => tx.execute(
-            "UPDATE memories SET summary = ?1, entities = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
-            params![summary, entities, &now, id, expected_revision],
-        )?,
-        (Some(summary), None, None) => tx.execute(
-            "UPDATE memories SET summary = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
-            params![summary, &now, id, expected_revision],
-        )?,
-        (None, Some(keywords), Some(entities)) => tx.execute(
-            "UPDATE memories SET keywords = ?1, entities = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
-            params![keywords, entities, &now, id, expected_revision],
-        )?,
-        (None, Some(keywords), None) => tx.execute(
-            "UPDATE memories SET keywords = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
-            params![keywords, &now, id, expected_revision],
-        )?,
-        (None, None, Some(entities)) => tx.execute(
-            "UPDATE memories SET entities = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
-            params![entities, &now, id, expected_revision],
-        )?,
-        (None, None, None) => tx.execute(
-            "UPDATE memories SET updated_at = ?1 WHERE id = ?2 AND revision = ?3",
-            params![&now, id, expected_revision],
-        )?,
+    // Read the exact revision whose fields and metadata may be changed. The
+    // final UPDATE repeats the revision predicate, so a concurrent writer can
+    // only turn this into a clean `false`, never split fields from receipts.
+    let existing_metadata: Option<String> = tx
+        .query_row(
+            "SELECT metadata FROM memories WHERE id = ?1 AND revision = ?2",
+            params![id, expected_revision],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(existing_metadata) = existing_metadata else {
+        tx.commit()?;
+        eprintln!(
+            "[enrichment] discarded stale enrichment for id={id}: revision {expected_revision} no longer current"
+        );
+        return Ok(false);
     };
 
+    let mut metadata = parse_enrichment_metadata(&existing_metadata);
+
+    let status = match (
+        new_vec.is_some(),
+        new_summary.is_some(),
+        new_keywords.is_some() || new_entities.is_some(),
+    ) {
+        (true, true, true) => "embedded+summarized+metadata",
+        (true, true, false) => "embedded+summarized",
+        (true, false, true) => "embedded+metadata",
+        (true, false, false) => "embedded",
+        (false, true, true) => "summarized+metadata",
+        (false, true, false) => "summarized",
+        (false, false, true) => "metadata",
+        (false, false, false) => "touched",
+    };
+
+    // Mixed-stage merge (#943): if another enrichment stage already recorded a
+    // durable failure that this write does NOT resolve, preserve aggregate
+    // failure metadata (failed_stage / last_error / last_failure_at / retry)
+    // and only stamp last_success_at for the stages that succeeded. Clearing
+    // then re-applying keywords_status alone used to drop operator-visible
+    // failure context on partial success.
+    let existing_failed_stage = metadata
+        .get("enrichment")
+        .and_then(Value::as_object)
+        .and_then(|enrichment| enrichment.get("failed_stage"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let failed_stage_resolved = match existing_failed_stage.as_deref() {
+        None => true,
+        Some("embedding") => new_vec.is_some(),
+        Some("summary") => new_summary.is_some(),
+        // Both metadata extraction and write-side keyword enrichment land in
+        // the keywords/entities columns.
+        Some("metadata") | Some("keywords") => new_keywords.is_some() || new_entities.is_some(),
+        // Unknown / db_update: do not claim resolution from a field write.
+        Some(_) => false,
+    };
+
+    let enrichment = enrichment_metadata_object(&mut metadata);
+    if failed_stage_resolved {
+        enrichment.insert("status".to_string(), Value::String(status.to_string()));
+        enrichment.insert("last_success_at".to_string(), Value::String(now.clone()));
+        enrichment.insert("last_error".to_string(), Value::Null);
+        enrichment.remove("failed_stage");
+        enrichment.remove("last_failure_at");
+        enrichment.remove("retry");
+    } else {
+        // Preserve failure aggregate; still record that some stages succeeded.
+        enrichment.insert("last_success_at".to_string(), Value::String(now.clone()));
+        enrichment.insert(
+            "partial_success_status".to_string(),
+            Value::String(status.to_string()),
+        );
+    }
+    merge_enrichment_receipts(enrichment, receipts);
+    let metadata_json = serde_json::to_string(&metadata)?;
+
+    // One revision-checked update owns generated fields and their receipt
+    // metadata. Never append receipt metadata after this CAS has committed.
+    let rows_affected = tx.execute(
+        r#"UPDATE memories
+           SET summary = COALESCE(?1, summary),
+               keywords = COALESCE(?2, keywords),
+               entities = COALESCE(?3, entities),
+               metadata = ?4,
+               updated_at = ?5
+           WHERE id = ?6 AND revision = ?7"#,
+        params![
+            clean_summary.as_deref(),
+            keywords_json.as_deref(),
+            entities_json.as_deref(),
+            &metadata_json,
+            &now,
+            id,
+            expected_revision,
+        ],
+    )?;
     if rows_affected == 0 {
         tx.commit()?;
         eprintln!(
@@ -191,7 +266,9 @@ pub fn update_enrichment_fields(
         return Ok(false);
     }
 
-    // Refresh FTS when any searchable text field changed.
+    // Refresh FTS only after the field-and-receipt CAS has landed. It remains
+    // in the same transaction, so an FTS failure rolls the field and receipt
+    // back together rather than leaving a partial enrichment success.
     //
     // FTS safety (#943): keywords/entities land in `memories` via parameterized
     // UPDATE binds above; this INSERT copies column content with `WHERE id = ?1`.
@@ -223,82 +300,116 @@ pub fn update_enrichment_fields(
         )?;
     }
 
-    let status = match (
-        new_vec.is_some(),
-        new_summary.is_some(),
-        new_keywords.is_some() || new_entities.is_some(),
-    ) {
-        (true, true, true) => "embedded+summarized+metadata",
-        (true, true, false) => "embedded+summarized",
-        (true, false, true) => "embedded+metadata",
-        (true, false, false) => "embedded",
-        (false, true, true) => "summarized+metadata",
-        (false, true, false) => "summarized",
-        (false, false, true) => "metadata",
-        (false, false, false) => "touched",
-    };
-
-    // Mixed-stage merge (#943): if another enrichment stage already recorded a
-    // durable failure that this write does NOT resolve, preserve aggregate
-    // failure metadata (failed_stage / last_error / last_failure_at / retry)
-    // and only stamp last_success_at for the stages that succeeded. Clearing
-    // then re-applying keywords_status alone used to drop operator-visible
-    // failure context on partial success.
-    let existing_failed_stage: Option<String> = tx
-        .query_row(
-            r#"SELECT json_extract(
-                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                 '$.enrichment.failed_stage'
-               )
-               FROM memories WHERE id = ?1"#,
-            params![id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .unwrap_or(None);
-    let failed_stage_resolved = match existing_failed_stage.as_deref() {
-        None => true,
-        Some("embedding") => new_vec.is_some(),
-        Some("summary") => new_summary.is_some(),
-        // Both metadata extraction and write-side keyword enrichment land in
-        // the keywords/entities columns.
-        Some("metadata") | Some("keywords") => new_keywords.is_some() || new_entities.is_some(),
-        // Unknown / db_update: do not claim resolution from a field write.
-        Some(_) => false,
-    };
-
-    if failed_stage_resolved {
-        tx.execute(
-            r#"UPDATE memories
-               SET metadata = json_remove(
-                     json_set(
-                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                       '$.enrichment.status', ?1,
-                       '$.enrichment.last_success_at', ?2,
-                       '$.enrichment.last_error', NULL
-                     ),
-                     '$.enrichment.failed_stage',
-                     '$.enrichment.last_failure_at',
-                     '$.enrichment.retry'
-                   )
-               WHERE id = ?3"#,
-            params![status, &now, id],
-        )?;
-    } else {
-        // Preserve failure aggregate; still record that some stages succeeded.
-        tx.execute(
-            r#"UPDATE memories
-               SET metadata = json_set(
-                     CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                     '$.enrichment.last_success_at', ?1,
-                     '$.enrichment.partial_success_status', ?2
-                   )
-               WHERE id = ?3"#,
-            params![&now, status, id],
-        )?;
-    }
-
     tx.commit()?;
     Ok(true)
+}
+
+#[derive(Default)]
+struct ParsedEnrichmentReceipts {
+    summary: Option<Value>,
+    metadata: Option<Value>,
+    keywords: Option<Value>,
+}
+
+fn parse_enrichment_receipts(
+    summary: Option<&str>,
+    metadata: Option<&str>,
+    keywords: Option<&str>,
+    new_summary: Option<&str>,
+    new_keywords: Option<&[String]>,
+    new_entities: Option<&[String]>,
+) -> Result<ParsedEnrichmentReceipts, MemoryError> {
+    let summary_writes = new_summary.is_some_and(|value| !value.trim().is_empty());
+    let metadata_writes = new_keywords.is_some_and(|value| !value.is_empty())
+        || new_entities.is_some_and(|value| !value.is_empty());
+    let keywords_writes = new_keywords.is_some_and(|value| !value.is_empty());
+
+    receipt_for_generated_field("summary", summary, summary_writes)?;
+    receipt_for_generated_field("metadata", metadata, metadata_writes)?;
+    receipt_for_generated_field("keywords", keywords, keywords_writes)?;
+
+    Ok(ParsedEnrichmentReceipts {
+        summary: parse_receipt_json(summary)?,
+        metadata: parse_receipt_json(metadata)?,
+        keywords: parse_receipt_json(keywords)?,
+    })
+}
+
+fn receipt_for_generated_field(
+    stage: &str,
+    receipt: Option<&str>,
+    generated_field_written: bool,
+) -> Result<(), MemoryError> {
+    if receipt.is_some() && !generated_field_written {
+        return Err(MemoryError::InvalidArg(format!(
+            "enrichment receipt invariant: stage={stage} receipt requires an accepted generated field"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_receipt_json(receipt: Option<&str>) -> Result<Option<Value>, MemoryError> {
+    receipt
+        .map(|raw| {
+            let value: Value = serde_json::from_str(raw)?;
+            if !value.is_object() {
+                return Err(MemoryError::InvalidArg(
+                    "enrichment receipt invariant: receipt must be a JSON object".to_string(),
+                ));
+            }
+            Ok(value)
+        })
+        .transpose()
+}
+
+fn parse_enrichment_metadata(raw: &str) -> Value {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value) if value.is_object() => value,
+        _ => Value::Object(Map::new()),
+    }
+}
+
+fn enrichment_metadata_object(metadata: &mut Value) -> &mut Map<String, Value> {
+    let root = metadata
+        .as_object_mut()
+        .expect("parse_enrichment_metadata always returns an object");
+    let enrichment = root
+        .entry("enrichment".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !enrichment.is_object() {
+        *enrichment = Value::Object(Map::new());
+    }
+    enrichment
+        .as_object_mut()
+        .expect("enrichment was normalized to an object")
+}
+
+fn merge_enrichment_receipts(
+    enrichment: &mut Map<String, Value>,
+    receipts: ParsedEnrichmentReceipts,
+) {
+    if receipts.summary.is_none() && receipts.metadata.is_none() && receipts.keywords.is_none() {
+        return;
+    }
+
+    let invocations = enrichment
+        .entry("invocations".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !invocations.is_object() {
+        *invocations = Value::Object(Map::new());
+    }
+    let invocations = invocations
+        .as_object_mut()
+        .expect("invocations was normalized to an object");
+    if let Some(receipt) = receipts.summary {
+        invocations.insert("summary".to_string(), receipt);
+    }
+    if let Some(receipt) = receipts.metadata {
+        invocations.insert("metadata".to_string(), receipt);
+    }
+    if let Some(receipt) = receipts.keywords {
+        invocations.insert("keywords".to_string(), receipt);
+    }
 }
 
 pub fn record_enrichment_failure(
