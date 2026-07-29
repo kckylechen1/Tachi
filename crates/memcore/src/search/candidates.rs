@@ -141,6 +141,15 @@ pub(super) fn collect_candidates(
     let symbolic_candidate_count = symbolic_candidate_entries.len();
 
     let exact_id = exact_memory_id_query(query);
+    let mut normal_candidate_ids = vec_scores
+        .keys()
+        .chain(fts_scores.keys())
+        .chain(symbolic_candidate_entries.iter().map(|entry| &entry.id))
+        .chain(exact_id.as_ref())
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut normal_candidate_ids = normal_candidate_ids.drain().collect::<Vec<_>>();
+    normal_candidate_ids.sort();
     let typo = collect_typo_fallback_candidates(
         conn,
         query,
@@ -149,7 +158,7 @@ pub(super) fn collect_candidates(
         as_of_utc,
         &vec_scores,
         &fts_scores,
-        &symbolic_candidate_entries,
+        &normal_candidate_ids,
         exact_id.as_deref(),
         sample,
     )?;
@@ -229,7 +238,7 @@ fn collect_typo_fallback_candidates(
     as_of_utc: Option<&str>,
     vec_scores: &HashMap<String, f64>,
     fts_scores: &HashMap<String, f64>,
-    symbolic_entries: &[MemoryEntry],
+    normal_candidate_ids: &[String],
     exact_id: Option<&str>,
     sample: bool,
 ) -> Result<TypoFallbackCandidates, MemoryError> {
@@ -237,14 +246,25 @@ fn collect_typo_fallback_candidates(
     let Some(query_terms) = eligible_typo_query_terms(query, config) else {
         return Ok(TypoFallbackCandidates::not_activated());
     };
-    if !normal_legs_are_weak(
+    // Activation deliberately evaluates normal candidates with the same
+    // retrieval-evidence predicate used after the final fetch/rank boundary.
+    // Do not replace this with independent per-leg thresholds: weak
+    // FTS/symbolic/vector rows can otherwise suppress fallback and then be
+    // discarded by that later predicate. This fetch stays behind the typo
+    // query eligibility gate, so the normal hot path remains allocation/I/O
+    // unchanged.
+    let normal_candidate_entries = fetch_by_ids(conn, normal_candidate_ids, opts.include_archived)?;
+    if !normal_candidates_need_typo_fallback(
+        conn,
         query,
+        opts,
+        &normal_candidate_entries,
         vec_scores,
         fts_scores,
-        symbolic_entries,
         exact_id,
-        config,
-    ) {
+        include_superseded,
+        as_of_utc,
+    )? {
         return Ok(TypoFallbackCandidates::not_activated());
     }
 
@@ -327,24 +347,30 @@ fn eligible_typo_query_terms(query: &str, config: &TypoFallbackConfig) -> Option
     Some(terms)
 }
 
-fn normal_legs_are_weak(
+fn normal_candidates_need_typo_fallback(
+    conn: &Connection,
     query: &str,
+    opts: &SearchOptions,
+    normal_candidate_entries: &HashMap<String, MemoryEntry>,
     vec_scores: &HashMap<String, f64>,
     fts_scores: &HashMap<String, f64>,
-    symbolic_entries: &[MemoryEntry],
     exact_id: Option<&str>,
-    config: &TypoFallbackConfig,
-) -> bool {
-    exact_id.is_none()
-        && vec_scores
-            .values()
-            .all(|score| *score <= config.max_normal_vector_similarity)
-        && fts_scores
-            .values()
-            .all(|score| *score <= config.max_normal_fts_score)
-        && symbolic_entries.iter().all(|entry| {
-            crate::scorer::symbolic_score_entry(query, entry) <= config.max_normal_symbolic_score
-        })
+    include_superseded: bool,
+    as_of_utc: Option<&str>,
+) -> Result<bool, MemoryError> {
+    Ok(
+        !super::ranking::normal_candidates_have_final_retrieval_evidence(
+            conn,
+            query,
+            opts,
+            normal_candidate_entries,
+            vec_scores,
+            fts_scores,
+            exact_id,
+            include_superseded,
+            as_of_utc,
+        )?,
+    )
 }
 
 fn typo_prefilter_ids(
@@ -426,10 +452,23 @@ fn typo_candidate_similarity(
     edit_cell_count: &mut usize,
 ) -> Option<f64> {
     let candidate_tokens = bounded_candidate_tokens(entry, config);
-    let mut score_sum = 0.0;
-    for query_term in query_terms {
-        let mut best = 0.0_f64;
-        for candidate_term in &candidate_tokens {
+    if candidate_tokens.len() < query_terms.len() {
+        return None;
+    }
+
+    // `best_by_assignment[mask]` is the highest total similarity after the
+    // candidate tokens visited so far assigned exactly the query terms in
+    // `mask`. Processing one candidate token at a time means each token can
+    // fill at most one bit: two misspellings can never borrow one occurrence.
+    // The work is bounded by `max_candidate_tokens * 2^max_query_terms *
+    // max_query_terms` (at defaults: 48 * 256 * 8), in addition to the
+    // already-metered edit-distance comparisons.
+    let full_assignment = (1usize << query_terms.len()) - 1;
+    let mut best_by_assignment = vec![f64::NEG_INFINITY; full_assignment + 1];
+    best_by_assignment[0] = 0.0;
+    for candidate_term in &candidate_tokens {
+        let mut similarities = vec![None; query_terms.len()];
+        for (query_index, query_term) in query_terms.iter().enumerate() {
             *token_comparison_count = token_comparison_count.saturating_add(1);
             let length_delta = query_term.len().abs_diff(candidate_term.len());
             if length_delta > config.max_edit_distance {
@@ -441,37 +480,78 @@ fn typo_candidate_similarity(
             }
             let similarity =
                 1.0 - distance as f64 / query_term.len().max(candidate_term.len()).max(1) as f64;
-            best = best.max(similarity);
+            if similarity + f64::EPSILON >= config.min_token_similarity {
+                similarities[query_index] = Some(similarity);
+            }
         }
-        if best < config.min_token_similarity {
-            return None;
+        let before_candidate = best_by_assignment.clone();
+        for (assignment, score) in before_candidate.into_iter().enumerate() {
+            if !score.is_finite() {
+                continue;
+            }
+            for (query_index, similarity) in similarities.iter().enumerate() {
+                let query_bit = 1usize << query_index;
+                if assignment & query_bit != 0 {
+                    continue;
+                }
+                let Some(similarity) = *similarity else {
+                    continue;
+                };
+                let extended = assignment | query_bit;
+                best_by_assignment[extended] = best_by_assignment[extended].max(score + similarity);
+            }
         }
-        score_sum += best;
     }
-    Some(score_sum / query_terms.len() as f64)
+    best_by_assignment[full_assignment]
+        .is_finite()
+        .then(|| best_by_assignment[full_assignment] / query_terms.len() as f64)
 }
 
 fn bounded_candidate_tokens(entry: &MemoryEntry, config: &TypoFallbackConfig) -> Vec<String> {
     let keyword_text = entry.keywords.join(" ");
     let entity_text = entry.entities.join(" ");
-    let fields = [
-        entry.summary.as_str(),
-        entry.text.as_str(),
+    let structured_fields = [
         entry.topic.as_str(),
         keyword_text.as_str(),
         entity_text.as_str(),
         entry.path.as_str(),
         entry.id.as_str(),
     ];
-    let mut remaining_chars = config.max_candidate_chars;
+    let free_text_fields = [entry.summary.as_str(), entry.text.as_str()];
     let mut seen = HashSet::new();
     let mut tokens = Vec::new();
-    for field in fields {
-        if remaining_chars == 0 || tokens.len() >= config.max_candidate_tokens {
+
+    // Structured metadata receives a separate per-field budget and precedes
+    // summary/body text. A verbose body therefore cannot consume the only
+    // scan budget before topic, keywords, entities, path, or id are seen.
+    for field in structured_fields {
+        if tokens.len() >= config.max_candidate_tokens {
             break;
         }
-        let bounded = field.chars().take(remaining_chars).collect::<String>();
-        remaining_chars = remaining_chars.saturating_sub(bounded.chars().count());
+        let bounded = field
+            .chars()
+            .take(config.max_structured_field_chars)
+            .collect::<String>();
+        for token in crate::scorer::tokenize(&bounded) {
+            if token.chars().all(|ch| ch.is_ascii_alphabetic())
+                && (config.min_token_chars..=config.max_token_chars).contains(&token.len())
+                && seen.insert(token.clone())
+            {
+                tokens.push(token);
+                if tokens.len() >= config.max_candidate_tokens {
+                    break;
+                }
+            }
+        }
+    }
+    for field in free_text_fields {
+        if tokens.len() >= config.max_candidate_tokens {
+            break;
+        }
+        let bounded = field
+            .chars()
+            .take(config.max_candidate_chars)
+            .collect::<String>();
         for token in crate::scorer::tokenize(&bounded) {
             if token.chars().all(|ch| ch.is_ascii_alphabetic())
                 && (config.min_token_chars..=config.max_token_chars).contains(&token.len())
