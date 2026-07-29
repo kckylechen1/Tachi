@@ -172,16 +172,15 @@ pub(super) fn rank_candidate_entries(
     let pre_boost_scores = capture_impression.then(|| scores.clone());
 
     let mut boost_observer = NoopBoostSequenceObserver;
-    apply_production_boost_sequence(
+    let boost_context = BoostSequenceContext {
         query,
         opts,
-        &entries_ref,
-        &weights,
-        &access_times,
-        &superseded_ids,
-        &mut scores,
-        &mut boost_observer,
-    );
+        entries_ref: &entries_ref,
+        weights: &weights,
+        access_times: &access_times,
+        superseded_ids: &superseded_ids,
+    };
+    apply_production_boost_sequence(&boost_context, &mut scores, &mut boost_observer);
 
     // The scorer invariant: these are exactly the post-merge/post-boost score
     // keys, before MMR or `top_k` can remove displayed results. Sorting makes
@@ -925,15 +924,19 @@ struct NoopBoostSequenceObserver;
 
 impl BoostSequenceObserver for NoopBoostSequenceObserver {}
 
+struct BoostSequenceContext<'a> {
+    query: &'a str,
+    opts: &'a SearchOptions,
+    entries_ref: &'a HashMap<String, &'a MemoryEntry>,
+    weights: &'a crate::scorer::HybridWeights,
+    access_times: &'a HashMap<String, Vec<f64>>,
+    superseded_ids: &'a HashSet<String>,
+}
+
 /// The one production-owned boost order. Measurement observers see each
 /// sequential marginal transition around the same calls production executes.
 fn apply_production_boost_sequence<O: BoostSequenceObserver>(
-    query: &str,
-    opts: &SearchOptions,
-    entries_ref: &HashMap<String, &MemoryEntry>,
-    weights: &crate::scorer::HybridWeights,
-    access_times: &HashMap<String, Vec<f64>>,
-    superseded_ids: &HashSet<String>,
+    context: &BoostSequenceContext<'_>,
     scores: &mut HashMap<String, HybridScore>,
     observer: &mut O,
 ) {
@@ -947,25 +950,48 @@ fn apply_production_boost_sequence<O: BoostSequenceObserver>(
 
     apply_step!(
         "precision",
-        apply_precision_boosts(query, opts, entries_ref, weights, scores)
+        apply_precision_boosts(
+            context.query,
+            context.opts,
+            context.entries_ref,
+            context.weights,
+            scores,
+        )
     );
     apply_step!(
         "quality",
-        apply_quality_boosts(opts.path_prefix.as_deref(), entries_ref, scores)
+        apply_quality_boosts(
+            context.opts.path_prefix.as_deref(),
+            context.entries_ref,
+            scores,
+        )
     );
     apply_step!(
         "access_feedback",
-        apply_access_feedback(entries_ref, access_times, recall_config(opts), scores)
+        apply_access_feedback(
+            context.entries_ref,
+            context.access_times,
+            recall_config(context.opts),
+            scores,
+        )
     );
-    apply_step!("tier", apply_tier_boosts(entries_ref, scores));
+    apply_step!("tier", apply_tier_boosts(context.entries_ref, scores));
     apply_step!(
         "entity_recency",
-        apply_entity_recency_boosts(entries_ref, superseded_ids, scores)
+        apply_entity_recency_boosts(context.entries_ref, context.superseded_ids, scores)
     );
-    apply_step!("decision", apply_decision_boost(query, entries_ref, scores));
+    apply_step!(
+        "decision",
+        apply_decision_boost(context.query, context.entries_ref, scores)
+    );
     apply_step!(
         "lexical_overlap",
-        apply_lexical_overlap_boost(query, opts.path_prefix.as_deref(), entries_ref, scores)
+        apply_lexical_overlap_boost(
+            context.query,
+            context.opts.path_prefix.as_deref(),
+            context.entries_ref,
+            scores,
+        )
     );
 }
 
@@ -1450,16 +1476,15 @@ pub(super) mod attribution {
         }
 
         let mut observer = SnapshotObserver::new(&entries_ref);
-        apply_production_boost_sequence(
+        let boost_context = BoostSequenceContext {
             query,
             opts,
-            &entries_ref,
-            &weights,
-            &access_times,
-            &superseded_ids,
-            &mut scores,
-            &mut observer,
-        );
+            entries_ref: &entries_ref,
+            weights: &weights,
+            access_times: &access_times,
+            superseded_ids: &superseded_ids,
+        };
+        apply_production_boost_sequence(&boost_context, &mut scores, &mut observer);
         let final_scores = snapshot(&scores);
 
         Ok(RankAttribution {
