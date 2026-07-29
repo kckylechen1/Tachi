@@ -344,6 +344,22 @@ pub fn fact_to_entry_with_reason(
     source: &str,
     metadata: serde_json::Value,
 ) -> Result<MemoryEntry, &'static str> {
+    let mut entry = fact_to_entry_candidate_with_reason(fact, source, metadata)?;
+    entry.id = uuid::Uuid::new_v4().to_string();
+    Ok(entry)
+}
+
+/// Build the accepted fact shape without assigning an identity.
+///
+/// Canonical insert-once callers use this seam so the capture gate and field
+/// defaults remain shared with legacy callers while identity is assigned only
+/// after persisted-value normalization. Callers that want the historical
+/// random identity should continue using [`fact_to_entry_with_reason`].
+pub fn fact_to_entry_candidate_with_reason(
+    fact: &serde_json::Value,
+    source: &str,
+    metadata: serde_json::Value,
+) -> Result<MemoryEntry, &'static str> {
     fn string_list(value: &serde_json::Value) -> Vec<String> {
         value
             .as_array()
@@ -397,7 +413,7 @@ pub fn fact_to_entry_with_reason(
     };
     let summary = text.chars().take(100).collect::<String>();
     Ok(MemoryEntry {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: String::new(),
         path: format!("/{}/{}", scope, topic.replace(' ', "_")),
         summary,
         text,

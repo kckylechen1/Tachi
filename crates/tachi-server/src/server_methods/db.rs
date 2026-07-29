@@ -383,7 +383,7 @@ impl MemoryServer {
         Ok(canonical)
     }
 
-    fn validate_named_project(project_name: &str) -> Result<String, String> {
+    pub(crate) fn validate_named_project(project_name: &str) -> Result<String, String> {
         // Project names are persisted identities, not display strings. Accept
         // only an exact already-safe alias; never lossy-sanitize caller input
         // into another project's directory. `unnamed` is permanently

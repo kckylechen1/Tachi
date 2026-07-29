@@ -46,9 +46,11 @@ fn embedded_mcp_facade() -> bool {
 fn background_workers_enabled() -> bool {
     #[cfg(test)]
     {
-        TEST_BACKGROUND_WORKERS_OVERRIDE
-            .get()
-            .unwrap_or_else(|| env_truthy("TACHI_TEST_ENABLE_BACKGROUND_WORKERS"))
+        // Tests run in parallel, so a process-global environment variable
+        // cannot safely choose whether an otherwise unrelated constructor
+        // calls `tokio::spawn`. Tests that exercise workers must opt in via
+        // `new_with_background_workers_for_test` on their own thread.
+        TEST_BACKGROUND_WORKERS_OVERRIDE.get().unwrap_or(false)
     }
     #[cfg(not(test))]
     {
@@ -469,6 +471,21 @@ mod tests {
             query_diversity: 0,
             tier: "raw".to_string(),
         }
+    }
+
+    #[test]
+    fn memory_server_new_ignores_process_background_worker_env_in_tests() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _workers =
+            crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let server = MemoryServer::new(temp.path().join("global/memory.db"), None)
+            .expect("ambient test env must not enable background workers");
+
+        assert!(!server.has_project_db());
     }
 
     #[test]

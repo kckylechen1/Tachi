@@ -19,7 +19,8 @@ use crate::facade_save_ops::finalize_tachi_save_response;
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
-use evidence_format::{format_extract_result, json_string, parse_json_or_empty};
+pub(crate) use evidence_format::format_extract_result;
+use evidence_format::{json_string, parse_json_or_empty};
 pub(crate) use evidence_format::{
     shape_complete_response, shape_save_facade_response, wants_full_format, wants_json,
 };

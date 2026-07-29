@@ -42,8 +42,8 @@ pub(crate) fn save_kind_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &["memory", "note", "wiki"],
-        "What to save: memory (full entry), note (quick), or wiki (knowledge page).",
+        &["memory", "note", "wiki", "facts", "extract_facts"],
+        "What to save: memory (full entry), note (quick), wiki (knowledge page), or facts/extract_facts (LLM-atomized canonical facts).",
         generator,
     )
 }

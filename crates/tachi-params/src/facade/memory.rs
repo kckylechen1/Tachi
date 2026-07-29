@@ -196,7 +196,8 @@ pub struct TachiSaveParams {
     #[serde(default)]
     pub id: Option<String>,
 
-    /// What to save: "wiki" for wiki entry, "note" for a quick note, "memory" for full memory entry.
+    /// What to save: "wiki" for wiki entry, "note" for a quick note, "memory" for full memory
+    /// entry, or "facts"/"extract_facts" for LLM-atomized canonical facts.
     /// If omitted, auto-detected: title present → wiki; short/casual text → note; otherwise → memory.
     #[serde(default)]
     #[schemars(schema_with = "super::save_kind_schema")]
@@ -432,7 +433,7 @@ pub struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(
         schema_with = "super::save_kind_schema",
-        description = "[action=save] Kind hint: memory, note, or wiki. If omitted, tachi_memory defaults to memory unless scope='note'; use tachi_save for title-based auto-detection."
+        description = "[action=save] Kind hint: memory, note, wiki, facts, or extract_facts. If omitted, tachi_memory defaults to memory unless scope='note'; use tachi_save for title-based auto-detection."
     )]
     pub kind: Option<String>,
     #[serde(default)]
