@@ -430,6 +430,120 @@ async fn model_derived_wiki_facade_update_preserves_trusted_first_receipt_exactl
 }
 
 #[tokio::test]
+async fn ordinary_public_wiki_update_preserves_trusted_existing_model_receipt() {
+    let provider_a = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-public-a").await;
+    let (server, _home) = seed_wiki_project_entries(vec![]);
+
+    let invocation_a = provider_a
+        .llm
+        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
+        .await
+        .expect("receipt A")
+        .invocation;
+    let first = crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
+        &server,
+        WikiWriteParams {
+            title: "Public update receipt".to_string(),
+            text: "First model-derived wiki write with receipt A.".to_string(),
+            path: Some("/wiki/agent/tachi/public-update-receipt".to_string()),
+            topic: Some("public-update-receipt".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["receipt".to_string()],
+            entities: vec!["Tachi".to_string()],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        },
+        invocation_a,
+    )
+    .await
+    .expect("first model-derived wiki write");
+    let first_json: Value = serde_json::from_str(&first).expect("first public response");
+    let first_id = first_json["id"].as_str().expect("first public id");
+    let receipt_a = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(first_id).map_err(|error| error.to_string())
+        })
+        .expect("read first public row")
+        .expect("first public row exists")
+        .metadata
+        .pointer("/provenance/model_invocation")
+        .cloned()
+        .expect("first public typed receipt");
+    assert_eq!(receipt_a["effective_model"], "wiki-public-a");
+
+    let second = crate::copilot_ops::handle_tachi_wiki_write(
+        &server,
+        WikiWriteParams {
+            title: "Public update receipt".to_string(),
+            text: "Ordinary public wiki update must keep receipt A.".to_string(),
+            path: Some("/wiki/agent/tachi/public-update-receipt".to_string()),
+            topic: Some("public-update-receipt".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["receipt".to_string()],
+            entities: vec!["Tachi".to_string()],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: Some(json!({
+                "provenance": {
+                    "caller_marker": "hostile",
+                    "model_invocation": {
+                        "schema": "model-invocation-v1",
+                        "effective_model": "hostile-new-receipt"
+                    }
+                }
+            })),
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        },
+    )
+    .await
+    .expect("ordinary public wiki update");
+    let second_json: Value = serde_json::from_str(&second).expect("second public response");
+    let second_id = second_json["id"].as_str().expect("second public id");
+    assert_eq!(second_id, first_id, "public wiki update stays in place");
+
+    let updated = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(second_id).map_err(|error| error.to_string())
+        })
+        .expect("read updated public row")
+        .expect("updated public row exists");
+    assert_eq!(
+        updated.metadata.pointer("/provenance/model_invocation"),
+        Some(&receipt_a),
+        "ordinary public replacement must restore trusted receipt A exactly"
+    );
+    assert!(
+        updated.metadata["provenance"]
+            .get("caller_marker")
+            .is_none(),
+        "hostile public provenance must not survive inject_provenance"
+    );
+    assert_ne!(
+        updated.metadata["provenance"]["model_invocation"]["effective_model"],
+        "hostile-new-receipt",
+        "public metadata must not forge or select the receipt slot"
+    );
+}
+
+#[tokio::test]
 async fn tachi_wiki_ingest_truncated_metadata_writes_nothing() {
     let provider = MockWikiIngestProvider::start(
         r#"{"title":"Looks complete","topic":"truncated"}"#,

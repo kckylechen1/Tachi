@@ -107,16 +107,14 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
     // A typed receipt belongs to the artifact's first model-derived durable
     // write. Public metadata cannot populate this channel: `inject_provenance`
     // above replaces caller-provided provenance wholesale before we look at
-    // the typed internal invocation seam. On model-derived replacement of a
-    // trusted existing artifact, preserve the existing receipt exactly rather
-    // than overwriting it with invocation B or losing it when the provenance
-    // object is restamped.
-    if let Some(invocation) = model_invocation {
-        if let Some(existing_invocation) = trusted_existing_model_invocation(existing) {
-            attach_trusted_existing_model_invocation(&mut metadata, existing_invocation)?;
-        } else {
-            metadata = crate::provenance::attach_model_invocation(metadata, invocation)?;
-        }
+    // the typed internal invocation seam. Always restore a trusted existing
+    // receipt from the actual DB row after restamping provenance, including
+    // ordinary public replacements that have no invocation B. Only a row with
+    // no trusted existing receipt may attach the new typed invocation.
+    if let Some(existing_invocation) = trusted_existing_model_invocation(existing) {
+        attach_trusted_existing_model_invocation(&mut metadata, existing_invocation)?;
+    } else if let Some(invocation) = model_invocation {
+        metadata = crate::provenance::attach_model_invocation(metadata, invocation)?;
     }
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("force".to_string(), serde_json::Value::Bool(params.force));

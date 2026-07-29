@@ -118,6 +118,23 @@ pub(super) fn attach_model_invocation(
     Ok(metadata)
 }
 
+/// Attach a closed `model-invocation-v1` receipt to an event ledger
+/// provenance object. Event rows persist `TachiEventRecord::provenance`
+/// directly, not under `metadata.provenance`, so this is intentionally a
+/// separate seam from [`attach_model_invocation`].
+pub(super) fn attach_event_model_invocation(
+    mut provenance: serde_json::Value,
+    invocation: &PersistedModelInvocationReceiptV1,
+) -> Result<serde_json::Value, String> {
+    let provenance_obj = provenance
+        .as_object_mut()
+        .ok_or_else(|| "event model invocation provenance must be a JSON object".to_string())?;
+    let receipt = serde_json::to_value(invocation)
+        .map_err(|error| format!("serialize model invocation receipt: {error}"))?;
+    provenance_obj.insert("model_invocation".into(), receipt);
+    Ok(provenance)
+}
+
 /// #1041 F3 fix: correct ONLY `provenance.db_path` to point at a
 /// caller-resolved named-project path, leaving every other provenance field
 /// (`db_scope`, `tool_name`, `captured_at`, audit context) untouched.

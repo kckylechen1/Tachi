@@ -733,9 +733,14 @@ fn detect_model_api_calls(surface_lines: &[String]) -> Vec<(usize, ModelApi)> {
         let rest = &surface[offset..];
         let mut matched = None;
         for api in ModelApi::all().iter().copied() {
-            let method = format!(".{}", api.as_str());
-            if rest.starts_with(&method) && method_call_has_open_paren(rest, method.len()) {
-                matched = Some((api, method.len()));
+            for prefix in [".", "::"] {
+                let call = format!("{prefix}{}", api.as_str());
+                if rest.starts_with(&call) && model_api_call_has_open_paren(rest, call.len()) {
+                    matched = Some((api, call.len()));
+                    break;
+                }
+            }
+            if matched.is_some() {
                 break;
             }
         }
@@ -753,8 +758,8 @@ fn detect_model_api_calls(surface_lines: &[String]) -> Vec<(usize, ModelApi)> {
     out
 }
 
-fn method_call_has_open_paren(rest: &str, method_len: usize) -> bool {
-    rest[method_len..].trim_start().starts_with('(')
+fn model_api_call_has_open_paren(rest: &str, call_len: usize) -> bool {
+    rest[call_len..].trim_start().starts_with('(')
 }
 
 fn lexical_surface(source: &str) -> Vec<String> {
@@ -1088,6 +1093,25 @@ async fn production(server: &Server, llm: LlmClient) {
 }
 
 #[test]
+fn model_call_scanner_detects_ufcs_calls_and_preserves_multicall_order() {
+    let actual = discover_model_calls_in_source(
+        "synthetic.rs",
+        r#"
+async fn production(llm: &LlmClient) {
+    LlmClient::call_extract_llm(llm, "system", "user", None, 0.0, 8).await; llm.generate_summary("text").await;
+}
+"#,
+    );
+    let apis = actual.iter().map(|call| call.api).collect::<Vec<_>>();
+    assert_eq!(
+        apis,
+        vec![ModelApi::CallExtractLlm, ModelApi::GenerateSummary],
+        "{actual:#?}"
+    );
+    assert_eq!(actual[0].owner, "production");
+}
+
+#[test]
 fn model_call_scanner_ignores_block_comments_and_multiline_raw_strings() {
     let actual = discover_model_calls_in_source(
         "synthetic.rs",
@@ -1153,6 +1177,19 @@ async fn production(llm: LlmClient) {
 }
 
 #[test]
+fn model_call_registry_matches_registered_slot_using_ufcs_call() {
+    let errors = synthetic_census_errors(
+        r#"
+async fn production(llm: &LlmClient) {
+    LlmClient::generate_summary(llm, "durable summary").await.unwrap();
+}
+"#,
+        &synthetic_successor_slot_registry(),
+    );
+    assert!(errors.is_empty(), "{errors}");
+}
+
+#[test]
 fn model_call_registry_rejects_current_and_successor_together() {
     let errors = synthetic_census_errors(
         r#"
@@ -1185,6 +1222,23 @@ async fn production(llm: LlmClient) {
         errors.contains("missing typed registry slot entries")
             && errors.contains("api=call_extract_llm"),
         "extra unknown call must fail with the actual API diagnostic: {errors}"
+    );
+}
+
+#[test]
+fn model_call_registry_rejects_unregistered_ufcs_call() {
+    let errors = synthetic_census_errors(
+        r#"
+async fn production(llm: &LlmClient) {
+    LlmClient::call_extract_llm(llm, "system", "user", None, 0.0, 8).await.unwrap();
+}
+"#,
+        &synthetic_successor_slot_registry(),
+    );
+    assert!(
+        errors.contains("missing typed registry slot entries")
+            && errors.contains("api=call_extract_llm"),
+        "unregistered UFCS call must fail with the actual API diagnostic: {errors}"
     );
 }
 
