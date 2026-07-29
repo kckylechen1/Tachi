@@ -81,7 +81,7 @@ fn tachi_memory_schema_declares_polymorphic_field_enum_values() {
     );
     assert_eq!(
         enum_values(&properties["kind"], "kind"),
-        vec!["memory", "note", "wiki"]
+        vec!["memory", "note", "wiki", "facts", "extract_facts"]
     );
     assert_eq!(
         enum_values(&properties["category"], "category"),
