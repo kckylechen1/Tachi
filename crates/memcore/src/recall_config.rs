@@ -91,7 +91,8 @@ pub struct RecallConfig {
     /// do not update it. So this knob chooses between two partial views, not
     /// between a partial one and a complete one.
     pub use_provenance_recency: bool,
-    /// Deterministic query-hash sample rate in basis points. Zero is fully off.
+    /// Deterministic SHA-256 query-fingerprint sample rate in basis points.
+    /// Zero is fully off.
     pub impression_sample_rate_bps: u16,
 }
 

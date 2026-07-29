@@ -47,6 +47,8 @@
 //!   v23 inventory is refused rather than silently repaired.
 //! - v24: `memories.scored_count` scorer-only diagnostic counter (#1459).
 //! - v25: sampled recall-impression ledger tables and indexes (#1447).
+//! - v26: SHA-256 query fingerprints and complete replay-policy identity for
+//!   recall impressions; v25 groups remain honestly unversioned (#1447).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -89,7 +91,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 25;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 26;
 
 mod basic;
 mod cross_db;
@@ -165,6 +167,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v23_reserved_reference_guards",
     "v24_memories_scored_count",
     "v25_recall_impression_ledger",
+    "v26_recall_impression_replay_identity",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -196,6 +199,7 @@ pub struct MigrationReport {
     pub reserved_reference_guards_installed: usize,
     pub scored_count_column_added: usize,
     pub recall_impression_schema_objects_created: usize,
+    pub recall_impression_replay_identity_columns_added: usize,
 }
 
 #[cfg(test)]
@@ -639,6 +643,12 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v25_recall_impression_ledger,
     )?
     .unwrap_or(0);
+    report.recall_impression_replay_identity_columns_added = apply_versioned_migration(
+        conn,
+        "v26_recall_impression_replay_identity",
+        migrate_v26_recall_impression_replay_identity,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
 }
@@ -657,9 +667,13 @@ fn migrate_v24_memories_scored_count(conn: &Connection) -> Result<usize, MemoryE
 }
 
 fn migrate_v25_recall_impression_ledger(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::install_recall_impression_ledger_schema(conn)?;
-    crate::db::schema::validate_recall_impression_ledger_schema(conn)?;
+    crate::db::schema::install_v25_recall_impression_ledger_schema(conn)?;
     Ok(6)
+}
+
+fn migrate_v26_recall_impression_replay_identity(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::migrate_recall_impression_ledger_to_v26(conn)?;
+    Ok(7)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -1400,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn private_fresh_init_installs_v25_through_migration_once() {
+    fn private_fresh_init_installs_v25_and_v26_through_migration_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1417,6 +1431,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sentinel_version, 1);
+        let v26_sentinel_version: i64 = conn
+            .query_row(
+                "SELECT version FROM hard_state
+                 WHERE namespace = ?1 AND key = 'v26_recall_impression_replay_identity'",
+                [MIGRATION_NS],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v26_sentinel_version, 1);
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
 
         init_schema(&conn).expect("valid current private schema reopens idempotently");
@@ -1429,6 +1452,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sentinel_version_after, 1, "v25 migration must run once");
+        let v26_sentinel_version_after: i64 = conn
+            .query_row(
+                "SELECT version FROM hard_state
+                 WHERE namespace = ?1 AND key = 'v26_recall_impression_replay_identity'",
+                [MIGRATION_NS],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v26_sentinel_version_after, 1, "v26 migration must run once");
     }
 
     #[test]
@@ -2061,6 +2093,7 @@ mod tests {
         );
         assert!(was_run(&verify, "v24_memories_scored_count").unwrap());
         assert!(was_run(&verify, "v25_recall_impression_ledger").unwrap());
+        assert!(was_run(&verify, "v26_recall_impression_replay_identity").unwrap());
         let _reserved_reference_guard = crate::db::register_reserved_reference_write_guard(&verify)
             .expect("register trigger guard function");
         let default: i64 = verify
@@ -2073,19 +2106,20 @@ mod tests {
         assert_eq!(default, 0);
     }
 
-    /// #1447: the recall-impression ledger is a v25 persistent schema change.
-    /// A stamped-v24 OpenExisting DB must not acquire its tables or indexes
-    /// unless the caller explicitly authorizes migration.
+    /// #1447: v25 impression groups did not persist a unique fingerprint or a
+    /// replay-policy identity. v26 must be explicitly authorized, retain the
+    /// non-unique FNV bucket only under its legacy name, and leave unknown
+    /// provenance NULL so replay refuses rather than guessing current math.
     #[test]
-    fn v24_to_v25_recall_impressions_requires_authority_and_stamps() {
+    fn v25_to_v26_recall_impressions_requires_authority_and_preserves_unknowns() {
         use crate::db::DbOpenContext;
 
-        const V25_SENTINEL: &str = "v25_recall_impression_ledger";
-        const V25_OBJECTS: &[(&str, &str)] = &[
+        const V26_SENTINEL: &str = "v26_recall_impression_replay_identity";
+        const V26_OBJECTS: &[(&str, &str)] = &[
             ("table", "recall_impression_groups"),
             ("table", "recall_impressions"),
             ("index", "idx_recall_impression_groups_created"),
-            ("index", "idx_recall_impression_groups_query_hash"),
+            ("index", "idx_recall_impression_groups_fingerprint"),
             ("index", "idx_recall_impressions_memory"),
             ("index", "idx_recall_impressions_group_final_rank"),
         ];
@@ -2102,30 +2136,27 @@ mod tests {
             assert_eq!(
                 read_schema_version(&conn).unwrap(),
                 EXPECTED_SCHEMA_VERSION,
-                "fresh provisioning must stamp v25"
+                "fresh provisioning must stamp v26"
             );
-            assert!(was_run(&conn, V25_SENTINEL).unwrap());
-            for (object_type, name) in V25_OBJECTS {
-                let present: bool = conn
-                    .query_row(
-                        "SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2",
-                        params![object_type, name],
-                        |_| Ok(true),
-                    )
-                    .unwrap_or(false);
-                assert!(present, "fresh v25 must create {object_type} {name}");
-            }
             conn.execute(
                 "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-                params![MIGRATION_NS, V25_SENTINEL],
+                params![MIGRATION_NS, V26_SENTINEL],
             )
             .unwrap();
             conn.execute_batch(
                 "DROP TABLE recall_impressions;
-                 DROP TABLE recall_impression_groups;
-                 PRAGMA user_version = 24;",
+                 DROP TABLE recall_impression_groups;",
             )
             .unwrap();
+            crate::db::schema::install_v25_recall_impression_ledger_schema(&conn)
+                .expect("build historical v25 ledger fixture");
+            conn.execute(
+                "INSERT INTO recall_impression_groups (group_id, created_at, query_hash, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count)
+                 VALUES ('v25-group', '2026-07-29T00:00:00.000Z', 'deadbeef', 'default', 0.4, 0.3, 0.2, 0.1, 0, 20.0, 10, 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA user_version = 25;").unwrap();
         }
 
         let deny_err = match crate::MemoryStore::open_with_label_and_context(
@@ -2133,44 +2164,39 @@ mod tests {
             "global",
             &DbOpenContext::open_existing_deny(),
         ) {
-            Ok(_) => panic!("Deny must refuse stamped-v24 -> v25"),
+            Ok(_) => panic!("Deny must refuse stamped-v25 -> v26"),
             Err(error) => error,
         };
         assert!(
             matches!(
                 deny_err,
-                MemoryError::SchemaMigrationOptInRequired { stored: 24, .. }
+                MemoryError::SchemaMigrationOptInRequired { stored: 25, .. }
             ),
             "unexpected deny error: {deny_err}"
         );
         {
             let inspect = Connection::open(&path).expect("inspect denied DB");
-            assert_eq!(read_schema_version(&inspect).unwrap(), 24);
-            assert!(!was_run(&inspect, V25_SENTINEL).unwrap());
-            for (object_type, name) in V25_OBJECTS {
-                let present: bool = inspect
-                    .query_row(
-                        "SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2",
-                        params![object_type, name],
-                        |_| Ok(true),
-                    )
-                    .unwrap_or(false);
-                assert!(!present, "Deny must not create {object_type} {name}");
-            }
+            assert_eq!(read_schema_version(&inspect).unwrap(), 25);
+            assert!(!was_run(&inspect, V26_SENTINEL).unwrap());
+            assert!(table_has_column(&inspect, "recall_impression_groups", "query_hash").unwrap());
+            assert!(
+                !table_has_column(&inspect, "recall_impression_groups", "query_fingerprint")
+                    .unwrap()
+            );
         }
 
         let store = crate::MemoryStore::open_with_label_and_context(
             &path_str,
             "global",
-            &DbOpenContext::open_existing_allow("test:1447-v25"),
+            &DbOpenContext::open_existing_allow("test:1447-v26"),
         )
-        .expect("Allow must migrate v24 -> v25");
+        .expect("Allow must migrate v25 -> v26");
         drop(store);
 
         let verify = Connection::open(&path).expect("verify migrated DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), 25);
-        assert!(was_run(&verify, V25_SENTINEL).unwrap());
-        for (object_type, name) in V25_OBJECTS {
+        assert_eq!(read_schema_version(&verify).unwrap(), 26);
+        assert!(was_run(&verify, V26_SENTINEL).unwrap());
+        for (object_type, name) in V26_OBJECTS {
             let present: bool = verify
                 .query_row(
                     "SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2",
@@ -2178,8 +2204,73 @@ mod tests {
                     |_| Ok(true),
                 )
                 .unwrap_or(false);
-            assert!(present, "v25 must create {object_type} {name}");
+            assert!(present, "v26 must create {object_type} {name}");
         }
+        assert!(
+            !table_has_column(&verify, "recall_impression_groups", "query_hash").unwrap(),
+            "v26 must not retain the ambiguous v25 column name"
+        );
+        for column in [
+            "legacy_query_bucket",
+            "query_fingerprint",
+            "fusion_policy_version",
+            "pre_boost_adjustment_version",
+            "tie_break_policy_version",
+            "candidate_policy_version",
+            "schema_identity",
+        ] {
+            assert!(
+                table_has_column(&verify, "recall_impression_groups", column).unwrap(),
+                "v26 group schema must contain {column}"
+            );
+        }
+        let (legacy_bucket, fingerprint, fusion, adjustment, tie_break, candidate, schema): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = verify
+            .query_row(
+                "SELECT legacy_query_bucket, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity FROM recall_impression_groups WHERE group_id = 'v25-group'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(legacy_bucket, "deadbeef");
+        assert_eq!(
+            (
+                fingerprint,
+                fusion,
+                adjustment,
+                tie_break,
+                candidate,
+                schema
+            ),
+            (None, None, None, None, None, None),
+            "v26 must not fabricate unavailable query or policy provenance"
+        );
+        let error = crate::replay_recall_impression_group(&verify, "v25-group")
+            .expect_err("unversioned v25 group must not run current replay math");
+        assert!(matches!(
+            error,
+            MemoryError::RecallReplayIncompatible {
+                reason: crate::error::RecallReplayCompatibilityReason::LegacyUnversioned,
+                ..
+            }
+        ));
     }
 
     fn current_schema_snapshot(path: &Path) -> (Vec<u8>, Vec<String>, u32, Vec<String>) {
@@ -2235,7 +2326,7 @@ mod tests {
         ]
     }
 
-    fn assert_current_v25_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
+    fn assert_current_v26_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
         let mut unexpected_acceptances = Vec::new();
         for (surface, open) in current_existing_openers() {
             let tmp = tempfile::tempdir().expect("tempdir");
@@ -2246,7 +2337,7 @@ mod tests {
                     &path_str,
                     &DbOpenContext::create_fresh(),
                 )
-                .expect("provision current v25 fixture");
+                .expect("provision current v26 fixture");
                 drop(store);
                 let conn = Connection::open(&path).expect("open fixture for corruption");
                 conn.execute_batch(corruption_sql).expect("corrupt fixture");
@@ -2284,45 +2375,45 @@ mod tests {
         }
         assert!(
             unexpected_acceptances.is_empty(),
-            "stamped-current corrupt v25 DB was accepted by {unexpected_acceptances:?}"
+            "stamped-current corrupt v26 DB was accepted by {unexpected_acceptances:?}"
         );
     }
 
     #[test]
-    fn stamped_current_v25_missing_ledger_table_or_index_is_refused_without_repair() {
-        assert_current_v25_corruption_is_not_repaired(
+    fn stamped_current_v26_missing_ledger_table_or_index_is_refused_without_repair() {
+        assert_current_v26_corruption_is_not_repaired(
             "DROP TABLE recall_impressions;",
             "recall_impressions",
         );
-        assert_current_v25_corruption_is_not_repaired(
-            "DROP INDEX idx_recall_impression_groups_query_hash;",
-            "idx_recall_impression_groups_query_hash",
+        assert_current_v26_corruption_is_not_repaired(
+            "DROP INDEX idx_recall_impression_groups_fingerprint;",
+            "idx_recall_impression_groups_fingerprint",
         );
     }
 
     #[test]
-    fn stamped_current_v25_missing_sentinel_is_refused_without_repair() {
-        assert_current_v25_corruption_is_not_repaired(
+    fn stamped_current_v26_missing_sentinel_is_refused_without_repair() {
+        assert_current_v26_corruption_is_not_repaired(
             "DELETE FROM hard_state
-             WHERE namespace = 'migrations' AND key = 'v25_recall_impression_ledger';",
-            "v25_recall_impression_ledger",
+             WHERE namespace = 'migrations' AND key = 'v26_recall_impression_replay_identity';",
+            "v26_recall_impression_replay_identity",
         );
     }
 
     #[test]
-    fn valid_stamped_current_v25_reopens_on_all_existing_surfaces() {
+    fn valid_stamped_current_v26_reopens_on_all_existing_surfaces() {
         for (surface, open) in current_existing_openers() {
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join(format!("{surface}.db"));
             let path_str = path.to_string_lossy().to_string();
             let store =
                 crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision current v25 fixture");
+                    .expect("provision current v26 fixture");
             drop(store);
             let before = current_schema_snapshot(&path);
 
             let reopened = open(&path_str)
-                .unwrap_or_else(|error| panic!("valid current v25 {surface} reopen: {error}"));
+                .unwrap_or_else(|error| panic!("valid current v26 {surface} reopen: {error}"));
             drop(reopened);
 
             let after = current_schema_snapshot(&path);

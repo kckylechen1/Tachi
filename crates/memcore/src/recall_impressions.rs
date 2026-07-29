@@ -2,14 +2,16 @@
 
 use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fmt::Write;
 
 use crate::{
-    error::MemoryError,
+    error::{MemoryError, RecallReplayCompatibilityReason},
     scorer::{apply_pre_boost_adjustment, fuse_pre_boost_score, HybridWeights, PreBoostAdjustment},
 };
 
 pub(crate) const IMPRESSION_GROUP_INSERT_SQL: &str =
-    "INSERT INTO recall_impression_groups (group_id, created_at, query_hash, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+    "INSERT INTO recall_impression_groups (group_id, created_at, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)";
 pub(crate) const IMPRESSION_ROW_INSERT_SQL: &str =
     "INSERT INTO recall_impressions (group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
 
@@ -61,13 +63,139 @@ pub(crate) struct RecallImpressionRowDraft {
 pub(crate) struct RecallImpressionPayload {
     pub group_id: String,
     pub created_at: String,
-    pub query_hash: String,
+    /// SHA-256 query fingerprint used for sampling and cohorting. It is not
+    /// query text and is intentionally separate from v25's 32-bit FNV bucket.
+    pub query_fingerprint: String,
+    pub replay_policy: RecallReplayPolicy,
     pub weights_profile: String,
     pub weights: HybridWeights,
     pub rrf_k: f64,
     pub top_k: usize,
     pub rows: Vec<RecallImpressionRowDraft>,
     pub displayed_count: usize,
+}
+
+/// Complete, persisted identity of the pre-boost replay algorithm.
+///
+/// Every field is independently named because a future change to any of them
+/// must reject historical replay until a version-specific interpreter exists.
+/// The schema identity binds this tuple to the persistent group layout rather
+/// than treating a matching set of weights as sufficient evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecallReplayPolicy {
+    fusion_policy_version: &'static str,
+    pre_boost_adjustment_version: &'static str,
+    tie_break_policy_version: &'static str,
+    candidate_policy_version: &'static str,
+    schema_identity: &'static str,
+}
+
+impl RecallReplayPolicy {
+    const CURRENT: Self = Self {
+        fusion_policy_version: "fusion-v1",
+        pre_boost_adjustment_version: "pre-boost-adjustment-v1",
+        tie_break_policy_version: "recall-rank-v1",
+        candidate_policy_version: "candidate-set-v1",
+        schema_identity: "recall-impression-ledger-v26",
+    };
+
+    pub(crate) const fn current() -> Self {
+        Self::CURRENT
+    }
+
+    fn validate_stored(
+        group_id: &str,
+        stored: &StoredReplayPolicy,
+    ) -> Result<Self, MemoryError> {
+        let fields = [
+            stored.fusion_policy_version.as_deref(),
+            stored.pre_boost_adjustment_version.as_deref(),
+            stored.tie_break_policy_version.as_deref(),
+            stored.candidate_policy_version.as_deref(),
+            stored.schema_identity.as_deref(),
+        ];
+        if fields.iter().all(|field| field.is_none()) {
+            return Err(replay_incompatible(
+                group_id,
+                RecallReplayCompatibilityReason::LegacyUnversioned,
+            ));
+        }
+        if fields.iter().any(|field| field.is_none()) {
+            return Err(replay_incompatible(
+                group_id,
+                RecallReplayCompatibilityReason::IncompletePolicy,
+            ));
+        }
+        if stored.fusion_policy_version.as_deref() != Some(Self::CURRENT.fusion_policy_version) {
+            return Err(replay_incompatible(
+                group_id,
+                RecallReplayCompatibilityReason::UnsupportedFusionPolicy,
+            ));
+        }
+        if stored.pre_boost_adjustment_version.as_deref()
+            != Some(Self::CURRENT.pre_boost_adjustment_version)
+        {
+            return Err(replay_incompatible(
+                group_id,
+                RecallReplayCompatibilityReason::UnsupportedPreBoostAdjustmentPolicy,
+            ));
+        }
+        if stored.tie_break_policy_version.as_deref()
+            != Some(Self::CURRENT.tie_break_policy_version)
+        {
+            return Err(replay_incompatible(
+                group_id,
+                RecallReplayCompatibilityReason::UnsupportedTieBreakPolicy,
+            ));
+        }
+        if stored.candidate_policy_version.as_deref()
+            != Some(Self::CURRENT.candidate_policy_version)
+        {
+            return Err(replay_incompatible(
+                group_id,
+                RecallReplayCompatibilityReason::UnsupportedCandidatePolicy,
+            ));
+        }
+        if stored.schema_identity.as_deref() != Some(Self::CURRENT.schema_identity) {
+            return Err(replay_incompatible(
+                group_id,
+                RecallReplayCompatibilityReason::UnsupportedSchemaIdentity,
+            ));
+        }
+        Ok(Self::CURRENT)
+    }
+}
+
+#[derive(Debug)]
+struct StoredReplayPolicy {
+    fusion_policy_version: Option<String>,
+    pre_boost_adjustment_version: Option<String>,
+    tie_break_policy_version: Option<String>,
+    candidate_policy_version: Option<String>,
+    schema_identity: Option<String>,
+}
+
+fn replay_incompatible(
+    group_id: &str,
+    reason: RecallReplayCompatibilityReason,
+) -> MemoryError {
+    MemoryError::RecallReplayIncompatible {
+        group_id: group_id.to_string(),
+        reason,
+    }
+}
+
+/// SHA-256 query fingerprint for sampled impression sampling and cohorting.
+///
+/// This must never replace [`crate::db::query_hash`]: that 32-bit FNV value is
+/// retained only for the legacy `access_history` / `query_diversity` contract.
+pub(crate) fn query_fingerprint(query: &str) -> String {
+    let digest = Sha256::digest(query.as_bytes());
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut fingerprint, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    fingerprint
 }
 
 impl RecallImpressionPayload {
@@ -87,14 +215,20 @@ impl RecallImpressionPayload {
     }
 }
 
-/// Deterministic query-identity sampling in basis points. Zero is a strict off switch.
+/// Deterministic SHA-256 query-identity sampling in basis points. Zero is a
+/// strict off switch and avoids constructing a fingerprint on the hot path.
 #[inline]
 pub(crate) fn should_sample_query(query: &str, sample_rate_bps: u16) -> bool {
     if sample_rate_bps == 0 {
         return false;
     }
-    let hash = crate::db::query_hash(query);
-    let bucket = u32::from_str_radix(&hash, 16).unwrap_or(0) % 10_000;
+    let fingerprint = Sha256::digest(query.as_bytes());
+    let bucket = u32::from_be_bytes([
+        fingerprint[0],
+        fingerprint[1],
+        fingerprint[2],
+        fingerprint[3],
+    ]) % 10_000;
     bucket < u32::from(sample_rate_bps.min(10_000))
 }
 
@@ -107,7 +241,12 @@ pub(crate) fn insert_recall_impression(
         params![
             payload.group_id,
             payload.created_at,
-            payload.query_hash,
+            payload.query_fingerprint,
+            payload.replay_policy.fusion_policy_version,
+            payload.replay_policy.pre_boost_adjustment_version,
+            payload.replay_policy.tie_break_policy_version,
+            payload.replay_policy.candidate_policy_version,
+            payload.replay_policy.schema_identity,
             payload.weights_profile,
             payload.weights.semantic,
             payload.weights.fts,
@@ -172,6 +311,7 @@ pub struct RecallReplayReport {
 struct StoredGroup {
     weights: HybridWeights,
     rrf_k: f64,
+    policy: StoredReplayPolicy,
 }
 
 #[derive(Debug)]
@@ -213,7 +353,7 @@ pub fn replay_recall_impression_group(
     group_id: &str,
 ) -> Result<RecallReplayReport, MemoryError> {
     let group = conn.query_row(
-        "SELECT semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k FROM recall_impression_groups WHERE group_id = ?1",
+        "SELECT semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity FROM recall_impression_groups WHERE group_id = ?1",
         [group_id],
         |row| {
             Ok(StoredGroup {
@@ -225,9 +365,17 @@ pub fn replay_recall_impression_group(
                     use_rrf: row.get::<_, i64>(4)? != 0,
                 },
                 rrf_k: row.get(5)?,
+                policy: StoredReplayPolicy {
+                    fusion_policy_version: row.get(6)?,
+                    pre_boost_adjustment_version: row.get(7)?,
+                    tie_break_policy_version: row.get(8)?,
+                    candidate_policy_version: row.get(9)?,
+                    schema_identity: row.get(10)?,
+                },
             })
         },
     )?;
+    RecallReplayPolicy::validate_stored(group_id, &group.policy)?;
     let mut stmt = conn.prepare(
         "SELECT memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis FROM recall_impressions WHERE group_id = ?1 ORDER BY pre_boost_rank, memory_id",
     )?;

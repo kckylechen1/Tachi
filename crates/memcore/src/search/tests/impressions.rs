@@ -1,9 +1,10 @@
 use super::*;
 use crate::{
     db::{gc_tables, record_access_with_updates},
+    error::{MemoryError, RecallReplayCompatibilityReason},
     recall_impressions::{
-        RecallImpressionPayload, RecallImpressionRowDraft, IMPRESSION_GROUP_INSERT_SQL,
-        IMPRESSION_ROW_INSERT_SQL,
+        query_fingerprint, RecallImpressionPayload, RecallImpressionRowDraft, RecallReplayPolicy,
+        IMPRESSION_GROUP_INSERT_SQL, IMPRESSION_ROW_INSERT_SQL,
     },
     scorer::{fuse_pre_boost_score, HybridWeights, PreBoostAdjustment},
     GcConfig, RecallConfig,
@@ -58,6 +59,75 @@ fn sampled_recall_replays_preboost_bits_and_persists_statuses() {
     assert_eq!(scored, 1);
     assert_eq!(returned as usize, results.len());
     assert_eq!(mandatory_access, 0);
+    let (fingerprint, legacy_bucket, fusion, adjustment, tie_break, candidate, schema): (
+        String,
+        Option<String>,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT query_fingerprint, legacy_query_bucket, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity FROM recall_impression_groups WHERE group_id = ?1",
+            [&group_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(fingerprint, query_fingerprint("alpha beta"));
+    assert_eq!(fingerprint.len(), 64);
+    assert_eq!(
+        legacy_bucket, None,
+        "new groups do not retain the FNV bucket"
+    );
+    assert_eq!(
+        (
+            fusion.as_str(),
+            adjustment.as_str(),
+            tie_break.as_str(),
+            candidate.as_str(),
+            schema.as_str()
+        ),
+        (
+            "fusion-v1",
+            "pre-boost-adjustment-v1",
+            "recall-rank-v1",
+            "candidate-set-v1",
+            "recall-impression-ledger-v26",
+        )
+    );
+}
+
+#[test]
+fn recall_impression_fingerprint_is_sha256_not_the_legacy_bucket() {
+    assert_eq!(
+        query_fingerprint("abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_ne!(query_fingerprint("abc"), crate::db::query_hash("abc"));
+}
+
+#[test]
+fn impression_sampling_uses_the_sha256_fingerprint_not_the_legacy_fnv_bucket() {
+    // `abc` falls in FNV's first 1,000 basis points but SHA-256's 4,367th.
+    // This is a behavioral discriminator: reverting sampling to query_hash
+    // makes this assertion red without changing the fingerprint helper.
+    let legacy_bucket = u32::from_str_radix(&crate::db::query_hash("abc"), 16).unwrap() % 10_000;
+    assert!(legacy_bucket < 1_000);
+    assert!(
+        !crate::recall_impressions::should_sample_query("abc", 1_000),
+        "SHA-256 bucket 4,367 must be outside a 1,000-bps sample"
+    );
 }
 
 #[test]
@@ -194,7 +264,8 @@ fn multi_channel_order_and_pairwise_decay_zero_inversions_are_exact() {
     let payload = RecallImpressionPayload {
         group_id: "pairwise-group".to_string(),
         created_at: "2026-07-29T00:00:00.000Z".to_string(),
-        query_hash: crate::db::query_hash("multi channel"),
+        query_fingerprint: query_fingerprint("multi channel"),
+        replay_policy: RecallReplayPolicy::current(),
         weights_profile: "custom".to_string(),
         weights: weights.clone(),
         rrf_k: 20.0,
@@ -325,7 +396,8 @@ fn impression_insert_failure_rolls_back_access_and_group_atomically() {
     let payload = RecallImpressionPayload {
         group_id: "atomic-group".to_string(),
         created_at: "2026-07-29T00:00:00.000Z".to_string(),
-        query_hash: crate::db::query_hash("atomic"),
+        query_fingerprint: query_fingerprint("atomic"),
+        replay_policy: RecallReplayPolicy::current(),
         weights_profile: "default".to_string(),
         weights,
         rrf_k: 20.0,
@@ -334,16 +406,18 @@ fn impression_insert_failure_rolls_back_access_and_group_atomically() {
         displayed_count: 1,
     };
     let ids = ["atomic-row".to_string()];
-    assert!(record_access_with_updates(
-        &conn,
-        &ids,
-        &ids,
-        &[],
-        Some("atomic"),
-        &RecallConfig::default(),
-        Some(&payload),
-    )
-    .is_err());
+    assert!(
+        record_access_with_updates(
+            &conn,
+            &ids,
+            &ids,
+            &[],
+            Some("atomic"),
+            &RecallConfig::default(),
+            Some(&payload),
+        )
+        .is_err()
+    );
     let (access_count, groups): (i64, i64) = conn
         .query_row(
             "SELECT access_count, (SELECT COUNT(*) FROM recall_impression_groups) FROM memories WHERE id = 'atomic-row'",
@@ -429,12 +503,110 @@ fn impression_inserts_are_mechanically_content_free() {
         "propensity",
         "cache_id",
         "content",
+        "query_hash",
+        "legacy_query_bucket",
     ] {
         assert!(
             !sql.contains(forbidden),
             "forbidden INSERT field: {forbidden}"
         );
     }
+}
+
+#[test]
+fn replay_refuses_legacy_unversioned_group_before_current_math() {
+    let conn = setup();
+    let weights = HybridWeights::default();
+    conn.execute(
+        "INSERT INTO recall_impression_groups (group_id, created_at, legacy_query_bucket, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        rusqlite::params![
+            "legacy-unversioned",
+            "2026-07-29T00:00:00.000Z",
+            "deadbeef",
+            "default",
+            weights.semantic,
+            weights.fts,
+            weights.symbolic,
+            weights.decay,
+            i64::from(weights.use_rrf),
+            20.0,
+            10,
+            0,
+            0,
+            0,
+        ],
+    )
+    .unwrap();
+
+    let error = crate::replay_recall_impression_group(&conn, "legacy-unversioned")
+        .expect_err("v25 groups must not replay through current fusion math");
+    assert!(matches!(
+        error,
+        MemoryError::RecallReplayIncompatible {
+            reason: RecallReplayCompatibilityReason::LegacyUnversioned,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn replay_refuses_an_incompatible_policy_before_current_math() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "policy-row",
+        "policy incompatibility recall ledger",
+        &["policy", "incompatibility"],
+    );
+    hybrid_search(&conn, "policy incompatibility", &sampled_options()).unwrap();
+    let group_id: String = conn
+        .query_row("SELECT group_id FROM recall_impression_groups", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    conn.execute(
+        "UPDATE recall_impression_groups SET fusion_policy_version = 'fusion-v-next' WHERE group_id = ?1",
+        [&group_id],
+    )
+    .unwrap();
+
+    let error = crate::replay_recall_impression_group(&conn, &group_id)
+        .expect_err("incompatible fusion policy must fail before replay");
+    assert!(matches!(
+        error,
+        MemoryError::RecallReplayIncompatible {
+            reason: RecallReplayCompatibilityReason::UnsupportedFusionPolicy,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn sampled_replay_remains_exact_after_connection_reopen() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let group_id = {
+        crate::db::enable_simple_auto_extension().unwrap();
+        crate::db::register_sqlite_vec();
+        let mut conn = rusqlite::Connection::open(db.path()).unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        crate::db::try_load_sqlite_vec(&conn);
+        insert(
+            &mut conn,
+            "reopen-row",
+            "reopen exact replay ledger",
+            &["reopen", "replay"],
+        );
+        hybrid_search(&conn, "reopen replay", &sampled_options()).unwrap();
+        conn.query_row("SELECT group_id FROM recall_impression_groups", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+    };
+
+    let reopened = rusqlite::Connection::open(db.path()).unwrap();
+    let report = crate::replay_recall_impression_group(&reopened, &group_id).unwrap();
+    assert_eq!(report.bit_identical_count, report.candidate_count);
 }
 
 #[test]

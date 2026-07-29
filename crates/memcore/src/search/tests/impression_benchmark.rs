@@ -58,7 +58,7 @@ const CORPUS: &[(&str, &str, &str, &[&str], usize)] = &[
     (
         "query-sampling",
         "/guide/search",
-        "Deterministic query hash sampling remains disabled at the default zero rate and constructs no payload.",
+        "Deterministic SHA-256 query-fingerprint sampling remains disabled at the default zero rate and constructs no payload.",
         &["query", "sampling", "default", "payload"],
         780,
     ),
