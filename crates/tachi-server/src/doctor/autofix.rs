@@ -70,8 +70,9 @@ pub(crate) fn auto_fix_authorized(
                     path: f.path.clone(),
                     action: "doctor_autofix".to_string(),
                     outcome: "skipped".to_string(),
-                    note: "invariant: doctor mutation path must hold scan-captured physical authority"
-                        .to_string(),
+                    note:
+                        "invariant: doctor mutation path must hold scan-captured physical authority"
+                            .to_string(),
                     destination: None,
                 });
             }
@@ -99,7 +100,10 @@ pub(crate) fn auto_fix_authorized(
 }
 
 fn apply_explicitly_authorized(
-    findings: &[(DoctorFinding, crate::physical_db_identity::PhysicalMutationAuthority)],
+    findings: &[(
+        DoctorFinding,
+        crate::physical_db_identity::PhysicalMutationAuthority,
+    )],
     quarantine_root: &Path,
 ) -> Vec<AutoFixAction> {
     let mut actions = Vec::new();

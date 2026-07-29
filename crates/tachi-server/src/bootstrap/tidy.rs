@@ -14,7 +14,7 @@ pub(crate) use apply::execute_tidy_apply;
 #[cfg(test)]
 pub(crate) use migration::{
     authorized_migration_sources, build_migration_plan, execute_tidy_migrations,
-    update_manifest_after_migration, MigrationConfig,
+    force_boundary_failure_after_archive_stage, update_manifest_after_migration, MigrationConfig,
 };
 #[cfg(test)]
 pub(crate) use report::build_tidy_report;

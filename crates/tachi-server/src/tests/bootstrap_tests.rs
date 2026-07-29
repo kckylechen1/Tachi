@@ -10,10 +10,7 @@ mod tidy_report;
 
 fn authorized_plan_sources(
     plan: &[crate::bootstrap::TidyMigration],
-) -> std::collections::BTreeMap<
-    String,
-    crate::physical_db_identity::PhysicalMutationAuthority,
-> {
+) -> std::collections::BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority> {
     plan.iter()
         .map(|migration| {
             let authority = crate::physical_db_identity::PhysicalMutationAuthority::capture(

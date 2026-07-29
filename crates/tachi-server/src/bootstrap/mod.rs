@@ -65,7 +65,8 @@ pub(crate) use setup::build_setup_report;
 #[cfg(test)]
 pub(crate) use tidy::{
     authorized_migration_sources, build_migration_plan, build_tidy_report, execute_tidy_apply,
-    execute_tidy_migrations, update_manifest_after_migration, MigrationConfig,
+    execute_tidy_migrations, force_boundary_failure_after_archive_stage,
+    update_manifest_after_migration, MigrationConfig,
 };
 
 // Phase 2 (LLM 3-layer consolidation): Voyage covers vectors, SiliconFlow

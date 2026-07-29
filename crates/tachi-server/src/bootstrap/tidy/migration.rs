@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::PathBuf;
 
 use super::super::{
@@ -24,6 +25,16 @@ pub(crate) struct MigrationConfig {
     /// caller's outer `DualDaemonLock`, but a migration source can belong to
     /// a different scope with its own daemon.
     pub app_home: PathBuf,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn force_boundary_failure_after_archive_stage(enabled: bool) {
+    FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE.with(|flag| flag.set(enabled));
 }
 
 /// Scan-captured physical objects that may be used as migration sources.
@@ -399,10 +410,10 @@ fn migrate_single_db(
         std::fs::create_dir_all(parent)?;
     }
     // Keep every target row/projection write in one SQLite transaction until
-    // the source archive boundary succeeds. This preserves existing target
-    // rows exactly when a copy, authority, or archive precondition fails;
-    // row-count rollback alone is not sufficient because ordinary upsert can
-    // overwrite a pre-existing ID.
+    // a durable archive copy exists. The live source is deliberately retained
+    // through SQLite commit: a commit failure must never strand the only good
+    // source at its archive path. Only a successful commit permits removal of
+    // the live source alias/file below.
     let copied = source_entries.len();
     let rows_after = match target_store.upsert_batch_with_precommit(&source_entries, |tx| {
         // This is the last authority check before the non-atomic
@@ -410,27 +421,16 @@ fn migrate_single_db(
         authority
             .revalidate_for_mutation(Some(&target_path))
             .map_err(memcore::MemoryError::InvalidArg)?;
-        match std::fs::rename(&source_path, &archive_path) {
-            Ok(()) => {}
-            Err(_) => {
-                std::fs::copy(&source_path, &archive_path)?;
-                std::fs::remove_file(&source_path)?;
+        stage_archive_copy(&source_path, &archive_path)?;
+        #[cfg(test)]
+        FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE.with(|flag| {
+            if flag.get() {
+                return Err(memcore::MemoryError::InvalidArg(
+                    "injected boundary failure after archive staging".to_string(),
+                ));
             }
-        }
-        // Also move sidecar WAL/SHM files if present.
-        for ext in ["-wal", "-shm"] {
-            let sidecar = PathBuf::from(format!("{}{ext}", source_path.display()));
-            if sidecar.exists() {
-                let dst = PathBuf::from(format!("{}{ext}", archive_path.display()));
-                if let Err(e) = std::fs::rename(&sidecar, &dst).or_else(|_| {
-                    std::fs::copy(&sidecar, &dst)
-                        .map(|_| ())
-                        .and_then(|_| std::fs::remove_file(&sidecar))
-                }) {
-                    tracing::warn!("tidy: failed to move sidecar {}: {e}", sidecar.display());
-                }
-            }
-        }
+            Ok::<(), memcore::MemoryError>(())
+        })?;
         tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
             row.get::<_, i64>(0)
         })
@@ -452,6 +452,41 @@ fn migrate_single_db(
         Err(error) => return Err(Box::new(error)),
     };
 
+    // SQLite is durable now. Revalidate once more before removing the live
+    // source path. A refusal or unlink failure leaves both the source and the
+    // staged archive copy intact and records an explicit failed outcome; it
+    // never claims an atomic rollback after target commit.
+    if let Err(reason) = authority.revalidate_for_mutation(Some(&target_path)) {
+        return Ok(committed_source_retained_outcome(
+            migration,
+            rows_before,
+            rows_after,
+            copied,
+            &reason,
+        ));
+    }
+    if let Err(error) = std::fs::remove_file(&source_path) {
+        return Ok(committed_source_retained_outcome(
+            migration,
+            rows_before,
+            rows_after,
+            copied,
+            &format!("archive copy is durable but live source removal failed: {error}"),
+        ));
+    }
+    // Main source removal is the archive boundary. Sidecars are now orphaned
+    // rather than live database state; clean them best-effort and report any
+    // residue without misrepresenting the committed migration.
+    let mut sidecar_warnings = Vec::new();
+    for ext in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{ext}", source_path.display()));
+        if sidecar.exists() {
+            if let Err(error) = std::fs::remove_file(&sidecar) {
+                sidecar_warnings.push(format!("{}: {error}", sidecar.display()));
+            }
+        }
+    }
+
     Ok(TidyMigrationOutcome {
         source_path: migration.source_path.clone(),
         target_path: migration.target_path.clone(),
@@ -460,8 +495,104 @@ fn migrate_single_db(
         rows_before_target: rows_before,
         rows_after_target: rows_after,
         rows_copied: copied,
-        message: format!("migrated {copied} rows ({rows_before} -> {rows_after} on target)"),
+        message: if sidecar_warnings.is_empty() {
+            format!("migrated {copied} rows ({rows_before} -> {rows_after} on target)")
+        } else {
+            format!(
+                "migrated {copied} rows ({rows_before} -> {rows_after} on target); orphan sidecar cleanup warnings: {}",
+                sidecar_warnings.join("; ")
+            )
+        },
     })
+}
+
+fn stage_archive_copy(
+    source_path: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut staged = Vec::new();
+    let result = (|| {
+        stage_one_archive_file(source_path, archive_path)?;
+        staged.push(archive_path.to_path_buf());
+        for ext in ["-wal", "-shm"] {
+            let source = PathBuf::from(format!("{}{ext}", source_path.display()));
+            if source.exists() {
+                let destination = PathBuf::from(format!("{}{ext}", archive_path.display()));
+                stage_one_archive_file(&source, &destination)?;
+                staged.push(destination);
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for path in staged.into_iter().rev() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    result
+}
+
+fn stage_one_archive_file(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(source)?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, destination)?;
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            if std::fs::metadata(source)?.is_dir() {
+                std::os::windows::fs::symlink_dir(target, destination)?;
+            } else {
+                std::os::windows::fs::symlink_file(target, destination)?;
+            }
+            return Ok(());
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "symlink archive staging is unsupported on this platform",
+            ));
+        }
+    }
+
+    let mut input = std::fs::File::open(source)?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.flush()?;
+    output.sync_all()?;
+    std::fs::set_permissions(destination, metadata.permissions())?;
+    Ok(())
+}
+
+fn committed_source_retained_outcome(
+    migration: &TidyMigration,
+    rows_before: usize,
+    rows_after: usize,
+    copied: usize,
+    reason: &str,
+) -> TidyMigrationOutcome {
+    TidyMigrationOutcome {
+        source_path: migration.source_path.clone(),
+        target_path: migration.target_path.clone(),
+        archive_path: Some(migration.archive_path.clone()),
+        status: "failed".to_string(),
+        rows_before_target: rows_before,
+        rows_after_target: rows_after,
+        rows_copied: copied,
+        message: format!(
+            "target committed and archive copy staged, but live source was retained: {reason}"
+        ),
+    }
 }
 
 /// Build a failed outcome after the caller has refused before beginning the

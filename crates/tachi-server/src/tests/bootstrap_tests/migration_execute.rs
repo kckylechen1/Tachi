@@ -358,7 +358,7 @@ fn tidy_execute_archive_failure_rolls_back_overwritten_target_rows_atomically() 
     assert_eq!(summary.failed_count, 1);
     let error = &summary.outcomes[0].message;
     assert!(
-        error.contains("directory") || error.contains("Directory"),
+        error.contains("File exists"),
         "unexpected archive failure: {error}"
     );
 
@@ -373,6 +373,42 @@ fn tidy_execute_archive_failure_rolls_back_overwritten_target_rows_atomically() 
         "new source rows must also roll back with the overwritten row"
     );
     assert!(source.exists(), "failed archive leaves source untouched");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn tidy_execute_boundary_failure_keeps_live_source_after_archive_staging() {
+    let (root, source, target, plan, authorities, cfg) =
+        planned_mutation_authority_fixture("boundary-failure-source-retained");
+
+    crate::bootstrap::force_boundary_failure_after_archive_stage(true);
+    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorities)
+        .expect("boundary failure is represented by a failed migration outcome");
+    crate::bootstrap::force_boundary_failure_after_archive_stage(false);
+
+    assert_eq!(summary.failed_count, 1, "{summary:?}");
+    assert!(
+        summary.outcomes[0]
+            .message
+            .contains("injected boundary failure after archive staging"),
+        "the discriminator must fail after archive staging: {:?}",
+        summary.outcomes[0]
+    );
+    assert!(
+        source.exists(),
+        "a post-staging boundary failure must leave the live source in place"
+    );
+    assert!(
+        std::path::Path::new(&plan[0].archive_path).exists(),
+        "the pre-commit archive copy may remain as redundant recovery evidence"
+    );
+    let target_after = MemoryStore::open_read_only(target.to_str().unwrap()).unwrap();
+    assert!(
+        target_after.get("scanned-source-row").unwrap().is_none(),
+        "target transaction must roll back when the boundary fails"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -362,7 +362,10 @@ fn tidy_report_refuses_mutation_authority_for_multiple_live_hardlink_sidecars() 
         &root.join(".tachi/archive/ambiguous"),
         &root,
     );
-    assert!(plan.is_empty(), "ambiguous store must have no mutation plan");
+    assert!(
+        plan.is_empty(),
+        "ambiguous store must have no mutation plan"
+    );
 
     drop(owner);
     let _ = std::fs::remove_dir_all(&root);
