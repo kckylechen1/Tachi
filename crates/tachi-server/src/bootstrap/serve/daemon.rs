@@ -172,7 +172,8 @@ pub(super) async fn serve_http_daemon(
     let ct = CancellationToken::new();
     let ct_shutdown = ct.clone();
 
-    // Discovery pid path + its RAII cleanup guard, computed/armed BEFORE the
+    // Discovery pid path + its owner-scoped RAII cleanup guard, computed/armed
+    // only after the scoped daemon lock above was acquired, but BEFORE the
     // bind attempt (#936 review follow-up). Bind failure below is a NORMAL
     // function return (`?`-shaped / explicit `return Err`) — destructors run,
     // unlike `std::process::exit` — so `DiscoveryPidGuard::drop` fires and
@@ -416,7 +417,7 @@ pub(super) async fn serve_http_daemon(
     let pid_body = serde_json::to_string_pretty(&pid_payload).unwrap_or_default();
     match tokio::task::spawn_blocking({
         let pid_path = pid_path.clone();
-        move || crate::utils::write_owner_only_file(&pid_path, pid_body.as_bytes())
+        move || crate::utils::write_owner_only_file_atomic(&pid_path, pid_body.as_bytes())
     })
     .await
     {
@@ -652,9 +653,9 @@ fn paths_match(left: &Path, right: &Path) -> bool {
 /// attempt, so any early `?`-shaped return between there and the discovery
 /// file actually being written (chiefly: a failed bind) runs this guard's
 /// `Drop`, removing a STALE discovery pid file a prior run left behind.
-/// Mirrors the existing [`crate::daemon_lock::DaemonLock`] Drop pattern: a
-/// same-shaped guard rather than a bespoke defer closure, so the cleanup
-/// contract reads the same way at both call sites.
+/// Unlike [`crate::daemon_lock::DaemonLock`], which keeps its stable lock path
+/// after releasing `flock`, this guard owns a discovery *receipt* whose stale
+/// contents must be removed on an early owner return.
 ///
 /// Note: `std::process::exit` (used on the fail-loud serve and watchdog exit
 /// paths) does NOT run destructors, so this guard cannot replace the explicit
@@ -688,10 +689,9 @@ impl Drop for DiscoveryPidGuard {
         if self.disarmed {
             return;
         }
-        // Drop cannot be async; a small pid-file removal is an acceptable
-        // synchronous fs op here (the same tradeoff `DaemonLock::drop`
-        // makes). Best-effort: a bind failure with no prior discovery file
-        // (e.g. the very first run) is a harmless no-op.
+        // Drop cannot be async; a small receipt-file removal is an acceptable
+        // synchronous fs op here. Best-effort: a bind failure with no prior
+        // discovery file (e.g. the very first run) is a harmless no-op.
         let _ = std::fs::remove_file(&self.path);
     }
 }

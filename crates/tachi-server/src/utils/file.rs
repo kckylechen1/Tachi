@@ -2,35 +2,6 @@ use serde_json::Value;
 
 pub(super) const MAX_APPEND_ONLY_JSONL_LINE_BYTES: usize = 256 * 1024;
 
-/// Create or truncate a file with owner-only permissions on Unix.
-pub(crate) fn write_owner_only_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create parent dir: {e}"))?;
-    }
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| format!("open {}: {e}", path.display()))?;
-        file.write_all(bytes)
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
-        file.sync_all()
-            .map_err(|e| format!("fsync {}: {e}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
-    }
-    sync_parent_dir(path)?;
-    Ok(())
-}
-
 /// Atomically replace a file by writing a synced same-directory temp file first.
 pub(crate) fn write_owner_only_file_atomic(
     path: &std::path::Path,

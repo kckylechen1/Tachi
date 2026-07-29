@@ -15,7 +15,7 @@ pub(super) use self::env::{parse_env_bool, parse_env_u64};
 pub(super) use self::file::read_to_string_allow_missing;
 pub(super) use self::file::{
     append_owner_only_jsonl_line, append_run_event, sync_parent_dir, write_json_file_owner_only,
-    write_owner_only_file, write_owner_only_file_atomic, write_run_status_file,
+    write_owner_only_file_atomic, write_run_status_file,
 };
 #[cfg(test)]
 pub(crate) use self::locks::global_test_lock;

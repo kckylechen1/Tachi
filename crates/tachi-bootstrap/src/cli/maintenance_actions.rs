@@ -470,19 +470,20 @@ pub enum DaemonAction {
     },
     /// Send SIGTERM to the running daemon (no-op if no daemon is alive).
     Kill {
-        /// Skip the live-process check and unlink the lock file regardless.
-        /// Use only when a stale ~/.tachi/daemon.lock survived a hard crash
-        /// and the PID inside is not actually a tachi process.
+        /// Clear a stale PID record after acquiring its daemon lock.
+        /// The stable lock path is retained; a live lock owner is never bypassed.
         #[arg(long)]
         force: bool,
     },
     /// Sweep stale tachi processes machine-wide: orphaned stdio servers (the
     /// launching host died) and daemons whose backing global DB no longer
-    /// exists, plus stale daemon lock files. Previews by default; pass --apply
-    /// to actually SIGTERM / unlink. Self and healthy live processes are never
-    /// touched.
+    /// exists, plus stale daemon discovery receipts. Previews by default; pass
+    /// --apply to SIGTERM eligible processes and remove receipts only while
+    /// holding their matching daemon locks. Stable lock paths, self, and healthy
+    /// live processes are never removed.
     Reap {
-        /// Actually terminate / unlink. Without this it is a dry-run preview.
+        /// Actually terminate eligible processes and remove stale receipts.
+        /// Without this it is a dry-run preview.
         #[arg(long)]
         apply: bool,
         #[arg(long)]

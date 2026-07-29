@@ -1,17 +1,19 @@
-//! Singleton-daemon enforcement via advisory file lock + PID file.
+//! Singleton-daemon enforcement via an advisory file lock + PID record.
 //!
 //! The Tachi daemon must not run more than one process per user/host because
 //! multiple foundry workers writing to the same set of project DBs will race
 //! the `processed_events` claim table and the `foundry_jobs` queue. We enforce
-//! singleton-ness by `flock(LOCK_EX | LOCK_NB)` on `~/.tachi/daemon.pid`. If
-//! acquisition fails because the file is locked, we read the recorded PID and
-//! probe it with `kill(pid, 0)`. If the previous daemon is gone (process died
-//! without releasing flock — POSIX guarantees release on close, but a crashed
-//! process still leaves the file on disk) we fall through and take it over.
+//! singleton-ness by `flock(LOCK_EX | LOCK_NB)` on a stable lock-file path.
+//! If acquisition fails because the file is locked, we read the recorded PID
+//! and probe it with `kill(pid, 0)`. The path and PID record are informational:
+//! neither establishes daemon liveness. If the previous daemon is gone (POSIX
+//! releases `flock` on close, while the stable path remains) we fall through
+//! and take it over.
 //!
 //! Lifetime: the returned [`DaemonLock`] holds the open fd. Dropping it
-//! releases the kernel lock and best-effort removes the PID file. Callers must
-//! keep it alive for the daemon's full runtime.
+//! clears its PID record, releases the kernel lock, and closes the fd while
+//! preserving the stable lock path. Callers must keep it alive for the
+//! daemon's full runtime.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -76,11 +78,12 @@ impl From<std::io::Error> for DaemonLockError {
 
 /// RAII handle for the singleton daemon advisory lock.
 ///
-/// While alive, holds an exclusive `flock` on the PID file. Dropping releases
-/// the lock and removes the PID file (best-effort).
+/// While alive, holds an exclusive `flock` on a stable lock-file path.
+/// Dropping clears the PID record, releases the lock, and closes the descriptor
+/// without unlinking that path, so later acquirers and already-open waiters
+/// address the same inode.
 pub struct DaemonLock {
     file: File,
-    path: PathBuf,
 }
 
 impl DaemonLock {
@@ -109,7 +112,7 @@ impl DaemonLock {
         match try_flock_exclusive(&file)? {
             FlockOutcome::Acquired => {
                 write_pid(&file)?;
-                Ok(DaemonLock { file, path })
+                Ok(DaemonLock { file })
             }
             FlockOutcome::WouldBlock => {
                 // Lock is held by someone. Inspect the recorded PID.
@@ -123,7 +126,7 @@ impl DaemonLock {
                     match try_flock_exclusive(&file)? {
                         FlockOutcome::Acquired => {
                             write_pid(&file)?;
-                            Ok(DaemonLock { file, path })
+                            Ok(DaemonLock { file })
                         }
                         FlockOutcome::WouldBlock => {
                             Err(DaemonLockError::AlreadyRunning { pid: recorded })
@@ -137,9 +140,12 @@ impl DaemonLock {
 
 impl Drop for DaemonLock {
     fn drop(&mut self) {
-        // Releasing the fd implicitly drops the flock. Remove the PID file
-        // best-effort so a future operator inspection does not see a stale
-        // PID for an exited process.
+        // Clear the record while this owner still holds flock, then release it.
+        // Do not unlink the path: an already-open waiter must remain on this
+        // inode, rather than lock an unlinked predecessor while a later
+        // acquirer creates and locks a replacement inode. `File` closes
+        // immediately after this Drop implementation.
+        let _ = clear_pid(&self.file);
         let fd = self.file.as_raw_fd();
         // SAFETY: `fd` comes from a live `File` owned by this `DaemonLock`.
         // `flock(LOCK_UN)` does not dereference Rust memory and only requests
@@ -148,7 +154,6 @@ impl Drop for DaemonLock {
         unsafe {
             libc::flock(fd, libc::LOCK_UN);
         }
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -180,6 +185,14 @@ fn write_pid(file: &File) -> std::io::Result<()> {
     handle.seek(SeekFrom::Start(0))?;
     handle.set_len(0)?;
     writeln!(handle, "{pid}")?;
+    handle.flush()?;
+    Ok(())
+}
+
+fn clear_pid(file: &File) -> std::io::Result<()> {
+    let mut handle = file;
+    handle.seek(SeekFrom::Start(0))?;
+    handle.set_len(0)?;
     handle.flush()?;
     Ok(())
 }
@@ -260,9 +273,8 @@ impl DualDaemonLock {
             Ok(lock) => lock,
             Err(DaemonLockError::AlreadyRunning { pid }) => {
                 // Returning drops `scoped` (a local of this function) on the
-                // way out, releasing its flock + removing its pid file
-                // before the caller sees the legacy conflict — no partial
-                // hold survives a failed acquire.
+                // way out, releasing its flock before the caller sees the
+                // legacy conflict — no partial hold survives a failed acquire.
                 return Err(DualLockError::LegacyRunning { pid });
             }
             Err(DaemonLockError::Io(e)) => return Err(DualLockError::Io(e)),
@@ -369,7 +381,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn acquire_creates_pid_file_with_current_pid() {
+    fn acquire_records_current_pid_on_stable_lock_path() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("daemon.pid");
         let lock = DaemonLock::acquire(&path).expect("first acquire must succeed");
@@ -377,8 +389,12 @@ mod tests {
         assert_eq!(recorded as u32, std::process::id());
         drop(lock);
         assert!(
-            !path.exists(),
-            "PID file should be removed when DaemonLock is dropped"
+            path.exists(),
+            "the stable lock path must remain after DaemonLock is dropped"
+        );
+        assert!(
+            read_pid_file(&path).is_none(),
+            "dropping DaemonLock must clear the PID record while retaining the lock path"
         );
     }
 
@@ -456,6 +472,36 @@ mod tests {
         }
         // After drop, a fresh acquire must succeed.
         let _again = DaemonLock::acquire(&path).expect("re-acquire after drop");
+    }
+
+    #[test]
+    fn dropping_owner_keeps_waiters_on_the_stable_lock_inode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon.lock");
+
+        let owner_a = DaemonLock::acquire(&path).expect("owner A acquires the lock path");
+        // Open this descriptor while A still owns the path's inode. B waits
+        // until after A drops before taking its flock on that exact inode.
+        let old_inode = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("B opens A's lock inode before A drops");
+
+        drop(owner_a);
+        assert!(matches!(
+            try_flock_exclusive(&old_inode),
+            Ok(FlockOutcome::Acquired)
+        ));
+
+        match DaemonLock::acquire(&path) {
+            Err(DaemonLockError::AlreadyRunning { .. }) => {}
+            Ok(owner_c) => {
+                drop(owner_c);
+                panic!("C acquired a newly-created lock path while B still held the old inode");
+            }
+            Err(error) => panic!("C must be blocked by B's flock, got {error}"),
+        }
     }
 
     #[test]
