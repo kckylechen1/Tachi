@@ -187,6 +187,147 @@ fn typo_evidence_rescues_a_vector_candidate_in_the_normal_leg_dead_band() {
 }
 
 #[test]
+fn weak_normal_fts_and_symbolic_overlap_do_not_suppress_typo_recovery() {
+    let mut conn = setup();
+    const QUERY: &str = "persistant memory retrival boundries";
+    const INTENDED: &str = "weak-normal-intended";
+    const WEAK: &str = "weak-normal-one-term";
+    insert(
+        &mut conn,
+        INTENDED,
+        "Persistent memory retrieval boundaries define the intended recovery rule",
+        &["persistent", "memory", "retrieval", "boundaries"],
+    );
+    insert(
+        &mut conn,
+        WEAK,
+        "Memory deployment receipts are unrelated operational evidence",
+        &["memory", "deployment", "receipt"],
+    );
+    let opts = typo_opts();
+
+    let mut disabled_opts = typo_opts();
+    disabled_opts.recall_config = Some(disabled_config());
+    let disabled = result_ids(hybrid_search(&conn, QUERY, &disabled_opts).unwrap());
+    assert!(
+        !disabled.iter().any(|id| id == INTENDED || id == WEAK),
+        "one weak normal lexical overlap must not pass the final rich-query gate: {disabled:?}"
+    );
+
+    let (enabled, receipt) = hybrid_search_with_receipt(&conn, QUERY, &opts).unwrap();
+    let typo = receipt
+        .candidates
+        .expect("candidate receipt")
+        .typo_fallback
+        .expect("normal rows that all fail final eligibility must activate fallback");
+    assert!(typo.contributed_candidate_count >= 1);
+    assert_eq!(
+        enabled.first().map(|result| result.entry.id.as_str()),
+        Some(INTENDED),
+        "fallback must recover the intended row despite weak FTS/symbolic normal legs"
+    );
+}
+
+#[test]
+fn minimum_typo_score_is_explicit_retrieval_evidence_not_symbolic_dead_band() {
+    let mut conn = setup();
+    const QUERY: &str = "persxxt restxxe arxxive hixxory";
+    const INTENDED: &str = "minimum-typo-evidence";
+    insert(
+        &mut conn,
+        INTENDED,
+        "persist restore archive history",
+        &["persist", "restore", "archive", "history"],
+    );
+    let opts = typo_opts();
+    let (candidates, _) =
+        collect_candidates(&conn, QUERY, &opts, false, None, false, None).unwrap();
+    let score = candidates.typo_scores[INTENDED];
+    assert!(
+        (0.455..0.5).contains(&score),
+        "fixture must land in the historical fallback-score / symbolic-coverage dead band: {score}"
+    );
+
+    let (results, receipt) = hybrid_search_with_receipt(&conn, QUERY, &opts).unwrap();
+    assert!(
+        receipt
+            .candidates
+            .expect("candidate receipt")
+            .typo_fallback
+            .is_some(),
+        "minimum accepted typo assignment must execute the fallback"
+    );
+    assert_eq!(
+        results.first().map(|result| result.entry.id.as_str()),
+        Some(INTENDED),
+        "typed typo evidence must survive the final retrieval gate"
+    );
+}
+
+#[test]
+fn one_candidate_token_cannot_satisfy_two_misspelled_query_terms() {
+    let mut conn = setup();
+    const QUERY: &str = "memroy memmory retrival boundries";
+    const ONLY_ONE: &str = "one-memory-occurrence";
+    insert(
+        &mut conn,
+        ONLY_ONE,
+        "memory retrieval boundaries archive",
+        &["memory", "retrieval", "boundaries", "archive"],
+    );
+    let (results, receipt) = hybrid_search_with_receipt(&conn, QUERY, &typo_opts()).unwrap();
+    let typo = receipt
+        .candidates
+        .expect("candidate receipt")
+        .typo_fallback
+        .expect("eligible misspelled query must exercise the bounded matcher");
+    assert_eq!(
+        typo.contributed_candidate_count, 0,
+        "one `memory` occurrence must not satisfy both misspelled memory terms"
+    );
+    assert!(
+        !results.iter().any(|result| result.entry.id == ONLY_ONE),
+        "many-to-one token reuse must not recover the row"
+    );
+}
+
+#[test]
+fn structured_metadata_survives_a_long_free_text_budget() {
+    let mut conn = setup();
+    const STRUCTURED: &str = "structured-typo-target";
+    let mut entry = memory_entry(
+        STRUCTURED,
+        &"incidental prose ".repeat(1_024),
+        &["persistent", "memory", "retrieval", "boundaries"],
+    );
+    entry.summary = "incidental prose".to_string();
+    entry.topic = "persistent memory retrieval boundaries".to_string();
+    insert_entry(&mut conn, entry);
+    let mut config = enabled_config();
+    config.typo_fallback.max_candidate_chars = 256;
+    config.typo_fallback.max_structured_field_chars = 64;
+    let opts = SearchOptions {
+        recall_config: Some(config),
+        ..typo_opts()
+    };
+
+    let (results, receipt) = hybrid_search_with_receipt(&conn, TYPO_QUERY, &opts).unwrap();
+    assert!(
+        receipt
+            .candidates
+            .expect("candidate receipt")
+            .typo_fallback
+            .is_some(),
+        "structured evidence must reach the matcher even when body text exceeds its budget"
+    );
+    assert_eq!(
+        results.first().map(|result| result.entry.id.as_str()),
+        Some(STRUCTURED),
+        "topic/keywords must be evaluated before independently bounded free text"
+    );
+}
+
+#[test]
 fn short_cjk_uuid_and_identifier_queries_preserve_exact_behavior_without_activation() {
     let mut conn = setup();
     seed_typo_corpus(&mut conn);
@@ -473,8 +614,8 @@ fn sampled_impression_records_content_free_fallback_activation_and_contribution(
                     typo_fallback_edit_cell_count,
                     typo_fallback_candidate_count
                FROM recall_impression_groups
-              WHERE query_hash = ?1",
-            [crate::db::query_hash(TYPO_QUERY)],
+              WHERE query_fingerprint = ?1",
+            [crate::recall_impressions::query_fingerprint(TYPO_QUERY)],
             |row| {
                 Ok((
                     row.get(0)?,

@@ -1443,13 +1443,11 @@ mod tests {
                 "SELECT version FROM hard_state WHERE namespace = ?1 AND key = ?2",
                 params![MIGRATION_NS, key],
                 |row| row.get::<_, i64>(0),
+            )
             .unwrap()
         };
         assert_eq!(sentinel_version("v25_recall_impression_ledger"), 1);
-        assert_eq!(
-            sentinel_version("v26_recall_impression_replay_identity"),
-            1
-        );
+        assert_eq!(sentinel_version("v26_recall_impression_replay_identity"), 1);
         assert_eq!(sentinel_version("v27_typo_fallback_attribution"), 1);
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
         crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
@@ -2103,6 +2101,7 @@ mod tests {
         assert!(was_run(&verify, "v24_memories_scored_count").unwrap());
         assert!(was_run(&verify, "v25_recall_impression_ledger").unwrap());
         assert!(was_run(&verify, "v26_recall_impression_replay_identity").unwrap());
+        assert!(was_run(&verify, "v27_typo_fallback_attribution").unwrap());
         let _reserved_reference_guard = crate::db::register_reserved_reference_write_guard(&verify)
             .expect("register trigger guard function");
         let default: i64 = verify
@@ -2207,7 +2206,10 @@ mod tests {
         drop(store);
 
         let verify = Connection::open(&path).expect("verify migrated DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), EXPECTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
         assert!(was_run(&verify, V26_SENTINEL).unwrap());
         assert!(was_run(&verify, V27_SENTINEL).unwrap());
         for (object_type, name) in V26_OBJECTS {
