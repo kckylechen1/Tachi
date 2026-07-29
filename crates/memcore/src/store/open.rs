@@ -617,6 +617,37 @@ impl MemoryStore {
         })
     }
 
+    /// Upsert a bounded batch in one transaction and run a caller-supplied
+    /// pre-commit guard while every main/FTS/vector write is still rollbackable.
+    ///
+    /// This is for cross-resource maintenance that must validate or complete
+    /// an external boundary before the database half becomes durable. The
+    /// closure receives read access to the transaction for exact post-state
+    /// accounting; any closure error drops the transaction without commit.
+    pub fn upsert_batch_with_precommit<T, F>(
+        &mut self,
+        entries: &[MemoryEntry],
+        precommit: F,
+    ) -> Result<T, MemoryError>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+    {
+        for entry in entries {
+            self.validate_write_path(entry)?;
+        }
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for entry in entries {
+            db::upsert_within_tx(&tx, entry, self.vec_available, None)?;
+        }
+        let output = precommit(&tx)?;
+        tx.commit()?;
+        Ok(output)
+    }
+
     /// Atomically insert a memory and all of its search projections, without
     /// rewriting an existing id.
     pub fn insert_if_absent(

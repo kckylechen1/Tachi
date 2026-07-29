@@ -82,9 +82,10 @@ pub(crate) fn build_migration_plan(
         // An ambiguous physical store has independent live sidecar owners.
         // It remains fully visible in the report, but no arbitrary alias can
         // become a migration source until the owner adjudicates it.
-        let has_mutation_authority = report.physical_stores.iter().any(|store| {
-            store.primary_path == source_path && store.mutation_authority.is_some()
-        });
+        let has_mutation_authority = report
+            .physical_stores
+            .iter()
+            .any(|store| store.primary_path == source_path && store.mutation_authority.is_some());
         if !has_mutation_authority {
             continue;
         }
@@ -255,8 +256,6 @@ fn migrate_single_db(
     cfg: &MigrationConfig,
     authority: &crate::physical_db_identity::PhysicalMutationAuthority,
 ) -> Result<TidyMigrationOutcome, Box<dyn std::error::Error>> {
-    use std::collections::HashSet;
-
     let source_path = PathBuf::from(&migration.source_path);
     let target_path = cfg.target_db.clone();
 
@@ -265,13 +264,16 @@ fn migrate_single_db(
     // transition before either source or target can be opened for mutation.
     authority.revalidate_for_mutation(Some(&target_path))?;
     let source_store = open_cli_store_read_only(&source_path)?;
-    let source_count: usize = {
-        let count: i64 =
-            source_store
-                .connection()
-                .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
-        count as usize
+    let source_entries = {
+        let conn = source_store.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+             FROM memories",
+        )?;
+        let rows = stmt.query_map([], memcore::row_to_entry)?;
+        rows.collect::<Result<Vec<_>, _>>()?
     };
+    let source_count = source_entries.len();
 
     if cfg.dry_run {
         return Ok(TidyMigrationOutcome {
@@ -296,41 +298,6 @@ fn migrate_single_db(
     let mut target_store = open_cli_store(&target_path)?;
     let rows_before = target_store.stats(true)?.total as usize;
 
-    let existing_target_ids: HashSet<String> = {
-        let conn = target_store.connection();
-        let mut stmt = conn.prepare("SELECT id FROM memories")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?.into_iter().collect()
-    };
-
-    let mut copied = 0usize;
-    let mut newly_inserted_ids: Vec<String> = Vec::new();
-    let mut copy_err: Option<Box<dyn std::error::Error>> = None;
-
-    {
-        let conn = source_store.connection();
-        let mut stmt = conn.prepare(
-            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
-             FROM memories",
-        )?;
-        let rows = stmt.query_map([], memcore::row_to_entry)?;
-        for row in rows {
-            let entry = row?;
-            let existed_before = existing_target_ids.contains(&entry.id);
-            match target_store.upsert(&entry) {
-                Ok(()) => {
-                    if !existed_before {
-                        newly_inserted_ids.push(entry.id.clone());
-                    }
-                    copied += 1;
-                }
-                Err(e) => {
-                    copy_err = Some(Box::new(e));
-                    break;
-                }
-            }
-        }
-    }
     // Drop the read-only source connection now — it is never used again in
     // this function, and the archive-safety guard below probes whether some
     // OTHER process still holds `source_path` open. Leaving this process's
@@ -342,28 +309,6 @@ fn migrate_single_db(
     // in `db_ownership.rs` is defense in depth for any other call site that
     // probes while holding its own connection.
     drop(source_store);
-
-    if let Some(err) = copy_err {
-        // Best-effort rollback: delete rows we newly inserted in this run.
-        for id in &newly_inserted_ids {
-            let _ = target_store.delete(id);
-        }
-        return Ok(TidyMigrationOutcome {
-            source_path: migration.source_path.clone(),
-            target_path: migration.target_path.clone(),
-            archive_path: None,
-            status: "failed".to_string(),
-            rows_before_target: rows_before,
-            rows_after_target: rows_before,
-            rows_copied: 0,
-            message: format!(
-                "rolled back after {copied}/{source_count} rows ({} reverted): {err}",
-                newly_inserted_ids.len()
-            ),
-        });
-    }
-
-    let rows_after = target_store.stats(true)?.total as usize;
 
     // Source-scope lock: the caller's outer `DualDaemonLock` — acquired once
     // in `run_tidy_command` (`crates/tachi-server/src/bootstrap/tidy/command.rs:39`),
@@ -411,29 +356,23 @@ fn migrate_single_db(
             Err(crate::daemon_lock::ScopedLockError::Running { pid }) => {
                 let outcome = rollback_failed_outcome(
                     migration,
-                    &mut target_store,
-                    &newly_inserted_ids,
                     rows_before,
-                    copied,
+                    0,
                     source_count,
                     &format!(
                         "source DB's own daemon is running (pid {pid}, scoped lock); refusing to risk a torn archive copy"
                     ),
                 );
-                drop(target_store);
                 return Ok(outcome);
             }
             Err(crate::daemon_lock::ScopedLockError::Io(e)) => {
                 let outcome = rollback_failed_outcome(
                     migration,
-                    &mut target_store,
-                    &newly_inserted_ids,
                     rows_before,
-                    copied,
+                    0,
                     source_count,
                     &format!("source DB daemon lock probe failed: {e}"),
                 );
-                drop(target_store);
                 return Ok(outcome);
             }
         }
@@ -442,35 +381,15 @@ fn migrate_single_db(
     // Ownership guard: the archive step below moves main/-wal/-shm as three
     // sequential, non-atomic filesystem operations. If a live daemon still
     // holds the source DB open — or ownership cannot be determined — that
-    // race can leave a torn archived copy. Roll back the rows we just
-    // copied into the target and fail the whole migration atomically (the
-    // same rollback path used for a mid-copy SQL error above) rather than
-    // leaving a copied-but-unarchived half-state; the source stays on disk
-    // untouched and will simply be reconsidered by the next `tidy` run.
+    // race can leave a torn archived copy. Refuse before the target
+    // transaction starts; the source stays untouched and will simply be
+    // reconsidered by the next `tidy` run.
     if let Err(reason) = authority.revalidate_for_mutation(Some(&target_path)) {
-        let outcome = rollback_failed_outcome(
-            migration,
-            &mut target_store,
-            &newly_inserted_ids,
-            rows_before,
-            copied,
-            source_count,
-            &reason,
-        );
-        drop(target_store);
+        let outcome = rollback_failed_outcome(migration, rows_before, 0, source_count, &reason);
         return Ok(outcome);
     }
     if let Some(reason) = archive_unsafe_reason(&source_path) {
-        let outcome = rollback_failed_outcome(
-            migration,
-            &mut target_store,
-            &newly_inserted_ids,
-            rows_before,
-            copied,
-            source_count,
-            &reason,
-        );
-        drop(target_store);
+        let outcome = rollback_failed_outcome(migration, rows_before, 0, source_count, &reason);
         return Ok(outcome);
     }
     // Archive the source DB file. Move (rename) when possible; fall back to
@@ -479,43 +398,59 @@ fn migrate_single_db(
     if let Some(parent) = archive_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // The previous check protects the copied rows; this final check is the
-    // last operation before the non-atomic main/WAL/SHM archive move.
-    if let Err(reason) = authority.revalidate_for_mutation(Some(&target_path)) {
-        let outcome = rollback_failed_outcome(
-            migration,
-            &mut target_store,
-            &newly_inserted_ids,
-            rows_before,
-            copied,
-            source_count,
-            &reason,
-        );
-        drop(target_store);
-        return Ok(outcome);
-    }
-    drop(target_store);
-    match std::fs::rename(&source_path, &archive_path) {
-        Ok(()) => {}
-        Err(_) => {
-            std::fs::copy(&source_path, &archive_path)?;
-            std::fs::remove_file(&source_path)?;
-        }
-    }
-    // Also move sidecar WAL/SHM files if present.
-    for ext in ["-wal", "-shm"] {
-        let sidecar = PathBuf::from(format!("{}{ext}", source_path.display()));
-        if sidecar.exists() {
-            let dst = PathBuf::from(format!("{}{ext}", archive_path.display()));
-            if let Err(e) = std::fs::rename(&sidecar, &dst).or_else(|_| {
-                std::fs::copy(&sidecar, &dst)
-                    .map(|_| ())
-                    .and_then(|_| std::fs::remove_file(&sidecar))
-            }) {
-                tracing::warn!("tidy: failed to move sidecar {}: {e}", sidecar.display());
+    // Keep every target row/projection write in one SQLite transaction until
+    // the source archive boundary succeeds. This preserves existing target
+    // rows exactly when a copy, authority, or archive precondition fails;
+    // row-count rollback alone is not sufficient because ordinary upsert can
+    // overwrite a pre-existing ID.
+    let copied = source_entries.len();
+    let rows_after = match target_store.upsert_batch_with_precommit(&source_entries, |tx| {
+        // This is the last authority check before the non-atomic
+        // main/WAL/SHM archive move, while target writes remain uncommitted.
+        authority
+            .revalidate_for_mutation(Some(&target_path))
+            .map_err(memcore::MemoryError::InvalidArg)?;
+        match std::fs::rename(&source_path, &archive_path) {
+            Ok(()) => {}
+            Err(_) => {
+                std::fs::copy(&source_path, &archive_path)?;
+                std::fs::remove_file(&source_path)?;
             }
         }
-    }
+        // Also move sidecar WAL/SHM files if present.
+        for ext in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{ext}", source_path.display()));
+            if sidecar.exists() {
+                let dst = PathBuf::from(format!("{}{ext}", archive_path.display()));
+                if let Err(e) = std::fs::rename(&sidecar, &dst).or_else(|_| {
+                    std::fs::copy(&sidecar, &dst)
+                        .map(|_| ())
+                        .and_then(|_| std::fs::remove_file(&sidecar))
+                }) {
+                    tracing::warn!("tidy: failed to move sidecar {}: {e}", sidecar.display());
+                }
+            }
+        }
+        tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count as usize)
+        .map_err(memcore::MemoryError::from)
+    }) {
+        Ok(rows_after) => rows_after,
+        Err(memcore::MemoryError::InvalidArg(reason))
+            if reason.starts_with("invariant: mutation authority") =>
+        {
+            return Ok(rollback_failed_outcome(
+                migration,
+                rows_before,
+                copied,
+                source_count,
+                &reason,
+            ));
+        }
+        Err(error) => return Err(Box::new(error)),
+    };
 
     Ok(TidyMigrationOutcome {
         source_path: migration.source_path.clone(),
@@ -529,23 +464,17 @@ fn migrate_single_db(
     })
 }
 
-/// Build a "failed, rolled back" `TidyMigrationOutcome`, deleting the rows
-/// this migration attempt newly inserted into `target_store` before
-/// reporting. Shared by every failure path downstream of a successful
-/// row-copy (source/legacy daemon-lock conflicts, the archive-safety probe)
-/// so the rollback + message shape stays identical across all of them.
+/// Build a failed outcome after the caller has refused before beginning the
+/// target transaction or dropped that transaction without committing it.
+/// The phrase "rolled back" is literal: target main/FTS/vector state remains
+/// at its pre-migration snapshot even when source IDs overlap existing rows.
 fn rollback_failed_outcome(
     migration: &TidyMigration,
-    target_store: &mut memcore::MemoryStore,
-    newly_inserted_ids: &[String],
     rows_before: usize,
     copied: usize,
     source_count: usize,
     reason: &str,
 ) -> TidyMigrationOutcome {
-    for id in newly_inserted_ids {
-        let _ = target_store.delete(id);
-    }
     TidyMigrationOutcome {
         source_path: migration.source_path.clone(),
         target_path: migration.target_path.clone(),
@@ -555,8 +484,7 @@ fn rollback_failed_outcome(
         rows_after_target: rows_before,
         rows_copied: 0,
         message: format!(
-            "rolled back after {copied}/{source_count} rows ({} reverted): {reason}",
-            newly_inserted_ids.len()
+            "rolled back atomically before target commit after {copied}/{source_count} rows: {reason}"
         ),
     }
 }

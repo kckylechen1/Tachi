@@ -331,6 +331,52 @@ fn tidy_execute_refuses_source_becoming_target_after_plan() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn tidy_execute_archive_failure_rolls_back_overwritten_target_rows_atomically() {
+    let (root, source, target, plan, authorities, cfg) =
+        planned_mutation_authority_fixture("archive-failure-overlap");
+
+    let mut target_original = make_entry("overlap-row");
+    target_original.text = "target original must survive".to_string();
+    let mut target_store = MemoryStore::open(target.to_str().unwrap()).unwrap();
+    target_store.upsert(&target_original).unwrap();
+    drop(target_store);
+
+    let mut source_replacement = make_entry("overlap-row");
+    source_replacement.text = "source replacement must roll back".to_string();
+    let mut source_store = MemoryStore::open(source.to_str().unwrap()).unwrap();
+    source_store.upsert(&source_replacement).unwrap();
+    drop(source_store);
+
+    let archive_path = std::path::PathBuf::from(&plan[0].archive_path);
+    std::fs::create_dir_all(&archive_path)
+        .expect("an existing directory forces the post-copy archive operation to fail");
+
+    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorities)
+        .expect("archive failure is represented by a failed migration outcome");
+    assert_eq!(summary.failed_count, 1);
+    let error = &summary.outcomes[0].message;
+    assert!(
+        error.contains("directory") || error.contains("Directory"),
+        "unexpected archive failure: {error}"
+    );
+
+    let target_after = MemoryStore::open_read_only(target.to_str().unwrap()).unwrap();
+    let overlap = target_after
+        .get("overlap-row")
+        .unwrap()
+        .expect("pre-existing overlap row survives");
+    assert_eq!(overlap.text, "target original must survive");
+    assert!(
+        target_after.get("scanned-source-row").unwrap().is_none(),
+        "new source rows must also roll back with the overwritten row"
+    );
+    assert!(source.exists(), "failed archive leaves source untouched");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// #1341-follow-up: the archive step moves main/-wal/-shm as three sequential,
 /// non-atomic filesystem operations. If a live daemon still holds the
 /// source DB open (or ownership can't be determined), migrating anyway
