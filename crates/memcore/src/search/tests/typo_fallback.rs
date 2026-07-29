@@ -268,13 +268,14 @@ fn minimum_typo_score_is_explicit_retrieval_evidence_not_symbolic_dead_band() {
 fn one_candidate_token_cannot_satisfy_two_misspelled_query_terms() {
     let mut conn = setup();
     const QUERY: &str = "memroy memmory retrival boundries";
-    const ONLY_ONE: &str = "one-memory-occurrence";
-    insert(
-        &mut conn,
+    const ONLY_ONE: &str = "single-occurrence-target";
+    let mut entry = memory_entry(
         ONLY_ONE,
         "memory retrieval boundaries archive",
-        &["memory", "retrieval", "boundaries", "archive"],
+        &["retrieval", "boundaries", "archive"],
     );
+    entry.summary = "operational note".to_string();
+    insert_entry(&mut conn, entry);
     let (results, receipt) = hybrid_search_with_receipt(&conn, QUERY, &typo_opts()).unwrap();
     let typo = receipt
         .candidates
@@ -288,6 +289,35 @@ fn one_candidate_token_cannot_satisfy_two_misspelled_query_terms() {
     assert!(
         !results.iter().any(|result| result.entry.id == ONLY_ONE),
         "many-to-one token reuse must not recover the row"
+    );
+}
+
+#[test]
+fn two_candidate_token_occurrences_can_satisfy_two_misspelled_query_terms() {
+    let mut conn = setup();
+    const QUERY: &str = "memroy memmory retrival boundries";
+    const TWO_COPIES: &str = "double-occurrence-target";
+    let mut entry = memory_entry(
+        TWO_COPIES,
+        "memory memory retrieval boundaries archive",
+        &["retrieval", "boundaries", "archive"],
+    );
+    entry.summary = "operational note".to_string();
+    insert_entry(&mut conn, entry);
+
+    let (results, receipt) = hybrid_search_with_receipt(&conn, QUERY, &typo_opts()).unwrap();
+    let typo = receipt
+        .candidates
+        .expect("candidate receipt")
+        .typo_fallback
+        .expect("eligible misspelled query must exercise the bounded matcher");
+    assert_eq!(
+        typo.contributed_candidate_count, 1,
+        "two physical `memory` occurrences must support a one-to-one assignment"
+    );
+    assert!(
+        results.iter().any(|result| result.entry.id == TWO_COPIES),
+        "occurrence-level one-to-one matching must recover the row"
     );
 }
 

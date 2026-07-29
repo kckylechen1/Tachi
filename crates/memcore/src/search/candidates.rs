@@ -494,7 +494,6 @@ fn bounded_candidate_tokens(entry: &MemoryEntry, config: &TypoFallbackConfig) ->
         entry.id.as_str(),
     ];
     let free_text_fields = [entry.summary.as_str(), entry.text.as_str()];
-    let mut seen = HashSet::new();
     let mut tokens = Vec::new();
 
     // Structured metadata receives a separate per-field budget and precedes
@@ -511,7 +510,6 @@ fn bounded_candidate_tokens(entry: &MemoryEntry, config: &TypoFallbackConfig) ->
         for token in crate::scorer::tokenize(&bounded) {
             if token.chars().all(|ch| ch.is_ascii_alphabetic())
                 && (config.min_token_chars..=config.max_token_chars).contains(&token.len())
-                && seen.insert(token.clone())
             {
                 tokens.push(token);
                 if tokens.len() >= config.max_candidate_tokens {
@@ -531,7 +529,6 @@ fn bounded_candidate_tokens(entry: &MemoryEntry, config: &TypoFallbackConfig) ->
         for token in crate::scorer::tokenize(&bounded) {
             if token.chars().all(|ch| ch.is_ascii_alphabetic())
                 && (config.min_token_chars..=config.max_token_chars).contains(&token.len())
-                && seen.insert(token.clone())
             {
                 tokens.push(token);
                 if tokens.len() >= config.max_candidate_tokens {
