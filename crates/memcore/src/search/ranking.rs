@@ -1,13 +1,19 @@
 //! Candidate scoring and top-k ranking for hybrid search.
 
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::{
     db::{get_access_times, get_superseded_ids, get_use_access_times},
     error::MemoryError,
-    scorer::{cosine_similarity, is_id_like_exact_query, DecayPolicyContext},
+    recall_impressions::{
+        query_fingerprint, RecallImpressionPayload, RecallImpressionRowDraft, RecallReplayPolicy,
+    },
+    scorer::{
+        apply_pre_boost_adjustment, cosine_similarity, is_id_like_exact_query, DecayPolicyContext,
+        PreBoostAdjustment,
+    },
     types::{HybridScore, MemoryEntry, SearchResult},
 };
 
@@ -16,6 +22,7 @@ use super::{
     expansion::symbolic_query_with_expansion,
     filtering::{is_search_noise_entry, newest_by_shared_entity, quality_multiplier, valid_at},
     recall_config, resolve_weights, ChannelPhaseReceipt, RankPhaseReceipt, SearchOptions,
+    TypoFallbackAttribution,
 };
 
 pub(super) struct CandidateRanking<'a> {
@@ -24,12 +31,27 @@ pub(super) struct CandidateRanking<'a> {
     pub(super) entries_map: HashMap<String, MemoryEntry>,
     pub(super) vec_scores: &'a HashMap<String, f64>,
     pub(super) fts_scores: &'a HashMap<String, f64>,
+    pub(super) typo_scores: &'a HashMap<String, f64>,
+    pub(super) typo_candidate_ids: &'a HashSet<String>,
+    pub(super) typo_attribution: TypoFallbackAttribution,
     pub(super) exact_id: Option<&'a str>,
     pub(super) include_superseded: bool,
     pub(super) as_of_utc: Option<&'a str>,
 }
 
-type RankedEntries = (Vec<SearchResult>, Vec<String>, Option<RankPhaseReceipt>);
+pub(super) struct NormalCandidateEligibility<'a> {
+    pub(super) entries: &'a HashMap<String, MemoryEntry>,
+    pub(super) vec_scores: &'a HashMap<String, f64>,
+    pub(super) fts_scores: &'a HashMap<String, f64>,
+    pub(super) exact_id: Option<&'a str>,
+}
+
+type RankedEntries = (
+    Vec<SearchResult>,
+    Vec<String>,
+    Option<RankPhaseReceipt>,
+    Option<RecallImpressionPayload>,
+);
 
 /// Importance floor for the decision prior. This is candidate eligibility,
 /// not retrieval evidence: the later topical-evidence gate still decides
@@ -40,6 +62,7 @@ pub(super) fn rank_candidate_entries(
     conn: &Connection,
     ranking: CandidateRanking<'_>,
     sample: bool,
+    capture_impression: bool,
 ) -> Result<RankedEntries, MemoryError> {
     let phase_start = sample.then(Instant::now);
     let CandidateRanking {
@@ -48,17 +71,21 @@ pub(super) fn rank_candidate_entries(
         entries_map,
         vec_scores,
         fts_scores,
+        typo_scores,
+        typo_candidate_ids,
+        typo_attribution,
         exact_id,
         include_superseded,
         as_of_utc,
     } = ranking;
-    let symbolic_scores = symbolic_scores(query, &entries_map);
+    let normal_symbolic_scores = symbolic_scores(query, &entries_map);
     let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
     let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
     let retrieval_evidence = RetrievalEvidence {
         vec_scores,
         fts_scores,
-        symbolic_scores: &symbolic_scores,
+        symbolic_scores: &normal_symbolic_scores,
+        typo_evidence: typo_candidate_ids,
         exact_id,
         recall_config: recall_config(opts),
         minimum_symbolic_coverage,
@@ -75,31 +102,16 @@ pub(super) fn rank_candidate_entries(
 
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
         .iter()
-        .filter(|(id, e)| {
-            if !valid_at(e, as_of_utc) {
-                return false;
-            }
-            if !include_superseded && superseded_ids.contains(*id) {
-                return false;
-            }
-            if is_search_noise_entry(e, opts.path_prefix.as_deref()) {
-                return false;
-            }
-            if let Some(prefix) = &opts.path_prefix {
-                if !e.path.starts_with(prefix.as_str()) {
-                    return false;
-                }
-            }
-            if let Some(domain) = &opts.domain {
-                match &e.domain {
-                    Some(d) if d == domain => {}
-                    _ => return false,
-                }
-            }
-            if below_minimum_retrieval_evidence(id, e, &retrieval_evidence) {
-                return false;
-            }
-            true
+        .filter(|(id, entry)| {
+            passes_final_candidate_eligibility(
+                id,
+                entry,
+                opts,
+                include_superseded,
+                as_of_utc,
+                &superseded_ids,
+                &retrieval_evidence,
+            )
         })
         .map(|(k, v)| (k.clone(), v))
         .collect();
@@ -126,7 +138,7 @@ pub(super) fn rank_candidate_entries(
             mmr_enabled: opts.mmr_threshold.is_some(),
             ranked_result_count: 0,
         });
-        return Ok((vec![], vec![], receipt));
+        return Ok((vec![], vec![], receipt, None));
     }
 
     let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
@@ -136,6 +148,15 @@ pub(super) fn rank_candidate_entries(
     let access_times = read_access_times(conn, opts, &candidate_ids_vec)?;
     let access_elapsed = access_start.map(|s| s.elapsed());
     let weights = resolve_weights(opts);
+    // Typo scores affect fusion only after the typed evidence lane has decided
+    // survival. They must not masquerade as ordinary symbolic coverage.
+    let mut symbolic_scores = normal_symbolic_scores;
+    for (id, score) in typo_scores {
+        symbolic_scores
+            .entry(id.clone())
+            .and_modify(|existing| *existing = existing.max(*score))
+            .or_insert(*score);
+    }
     let mut scores = merge_pre_boost_scores(
         opts,
         &entries_ref,
@@ -148,24 +169,18 @@ pub(super) fn rank_candidate_entries(
         include_superseded,
         &superseded_ids,
     );
+    let pre_boost_scores = capture_impression.then(|| scores.clone());
 
-    apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
-    apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
-    apply_access_feedback(
-        &entries_ref,
-        &access_times,
-        recall_config(opts),
-        &mut scores,
-    );
-    apply_tier_boosts(&entries_ref, &mut scores);
-    apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
-    apply_decision_boost(query, &entries_ref, &mut scores);
-    apply_lexical_overlap_boost(
+    let mut boost_observer = NoopBoostSequenceObserver;
+    let boost_context = BoostSequenceContext {
         query,
-        opts.path_prefix.as_deref(),
-        &entries_ref,
-        &mut scores,
-    );
+        opts,
+        entries_ref: &entries_ref,
+        weights: &weights,
+        access_times: &access_times,
+        superseded_ids: &superseded_ids,
+    };
+    apply_production_boost_sequence(&boost_context, &mut scores, &mut boost_observer);
 
     // The scorer invariant: these are exactly the post-merge/post-boost score
     // keys, before MMR or `top_k` can remove displayed results. Sorting makes
@@ -204,6 +219,25 @@ pub(super) fn rank_candidate_entries(
     } else {
         ranked.iter().map(|(id, _, _)| id.to_string()).collect()
     };
+    let impression = pre_boost_scores.map(|pre_scores| {
+        build_impression_payload(
+            query,
+            opts,
+            &entries_ref,
+            vec_scores,
+            fts_scores,
+            &symbolic_scores,
+            &pre_scores,
+            &scores,
+            &ranked_ids,
+            typo_candidate_ids,
+            typo_attribution,
+            exact_id,
+            include_superseded,
+            &superseded_ids,
+            &weights,
+        )
+    });
     drop(entries_ref);
 
     let mut entries_map = entries_map;
@@ -230,7 +264,146 @@ pub(super) fn rank_candidate_entries(
         mmr_enabled,
         ranked_result_count,
     });
-    Ok((results, scored_ids, receipt))
+    Ok((results, scored_ids, receipt, impression))
+}
+
+fn score_rank_map(
+    scores: &HashMap<String, f64>,
+    entries: &HashMap<String, &MemoryEntry>,
+) -> HashMap<String, usize> {
+    let mut ranked = scores
+        .iter()
+        .map(|(id, score)| {
+            let timestamp = entries
+                .get(id)
+                .map(|entry| crate::scorer::timestamp_epoch_millis(&entry.timestamp))
+                .unwrap_or(i64::MIN);
+            (id, *score, timestamp)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| crate::scorer::cmp_recall_rank((a.1, a.2, a.0), (b.1, b.2, b.0)));
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, _, _))| (id.clone(), index + 1))
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_impression_payload(
+    query: &str,
+    opts: &SearchOptions,
+    entries: &HashMap<String, &MemoryEntry>,
+    vec_scores: &HashMap<String, f64>,
+    fts_scores: &HashMap<String, f64>,
+    symbolic_scores: &HashMap<String, f64>,
+    pre_scores: &HashMap<String, HybridScore>,
+    final_scores: &HashMap<String, HybridScore>,
+    ranked_ids: &[String],
+    typo_candidate_ids: &HashSet<String>,
+    typo_attribution: TypoFallbackAttribution,
+    exact_id: Option<&str>,
+    include_superseded: bool,
+    superseded_ids: &std::collections::HashSet<String>,
+    weights: &crate::scorer::HybridWeights,
+) -> RecallImpressionPayload {
+    #[cfg(test)]
+    IMPRESSION_PAYLOAD_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+    let vec_ranks = score_rank_map(vec_scores, entries);
+    let fts_ranks = score_rank_map(fts_scores, entries);
+    let sym_ranks = score_rank_map(symbolic_scores, entries);
+    let pre_rank_scores = pre_scores
+        .iter()
+        .filter(|(id, _)| entries.contains_key(*id))
+        .map(|(id, score)| (id.clone(), score.final_score))
+        .collect::<HashMap<_, _>>();
+    let pre_ranks = score_rank_map(&pre_rank_scores, entries);
+    let final_ranks = ranked_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.clone(), index + 1))
+        .collect::<HashMap<_, _>>();
+    let mut ids = pre_scores
+        .keys()
+        .filter(|id| entries.contains_key(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    ids.sort();
+    let rows = ids
+        .into_iter()
+        .map(|id| {
+            let pre = &pre_scores[&id];
+            let final_score = &final_scores[&id];
+            let is_exact = exact_id == Some(id.as_str());
+            let is_superseded = include_superseded && superseded_ids.contains(&id);
+            let merge_adjustment = match (is_exact, is_superseded) {
+                (true, true) => PreBoostAdjustment::ExactIdSupersededScale,
+                (true, false) => PreBoostAdjustment::ExactId,
+                (false, true) => PreBoostAdjustment::SupersededScale,
+                (false, false) => PreBoostAdjustment::None,
+            };
+            RecallImpressionRowDraft {
+                memory_id: id.clone(),
+                vector_score: pre.vector,
+                fts_score: pre.fts,
+                symbolic_score: pre.symbolic,
+                decay_score: pre.decay,
+                vec_rank: vec_ranks.get(&id).copied(),
+                fts_rank: fts_ranks.get(&id).copied(),
+                sym_rank: sym_ranks.get(&id).copied(),
+                merge_adjustment,
+                pre_boost_score: pre.final_score,
+                pre_boost_rank: pre_ranks[&id],
+                tie_break_epoch_millis: crate::scorer::timestamp_epoch_millis(
+                    &entries[&id].timestamp,
+                ),
+                final_score: final_score.final_score,
+                final_rank: final_ranks[&id],
+                scored: true,
+                scored_returned: false,
+                access_count_at_recall: entries[&id].access_count,
+                typo_fallback_candidate: typo_candidate_ids.contains(&id),
+            }
+        })
+        .collect();
+    let weights_profile = if opts.weights != crate::scorer::HybridWeights::default() {
+        "custom"
+    } else {
+        match opts.path_prefix.as_deref().unwrap_or("") {
+            path if path.starts_with("/guide") => "guide",
+            path if path.starts_with("/wiki")
+                || path.starts_with("/behavior")
+                || path.starts_with("/rules") =>
+            {
+                "wiki"
+            }
+            path if path.starts_with("/events") || path.starts_with("/notes") => "events_notes",
+            _ => "default",
+        }
+    };
+    RecallImpressionPayload {
+        group_id: uuid::Uuid::new_v4().to_string(),
+        created_at: crate::db::now_utc_iso(),
+        query_fingerprint: query_fingerprint(query),
+        replay_policy: RecallReplayPolicy::current(),
+        weights_profile: weights_profile.to_string(),
+        weights: weights.clone(),
+        rrf_k: recall_config(opts).rrf_k,
+        top_k: opts.top_k,
+        rows,
+        displayed_count: 0,
+        typo_fallback: typo_attribution,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static IMPRESSION_PAYLOAD_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn impression_payload_constructions() -> usize {
+    IMPRESSION_PAYLOAD_CONSTRUCTIONS.with(std::cell::Cell::get)
 }
 
 /// Pure merge of the four channel scores (vector/FTS/symbolic + ACT-R decay)
@@ -268,22 +441,19 @@ fn merge_pre_boost_scores(
         DecayPolicyContext::new(recall_config(opts), decay_policy(opts)),
     );
     if let Some(exact_id) = exact_id.filter(|id| entries_ref.contains_key(*id)) {
-        scores.insert(
-            exact_id.to_string(),
-            HybridScore {
-                vector: 1.0,
-                fts: 1.0,
-                symbolic: 1.0,
-                decay: 1.0,
-                final_score: 10.0,
-            },
-        );
+        if let Some(score) = scores.get_mut(exact_id) {
+            score.final_score =
+                apply_pre_boost_adjustment(score.final_score, PreBoostAdjustment::ExactId);
+        }
     }
 
     if include_superseded {
         for id in superseded_ids {
             if let Some(score) = scores.get_mut(id) {
-                score.final_score *= 0.3;
+                score.final_score = apply_pre_boost_adjustment(
+                    score.final_score,
+                    PreBoostAdjustment::SupersededScale,
+                );
             }
         }
     }
@@ -312,6 +482,11 @@ struct RetrievalEvidence<'a> {
     vec_scores: &'a HashMap<String, f64>,
     fts_scores: &'a HashMap<String, f64>,
     symbolic_scores: &'a HashMap<String, f64>,
+    /// Accepted bounded typo matches are a distinct retrieval-evidence lane.
+    /// Their fusion contribution may be below normal symbolic coverage, but
+    /// they have already satisfied the typo matcher’s all-term one-to-one
+    /// assignment contract.
+    typo_evidence: &'a HashSet<String>,
     exact_id: Option<&'a str>,
     recall_config: &'a crate::RecallConfig,
     minimum_symbolic_coverage: f64,
@@ -324,6 +499,9 @@ fn below_minimum_retrieval_evidence(
     evidence: &RetrievalEvidence<'_>,
 ) -> bool {
     if evidence.exact_id == Some(id) {
+        return false;
+    }
+    if evidence.typo_evidence.contains(id) {
         return false;
     }
     let has_fts_evidence = evidence
@@ -352,6 +530,74 @@ fn below_minimum_retrieval_evidence(
         return false;
     }
     !has_minimum_symbolic_coverage
+}
+
+fn passes_final_candidate_eligibility(
+    id: &str,
+    entry: &MemoryEntry,
+    opts: &SearchOptions,
+    include_superseded: bool,
+    as_of_utc: Option<&str>,
+    superseded_ids: &HashSet<String>,
+    retrieval_evidence: &RetrievalEvidence<'_>,
+) -> bool {
+    if !valid_at(entry, as_of_utc)
+        || (!include_superseded && superseded_ids.contains(id))
+        || is_search_noise_entry(entry, opts.path_prefix.as_deref())
+        || opts
+            .path_prefix
+            .as_ref()
+            .is_some_and(|prefix| !entry.path.starts_with(prefix))
+        || opts
+            .domain
+            .as_ref()
+            .is_some_and(|domain| entry.domain.as_deref() != Some(domain.as_str()))
+    {
+        return false;
+    }
+    !below_minimum_retrieval_evidence(id, entry, retrieval_evidence)
+}
+
+/// Apply the exact final retrieval-evidence predicate to normal candidate
+/// rows before deciding whether typo fallback should activate. This deliberately
+/// excludes typo evidence: activation answers whether the normal pipeline can
+/// already yield a survivor, not whether fallback could rescue one.
+pub(super) fn normal_candidates_have_final_retrieval_evidence(
+    conn: &Connection,
+    query: &str,
+    opts: &SearchOptions,
+    candidates: NormalCandidateEligibility<'_>,
+    include_superseded: bool,
+    as_of_utc: Option<&str>,
+) -> Result<bool, MemoryError> {
+    if candidates.entries.is_empty() {
+        return Ok(false);
+    }
+    let symbolic_scores = symbolic_scores(query, candidates.entries);
+    let empty_typo_evidence = HashSet::new();
+    let retrieval_evidence = RetrievalEvidence {
+        vec_scores: candidates.vec_scores,
+        fts_scores: candidates.fts_scores,
+        symbolic_scores: &symbolic_scores,
+        typo_evidence: &empty_typo_evidence,
+        exact_id: candidates.exact_id,
+        recall_config: recall_config(opts),
+        minimum_symbolic_coverage: minimum_symbolic_query_coverage(query, recall_config(opts)),
+        requires_pair_evidence: query_requires_pair_evidence(query, recall_config(opts)),
+    };
+    let candidate_ids = candidates.entries.keys().cloned().collect::<Vec<_>>();
+    let superseded_ids = get_superseded_ids(conn, &candidate_ids)?;
+    Ok(candidates.entries.iter().any(|(id, entry)| {
+        passes_final_candidate_eligibility(
+            id,
+            entry,
+            opts,
+            include_superseded,
+            as_of_utc,
+            &superseded_ids,
+            &retrieval_evidence,
+        )
+    }))
 }
 
 fn query_requires_pair_evidence(query: &str, recall_config: &crate::RecallConfig) -> bool {
@@ -663,6 +909,92 @@ fn apply_lexical_overlap_boost(
     }
 }
 
+/// Test-only observers can snapshot the exact production boost sequence
+/// without owning a second list of boost calls. The default observer is a
+/// statically dispatched no-op, so it cannot alter ranking behavior or order.
+trait BoostSequenceObserver {
+    #[inline]
+    fn before_step(&mut self, _label: &'static str, _scores: &HashMap<String, HybridScore>) {}
+
+    #[inline]
+    fn after_step(&mut self, _label: &'static str, _scores: &HashMap<String, HybridScore>) {}
+}
+
+struct NoopBoostSequenceObserver;
+
+impl BoostSequenceObserver for NoopBoostSequenceObserver {}
+
+struct BoostSequenceContext<'a> {
+    query: &'a str,
+    opts: &'a SearchOptions,
+    entries_ref: &'a HashMap<String, &'a MemoryEntry>,
+    weights: &'a crate::scorer::HybridWeights,
+    access_times: &'a HashMap<String, Vec<f64>>,
+    superseded_ids: &'a HashSet<String>,
+}
+
+/// The one production-owned boost order. Measurement observers see each
+/// sequential marginal transition around the same calls production executes.
+fn apply_production_boost_sequence<O: BoostSequenceObserver>(
+    context: &BoostSequenceContext<'_>,
+    scores: &mut HashMap<String, HybridScore>,
+    observer: &mut O,
+) {
+    macro_rules! apply_step {
+        ($label:literal, $apply:expr) => {{
+            observer.before_step($label, scores);
+            $apply;
+            observer.after_step($label, scores);
+        }};
+    }
+
+    apply_step!(
+        "precision",
+        apply_precision_boosts(
+            context.query,
+            context.opts,
+            context.entries_ref,
+            context.weights,
+            scores,
+        )
+    );
+    apply_step!(
+        "quality",
+        apply_quality_boosts(
+            context.opts.path_prefix.as_deref(),
+            context.entries_ref,
+            scores,
+        )
+    );
+    apply_step!(
+        "access_feedback",
+        apply_access_feedback(
+            context.entries_ref,
+            context.access_times,
+            recall_config(context.opts),
+            scores,
+        )
+    );
+    apply_step!("tier", apply_tier_boosts(context.entries_ref, scores));
+    apply_step!(
+        "entity_recency",
+        apply_entity_recency_boosts(context.entries_ref, context.superseded_ids, scores)
+    );
+    apply_step!(
+        "decision",
+        apply_decision_boost(context.query, context.entries_ref, scores)
+    );
+    apply_step!(
+        "lexical_overlap",
+        apply_lexical_overlap_boost(
+            context.query,
+            context.opts.path_prefix.as_deref(),
+            context.entries_ref,
+            scores,
+        )
+    );
+}
+
 fn soft_token_set(text: &str) -> std::collections::HashSet<String> {
     crate::scorer::tokenize(text)
         .into_iter()
@@ -871,26 +1203,15 @@ fn apply_mmr_diversity(
 // decomposition. See `search/tests/rank_attribution.rs` for the JSONL driver
 // that runs this against the golden_corpus / ops_audit_corpus fixtures.
 //
-// Zero production overhead: this entire module is `#[cfg(test)]`-gated (the
-// same convention `mod tests` below already uses) — a default `cargo build`
-// / `cargo build --release` / `cargo clippy` (without `--tests`) does not
-// compile any of it, so there is no runtime branch, no allocation, and no
-// code-size cost on the production path. The only non-test-gated change
-// this leaf makes to `rank_candidate_entries` above is the
-// `merge_pre_boost_scores` extraction — a pure code-motion (identical calls,
-// identical order, identical values); `rank_candidate_entries`'s own
-// behavior is unchanged.
+// The attribution module itself is `#[cfg(test)]`-gated. Production owns the
+// boost sequence and passes its statically dispatched no-op observer; the
+// calls, arguments, and order are unchanged, while test builds can snapshot
+// those same transitions without a second sequence to maintain.
 //
-// This does NOT re-derive the boost math: every step below calls the exact
-// same private `apply_*_boost` functions the production sequence
-// (ranking.rs `rank_candidate_entries`, the `apply_precision_boosts` .. `
-// apply_lexical_overlap_boost` calls) invokes, in the same order, on a
-// snapshot-observed clone of the identical pre-boost baseline
-// (`merge_pre_boost_scores`). The one thing NOT shared by construction is
-// the CALL SEQUENCE ITSELF (7 one-line calls, listed a second time below) —
-// if a future change adds/removes/reorders a boost in `rank_candidate_entries`,
-// this module's list must be updated to match by hand; there is no
-// compile-time link between the two sequences, only this comment.
+// This does NOT re-derive the boost math or its call sequence: attribution
+// passes a snapshot observer to `apply_production_boost_sequence`, the same
+// production-owned function used by `rank_candidate_entries`. A future
+// add/remove/reorder therefore changes the measured sequence with production.
 #[cfg(test)]
 pub(super) mod attribution {
     use super::*;
@@ -906,6 +1227,8 @@ pub(super) mod attribution {
         pub(crate) label: &'static str,
         before: HashMap<String, f64>,
         after: HashMap<String, f64>,
+        before_ranks: HashMap<String, usize>,
+        after_ranks: HashMap<String, usize>,
     }
 
     impl BoostStep {
@@ -930,11 +1253,40 @@ pub(super) mod attribution {
             self.multiplier_for(id)
                 .is_some_and(|m| (m - 1.0).abs() > 1e-9)
         }
+
+        /// Sequential marginal candidate-query observations whose exact rank
+        /// changed across this step. The same memory id in different queries
+        /// is counted once per query; this is not a unique-memory-id count.
+        pub(crate) fn sequential_changed_candidate_query_observations(&self) -> usize {
+            self.before_ranks
+                .iter()
+                .filter(|(id, rank)| self.after_ranks.get(*id) != Some(*rank))
+                .count()
+        }
+
+        /// Sequential marginal pairwise order inversions introduced by this
+        /// step, using the same score/timestamp/id total order as production.
+        pub(crate) fn sequential_pairwise_inversions(&self) -> usize {
+            let mut ids = self.before_ranks.keys().collect::<Vec<_>>();
+            ids.sort();
+            ids.iter()
+                .enumerate()
+                .flat_map(|(left_index, left)| {
+                    ids[left_index + 1..]
+                        .iter()
+                        .map(move |right| (*left, *right))
+                })
+                .filter(|(left, right)| {
+                    self.before_ranks[*left].cmp(&self.before_ranks[*right])
+                        != self.after_ranks[*left].cmp(&self.after_ranks[*right])
+                })
+                .count()
+        }
     }
 
     /// Full attribution for one ranking call: the pre-boost baseline
     /// `HybridScore` per candidate (vector/FTS/symbolic/decay merge, before
-    /// any boost), each of the 7 boost steps in production order, and the
+    /// any boost), each production boost step in production order, and the
     /// resulting final scores.
     #[derive(Debug, Clone)]
     pub(crate) struct RankAttribution {
@@ -944,12 +1296,10 @@ pub(super) mod attribution {
     }
 
     /// Attribution twin of `rank_candidate_entries`. Re-derives the same
-    /// pre-boost baseline via the shared `merge_pre_boost_scores` (no
-    /// scoring math duplicated there), then walks the SAME 7 boost calls
-    /// `rank_candidate_entries` makes, in the SAME order, snapshotting
-    /// scores before/after each. Does not sort, apply MMR, or truncate to
-    /// `top_k` — callers that need actual production rank order should call
-    /// `hybrid_search`/`rank_candidate_entries` separately (see
+    /// pre-boost baseline via the shared `merge_pre_boost_scores`, then gives
+    /// the production boost sequence a snapshot observer. Does not sort,
+    /// apply MMR, or truncate to `top_k` — callers that need actual production
+    /// rank order should call `hybrid_search`/`rank_candidate_entries` separately (see
     /// `hybrid_search_with_attribution` in `search.rs`, which does exactly
     /// that pairing).
     pub(crate) fn rank_candidate_entries_with_attribution(
@@ -962,18 +1312,22 @@ pub(super) mod attribution {
             entries_map,
             vec_scores,
             fts_scores,
+            typo_scores,
+            typo_candidate_ids,
+            typo_attribution: _,
             exact_id,
             include_superseded,
             as_of_utc,
         } = ranking;
 
-        let symbolic_scores = symbolic_scores(query, &entries_map);
+        let normal_symbolic_scores = symbolic_scores(query, &entries_map);
         let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
         let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
         let retrieval_evidence = RetrievalEvidence {
             vec_scores,
             fts_scores,
-            symbolic_scores: &symbolic_scores,
+            symbolic_scores: &normal_symbolic_scores,
+            typo_evidence: typo_candidate_ids,
             exact_id,
             recall_config: recall_config(opts),
             minimum_symbolic_coverage,
@@ -988,31 +1342,16 @@ pub(super) mod attribution {
         // observation-only twin does not need.
         let entries_ref: HashMap<String, &MemoryEntry> = entries_map
             .iter()
-            .filter(|(id, e)| {
-                if !valid_at(e, as_of_utc) {
-                    return false;
-                }
-                if !include_superseded && superseded_ids.contains(*id) {
-                    return false;
-                }
-                if is_search_noise_entry(e, opts.path_prefix.as_deref()) {
-                    return false;
-                }
-                if let Some(prefix) = &opts.path_prefix {
-                    if !e.path.starts_with(prefix.as_str()) {
-                        return false;
-                    }
-                }
-                if let Some(domain) = &opts.domain {
-                    match &e.domain {
-                        Some(d) if d == domain => {}
-                        _ => return false,
-                    }
-                }
-                if below_minimum_retrieval_evidence(id, e, &retrieval_evidence) {
-                    return false;
-                }
-                true
+            .filter(|(id, entry)| {
+                passes_final_candidate_eligibility(
+                    id,
+                    entry,
+                    opts,
+                    include_superseded,
+                    as_of_utc,
+                    &superseded_ids,
+                    &retrieval_evidence,
+                )
             })
             .map(|(k, v)| (k.clone(), v))
             .collect();
@@ -1028,6 +1367,13 @@ pub(super) mod attribution {
         let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
         let access_times = read_access_times(conn, opts, &candidate_ids_vec)?;
         let weights = resolve_weights(opts);
+        let mut symbolic_scores = normal_symbolic_scores;
+        for (id, score) in typo_scores {
+            symbolic_scores
+                .entry(id.clone())
+                .and_modify(|existing| *existing = existing.max(*score))
+                .or_insert(*score);
+        }
         let mut scores = merge_pre_boost_scores(
             opts,
             &entries_ref,
@@ -1042,7 +1388,12 @@ pub(super) mod attribution {
         );
         let base_scores = scores.clone();
 
-        let mut steps: Vec<BoostStep> = Vec::with_capacity(7);
+        struct SnapshotObserver<'entries, 'memory> {
+            entries: &'entries HashMap<String, &'memory MemoryEntry>,
+            pending: Option<(&'static str, HashMap<String, f64>)>,
+            steps: Vec<BoostStep>,
+        }
+
         fn snapshot(scores: &HashMap<String, HybridScore>) -> HashMap<String, f64> {
             scores
                 .iter()
@@ -1050,81 +1401,95 @@ pub(super) mod attribution {
                 .collect()
         }
 
-        let before = snapshot(&scores);
-        apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
-        steps.push(BoostStep {
-            label: "precision",
-            before,
-            after: snapshot(&scores),
-        });
+        fn ranks(
+            scores: &HashMap<String, f64>,
+            entries: &HashMap<String, &MemoryEntry>,
+        ) -> HashMap<String, usize> {
+            let mut ranked = scores
+                .iter()
+                .map(|(id, score)| {
+                    let timestamp = entries
+                        .get(id)
+                        .map(|entry| crate::scorer::timestamp_epoch_millis(&entry.timestamp))
+                        .unwrap_or(i64::MIN);
+                    (id, *score, timestamp)
+                })
+                .collect::<Vec<_>>();
+            ranked.sort_by(|left, right| {
+                crate::scorer::cmp_recall_rank(
+                    (left.1, left.2, left.0),
+                    (right.1, right.2, right.0),
+                )
+            });
+            ranked
+                .into_iter()
+                .enumerate()
+                .map(|(index, (id, _, _))| (id.clone(), index + 1))
+                .collect()
+        }
 
-        let before = snapshot(&scores);
-        apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "quality",
-            before,
-            after: snapshot(&scores),
-        });
+        impl<'entries, 'memory> SnapshotObserver<'entries, 'memory> {
+            fn new(entries: &'entries HashMap<String, &'memory MemoryEntry>) -> Self {
+                Self {
+                    entries,
+                    pending: None,
+                    steps: Vec::new(),
+                }
+            }
 
-        let before = snapshot(&scores);
-        apply_access_feedback(
-            &entries_ref,
-            &access_times,
-            recall_config(opts),
-            &mut scores,
-        );
-        steps.push(BoostStep {
-            label: "access_feedback",
-            before,
-            after: snapshot(&scores),
-        });
+            fn into_steps(self) -> Vec<BoostStep> {
+                assert!(
+                    self.pending.is_none(),
+                    "production boost observer ended in the middle of a step"
+                );
+                self.steps
+            }
+        }
 
-        let before = snapshot(&scores);
-        apply_tier_boosts(&entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "tier",
-            before,
-            after: snapshot(&scores),
-        });
+        impl<'entries, 'memory> BoostSequenceObserver for SnapshotObserver<'entries, 'memory> {
+            fn before_step(&mut self, label: &'static str, scores: &HashMap<String, HybridScore>) {
+                assert!(
+                    self.pending.is_none(),
+                    "production boost observer started {label} before ending the prior step"
+                );
+                self.pending = Some((label, snapshot(scores)));
+            }
 
-        let before = snapshot(&scores);
-        apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
-        steps.push(BoostStep {
-            label: "entity_recency",
-            before,
-            after: snapshot(&scores),
-        });
+            fn after_step(&mut self, label: &'static str, scores: &HashMap<String, HybridScore>) {
+                let (before_label, before) = self
+                    .pending
+                    .take()
+                    .expect("production boost observer ended a step without a snapshot");
+                assert_eq!(
+                    before_label, label,
+                    "production boost observer label mismatch"
+                );
+                let after = snapshot(scores);
+                self.steps.push(BoostStep {
+                    label,
+                    before_ranks: ranks(&before, self.entries),
+                    after_ranks: ranks(&after, self.entries),
+                    before,
+                    after,
+                });
+            }
+        }
 
-        let before = snapshot(&scores);
-        // Renamed on main when Phase 2 dissolved the research-path boost
-        // (`apply_decision_and_research_boosts` -> `apply_decision_boost`).
-        // The label moves with it: a report that still said
-        // "decision_and_research" would name a boost this build does not apply.
-        apply_decision_boost(query, &entries_ref, &mut scores);
-        steps.push(BoostStep {
-            label: "decision",
-            before,
-            after: snapshot(&scores),
-        });
-
-        let before = snapshot(&scores);
-        apply_lexical_overlap_boost(
+        let mut observer = SnapshotObserver::new(&entries_ref);
+        let boost_context = BoostSequenceContext {
             query,
-            opts.path_prefix.as_deref(),
-            &entries_ref,
-            &mut scores,
-        );
-        steps.push(BoostStep {
-            label: "lexical_overlap",
-            before,
-            after: snapshot(&scores),
-        });
-
+            opts,
+            entries_ref: &entries_ref,
+            weights: &weights,
+            access_times: &access_times,
+            superseded_ids: &superseded_ids,
+        };
+        apply_production_boost_sequence(&boost_context, &mut scores, &mut observer);
         let final_scores = snapshot(&scores);
 
         Ok(RankAttribution {
             base_scores,
-            steps,
+            steps: observer.into_steps(),
             final_scores,
         })
     }

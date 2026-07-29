@@ -99,6 +99,8 @@ pub use hub_db::{
     hub_set_enabled, hub_set_review, hub_upsert,
 };
 #[cfg(test)]
+pub(crate) use memory_crud::query_hash;
+#[cfg(test)]
 pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
 pub(crate) use memory_crud::search_fts_raw_match;
@@ -145,8 +147,10 @@ pub use open::sqlite_error_is_locked;
 pub(crate) use open::{
     acquire_startup_lock, authorize_planner_maintenance, authorize_reserved_reference_write,
     authorize_schema_migration, configure_connection, install_reserved_reference_authorizer,
-    open_read_only, open_read_write, register_reserved_reference_write_guard, retry_memory_locked,
-    validate_persistent_trigger_inventory, ReservedReferenceWriteFlag,
+    open_read_only, open_read_write, open_read_write_with_busy_timeout,
+    register_reserved_reference_write_guard, retry_memory_locked, scoped_sqlite_busy_deadline,
+    sqlite_busy_deadline_remaining, validate_persistent_trigger_inventory,
+    ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,

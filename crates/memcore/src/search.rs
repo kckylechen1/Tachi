@@ -5,6 +5,7 @@
 // This is the hottest path: all computation stays in Rust, zero JS/Python overhead.
 
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,21 @@ use self::filtering::{is_search_noise_entry, quality_multiplier, valid_at};
 pub use rerank_blend::{
     apply_blend_relevance, merge_rerank_order_with_hybrid_floor, HYBRID_HEAD_FRACTION,
 };
+
+/// Content-free evidence that one observed row entered each normal candidate leg.
+///
+/// This reports membership only. It deliberately excludes query text, memory
+/// content, vectors, and channel scores so offline coverage can explain a miss
+/// without widening the production search result schema. The additive typo
+/// fallback is deliberately excluded so a RED fixture can prove that recovery
+/// was absent from vector, FTS, symbolic, and exact-ID retrieval first.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CandidateLegEvidence {
+    pub vector: bool,
+    pub fts: bool,
+    pub symbolic: bool,
+    pub exact_id: bool,
+}
 
 /// Options for a hybrid search query.
 pub struct SearchOptions {
@@ -239,7 +255,7 @@ pub struct FtsExpansionGroupReceipt {
     pub hit_count: usize,
 }
 
-/// Candidate-collection phase receipt (vector KNN + FTS-with-expansion + symbolic).
+/// Candidate-collection phase receipt (normal legs plus optional typo fallback).
 #[derive(Debug, Clone)]
 pub struct CandidatePhaseReceipt {
     pub total_elapsed: Duration,
@@ -254,9 +270,36 @@ pub struct CandidatePhaseReceipt {
     pub fts_groups: Vec<FtsExpansionGroupReceipt>,
     pub fts_candidate_count: usize,
     pub symbolic: ChannelPhaseReceipt,
-    /// Deduplicated union of vec + fts + symbolic + exact-id across all
-    /// channels — the size of the candidate set that flows into fetch/rank.
+    /// `None` means the eligibility/weak-leg gate did not open. `Some` means
+    /// the bounded character fallback executed, including honest zero-result
+    /// work when its trigram prefilter or character filter contributed nothing.
+    pub typo_fallback: Option<TypoFallbackPhaseReceipt>,
+    /// Deduplicated union of vec + fts + symbolic + exact-id + typo fallback
+    /// across all channels — the size of the candidate set that flows into
+    /// fetch/rank.
     pub merged_candidate_count: usize,
+}
+
+/// Bounded work and latency for one executed character-level typo fallback.
+#[derive(Debug, Clone)]
+pub struct TypoFallbackPhaseReceipt {
+    pub elapsed: Duration,
+    pub prefilter_candidate_count: usize,
+    pub compared_candidate_count: usize,
+    pub token_comparison_count: usize,
+    pub edit_cell_count: usize,
+    pub contributed_candidate_count: usize,
+}
+
+/// Content-free fallback facts threaded into sampled #1447 impressions.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct TypoFallbackAttribution {
+    pub(super) activated: bool,
+    pub(super) prefilter_candidate_count: usize,
+    pub(super) compared_candidate_count: usize,
+    pub(super) token_comparison_count: usize,
+    pub(super) edit_cell_count: usize,
+    pub(super) contributed_candidate_count: usize,
 }
 
 /// Bulk-fetch-by-id phase receipt (`db::fetch_by_ids`).
@@ -430,20 +473,20 @@ pub fn hybrid_search(
     hybrid_search_inner(conn, query, opts, false, None).map(|(results, _, _)| results)
 }
 
-/// Runs the normal hybrid pipeline and reports whether one target survived the
-/// vector channel's bounded candidate collection.
+/// Runs the normal hybrid pipeline and reports content-free candidate-leg
+/// membership for the explicitly observed row IDs.
 ///
 /// This is crate-visible only because offline recall coverage needs the
-/// channel-provenance fact without exposing candidate IDs or changing the
+/// channel-provenance facts without exposing the full candidate set or changing the
 /// production search result schema.
-pub(crate) fn hybrid_search_with_vector_target_presence(
+pub(crate) fn hybrid_search_with_candidate_leg_evidence(
     conn: &Connection,
     query: &str,
     opts: &SearchOptions,
-    target_id: &str,
-) -> Result<(Vec<SearchResult>, bool), MemoryError> {
-    hybrid_search_inner(conn, query, opts, false, Some(target_id))
-        .map(|(results, _, target_in_vector_candidates)| (results, target_in_vector_candidates))
+    observed_ids: &[String],
+) -> Result<(Vec<SearchResult>, HashMap<String, CandidateLegEvidence>), MemoryError> {
+    hybrid_search_inner(conn, query, opts, false, Some(observed_ids))
+        .map(|(results, _, evidence)| (results, evidence))
 }
 
 /// Instrumented twin of [`hybrid_search`]: returns the ranked `SearchResult`s
@@ -464,13 +507,19 @@ pub fn hybrid_search_with_receipt(
         .map(|(results, receipt, _)| (results, receipt))
 }
 
+type HybridSearchOutcome = (
+    Vec<SearchResult>,
+    SearchPhaseReceipt,
+    HashMap<String, CandidateLegEvidence>,
+);
+
 fn hybrid_search_inner(
     conn: &Connection,
     query: &str,
     opts: &SearchOptions,
     sample: bool,
-    vector_target_id: Option<&str>,
-) -> Result<(Vec<SearchResult>, SearchPhaseReceipt, bool), MemoryError> {
+    observed_ids: Option<&[String]>,
+) -> Result<HybridSearchOutcome, MemoryError> {
     let total_start = sample.then(Instant::now);
 
     let as_of_utc = opts
@@ -482,16 +531,16 @@ fn hybrid_search_inner(
         || include_superseded_env_override_active()
         || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
 
-    let (candidates, candidates_receipt) = candidates::collect_candidates(
+    let (mut candidates, candidates_receipt) = candidates::collect_candidates(
         conn,
         query,
         opts,
         include_superseded,
         as_of_utc.as_deref(),
         sample,
+        observed_ids,
     )?;
-    let target_in_vector_candidates =
-        vector_target_id.is_some_and(|target_id| candidates.vec_scores.contains_key(target_id));
+    let candidate_leg_evidence = candidates.observed_evidence.take().unwrap_or_default();
     if candidates.candidate_ids.is_empty() {
         let receipt = finish_receipt(sample, total_start, |b| {
             b.candidates = candidates_receipt;
@@ -499,7 +548,7 @@ fn hybrid_search_inner(
             // the empty-candidate early return — honest "did not execute"
             // rather than zero elapsed.
         });
-        return Ok((vec![], receipt, target_in_vector_candidates));
+        return Ok((vec![], receipt, candidate_leg_evidence));
     }
 
     // ── Bulk-fetch entries ─────────────────────────────────────────────────────
@@ -510,20 +559,30 @@ fn hybrid_search_inner(
         fetched_count: entries_map.len(),
     });
 
-    let (mut results, scored_ids, rank_receipt) = ranking::rank_candidate_entries(
-        conn,
-        ranking::CandidateRanking {
+    let capture_impression = opts.record_access
+        && crate::recall_impressions::should_sample_query(
             query,
-            opts,
-            entries_map,
-            vec_scores: &candidates.vec_scores,
-            fts_scores: &candidates.fts_scores,
-            exact_id: candidates.exact_id.as_deref(),
-            include_superseded,
-            as_of_utc: as_of_utc.as_deref(),
-        },
-        sample,
-    )?;
+            recall_config(opts).impression_sample_rate_bps,
+        );
+    let (mut results, scored_ids, rank_receipt, mut impression_payload) =
+        ranking::rank_candidate_entries(
+            conn,
+            ranking::CandidateRanking {
+                query,
+                opts,
+                entries_map,
+                vec_scores: &candidates.vec_scores,
+                fts_scores: &candidates.fts_scores,
+                typo_scores: &candidates.typo_scores,
+                typo_candidate_ids: &candidates.typo_candidate_ids,
+                typo_attribution: candidates.typo_attribution,
+                exact_id: candidates.exact_id.as_deref(),
+                include_superseded,
+                as_of_utc: as_of_utc.as_deref(),
+            },
+            sample,
+            capture_impression,
+        )?;
 
     // `append_graph_expansion` mutates `results` in place and returns the
     // receipt by value, so the receipt does not borrow `results` and there is
@@ -536,6 +595,13 @@ fn hybrid_search_inner(
         as_of_utc.as_deref(),
         sample,
     )?;
+    if let Some(payload) = &mut impression_payload {
+        let displayed_ids = results
+            .iter()
+            .map(|result| result.entry.id.clone())
+            .collect::<Vec<_>>();
+        payload.finalize_displayed(&displayed_ids);
+    }
 
     // ── Record access (bump counters) ─────────────────────────────────────────
     //
@@ -562,6 +628,7 @@ fn hybrid_search_inner(
             &fts_hit_ids,
             Some(query),
             recall_config(opts),
+            impression_payload.as_ref(),
         )?;
         for r in &mut results {
             if let Some(update) = access_updates.get(&r.entry.id) {
@@ -592,7 +659,7 @@ fn hybrid_search_inner(
         b.access_recording = access_receipt;
     });
 
-    Ok((results, receipt, target_in_vector_candidates))
+    Ok((results, receipt, candidate_leg_evidence))
 }
 
 /// Receipt-builder closure. Keeps the per-phase plumbing in one place so the
@@ -662,6 +729,7 @@ fn hybrid_search_with_attribution(
         include_superseded,
         as_of_utc.as_deref(),
         false,
+        None,
     )?;
     if candidates.candidate_ids.is_empty() {
         return Ok((
@@ -683,6 +751,9 @@ fn hybrid_search_with_attribution(
             entries_map,
             vec_scores: &candidates.vec_scores,
             fts_scores: &candidates.fts_scores,
+            typo_scores: &candidates.typo_scores,
+            typo_candidate_ids: &candidates.typo_candidate_ids,
+            typo_attribution: candidates.typo_attribution,
             exact_id: candidates.exact_id.as_deref(),
             include_superseded,
             as_of_utc: as_of_utc.as_deref(),

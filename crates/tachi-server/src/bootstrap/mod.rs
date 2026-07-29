@@ -64,7 +64,8 @@ impl std::error::Error for VaultExecExit {}
 pub(crate) use setup::build_setup_report;
 #[cfg(test)]
 pub(crate) use tidy::{
-    build_migration_plan, build_tidy_report, execute_tidy_apply, execute_tidy_migrations,
+    authorized_migration_sources, build_migration_plan, build_tidy_report, execute_tidy_apply,
+    execute_tidy_migrations, force_boundary_failure_after_archive_stage,
     update_manifest_after_migration, MigrationConfig,
 };
 
@@ -175,6 +176,13 @@ pub(crate) struct TidyFinding {
     pub is_symlink: bool,
     pub symlink_target: Option<String>,
     pub target_exists: Option<bool>,
+    pub physical_id: Option<String>,
+    pub canonical_path: Option<String>,
+    /// Read-only probe path selected for SQLite/WAL visibility. It is
+    /// inventory evidence only and never authorizes a mutation.
+    pub inventory_open_path: Option<String>,
+    pub is_primary_alias: bool,
+    pub open_failure_kind: Option<crate::physical_db_identity::InventoryFailureKind>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,7 +263,17 @@ pub(crate) struct TidyReport {
     pub groups: Vec<TidyGroupSummary>,
     pub dry_run_plan: Vec<TidyPlanStep>,
     pub total_databases: usize,
+    /// Resolved discovered aliases belonging to a physical store. Unresolved
+    /// paths are deliberately excluded. Retained as a compatibility field;
+    /// new consumers should prefer `resolved_aliases`.
+    pub total_aliases: usize,
+    pub resolved_aliases: usize,
+    pub unresolved_paths: usize,
+    /// All discovered path appearances: resolved aliases plus unresolved
+    /// paths.
+    pub path_appearances: usize,
     pub total_memories: usize,
+    pub physical_stores: Vec<crate::physical_db_identity::PhysicalDbStore>,
     pub next_steps: Vec<String>,
 }
 

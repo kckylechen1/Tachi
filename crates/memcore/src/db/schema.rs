@@ -8,42 +8,36 @@ use super::common::normalize_utc_iso;
 
 mod ddl;
 
-/// Bare, transaction-less schema init: applies connection PRAGMAs then runs
-/// [`init_schema_inner`] directly on `conn`.
-///
-/// ## Why the missing outer transaction is safe here (#1289 Claim1)
-///
-/// `init_schema_inner` performs its `session_claims` dedup
-/// ([`crate::db::migrations::dedupe_session_claims_identity_conflicts`]) and
-/// the `CREATE UNIQUE INDEX idx_session_claims_identity_active`
-/// (`MIGRATED_INDEXES_SQL`) as two separate connection ops. If a *concurrent*
-/// writer could insert a fresh duplicate active claim between them, the index
-/// build would fail — so that pair would need a transaction to be race-free.
-/// It is not wrapped here because this entry point is only ever reached where
-/// there is NO concurrent writer:
-///
-/// - The sole production caller is [`crate::MemoryStore::open_in_memory`],
-///   which builds a plain `Connection::open_in_memory()` — a private,
-///   single-connection, non-shared-cache DB that no other connection can write
-///   to, so the interleaving window cannot exist.
-/// - Every file-backed production open routes through
-///   [`init_schema_with_label_mut`] instead, which runs `init_schema_inner` +
-///   `run_data_migrations_in_tx` + the version stamp inside ONE
-///   `BEGIN IMMEDIATE` transaction (#984 F1 round 3) — already atomic against
-///   concurrent writers.
-/// - All remaining callers are `#[cfg(test)]` single-threaded fixtures.
-///
-/// A caller that ever wires this bare path onto a *shared* file/in-memory DB
-/// with concurrent writers must switch to [`init_schema_with_label_mut`]'s
-/// transactional entry instead.
+/// Initialize a private fresh schema and run the same sentinel migrations used
+/// by file-backed provisioning. The sole production caller is
+/// [`crate::MemoryStore::open_in_memory`]; tests also use this as the complete
+/// current-schema constructor.
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
+    super::ensure_reserved_reference_write_guard(conn)?;
+    crate::db::migrations::check_schema_version_gate(conn)?;
+    crate::db::migrations::validate_current_schema_integrity(conn)?;
+    apply_connection_pragmas(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    init_schema_inner(&tx)?;
+    crate::db::migrations::run_data_migrations_in_tx(&tx, "global", Path::new(":memory:"))?;
+    crate::db::migrations::write_schema_version_stamp(&tx)?;
+    super::validate_persistent_trigger_inventory(&tx, true)?;
+    validate_recall_impression_ledger_schema(&tx)?;
+    validate_typo_fallback_attribution_schema(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Build the pre-sentinel fixture used only by migration unit tests. Production
+/// fresh initialization must use [`init_schema`] so versioned schema is never
+/// installed outside the migration runner.
+#[cfg(test)]
+pub(crate) fn init_unversioned_schema_for_migration_tests(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     apply_connection_pragmas(conn)?;
     init_schema_inner(conn)?;
-    // This bare entry point is fresh, private in-memory/test setup and does
-    // not participate in the file-backed version-stamp lifecycle. Mirror the
-    // v23 migration's canonical guards here only after the final memories
-    // table exists; operational file opens install them through v23 below.
     install_reserved_reference_guard(conn)?;
     super::validate_persistent_trigger_inventory(conn, true)
 }
@@ -89,6 +83,7 @@ pub fn init_schema_with_label_mut(
     // stamped older DB must refuse before `init_schema_inner`'s idempotent
     // DDL or the final `write_schema_version_stamp` touches the file.
     crate::db::migrations::check_db_open_context_gate(conn, current_db_path, ctx)?;
+    crate::db::migrations::validate_current_schema_integrity(conn)?;
     maybe_backup_before_migration(conn, current_db_path)?;
     apply_connection_pragmas(conn)?;
 
@@ -99,6 +94,8 @@ pub fn init_schema_with_label_mut(
     let report = crate::db::migrations::run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
     crate::db::migrations::write_schema_version_stamp(&tx)?;
     super::validate_persistent_trigger_inventory(&tx, true)?;
+    validate_recall_impression_ledger_schema(&tx)?;
+    validate_typo_fallback_attribution_schema(&tx)?;
     tx.commit()?;
 
     remember_migration_fingerprint(conn, current_db_path)?;
@@ -142,7 +139,15 @@ pub(crate) mod test_hooks {
 /// particular is a no-op/error mid-transaction — so callers apply this before
 /// opening the compatibility transaction, not inside `init_schema_inner`.
 fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
-    execute_batch_retry(conn, ddl::CONNECTION_PRAGMA_SQL)
+    execute_batch_retry(conn, ddl::CONNECTION_PRAGMA_SQL)?;
+    // `MemoryStore::open_with_context_and_busy_timeout` installs a scoped
+    // local deadline before schema work begins. Do not overwrite that writer's
+    // busy budget here. Raw/direct schema callers without such a deadline keep
+    // the historical five-second connection policy.
+    if super::sqlite_busy_deadline_remaining().is_none() {
+        super::configure_connection(conn)?;
+    }
+    Ok(())
 }
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
@@ -371,6 +376,247 @@ pub(crate) fn ensure_memories_scored_count(conn: &Connection) -> Result<(), Memo
     )
 }
 
+pub(crate) fn install_recall_impression_ledger_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::RECALL_IMPRESSION_LEDGER_V26_SQL)
+}
+
+/// Install the historical v25 schema only as a step in the in-order migration
+/// runner. New provisioning reaches v26 in the same transaction immediately
+/// afterward; no current database is left at this shape by this binary.
+pub(crate) fn install_v25_recall_impression_ledger_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::RECALL_IMPRESSION_LEDGER_V25_SQL)
+}
+
+/// Upgrade the v25 group table without inventing query fingerprints or replay
+/// policy for rows whose source query and historical algorithm are unavailable.
+pub(crate) fn migrate_recall_impression_ledger_to_v26(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    if !has_column(conn, "recall_impression_groups", "query_hash")? {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v25 recall impression ledger: query_hash is missing".to_string(),
+        ));
+    }
+
+    // Rebuild both tables rather than merely adding nullable columns. That
+    // preserves the v26 all-or-none policy CHECK for future writes while
+    // retaining each historical v25 group as an explicitly unversioned row.
+    // The caller's outer migration transaction makes this table swap atomic.
+    execute_batch_retry(
+        conn,
+        "ALTER TABLE recall_impressions RENAME TO recall_impressions_v25;
+         ALTER TABLE recall_impression_groups RENAME TO recall_impression_groups_v25;
+         DROP INDEX idx_recall_impression_groups_created;
+         DROP INDEX idx_recall_impression_groups_query_hash;
+         DROP INDEX idx_recall_impressions_memory;
+         DROP INDEX idx_recall_impressions_group_final_rank;",
+    )?;
+    install_recall_impression_ledger_schema(conn)?;
+    // NULL is the only honest migration value: v25 did not persist query text
+    // or replay-policy provenance, so neither can be reconstructed now.
+    conn.execute(
+        "INSERT INTO recall_impression_groups (group_id, created_at, legacy_query_bucket, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count, replay_count)
+         SELECT group_id, created_at, query_hash, NULL, NULL, NULL, NULL, NULL, NULL, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count, replay_count
+         FROM recall_impression_groups_v25",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO recall_impressions (group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall)
+         SELECT group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall
+         FROM recall_impressions_v25",
+        [],
+    )?;
+    execute_batch_retry(
+        conn,
+        "DROP TABLE recall_impressions_v25;
+         DROP TABLE recall_impression_groups_v25;",
+    )?;
+    validate_recall_impression_ledger_schema(conn)
+}
+
+/// Canonical v27 installer. Production callers reach this only through the
+/// sentinel-gated migration runner, after the typed migration-authority gate.
+pub(crate) fn install_typo_fallback_attribution_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    for (table, column, definition) in [
+        (
+            "recall_impression_groups",
+            "typo_fallback_activated",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_prefilter_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_compared_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_token_comparison_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_edit_cell_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impression_groups",
+            "typo_fallback_candidate_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "recall_impressions",
+            "typo_fallback_candidate",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        ensure_column(conn, table, column, definition)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_typo_fallback_attribution_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    const REQUIRED_COLUMNS: &[(&str, &str)] = &[
+        ("recall_impression_groups", "typo_fallback_activated"),
+        ("recall_impression_groups", "typo_fallback_prefilter_count"),
+        ("recall_impression_groups", "typo_fallback_compared_count"),
+        (
+            "recall_impression_groups",
+            "typo_fallback_token_comparison_count",
+        ),
+        ("recall_impression_groups", "typo_fallback_edit_cell_count"),
+        ("recall_impression_groups", "typo_fallback_candidate_count"),
+        ("recall_impressions", "typo_fallback_candidate"),
+    ];
+    for (table, column) in REQUIRED_COLUMNS {
+        let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1");
+        let present = match conn.query_row(&sql, [column], |_| Ok(())) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v27 typo fallback attribution: required column '{table}.{column}' is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_recall_impression_ledger_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    const REQUIRED_OBJECTS: &[(&str, &str, &str)] = &[
+        (
+            "table",
+            "recall_impression_groups",
+            "recall_impression_groups",
+        ),
+        ("table", "recall_impressions", "recall_impressions"),
+        (
+            "index",
+            "idx_recall_impression_groups_created",
+            "recall_impression_groups",
+        ),
+        (
+            "index",
+            "idx_recall_impression_groups_fingerprint",
+            "recall_impression_groups",
+        ),
+        (
+            "index",
+            "idx_recall_impressions_memory",
+            "recall_impressions",
+        ),
+        (
+            "index",
+            "idx_recall_impressions_group_final_rank",
+            "recall_impressions",
+        ),
+    ];
+    const REQUIRED_GROUP_COLUMNS: &[&str] = &[
+        "legacy_query_bucket",
+        "query_fingerprint",
+        "fusion_policy_version",
+        "pre_boost_adjustment_version",
+        "tie_break_policy_version",
+        "candidate_policy_version",
+        "schema_identity",
+    ];
+
+    for (object_type, name, table) in REQUIRED_OBJECTS {
+        let present = match conn.query_row(
+            "SELECT 1 FROM main.sqlite_schema
+                 WHERE type = ?1 AND name = ?2 AND tbl_name = ?3",
+            params![object_type, name, table],
+            |_| Ok(()),
+        ) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v26 recall impression ledger: required {object_type} '{name}' on '{table}' is missing"
+            )));
+        }
+    }
+    for column in REQUIRED_GROUP_COLUMNS {
+        if !has_column(conn, "recall_impression_groups", column)? {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v26 recall impression ledger: required column '{column}' is missing"
+            )));
+        }
+    }
+    let malformed_identity_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM recall_impression_groups
+             WHERE CASE
+                 WHEN query_fingerprint IS NULL
+                      AND fusion_policy_version IS NULL
+                      AND pre_boost_adjustment_version IS NULL
+                      AND tie_break_policy_version IS NULL
+                      AND candidate_policy_version IS NULL
+                      AND schema_identity IS NULL
+                 THEN 0
+                 WHEN query_fingerprint IS NOT NULL
+                      AND length(query_fingerprint) = 64
+                      AND query_fingerprint NOT GLOB '*[^0-9a-f]*'
+                      AND fusion_policy_version IS NOT NULL
+                      AND pre_boost_adjustment_version IS NOT NULL
+                      AND tie_break_policy_version IS NOT NULL
+                      AND candidate_policy_version IS NOT NULL
+                      AND schema_identity IS NOT NULL
+                 THEN 0
+                 ELSE 1
+             END = 1
+             LIMIT 1
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if malformed_identity_exists {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v26 recall impression ledger: malformed replay identity row".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn install_reserved_reference_guard(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::RESERVED_REFERENCE_GUARD_SQL)
 }
@@ -422,7 +668,12 @@ fn retry_locked<T>(
     for attempt in 1..=attempts {
         match operation() {
             Ok(value) => return Ok(value),
-            Err(error) if is_locked_error(&error) && attempt < attempts => {
+            Err(error)
+                if is_locked_error(&error)
+                    && attempt < attempts
+                    && super::sqlite_busy_deadline_remaining()
+                        .is_none_or(|remaining| !remaining.is_zero() && backoff < remaining) =>
+            {
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(max_backoff);
             }
@@ -1243,6 +1494,58 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     s.push(".");
     s.push(suffix);
     PathBuf::from(s)
+}
+
+#[cfg(test)]
+mod recall_impression_schema_tests {
+    use std::ffi::{c_char, c_int, c_void};
+
+    use super::*;
+
+    unsafe extern "C" fn deny_schema_reads(
+        _state: *mut c_void,
+        action: c_int,
+        _arg1: *const c_char,
+        _arg2: *const c_char,
+        _database: *const c_char,
+        _accessor: *const c_char,
+    ) -> c_int {
+        if action == rusqlite::ffi::SQLITE_READ {
+            rusqlite::ffi::SQLITE_DENY
+        } else {
+            rusqlite::ffi::SQLITE_OK
+        }
+    }
+
+    #[test]
+    fn recall_attribution_schema_validations_propagate_sqlite_query_errors() {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        install_recall_impression_ledger_schema(&conn).expect("install valid ledger schema");
+        install_typo_fallback_attribution_schema(&conn)
+            .expect("install valid typo attribution schema");
+        let install_result = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(
+                conn.handle(),
+                Some(deny_schema_reads),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(install_result, rusqlite::ffi::SQLITE_OK);
+
+        let error = validate_recall_impression_ledger_schema(&conn)
+            .expect_err("SQLite authorization errors must not become missing-object errors");
+        assert!(
+            matches!(error, MemoryError::Sqlite(_)),
+            "expected propagated SQLite error, got: {error}"
+        );
+
+        let error = validate_typo_fallback_attribution_schema(&conn)
+            .expect_err("SQLite authorization errors must not become missing-column errors");
+        assert!(
+            matches!(error, MemoryError::Sqlite(_)),
+            "expected propagated SQLite error, got: {error}"
+        );
+    }
 }
 
 #[cfg(test)]

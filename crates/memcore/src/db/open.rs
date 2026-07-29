@@ -42,6 +42,7 @@
 
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags};
+use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -68,6 +69,40 @@ const READ_CACHE_SIZE_KIB: i64 = -16_000;
 const READ_MMAP_SIZE_BYTES: i64 = 256 * 1024 * 1024;
 
 static SQLITE_STARTUP_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    // A bounded writer installs this only around its own synchronous open and
+    // write. Existing callers leave it unset and retain the normal retry
+    // policy. The deadline is thread-local because a rusqlite connection and
+    // its schema/open work stay on the same blocking thread.
+    static SQLITE_BUSY_DEADLINE: RefCell<Option<std::time::Instant>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct ScopedSqliteBusyDeadline {
+    previous: Option<std::time::Instant>,
+}
+
+impl Drop for ScopedSqliteBusyDeadline {
+    fn drop(&mut self) {
+        SQLITE_BUSY_DEADLINE.with(|deadline| *deadline.borrow_mut() = self.previous.take());
+    }
+}
+
+pub(crate) fn scoped_sqlite_busy_deadline(budget: Duration) -> ScopedSqliteBusyDeadline {
+    let deadline_at = std::time::Instant::now()
+        .checked_add(budget)
+        .unwrap_or_else(std::time::Instant::now);
+    let previous = SQLITE_BUSY_DEADLINE.with(|deadline| deadline.replace(Some(deadline_at)));
+    ScopedSqliteBusyDeadline { previous }
+}
+
+pub(crate) fn sqlite_busy_deadline_remaining() -> Option<Duration> {
+    SQLITE_BUSY_DEADLINE.with(|deadline| {
+        deadline
+            .borrow()
+            .map(|deadline_at| deadline_at.saturating_duration_since(std::time::Instant::now()))
+    })
+}
 
 pub(crate) struct ConnectionAuthorizationState {
     typed_dml: AtomicBool,
@@ -683,8 +718,19 @@ pub(crate) fn acquire_startup_lock() -> MutexGuard<'static, ()> {
 }
 
 pub(crate) fn open_read_write(db_path: &str) -> Result<Connection, MemoryError> {
+    open_read_write_with_busy_timeout(db_path, Duration::from_millis(BUSY_TIMEOUT_MS))
+}
+
+/// Open a writer connection with a caller-owned SQLite busy budget. The
+/// caller still passes a typed [`DbOpenContext`](crate::db::DbOpenContext) to
+/// `MemoryStore`; this function changes contention waiting only, never schema
+/// authority.
+pub(crate) fn open_read_write_with_busy_timeout(
+    db_path: &str,
+    busy_timeout: Duration,
+) -> Result<Connection, MemoryError> {
     let conn = Connection::open(db_path)?;
-    configure_connection(&conn)?;
+    configure_connection_with_busy_timeout(&conn, busy_timeout)?;
     Ok(conn)
 }
 
@@ -696,7 +742,14 @@ pub(crate) fn open_read_only(db_path: &str) -> Result<Connection, MemoryError> {
 }
 
 pub(crate) fn configure_connection(conn: &Connection) -> Result<(), MemoryError> {
-    conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
+    configure_connection_with_busy_timeout(conn, Duration::from_millis(BUSY_TIMEOUT_MS))
+}
+
+fn configure_connection_with_busy_timeout(
+    conn: &Connection,
+    busy_timeout: Duration,
+) -> Result<(), MemoryError> {
+    conn.busy_timeout(busy_timeout)?;
     Ok(())
 }
 
@@ -754,7 +807,9 @@ pub(crate) fn retry_memory_locked<T>(
             Err(error)
                 if memory_error_is_locked(&error)
                     && attempt < LOCK_RETRY_ATTEMPTS
-                    && started_at.elapsed().saturating_add(backoff) < max_elapsed =>
+                    && started_at.elapsed().saturating_add(backoff) < max_elapsed
+                    && sqlite_busy_deadline_remaining()
+                        .is_none_or(|remaining| !remaining.is_zero() && backoff < remaining) =>
             {
                 tracing::debug!(
                     op,

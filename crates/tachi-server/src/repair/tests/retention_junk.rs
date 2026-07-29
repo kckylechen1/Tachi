@@ -44,30 +44,25 @@ fn r2_retention_backfill() {
 }
 
 #[test]
-fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
+fn r8_routes_exact_duplicates_to_dedupe_without_deleting_evidence() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "junk.db");
     let old = "2026-01-01T00:00:00Z";
     let new = "2026-01-02T00:00:00Z";
-    conn.execute(
-        "UPDATE memories SET timestamp = ?2 WHERE id = ?1",
-        ["missing-row", old],
-    )
-    .ok();
 
     insert_memory(
         &conn,
         "dup-old",
-        "/notes/a",
+        "/notes/exact",
         "same body duplicated long enough for cleanup",
         "{}",
-        Some("durable"),
+        Some("permanent"),
         None,
     );
     insert_memory(
         &conn,
         "dup-new",
-        "/notes/b",
+        "/notes/exact",
         "same body duplicated long enough for cleanup",
         "{}",
         Some("durable"),
@@ -83,46 +78,189 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
         ["dup-new", new],
     )
     .unwrap();
+    conn.execute(
+        "UPDATE memories
+         SET access_count=1, recall_count=1, last_access=?2
+         WHERE id=?1",
+        ["dup-old", old],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO access_history(memory_id, accessed_at, query_hash, event_kind)
+         VALUES (?1, ?2, 'exact-duplicate-query', 'display')",
+        ["dup-old", old],
+    )
+    .unwrap();
+    drop(conn);
+
+    let identity = path.to_string_lossy().into_owned();
+    let exact_plan = memcore::MemoryStore::open_read_only(&identity)
+        .unwrap()
+        .plan_exact_dedupe(identity, None, Some("/notes/exact"))
+        .unwrap();
+    assert_eq!(exact_plan.planned_groups, 1);
+    assert_eq!(exact_plan.planned_losers, 1);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = JunkCleanup.dry_run(&mut ctx).unwrap();
+    assert!(
+        dry.rule_name.contains("repair dedupe"),
+        "human and JSON reports must name the exact-dedupe ownership boundary"
+    );
+    assert!(
+        dry.findings
+            .iter()
+            .all(|finding| finding.kind != "duplicate_text_old_versions"),
+        "R8 must route exact duplicates to repair dedupe, got {dry:?}"
+    );
+
+    let app = JunkCleanup.apply(&mut ctx).unwrap();
+    assert_eq!(app.applied, 0);
+    for id in ["dup-old", "dup-new"] {
+        let rows: i64 = ctx
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1, "R8 must preserve exact-dedupe row {id}");
+    }
+    let history: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM access_history WHERE memory_id='dup-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(history, 1, "R8 must preserve duplicate use/recall evidence");
+}
+
+#[test]
+fn r8_deletes_marked_cache_and_keeps_empty_json_lookalikes_and_projections_consistent() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "junk-guards.db");
+
     insert_memory(
         &conn,
-        "cache-1",
-        "/system/foundry_recall_rerank_cache",
+        "cache-eligible",
+        "/system/cache/eligible",
         "cache body",
-        r#"{"cache_key":"foundry_recall_rerank_cache"}"#,
-        Some("durable"),
-        None,
-    );
-    insert_memory(
-        &conn,
-        "cache-2",
-        "/scratch/recall-cache/noisy",
-        "cache body by recall-cache path",
         "{}",
-        Some("durable"),
-        None,
+        Some("ephemeral"),
+        Some(memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE),
     );
+
+    for (id, retention) in [("cache-permanent", "permanent"), ("cache-pinned", "pinned")] {
+        insert_memory(
+            &conn,
+            id,
+            &format!("/scratch/recall-cache/{id}"),
+            "protected cache lookalike",
+            "{}",
+            Some(retention),
+            None,
+        );
+    }
+    for id in ["cache-archived", "cache-superseded", "cache-used"] {
+        insert_memory(
+            &conn,
+            id,
+            &format!("/scratch/recall-cache/{id}"),
+            "stateful cache lookalike",
+            "{}",
+            Some("durable"),
+            None,
+        );
+    }
+    for (id, path, retention, topic) in [
+        (
+            "cache-path-durable-lookalike",
+            "/scratch/recall-cache/manual-empty",
+            Some("durable"),
+            "",
+        ),
+        (
+            "cache-topic-null-lookalike",
+            "/notes/manual-cache-lookalike",
+            None,
+            "recall_rerank_cache",
+        ),
+    ] {
+        insert_memory(
+            &conn,
+            id,
+            path,
+            "manual cache lookalike",
+            "{}",
+            retention,
+            Some("manual"),
+        );
+        conn.execute("UPDATE memories SET topic=?2 WHERE id=?1", [id, topic])
+            .unwrap();
+    }
     conn.execute(
-        "UPDATE memories SET topic='recall_rerank_cache' WHERE id='cache-2'",
+        "UPDATE memories SET archived=1 WHERE id='cache-archived'",
         [],
     )
     .unwrap();
-    insert_memory(
-        &conn,
-        "empty-turn",
-        "/hermes/turns/1",
-        "{}",
-        "{}",
-        Some("durable"),
-        None,
-    );
     conn.execute(
-        "UPDATE memories SET category='other', topic='hermes_turn' WHERE id='empty-turn'",
+        "UPDATE memories SET superseded_by='cache-eligible' WHERE id='cache-superseded'",
         [],
     )
     .unwrap();
+    conn.execute(
+        "UPDATE memories
+         SET access_count=1, recall_count=1, query_diversity=1,
+             last_access='2026-07-28T00:00:00Z', last_use_at='2026-07-28T00:00:00Z'
+         WHERE id='cache-used'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO access_history(memory_id, accessed_at, query_hash, event_kind)
+         VALUES ('cache-used', '2026-07-28T00:00:00Z', 'used-query', 'use')",
+        [],
+    )
+    .unwrap();
+    for (id, retention) in [
+        ("empty-permanent", Some("permanent")),
+        ("empty-used", Some("durable")),
+        ("empty-durable-lookalike", Some("durable")),
+        ("empty-null-lookalike", None),
+    ] {
+        insert_memory(
+            &conn,
+            id,
+            &format!("/notes/turns/{id}"),
+            "{}",
+            "{}",
+            retention,
+            Some("manual"),
+        );
+        conn.execute(
+            "UPDATE memories SET category='fact', topic='interaction' WHERE id=?1",
+            [id],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "UPDATE memories
+         SET access_count=1, last_access='2026-07-28T00:00:00Z'
+         WHERE id='empty-used'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO access_history(memory_id, accessed_at, query_hash, event_kind)
+         VALUES ('empty-used', '2026-07-28T00:00:00Z', 'empty-query', 'display')",
+        [],
+    )
+    .unwrap();
+
     // Discriminative seed: insert_memory does not project into symbolic FTS.
     // Seed the junk ids so a delete that forgets symbolic_fts fails red.
-    let junk_ids = ["cache-1", "cache-2", "empty-turn"];
+    let junk_ids = ["cache-eligible"];
     {
         let tx = conn.unchecked_transaction().unwrap();
         for id in junk_ids {
@@ -145,21 +283,64 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
     let mut ctx = open_ctx(&path, "test");
     let dry = JunkCleanup.dry_run(&mut ctx).unwrap();
     let total: usize = dry.findings.iter().map(|f| f.count).sum();
-    assert_eq!(total, 3, "expected 3 junk candidates, got {dry:?}");
-
-    let app = JunkCleanup.apply(&mut ctx).unwrap();
-    assert_eq!(app.applied, 3);
-
-    let remaining: i64 = ctx
-        .conn
-        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
-        .unwrap();
+    assert_eq!(total, 1, "expected only producer-marked junk, got {dry:?}");
     assert_eq!(
-        remaining, 2,
-        "same text under different paths should be preserved"
+        dry.findings
+            .iter()
+            .find(|finding| finding.kind == "foundry_recall_rerank_cache")
+            .map(|finding| finding.count),
+        Some(1),
+        "the canonical cache producer marker must identify the only target"
+    );
+    assert!(
+        dry.findings
+            .iter()
+            .all(|finding| finding.kind != "empty_json_turns"),
+        "unproven empty JSON turn shapes must not be physical-delete findings"
     );
 
+    let app = JunkCleanup.apply(&mut ctx).unwrap();
+    assert_eq!(app.applied, 1);
+
+    for id in [
+        "cache-permanent",
+        "cache-pinned",
+        "cache-archived",
+        "cache-superseded",
+        "cache-used",
+        "cache-path-durable-lookalike",
+        "cache-topic-null-lookalike",
+        "empty-permanent",
+        "empty-used",
+        "empty-durable-lookalike",
+        "empty-null-lookalike",
+    ] {
+        let rows: i64 = ctx
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1, "R8 must preserve ineligible lookalike {id}");
+    }
+    let use_history: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM access_history WHERE memory_id='cache-used'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(use_history, 1, "R8 must preserve real use evidence");
+
     for id in junk_ids {
+        let rows: i64 = ctx
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "eligible junk row {id} must be deleted");
         let n: i64 = ctx
             .conn
             .query_row(
@@ -185,5 +366,132 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
     assert_eq!(
         orphan_symbolic, 0,
         "junk cleanup must leave no orphan memories_symbolic_fts rows"
+    );
+}
+
+#[test]
+fn r8_deletes_producer_marked_empty_json_cache_once() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "producer-marked-cache.db");
+    insert_memory(
+        &conn,
+        "producer-marked-empty-json-cache",
+        "/producer/empty-turn",
+        "{}",
+        "{}",
+        Some("ephemeral"),
+        Some(memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE),
+    );
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = JunkCleanup.dry_run(&mut ctx).unwrap();
+    assert_eq!(
+        dry.finding_total(),
+        1,
+        "producer-marked cache must be one unique R8 target, got {dry:?}"
+    );
+    assert_eq!(
+        dry.findings
+            .iter()
+            .find(|finding| finding.kind == "foundry_recall_rerank_cache")
+            .map(|finding| finding.count),
+        Some(1),
+        "canonical source must classify the empty JSON cache row"
+    );
+
+    let applied = JunkCleanup.apply(&mut ctx).unwrap();
+    assert_eq!(applied.finding_total(), 1);
+    assert_eq!(applied.applied, 1);
+    let remaining: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id='producer-marked-empty-json-cache'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn r8_cli_backend_keeps_dry_run_non_mutating_and_apply_opt_in() {
+    let dir = TempDir::new().unwrap();
+    let app_home = dir.path().join("home");
+    std::fs::create_dir_all(&app_home).unwrap();
+    let db_path = app_home.join("junk-cli.db");
+    let conn = fresh_db_at(&db_path, "junk-cli");
+    insert_memory(
+        &conn,
+        "cache-cli",
+        "/recall-cache/cli",
+        "ephemeral CLI fixture",
+        "{}",
+        Some("ephemeral"),
+        Some(memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE),
+    );
+    drop(conn);
+
+    let mut manifest = crate::manifest::Manifest::empty();
+    manifest
+        .dbs
+        .push(manifest_db_entry(&db_path, crate::manifest::DbRole::Global));
+    manifest.save(&app_home.join("manifest.json")).unwrap();
+    let db_filter = db_path.to_string_lossy().into_owned();
+
+    let dry_error = super::super::run_repair_sweep(
+        Some(db_filter.clone()),
+        vec!["R8".to_string()],
+        false,
+        true,
+        true,
+        None,
+        &app_home,
+    )
+    .await
+    .expect_err("R8 dry-run must report pending maintenance");
+    assert_eq!(dry_error.to_string(), "repair completed with exit code 1");
+    let dry_conn = Connection::open(&db_path).unwrap();
+    assert_eq!(
+        dry_conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE id='cache-cli'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "dry-run must not mutate the eligible row"
+    );
+    drop(dry_conn);
+
+    super::super::run_repair_sweep(
+        Some(db_filter),
+        vec!["R8".to_string()],
+        true,
+        true,
+        false,
+        None,
+        &app_home,
+    )
+    .await
+    .expect("explicit R8 apply succeeds");
+    let applied_conn = Connection::open(&db_path).unwrap();
+    assert_eq!(
+        applied_conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE id='cache-cli'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "explicit apply must delete eligible ephemeral junk"
+    );
+    assert!(
+        !super::super::resolve_rules(&[])
+            .iter()
+            .any(|rule| rule == "R8"),
+        "R8 must remain excluded from the default repair sweep"
     );
 }

@@ -1,6 +1,7 @@
 //! Opening, construction, and write-path entry points for [`MemoryStore`].
 
 use rusqlite::Connection;
+use std::time::Duration;
 
 use crate::{db, db::DbOpenContext, error::MemoryError, path_router, MemoryEntry, MemoryStore};
 
@@ -318,7 +319,7 @@ impl MemoryStore {
     /// deploy-time migrator, or that are provisioning a brand-new DB, use
     /// [`Self::open_with_context`] with an explicit context.
     pub fn open(db_path: &str) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, "unknown", false, &DbOpenContext::default())
+        Self::open_with_label_inner(db_path, "unknown", false, &DbOpenContext::default(), None)
     }
 
     /// Open (or create) a memory database with a known manifest label.
@@ -327,13 +328,29 @@ impl MemoryStore {
     /// Uses the fail-closed default [`DbOpenContext`] (`OpenExisting + Deny`);
     /// see [`Self::open`] and [`Self::open_with_label_and_context`].
     pub fn open_with_label(db_path: &str, db_label: &str) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, db_label, true, &DbOpenContext::default())
+        Self::open_with_label_inner(db_path, db_label, true, &DbOpenContext::default(), None)
     }
 
     /// Open (or create) with an explicit [`DbOpenContext`] and no manifest
     /// label (path-routing validation disabled, like [`Self::open`]).
     pub fn open_with_context(db_path: &str, ctx: &DbOpenContext) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, "unknown", false, ctx)
+        Self::open_with_label_inner(db_path, "unknown", false, ctx, None)
+    }
+
+    /// Open an existing store under an explicit SQLite busy budget while
+    /// preserving the caller's typed migration authority. This is for
+    /// one-shot write phases that must join their blocking writer before the
+    /// process may construct a subsequent owner of the same database.
+    ///
+    /// The ordinary open APIs deliberately retain the repository-wide default
+    /// busy timeout. Callers opt into a smaller budget only when the phase
+    /// contract has an independently justified deadline.
+    pub fn open_with_context_and_busy_timeout(
+        db_path: &str,
+        ctx: &DbOpenContext,
+        busy_timeout: Duration,
+    ) -> Result<Self, MemoryError> {
+        Self::open_with_label_inner(db_path, "unknown", false, ctx, Some(busy_timeout))
     }
 
     /// Open (or create) with an explicit manifest label AND an explicit
@@ -345,7 +362,7 @@ impl MemoryStore {
         db_label: &str,
         ctx: &DbOpenContext,
     ) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, db_label, true, ctx)
+        Self::open_with_label_inner(db_path, db_label, true, ctx, None)
     }
 
     fn open_with_label_inner(
@@ -353,6 +370,7 @@ impl MemoryStore {
         db_label: &str,
         path_validation: bool,
         ctx: &DbOpenContext,
+        busy_timeout: Option<Duration>,
     ) -> Result<Self, MemoryError> {
         // Register extensions BEFORE opening the connection.
         crate::db::enable_simple_auto_extension()
@@ -377,12 +395,20 @@ impl MemoryStore {
         // primitive it FAILS CLOSED (loud error) rather than degrading to a
         // plain rename, which would reopen the very clobber race it closes.
         let _startup_guard = db::acquire_startup_lock();
+        // A caller-owned busy budget covers the whole synchronous open path,
+        // including schema initialization's explicit retry sleeps. Without
+        // this guard a small per-operation SQLite timeout could still be
+        // extended by the retry loop after the local deadline had elapsed.
+        let _busy_deadline = busy_timeout.map(db::scoped_sqlite_busy_deadline);
         // #1132: one-time rename-on-open migration away from the legacy
         // `memory.db` filename, before the connection is opened. Single seam —
         // see `db::filename`'s doc comment for why it lives here and not
         // scattered across every call site that builds a `db_path`.
         db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
-        let mut conn = db::open_read_write(db_path)?;
+        let mut conn = match busy_timeout {
+            Some(busy_timeout) => db::open_read_write_with_busy_timeout(db_path, busy_timeout)?,
+            None => db::open_read_write(db_path)?,
+        };
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         let existing_application_schema = has_existing_application_schema(&conn)?;
@@ -479,6 +505,7 @@ impl MemoryStore {
         }
         db::migrations::check_schema_version_gate(&conn)?;
         let stored_schema_version = db::migrations::read_schema_version(&conn)?;
+        db::migrations::validate_current_schema_integrity(&conn)?;
         let is_stamped_older_schema =
             (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version);
         if is_stamped_older_schema {
@@ -523,6 +550,7 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
             return Err(MemoryError::InvalidArg(format!(
@@ -530,6 +558,7 @@ impl MemoryStore {
                 db::migrations::EXPECTED_SCHEMA_VERSION
             )));
         }
+        db::migrations::validate_current_schema_integrity(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
         // A version stamp is not proof of shape. Prepare the complete memories
         // projection exact-dedupe reads and writes before returning a writable
@@ -615,6 +644,37 @@ impl MemoryStore {
             let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::upsert(&mut self.conn, entry, self.vec_available)
         })
+    }
+
+    /// Upsert a bounded batch in one transaction and run a caller-supplied
+    /// pre-commit guard while every main/FTS/vector write is still rollbackable.
+    ///
+    /// This is for cross-resource maintenance that must validate or complete
+    /// an external boundary before the database half becomes durable. The
+    /// closure receives read access to the transaction for exact post-state
+    /// accounting; any closure error drops the transaction without commit.
+    pub fn upsert_batch_with_precommit<T, F>(
+        &mut self,
+        entries: &[MemoryEntry],
+        precommit: F,
+    ) -> Result<T, MemoryError>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+    {
+        for entry in entries {
+            self.validate_write_path(entry)?;
+        }
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for entry in entries {
+            db::upsert_within_tx(&tx, entry, self.vec_available, None)?;
+        }
+        let output = precommit(&tx)?;
+        tx.commit()?;
+        Ok(output)
     }
 
     /// Atomically insert a memory and all of its search projections, without
@@ -1305,9 +1365,7 @@ mod exact_dedupe_open_tests {
             Err(error) => error,
         };
         assert!(
-            error
-                .to_string()
-                .contains("no such table: memory_search_generation"),
+            error.to_string().contains("no such table: hard_state"),
             "unexpected spoofed-schema refusal: {error}"
         );
 

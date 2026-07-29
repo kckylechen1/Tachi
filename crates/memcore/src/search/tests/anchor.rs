@@ -41,6 +41,7 @@ fn collect_candidates_never_surfaces_an_anchor_even_on_exact_text_match() {
         false,
         as_of_utc.as_deref(),
         false,
+        None,
     )
     .unwrap();
 

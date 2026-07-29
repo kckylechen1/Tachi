@@ -14,6 +14,7 @@ pub use llm::{
     LlmClient, ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult,
     ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
     ProviderInvocationReceipt, ProviderSecret, ReasoningOutcome, RerankConfig, RerankProviderKind,
+    PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE, PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE,
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
 /// Test-only entry: pre-resolved pools cannot report [`VaultSourceAvailability`],

@@ -73,6 +73,7 @@ fn record_access_promotion_gate_raw_to_consolidated() {
         std::slice::from_ref(&id),
         Some("q-alpha"),
         &legacy_config,
+        None,
     )
     .unwrap();
     record_access_with_updates(
@@ -82,6 +83,7 @@ fn record_access_promotion_gate_raw_to_consolidated() {
         std::slice::from_ref(&id),
         Some("q-beta"),
         &legacy_config,
+        None,
     )
     .unwrap();
     record_access_with_updates(
@@ -91,6 +93,7 @@ fn record_access_promotion_gate_raw_to_consolidated() {
         std::slice::from_ref(&id),
         Some("q-gamma"),
         &legacy_config,
+        None,
     )
     .unwrap();
 

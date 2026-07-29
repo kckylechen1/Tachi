@@ -28,7 +28,6 @@ mod schema_skew;
 mod secrets;
 mod types;
 
-pub use autofix::auto_fix_safe;
 /// tachi#1184 item 2 — REPORT-ONLY build-resource patrol (private orphan
 /// `CARGO_TARGET_DIR`-shaped dirs + managed-worktree inspection notes),
 /// folded into `report.warnings` by `bootstrap::manifest_cli::run_doctor_command`.

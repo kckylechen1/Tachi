@@ -20,8 +20,9 @@
 //! - **R6** VACUUM INTO + atomic swap. Requires daemon to not be running.
 //! - **R7** Orphan reference cleanup (memory_edges, agent_known_state,
 //!   processed_events, access_history).
-//! - **R8** Deterministic junk cleanup (exact duplicate old versions,
-//!   foundry rerank cache records, empty JSON turn records).
+//! - **R8** Conservative ephemeral recall-cache cleanup. Empty JSON turn shapes
+//!   lack canonical producer provenance and are retained. Exact duplicates use
+//!   `repair dedupe exact/apply`.
 //! - **R9** Domain normalization/backfill for missing and legacy path-like values.
 //! - **R10** Enrichment failure marker reset (explicit opt-in only).
 //! - **R11** Plan C split-brain repair: merge a stale regular alias DB into
@@ -38,7 +39,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::manifest::{DbEntry, Manifest};
-use tachi_bootstrap::cli::{DedupeAction, QuarantineAction, RepairAction};
+use tachi_bootstrap::cli::{
+    DedupeAction, LifecycleConsistencyAction, QuarantineAction, RepairAction,
+};
 
 pub mod domain;
 pub mod edges;
@@ -49,6 +52,7 @@ pub mod integrity;
 pub mod inventory;
 pub mod jobs;
 pub mod junk;
+pub mod lifecycle_consistency;
 pub mod memory_hygiene;
 pub mod plan_c;
 pub mod quarantine;
@@ -64,7 +68,7 @@ pub use report::{Finding, ReportBuilder, RuleReport};
 /// Default ordered set of rules run when `--rule` is not supplied.
 ///
 /// R8 (junk cleanup) is intentionally **excluded** from the default sweep:
-/// even with conservative duplicate matching, it is a destructive cleanup rule
+/// even with conservative ephemeral-junk matching, it is a destructive cleanup rule
 /// and must be opted in explicitly via `--rule R8`.
 const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7", "R9", "R11"];
 
@@ -212,6 +216,20 @@ pub async fn run_repair(
                 } => exact_dedupe::apply(&db, &plan, yes, &receipt_out, app_home),
                 DedupeAction::Restore { db, receipt, yes } => {
                     exact_dedupe::restore(&db, &receipt, yes, app_home)
+                }
+            },
+            RepairAction::Lifecycle { action } => match action {
+                LifecycleConsistencyAction::Plan { db, output, json } => {
+                    lifecycle_consistency::plan(&db, &output, json, app_home)
+                }
+                LifecycleConsistencyAction::Apply {
+                    db,
+                    plan,
+                    yes,
+                    receipt_out,
+                } => lifecycle_consistency::apply(&db, &plan, yes, &receipt_out, app_home),
+                LifecycleConsistencyAction::Restore { db, receipt, yes } => {
+                    lifecycle_consistency::restore(&db, &receipt, yes, app_home)
                 }
             },
             RepairAction::Quarantine { action } => run_quarantine(action, app_home, json_out).await,

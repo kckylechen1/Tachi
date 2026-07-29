@@ -38,6 +38,7 @@ pub mod graph;
 pub mod hub;
 pub mod immutable_supersession;
 pub mod lessons;
+pub mod lifecycle_consistency;
 pub mod linking;
 pub mod llm_usage;
 pub mod maintenance;

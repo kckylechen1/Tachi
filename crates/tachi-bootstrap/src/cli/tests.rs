@@ -14,16 +14,21 @@ fn recall_coverage_cli_requires_db_and_exposes_explicit_options() {
         "13",
         "--limit",
         "3",
+        "--equivalence-file",
+        "/tmp/equivalence.json",
+        "--human",
     ])
     .expect("recall-coverage invocation should parse");
     assert!(matches!(
         parsed.command,
-        Some(Commands::RecallCoverage {
-            db,
-            top_k: Some(7),
-            candidates_per_channel: Some(13),
-            limit: Some(3),
-        }) if db == std::path::Path::new("/tmp/coverage.db")
+        Some(Commands::RecallCoverage(args))
+            if args.db == std::path::Path::new("/tmp/coverage.db")
+                && args.top_k == Some(7)
+                && args.candidates_per_channel == Some(13)
+                && args.limit == Some(3)
+                && args.equivalence_file.as_deref()
+                    == Some(std::path::Path::new("/tmp/equivalence.json"))
+                && args.human
     ));
 
     let missing_db = Cli::try_parse_from(["tachi", "recall-coverage"])
@@ -39,7 +44,14 @@ fn recall_coverage_cli_requires_db_and_exposes_explicit_options() {
         .expect("recall-coverage subcommand")
         .render_long_help()
         .to_string();
-    for flag in ["--db", "--top-k", "--candidates-per-channel", "--limit"] {
+    for flag in [
+        "--db",
+        "--top-k",
+        "--candidates-per-channel",
+        "--limit",
+        "--equivalence-file",
+        "--human",
+    ] {
         assert!(help.contains(flag), "help must advertise {flag}");
     }
 }
@@ -249,6 +261,75 @@ fn exact_dedupe_cli_is_nested_under_repair_dedupe() {
         Some(Commands::Repair {
             action: Some(RepairAction::Dedupe {
                 action: DedupeAction::Restore { db, receipt, yes: true }
+            }), ..
+        }) if db == "project:test" && receipt == std::path::Path::new("receipt.json")
+    ));
+}
+
+#[test]
+fn lifecycle_consistency_cli_exposes_plan_apply_restore_boundaries() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "lifecycle",
+        "plan",
+        "--db",
+        "project:test",
+        "--output",
+        "plan.json",
+        "--json",
+    ])
+    .expect("lifecycle plan should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Lifecycle {
+                action: LifecycleConsistencyAction::Plan { db, output, json: true }
+            }), ..
+        }) if db == "project:test" && output == std::path::Path::new("plan.json")
+    ));
+
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "lifecycle",
+        "apply",
+        "--db",
+        "project:test",
+        "--plan",
+        "plan.json",
+        "--receipt-out",
+        "receipt.json",
+    ])
+    .expect("lifecycle apply parses without confirmation for runtime refusal");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Lifecycle {
+                action: LifecycleConsistencyAction::Apply { db, plan, yes: false, receipt_out }
+            }), ..
+        }) if db == "project:test"
+            && plan == std::path::Path::new("plan.json")
+            && receipt_out == std::path::Path::new("receipt.json")
+    ));
+
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "repair",
+        "lifecycle",
+        "restore",
+        "--db",
+        "project:test",
+        "--receipt",
+        "receipt.json",
+        "--yes",
+    ])
+    .expect("lifecycle restore should parse");
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Repair {
+            action: Some(RepairAction::Lifecycle {
+                action: LifecycleConsistencyAction::Restore { db, receipt, yes: true }
             }), ..
         }) if db == "project:test" && receipt == std::path::Path::new("receipt.json")
     ));

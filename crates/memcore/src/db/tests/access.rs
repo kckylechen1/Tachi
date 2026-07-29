@@ -85,6 +85,7 @@ fn record_access_with_updates_returns_post_write_access_fields() {
         &[],
         None,
         &crate::RecallConfig::default(),
+        None,
     )
     .expect("record access updates");
     let update = updates.get("touch-return").expect("updated row");
@@ -120,6 +121,7 @@ fn record_access_with_updates_ignores_missing_ids() {
         &[],
         None,
         &crate::RecallConfig::default(),
+        None,
     )
     .expect("missing rows should not abort accounting");
 
@@ -148,7 +150,7 @@ fn display_counters_do_not_promote_tier_under_the_safe_default() {
         "display query two",
         "display query three",
     ] {
-        record_access_with_updates(&conn, &ids, &ids, &ids, Some(query), &safe).unwrap();
+        record_access_with_updates(&conn, &ids, &ids, &ids, Some(query), &safe, None).unwrap();
     }
     let tier: String = conn
         .query_row(
@@ -173,6 +175,7 @@ fn display_counters_do_not_promote_tier_under_the_safe_default() {
         &ids,
         Some("legacy rollback query"),
         &legacy,
+        None,
     )
     .unwrap();
     let legacy_tier: String = conn

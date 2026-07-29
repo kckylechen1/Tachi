@@ -170,6 +170,10 @@ pub struct GcConfig {
     pub audit_log_max_rows: usize,
     /// Max age for agent_known_state before pruning (default: 90 days)
     pub agent_known_state_max_days: u32,
+    /// Max sampled recall groups retained after age pruning.
+    pub recall_impression_max_groups: usize,
+    /// Max age of sampled recall groups.
+    pub recall_impression_max_days: u32,
 }
 
 impl Default for GcConfig {
@@ -180,6 +184,8 @@ impl Default for GcConfig {
             audit_log_max_days: 30,
             audit_log_max_rows: 100_000,
             agent_known_state_max_days: 90,
+            recall_impression_max_groups: 10_000,
+            recall_impression_max_days: 30,
         }
     }
 }

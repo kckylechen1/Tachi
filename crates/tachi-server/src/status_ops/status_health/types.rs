@@ -44,6 +44,12 @@ pub(crate) struct ProviderProbeCache {
     pub(crate) rotation_groups: Vec<ProviderRotationGroupProbe>,
 }
 
+#[derive(Debug)]
+pub(crate) struct DoctorProbeCacheRefresh {
+    pub(crate) report: ProviderProbeReport,
+    pub(crate) cache_write: Result<ProviderProbeCache, String>,
+}
+
 impl ProviderProbeCache {
     pub(crate) fn is_stale(&self) -> bool {
         let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&self.last_probe_at) else {

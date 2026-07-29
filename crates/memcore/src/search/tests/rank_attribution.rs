@@ -26,12 +26,12 @@
 //! # How it observes without changing scoring
 //! This file is pure driver/printer. The actual observation machinery lives
 //! in `ranking.rs`'s `#[cfg(test)] pub(super) mod attribution` (a twin of
-//! `rank_candidate_entries` that snapshots `scores` before/after each of the
-//! same 7 `apply_*_boost` calls the production function makes, in the same
-//! order) and `search.rs`'s `hybrid_search_with_attribution` (pairs that
-//! breakdown with the real ranked order from the unmodified `hybrid_search`).
-//! Neither is reachable outside a test build — see those modules' own doc
-//! comments for the zero-production-overhead argument.
+//! `rank_candidate_entries` that gives the one production boost sequence a
+//! snapshot observer before/after each sequential marginal step) and
+//! `search.rs`'s `hybrid_search_with_attribution` (pairs that breakdown with
+//! the real ranked order from the unmodified `hybrid_search`).
+//! The observation output remains test-only; the observer cannot alter the
+//! production calls, arguments, or rank order.
 //!
 //! # Corpus reuse
 //! Reuses `golden_corpus::{seed_corpus, QUERIES, Slice}` and
@@ -45,7 +45,7 @@
 //! nothing else is printed to stdout (no `--nocapture` noise from other
 //! tests, since this is invoked as a single named test).
 
-use super::golden_corpus::{self, Slice};
+use super::golden_corpus;
 use super::ops_audit_corpus;
 use super::*;
 
@@ -186,6 +186,39 @@ fn print_case(
     );
 }
 
+/// Keep the diagnostic report on the exact ops-audit retrieval contract. In
+/// particular, the hindsight case is Memory-scoped; dropping that surface
+/// changes both its candidate set and the attribution being reported.
+fn ops_report_opts(case: &ops_audit_corpus::CaseSpec) -> SearchOptions {
+    ops_audit_corpus::search_opts(case.surface)
+}
+
+#[test]
+fn rank_attribution_report_preserves_ops_case_surfaces() {
+    for case in ops_audit_corpus::CASES {
+        assert_eq!(
+            ops_report_opts(case).surface,
+            case.surface,
+            "rank attribution options dropped the ops-audit surface for {}",
+            case.name
+        );
+    }
+
+    let case = ops_audit_corpus::CASES
+        .iter()
+        .find(|case| case.name == "hindsight-research-wiki")
+        .expect("hindsight-research-wiki case");
+    let mut conn = setup();
+    ops_audit_corpus::seed_corpus(&mut conn);
+    let (ranked, _) = hybrid_search_with_attribution(&conn, case.query, &ops_report_opts(case))
+        .expect("surface-equivalent rank attribution search");
+    assert_eq!(
+        ranked.first().map(|result| result.entry.id.as_str()),
+        Some(case.expected),
+        "the report must attribute the hindsight case within its canonical Memory surface"
+    );
+}
+
 /// REPORT — not a gate. Prints one JSONL object per golden_corpus /
 /// ops_audit_corpus labeled case. `#[ignore]`; see module doc for the run
 /// command.
@@ -196,14 +229,7 @@ fn rank_attribution_report() {
     let mut gconn = setup();
     golden_corpus::seed_corpus(&mut gconn);
     for spec in golden_corpus::QUERIES {
-        let opts = SearchOptions {
-            top_k: 40,
-            candidates_per_channel: 128,
-            record_access: false,
-            mmr_threshold: None,
-            path_prefix: (spec.slice == Slice::WikiScoped).then(|| "/wiki".to_string()),
-            ..Default::default()
-        };
+        let opts = golden_corpus::search_opts(spec);
         print_case(
             &gconn,
             "golden_corpus",
@@ -218,20 +244,13 @@ fn rank_attribution_report() {
     let mut oconn = setup();
     ops_audit_corpus::seed_corpus(&mut oconn);
     for case in ops_audit_corpus::CASES {
-        let opts = SearchOptions {
-            top_k: 40,
-            candidates_per_channel: 128,
-            record_access: false,
-            mmr_threshold: None,
-            ..Default::default()
-        };
         print_case(
             &oconn,
             "ops_audit_corpus",
             case.name,
             case.query,
             case.expected,
-            opts,
+            ops_report_opts(case),
         );
     }
 }

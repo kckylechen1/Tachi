@@ -16,16 +16,20 @@ mod expansion;
 mod exposure_loop;
 mod golden_corpus;
 mod graph;
+mod impression_benchmark;
+mod impressions;
 mod noise;
 mod ops_audit_corpus;
 mod p3_probe;
 mod phase_receipts;
 mod rank_attribution;
+mod rank_effect;
 mod raw_vector_floor;
 mod scored_count;
 mod supersession;
 mod surface;
 mod symbolic;
+mod typo_fallback;
 
 fn setup() -> Connection {
     crate::db::enable_simple_auto_extension().unwrap();

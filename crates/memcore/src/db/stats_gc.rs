@@ -101,6 +101,24 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
         [],
     )?;
 
+    // Recall impressions own their retention. Deleting groups cascades rows;
+    // access_history and query_diversity are intentionally untouched.
+    let impression_age_sql = format!(
+        "DELETE FROM recall_impression_groups
+         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
+        cfg.recall_impression_max_days
+    );
+    let impression_age_deleted = tx.execute(&impression_age_sql, [])?;
+    let impression_quota_sql = format!(
+        "DELETE FROM recall_impression_groups
+         WHERE group_id NOT IN (
+             SELECT group_id FROM recall_impression_groups
+             ORDER BY created_at DESC, group_id DESC LIMIT {}
+         )",
+        cfg.recall_impression_max_groups
+    );
+    let impression_quota_deleted = tx.execute(&impression_quota_sql, [])?;
+
     tx.commit()?;
 
     Ok(serde_json::json!({
@@ -111,6 +129,7 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
         "agent_known_state_pruned": aks_deleted,
         "orphaned_access_history": orphan_deleted,
         "orphaned_agent_known_state": orphan_aks_deleted,
+        "recall_impression_groups_pruned": impression_age_deleted + impression_quota_deleted,
     }))
 }
 

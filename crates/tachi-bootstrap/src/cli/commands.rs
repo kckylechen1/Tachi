@@ -4,8 +4,31 @@ use super::{
     ManifestAction, McpAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction,
     VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use std::path::PathBuf;
+
+#[derive(Args, Debug, Clone)]
+pub struct RecallCoverageArgs {
+    /// Existing database to inspect. This command never selects a default store.
+    #[arg(long, value_name = "PATH")]
+    pub db: PathBuf,
+    /// Hybrid result width. Omit to use the named recall-coverage default.
+    #[arg(long)]
+    pub top_k: Option<usize>,
+    /// Hybrid candidate width per channel. Omit to use the named recall-coverage default.
+    #[arg(long)]
+    pub candidates_per_channel: Option<usize>,
+    /// Deterministically probe only the first N eligible rows and report incomplete coverage.
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Optional reviewed ID-only corpus with schema_version, expected_ids, and equivalences.
+    /// No text similarity or model inference is performed.
+    #[arg(long, value_name = "PATH")]
+    pub equivalence_file: Option<PathBuf>,
+    /// Emit a content-free human summary instead of the default JSON report.
+    #[arg(long)]
+    pub human: bool,
+}
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
@@ -36,20 +59,7 @@ pub enum Commands {
     /// Show database statistics
     Stats,
     /// Measure self-query recall coverage for never-search-surfaced rows in one explicit DB.
-    RecallCoverage {
-        /// Existing database to inspect. This command never selects a default store.
-        #[arg(long, value_name = "PATH")]
-        db: PathBuf,
-        /// Hybrid result width. Omit to use the named recall-coverage default.
-        #[arg(long)]
-        top_k: Option<usize>,
-        /// Hybrid candidate width per channel. Omit to use the named recall-coverage default.
-        #[arg(long)]
-        candidates_per_channel: Option<usize>,
-        /// Deterministically probe only the first N eligible rows and report incomplete coverage.
-        #[arg(long)]
-        limit: Option<usize>,
-    },
+    RecallCoverage(Box<RecallCoverageArgs>),
     /// Inspect onboarding readiness or run the interactive 5-step setup wizard
     Setup {
         /// Emit machine-readable JSON instead of the human summary

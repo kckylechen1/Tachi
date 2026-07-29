@@ -46,6 +46,10 @@
 //!   a legitimate v22 DB upgrades under migration authority while a damaged
 //!   v23 inventory is refused rather than silently repaired.
 //! - v24: `memories.scored_count` scorer-only diagnostic counter (#1459).
+//! - v25: sampled recall-impression ledger tables and indexes (#1447).
+//! - v26: SHA-256 query fingerprints and complete replay-policy identity for
+//!   recall impressions; v25 groups remain honestly unversioned (#1447).
+//! - v27: content-free typo-fallback attribution columns on the v26 ledger (#1506).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -88,7 +92,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 24;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 27;
 
 mod basic;
 mod cross_db;
@@ -134,6 +138,40 @@ use symbolic_fts::*;
 const MIGRATION_NS: &str = "migrations";
 const SANITY_QUARANTINE_FRACTION: f64 = 0.5;
 
+/// Canonical sentinel inventory for a database stamped at
+/// [`EXPECTED_SCHEMA_VERSION`]. A current stamp is a claim that every
+/// migration completed; an absent sentinel is corruption, never permission to
+/// rerun migration work during an ordinary same-version open.
+pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
+    "v1_path_normalize_legacy",
+    "v2_scope_self_normalize",
+    "v3_handoff_path_standardize",
+    "v4_quarantine_cross_db_rows",
+    "v5_drop_hypertachi_legacy_columns",
+    "v6_fold_persons_into_entities",
+    "v7_reconcile_legacy_memory_columns",
+    "v8_drop_legacy_persons_column",
+    "v9_relocate_and_drop_location",
+    "v10_drop_pack_tables",
+    "v11_drop_domains_table",
+    "v12_session_claims_unique_identity",
+    "v13_hard_state_ns_updated_index",
+    "v14_dispatch_outcomes_reported_outcome",
+    "v15_exec_envs_env_class",
+    "v16_dispatch_outcomes_identity_receipt",
+    "v17_dispatch_outcomes_attribution_basis",
+    "v18_dispatch_adjudications",
+    "v19_idless_memory_identity",
+    "v20_mirror_eval",
+    "v21_identity_workclaim_spine",
+    "v22_memories_symbolic_fts",
+    "v23_reserved_reference_guards",
+    "v24_memories_scored_count",
+    "v25_recall_impression_ledger",
+    "v26_recall_impression_replay_identity",
+    "v27_typo_fallback_attribution",
+];
+
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct MigrationReport {
     pub paths_normalized: usize,
@@ -162,6 +200,9 @@ pub struct MigrationReport {
     pub memories_symbolic_fts_rows: usize,
     pub reserved_reference_guards_installed: usize,
     pub scored_count_column_added: usize,
+    pub recall_impression_schema_objects_created: usize,
+    pub recall_impression_replay_identity_columns_added: usize,
+    pub typo_fallback_attribution_columns_added: usize,
 }
 
 #[cfg(test)]
@@ -241,6 +282,26 @@ pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
         )));
     }
     Ok(())
+}
+
+/// Fail closed when a database claims the current schema version but lacks
+/// evidence or persistent objects required by that claim. This is a read-only
+/// preflight: callers run it before backup, connection PRAGMAs, transactions,
+/// idempotent DDL, migration execution, or version stamping.
+pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(), MemoryError> {
+    if read_schema_version(conn)? != EXPECTED_SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    for key in MIGRATION_SENTINEL_KEYS {
+        if !was_run(conn, key)? {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete current schema v{EXPECTED_SCHEMA_VERSION}: required migration sentinel '{key}' is missing"
+            )));
+        }
+    }
+    crate::db::schema::validate_recall_impression_ledger_schema(conn)?;
+    crate::db::schema::validate_typo_fallback_attribution_schema(conn)
 }
 
 /// #1119 typed schema-migration gate. Runs at the DB-open funnel
@@ -403,6 +464,7 @@ pub fn run_data_migrations(
     current_db_path: &Path,
 ) -> Result<MigrationReport, MemoryError> {
     check_schema_version_gate(conn)?;
+    validate_current_schema_integrity(conn)?;
 
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let report = run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
@@ -579,6 +641,24 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v24_memories_scored_count,
     )?
     .unwrap_or(0);
+    report.recall_impression_schema_objects_created = apply_versioned_migration(
+        conn,
+        "v25_recall_impression_ledger",
+        migrate_v25_recall_impression_ledger,
+    )?
+    .unwrap_or(0);
+    report.recall_impression_replay_identity_columns_added = apply_versioned_migration(
+        conn,
+        "v26_recall_impression_replay_identity",
+        migrate_v26_recall_impression_replay_identity,
+    )?
+    .unwrap_or(0);
+    report.typo_fallback_attribution_columns_added = apply_versioned_migration(
+        conn,
+        "v27_typo_fallback_attribution",
+        migrate_v27_typo_fallback_attribution,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
 }
@@ -594,6 +674,22 @@ fn migrate_v23_reserved_reference_guards(conn: &Connection) -> Result<usize, Mem
 fn migrate_v24_memories_scored_count(conn: &Connection) -> Result<usize, MemoryError> {
     crate::db::schema::ensure_memories_scored_count(conn)?;
     Ok(1)
+}
+
+fn migrate_v25_recall_impression_ledger(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::install_v25_recall_impression_ledger_schema(conn)?;
+    Ok(6)
+}
+
+fn migrate_v26_recall_impression_replay_identity(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::migrate_recall_impression_ledger_to_v26(conn)?;
+    Ok(7)
+}
+
+fn migrate_v27_typo_fallback_attribution(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::install_typo_fallback_attribution_schema(conn)?;
+    crate::db::schema::validate_typo_fallback_attribution_schema(conn)?;
+    Ok(7)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -632,7 +728,8 @@ mod tests {
         register_sqlite_vec();
         let conn = Connection::open(tmp.path()).expect("open");
         let _ = try_load_sqlite_vec(&conn);
-        init_schema(&conn).expect("init_schema");
+        crate::db::schema::init_unversioned_schema_for_migration_tests(&conn)
+            .expect("init unversioned migration fixture");
         (conn, tmp)
     }
 
@@ -1269,6 +1366,7 @@ mod tests {
             [],
         )
         .unwrap();
+        write_schema_version(&conn, 12).unwrap();
         assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
         assert!(
             !was_run(&conn, "v13_hard_state_ns_updated_index").unwrap(),
@@ -1329,6 +1427,47 @@ mod tests {
         run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
 
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn private_fresh_init_installs_v25_through_v27_migrations_once() {
+        let _ = crate::db::enable_simple_auto_extension();
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        let _ = try_load_sqlite_vec(&conn);
+
+        init_schema(&conn).expect("initialize current private schema");
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+        let sentinel_version = |key: &str| {
+            conn.query_row(
+                "SELECT version FROM hard_state WHERE namespace = ?1 AND key = ?2",
+                params![MIGRATION_NS, key],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(sentinel_version("v25_recall_impression_ledger"), 1);
+        assert_eq!(sentinel_version("v26_recall_impression_replay_identity"), 1);
+        assert_eq!(sentinel_version("v27_typo_fallback_attribution"), 1);
+        crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
+        crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
+
+        init_schema(&conn).expect("valid current private schema reopens idempotently");
+        assert_eq!(
+            sentinel_version("v25_recall_impression_ledger"),
+            1,
+            "v25 migration must run once"
+        );
+        assert_eq!(
+            sentinel_version("v26_recall_impression_replay_identity"),
+            1,
+            "v26 migration must run once"
+        );
+        assert_eq!(
+            sentinel_version("v27_typo_fallback_attribution"),
+            1,
+            "v27 migration must run once"
+        );
     }
 
     #[test]
@@ -1408,7 +1547,7 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         assert_eq!(read_schema_version(&conn).unwrap(), 0);
 
-        for key in ALL_MIGRATION_SENTINEL_KEYS {
+        for key in MIGRATION_SENTINEL_KEYS {
             assert!(!was_run(&conn, key).unwrap(), "sentinel {key} pre-seeded?");
             mark_run(&conn, key).unwrap();
         }
@@ -1473,14 +1612,14 @@ mod tests {
     /// The frozen assertion this REPLACES (old route:
     /// `opt_in_gate_with_is_noop_for_fresh_db`, which inferred "fresh" from a
     /// `sqlite_master` table count). New semantics: a full-schema DB that still
-    /// reads `user_version == 0` — exactly what `init_schema` / `open_test_db`
-    /// produces — is a build, not a migration, under `CreateFresh`. Intent
+    /// reads `user_version == 0` — exactly what the unversioned migration-test
+    /// fixture produces — is a build, not a migration, under `CreateFresh`. Intent
     /// carries "I am creating", so no authority is needed and DB content is
     /// never consulted (owner ruling A: `init_schema`'s product IS fresh).
     #[test]
     fn create_fresh_needs_no_authority_regardless_of_db_content() {
         let (conn, tmp) = open_test_db();
-        // Full tables present (open_test_db ran init_schema) but user_version==0.
+        // Full pre-versioned tables are present but user_version==0.
         assert_eq!(read_schema_version(&conn).unwrap(), 0);
         let ctx = DbOpenContext::create_fresh();
         check_db_open_context_gate(&conn, tmp.path(), &ctx)
@@ -1730,36 +1869,6 @@ mod tests {
 
     // --- #984 F3(e): EXPECTED_SCHEMA_VERSION invariant ----------------------
 
-    /// All sentinel keys `run_data_migrations` gates on, in the same order
-    /// the runner checks them. Shared by the "genuine existing sentinels"
-    /// fixture above and the invariant test below so both stay in lockstep
-    /// with the runner's actual migration list.
-    const ALL_MIGRATION_SENTINEL_KEYS: &[&str] = &[
-        "v1_path_normalize_legacy",
-        "v2_scope_self_normalize",
-        "v3_handoff_path_standardize",
-        "v4_quarantine_cross_db_rows",
-        "v5_drop_hypertachi_legacy_columns",
-        "v6_fold_persons_into_entities",
-        "v7_reconcile_legacy_memory_columns",
-        "v8_drop_legacy_persons_column",
-        "v9_relocate_and_drop_location",
-        "v10_drop_pack_tables",
-        "v11_drop_domains_table",
-        "v12_session_claims_unique_identity",
-        "v13_hard_state_ns_updated_index",
-        "v14_dispatch_outcomes_reported_outcome",
-        "v15_exec_envs_env_class",
-        "v16_dispatch_outcomes_identity_receipt",
-        "v17_dispatch_outcomes_attribution_basis",
-        "v18_dispatch_adjudications",
-        "v19_idless_memory_identity",
-        "v20_mirror_eval",
-        "v21_identity_workclaim_spine",
-        "v22_memories_symbolic_fts",
-        "v23_reserved_reference_guards",
-    ];
-
     /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner
     /// *itself* produces — not a hand-maintained duplicate list — by running
     /// the real `run_data_migrations` against a fresh DB and counting the
@@ -1770,9 +1879,9 @@ mod tests {
     /// then fails this test — silently under-stamping newly-migrated DBs
     /// would otherwise defeat the #984 gate for the new migration.
     ///
-    /// `ALL_MIGRATION_SENTINEL_KEYS` above is a separate, hand-maintained
-    /// list used only to seed the "genuine existing sentinels" fixture; this
-    /// test intentionally does not depend on it being complete or in sync.
+    /// `MIGRATION_SENTINEL_KEYS` is also exercised by current-schema preflight;
+    /// this count check stays independent so runner additions cannot be hidden
+    /// by forgetting to update both the stamp and inventory.
     #[test]
     fn expected_schema_version_matches_migration_count() {
         let (mut conn, tmp) = open_test_db();
@@ -1793,6 +1902,17 @@ mod tests {
              sentinel migrations run_data_migrations actually marks run ({sentinel_count}) — \
              bump the const (and add a vN doc line) when a new migration is appended"
         );
+        assert_eq!(
+            MIGRATION_SENTINEL_KEYS.len(),
+            EXPECTED_SCHEMA_VERSION as usize,
+            "current-schema sentinel inventory must cover every version"
+        );
+        for key in MIGRATION_SENTINEL_KEYS {
+            assert!(
+                was_run(&conn, key).unwrap(),
+                "current-schema preflight key '{key}' is not written by the migration runner"
+            );
+        }
     }
 
     /// #1331 BUG 3: stamped-v21 DBs must not silently acquire
@@ -1974,8 +2094,14 @@ mod tests {
         .expect("authorized v23 migration must add scored_count");
         drop(store);
         let verify = Connection::open(&path).expect("verify migrated DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), 24);
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
         assert!(was_run(&verify, "v24_memories_scored_count").unwrap());
+        assert!(was_run(&verify, "v25_recall_impression_ledger").unwrap());
+        assert!(was_run(&verify, "v26_recall_impression_replay_identity").unwrap());
+        assert!(was_run(&verify, "v27_typo_fallback_attribution").unwrap());
         let _reserved_reference_guard = crate::db::register_reserved_reference_write_guard(&verify)
             .expect("register trigger guard function");
         let default: i64 = verify
@@ -1986,6 +2112,484 @@ mod tests {
             )
             .unwrap();
         assert_eq!(default, 0);
+    }
+
+    /// #1447: v25 impression groups did not persist a unique fingerprint or a
+    /// replay-policy identity. v26 must be explicitly authorized, retain the
+    /// non-unique FNV bucket only under its legacy name, and leave unknown
+    /// provenance NULL so replay refuses rather than guessing current math.
+    #[test]
+    fn v25_to_v27_recall_impressions_requires_authority_and_preserves_unknowns() {
+        use crate::db::DbOpenContext;
+
+        const V26_SENTINEL: &str = "v26_recall_impression_replay_identity";
+        const V27_SENTINEL: &str = "v27_typo_fallback_attribution";
+        const V26_OBJECTS: &[(&str, &str)] = &[
+            ("table", "recall_impression_groups"),
+            ("table", "recall_impressions"),
+            ("index", "idx_recall_impression_groups_created"),
+            ("index", "idx_recall_impression_groups_fingerprint"),
+            ("index", "idx_recall_impressions_memory"),
+            ("index", "idx_recall_impressions_group_final_rank"),
+        ];
+
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open fixture");
+            assert_eq!(
+                read_schema_version(&conn).unwrap(),
+                EXPECTED_SCHEMA_VERSION,
+                "fresh provisioning must stamp the current schema"
+            );
+            conn.execute(
+                "DELETE FROM hard_state
+                  WHERE namespace = ?1
+                    AND key IN (?2, ?3)",
+                params![MIGRATION_NS, V26_SENTINEL, V27_SENTINEL],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "DROP TABLE recall_impressions;
+                 DROP TABLE recall_impression_groups;",
+            )
+            .unwrap();
+            crate::db::schema::install_v25_recall_impression_ledger_schema(&conn)
+                .expect("build historical v25 ledger fixture");
+            conn.execute(
+                "INSERT INTO recall_impression_groups (group_id, created_at, query_hash, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count)
+                 VALUES ('v25-group', '2026-07-29T00:00:00.000Z', 'deadbeef', 'default', 0.4, 0.3, 0.2, 0.1, 0, 20.0, 10, 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA user_version = 25;").unwrap();
+        }
+
+        let deny_err = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_deny(),
+        ) {
+            Ok(_) => panic!("Deny must refuse stamped-v25 -> v27"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                deny_err,
+                MemoryError::SchemaMigrationOptInRequired { stored: 25, .. }
+            ),
+            "unexpected deny error: {deny_err}"
+        );
+        {
+            let inspect = Connection::open(&path).expect("inspect denied DB");
+            assert_eq!(read_schema_version(&inspect).unwrap(), 25);
+            assert!(!was_run(&inspect, V26_SENTINEL).unwrap());
+            assert!(!was_run(&inspect, V27_SENTINEL).unwrap());
+            assert!(table_has_column(&inspect, "recall_impression_groups", "query_hash").unwrap());
+            assert!(
+                !table_has_column(&inspect, "recall_impression_groups", "query_fingerprint")
+                    .unwrap()
+            );
+        }
+
+        let store = crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_allow("test:1447-v27"),
+        )
+        .expect("Allow must migrate v25 -> v27");
+        drop(store);
+
+        let verify = Connection::open(&path).expect("verify migrated DB");
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
+        assert!(was_run(&verify, V26_SENTINEL).unwrap());
+        assert!(was_run(&verify, V27_SENTINEL).unwrap());
+        for (object_type, name) in V26_OBJECTS {
+            let present: bool = verify
+                .query_row(
+                    "SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+                    params![object_type, name],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            assert!(present, "v26 must create {object_type} {name}");
+        }
+        assert!(
+            !table_has_column(&verify, "recall_impression_groups", "query_hash").unwrap(),
+            "v26 must not retain the ambiguous v25 column name"
+        );
+        for column in [
+            "legacy_query_bucket",
+            "query_fingerprint",
+            "fusion_policy_version",
+            "pre_boost_adjustment_version",
+            "tie_break_policy_version",
+            "candidate_policy_version",
+            "schema_identity",
+        ] {
+            assert!(
+                table_has_column(&verify, "recall_impression_groups", column).unwrap(),
+                "v26 group schema must contain {column}"
+            );
+        }
+        type LegacyReplayRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let (legacy_bucket, fingerprint, fusion, adjustment, tie_break, candidate, schema):
+            LegacyReplayRow = verify
+            .query_row(
+                "SELECT legacy_query_bucket, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity FROM recall_impression_groups WHERE group_id = 'v25-group'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(legacy_bucket, "deadbeef");
+        assert_eq!(
+            (
+                fingerprint,
+                fusion,
+                adjustment,
+                tie_break,
+                candidate,
+                schema
+            ),
+            (None, None, None, None, None, None),
+            "v26 must not fabricate unavailable query or policy provenance"
+        );
+        let error = crate::replay_recall_impression_group(&verify, "v25-group")
+            .expect_err("unversioned v25 group must not run current replay math");
+        assert!(matches!(
+            error,
+            MemoryError::RecallReplayIncompatible {
+                reason: crate::error::RecallReplayCompatibilityReason::LegacyUnversioned,
+                ..
+            }
+        ));
+    }
+
+    fn current_schema_snapshot(path: &Path) -> (Vec<u8>, Vec<String>, u32, Vec<String>) {
+        let bytes = std::fs::read(path).expect("read database bytes");
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open snapshot read-only");
+        let mut schema_stmt = conn
+            .prepare(
+                "SELECT type || char(31) || name || char(31) || tbl_name || char(31) || COALESCE(sql, '')
+                 FROM sqlite_schema ORDER BY type, name, tbl_name",
+            )
+            .unwrap();
+        let schema = schema_stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(schema_stmt);
+        let mut sentinel_stmt = conn
+            .prepare(
+                "SELECT key || char(31) || value_json || char(31) || version || char(31) || created_at || char(31) || updated_at
+                 FROM hard_state WHERE namespace = ?1 ORDER BY key",
+            )
+            .unwrap();
+        let sentinels = sentinel_stmt
+            .query_map([MIGRATION_NS], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(sentinel_stmt);
+        let version = read_schema_version(&conn).unwrap();
+        (bytes, schema, version, sentinels)
+    }
+
+    type ExistingOpen = fn(&str) -> Result<crate::MemoryStore, MemoryError>;
+
+    fn open_mutating_existing_deny(path: &str) -> Result<crate::MemoryStore, MemoryError> {
+        crate::MemoryStore::open_with_label_and_context(
+            path,
+            "global",
+            &DbOpenContext::open_existing_deny(),
+        )
+    }
+
+    fn current_existing_openers() -> [(&'static str, ExistingOpen); 3] {
+        [
+            ("mutating", open_mutating_existing_deny),
+            ("read-only", crate::MemoryStore::open_read_only),
+            (
+                "existing-read-write",
+                crate::MemoryStore::open_existing_read_write,
+            ),
+        ]
+    }
+
+    fn assert_current_v27_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
+        let mut unexpected_acceptances = Vec::new();
+        for (surface, open) in current_existing_openers() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join(format!("{surface}.db"));
+            let path_str = path.to_string_lossy().to_string();
+            {
+                let store = crate::MemoryStore::open_with_context(
+                    &path_str,
+                    &DbOpenContext::create_fresh(),
+                )
+                .expect("provision current v27 fixture");
+                drop(store);
+                let conn = Connection::open(&path).expect("open fixture for corruption");
+                conn.execute_batch(corruption_sql).expect("corrupt fixture");
+            }
+            let before = current_schema_snapshot(&path);
+
+            match open(&path_str) {
+                Ok(store) => {
+                    drop(store);
+                    unexpected_acceptances.push(surface);
+                }
+                Err(error) => assert!(
+                    error.to_string().contains(expected),
+                    "unexpected {surface} corruption error: {error}"
+                ),
+            }
+
+            let after = current_schema_snapshot(&path);
+            assert!(
+                after.0 == before.0,
+                "failed {surface} current open must be byte-identical"
+            );
+            assert_eq!(
+                after.1, before.1,
+                "failed {surface} current open must not repair schema"
+            );
+            assert_eq!(
+                after.2, before.2,
+                "failed {surface} current open must not re-stamp"
+            );
+            assert_eq!(
+                after.3, before.3,
+                "failed {surface} current open must not repair migration sentinels"
+            );
+        }
+        assert!(
+            unexpected_acceptances.is_empty(),
+            "stamped-current corrupt v27 DB was accepted by {unexpected_acceptances:?}"
+        );
+    }
+
+    #[test]
+    fn stamped_current_v27_missing_ledger_table_or_index_is_refused_without_repair() {
+        assert_current_v27_corruption_is_not_repaired(
+            "DROP TABLE recall_impressions;",
+            "recall_impressions",
+        );
+        assert_current_v27_corruption_is_not_repaired(
+            "DROP INDEX idx_recall_impression_groups_fingerprint;",
+            "idx_recall_impression_groups_fingerprint",
+        );
+    }
+
+    #[test]
+    fn stamped_current_v27_malformed_replay_identity_is_refused_without_repair() {
+        assert_current_v27_corruption_is_not_repaired(
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO recall_impression_groups (
+                 group_id, created_at,
+                 fusion_policy_version, pre_boost_adjustment_version,
+                 tie_break_policy_version, candidate_policy_version, schema_identity,
+                 weights_profile, semantic_weight, fts_weight, symbolic_weight,
+                 decay_weight, use_rrf, rrf_k, top_k, candidate_count,
+                 displayed_count, scored_returned_count
+             ) VALUES (
+                 'malformed-current', '2026-07-29T00:00:00Z',
+                 'fusion-v1', 'pre-boost-adjustment-v1',
+                 'recall-rank-v1', 'candidate-set-v1', 'recall-impression-ledger-v26',
+                 'default', 0.65, 0.35, 0.0, 0.0, 0, 60.0, 10, 1, 0, 0
+             );
+             PRAGMA ignore_check_constraints = OFF;",
+            "malformed replay identity row",
+        );
+    }
+
+    #[test]
+    fn stamped_current_v27_missing_v26_sentinel_is_refused_without_repair() {
+        assert_current_v27_corruption_is_not_repaired(
+            "DELETE FROM hard_state
+             WHERE namespace = 'migrations' AND key = 'v26_recall_impression_replay_identity';",
+            "v26_recall_impression_replay_identity",
+        );
+    }
+
+    #[test]
+    fn stamped_current_v27_missing_v27_sentinel_is_refused_without_repair() {
+        assert_current_v27_corruption_is_not_repaired(
+            "DELETE FROM hard_state
+             WHERE namespace = 'migrations' AND key = 'v27_typo_fallback_attribution';",
+            "v27_typo_fallback_attribution",
+        );
+    }
+
+    const V27_COLUMNS: &[(&str, &str)] = &[
+        ("recall_impression_groups", "typo_fallback_activated"),
+        ("recall_impression_groups", "typo_fallback_prefilter_count"),
+        ("recall_impression_groups", "typo_fallback_compared_count"),
+        (
+            "recall_impression_groups",
+            "typo_fallback_token_comparison_count",
+        ),
+        ("recall_impression_groups", "typo_fallback_edit_cell_count"),
+        ("recall_impression_groups", "typo_fallback_candidate_count"),
+        ("recall_impressions", "typo_fallback_candidate"),
+    ];
+
+    #[test]
+    fn stamped_current_v27_missing_each_v27_column_is_refused_without_repair() {
+        for (table, column) in V27_COLUMNS {
+            assert_current_v27_corruption_is_not_repaired(
+                &format!("ALTER TABLE {table} DROP COLUMN {column};"),
+                &format!("{table}.{column}"),
+            );
+        }
+    }
+
+    #[test]
+    fn valid_stamped_current_v27_reopens_on_all_existing_surfaces() {
+        for (surface, open) in current_existing_openers() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join(format!("{surface}.db"));
+            let path_str = path.to_string_lossy().to_string();
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision current v27 fixture");
+            drop(store);
+            let before = current_schema_snapshot(&path);
+
+            let reopened = open(&path_str)
+                .unwrap_or_else(|error| panic!("valid current v27 {surface} reopen: {error}"));
+            drop(reopened);
+
+            let after = current_schema_snapshot(&path);
+            assert_eq!(
+                after.1, before.1,
+                "valid {surface} open must preserve schema"
+            );
+            assert_eq!(
+                after.2, before.2,
+                "valid {surface} open must preserve version"
+            );
+            assert_eq!(
+                after.3, before.3,
+                "valid {surface} open must preserve migration sentinels"
+            );
+        }
+    }
+
+    /// #1506: persistent typo-fallback attribution is a distinct v27 change.
+    /// Deny must refuse before adding any column; Allow installs all columns,
+    /// records the sentinel, and advances the version atomically.
+    #[test]
+    fn v26_to_v27_typo_fallback_attribution_requires_authority_and_stamps() {
+        use crate::db::DbOpenContext;
+
+        const V27_SENTINEL: &str = "v27_typo_fallback_attribution";
+        let column_exists = |conn: &Connection, table: &str, column: &str| {
+            let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1");
+            conn.query_row(&sql, [column], |_| Ok(true))
+                .unwrap_or(false)
+        };
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision v27 fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open fixture");
+            assert_eq!(read_schema_version(&conn).unwrap(), 27);
+            assert!(was_run(&conn, V27_SENTINEL).unwrap());
+            for (table, column) in V27_COLUMNS {
+                assert!(column_exists(&conn, table, column));
+            }
+            conn.execute_batch(
+                "ALTER TABLE recall_impressions DROP COLUMN typo_fallback_candidate;
+                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_candidate_count;
+                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_edit_cell_count;
+                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_token_comparison_count;
+                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_compared_count;
+                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_prefilter_count;
+                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_activated;
+                 DELETE FROM hard_state
+                  WHERE namespace = 'migrations' AND key = 'v27_typo_fallback_attribution';
+                 PRAGMA user_version = 26;",
+            )
+            .expect("simulate stamped v26 ledger");
+        }
+
+        let deny_err = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_deny(),
+        ) {
+            Ok(_) => panic!("Deny must refuse stamped-v26 -> v27"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                deny_err,
+                MemoryError::SchemaMigrationOptInRequired { stored: 26, .. }
+            ),
+            "unexpected deny error: {deny_err}"
+        );
+        {
+            let inspect = Connection::open(&path).expect("inspect denied v26 DB");
+            assert_eq!(read_schema_version(&inspect).unwrap(), 26);
+            assert!(!was_run(&inspect, V27_SENTINEL).unwrap());
+            for (table, column) in V27_COLUMNS {
+                assert!(
+                    !column_exists(&inspect, table, column),
+                    "Deny must not add {table}.{column}"
+                );
+            }
+        }
+
+        let store = crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_allow("test:1506-v27"),
+        )
+        .expect("Allow must migrate v26 -> v27");
+        drop(store);
+
+        let verify = Connection::open(&path).expect("verify migrated v27 DB");
+        assert_eq!(read_schema_version(&verify).unwrap(), 27);
+        assert!(was_run(&verify, V27_SENTINEL).unwrap());
+        for (table, column) in V27_COLUMNS {
+            assert!(
+                column_exists(&verify, table, column),
+                "v27 must add {table}.{column}"
+            );
+        }
     }
 
     #[test]

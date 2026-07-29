@@ -9,7 +9,7 @@ use super::rerank::{
     non_empty_rerank_documents, voyage_rerank_request_body, RerankConfig, RerankProviderKind,
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
-use super::{LlmClient, ProviderSecret};
+use super::{LlmClient, ProviderSecret, PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE};
 use chrono::Utc;
 use memcore::vault::VaultKeyHealth;
 use reqwest::header::AUTHORIZATION;

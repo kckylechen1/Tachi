@@ -8,6 +8,20 @@ mod setup_report;
 mod tidy_apply;
 mod tidy_report;
 
+fn authorized_plan_sources(
+    plan: &[crate::bootstrap::TidyMigration],
+) -> std::collections::BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority> {
+    plan.iter()
+        .map(|migration| {
+            let authority = crate::physical_db_identity::PhysicalMutationAuthority::capture(
+                std::path::Path::new(&migration.source_path),
+            )
+            .expect("fixture migration source must bind to a physical object");
+            (migration.source_path.clone(), authority)
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5: fragment-DB consolidation (`tachi tidy --execute`)
 // ---------------------------------------------------------------------------

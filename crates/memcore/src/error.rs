@@ -13,6 +13,44 @@ impl std::fmt::Display for WorkClaimTransitionReason {
     }
 }
 
+/// Why a stored recall-impression group cannot be replayed by this binary.
+///
+/// This deliberately carries no query, memory, path, or score material: replay
+/// compatibility is metadata-only and callers must be able to report a refusal
+/// without turning the error path into a content surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecallReplayCompatibilityReason {
+    /// v25 groups predate policy persistence, so current math is not evidence
+    /// of their historical fusion result.
+    LegacyUnversioned,
+    /// A group has only part of the required policy tuple.
+    IncompletePolicy,
+    /// A versioned group lacks the canonical 64-character lowercase SHA-256
+    /// cohort identity, or carries a malformed value.
+    InvalidQueryFingerprint,
+    UnsupportedFusionPolicy,
+    UnsupportedPreBoostAdjustmentPolicy,
+    UnsupportedTieBreakPolicy,
+    UnsupportedCandidatePolicy,
+    UnsupportedSchemaIdentity,
+}
+
+impl std::fmt::Display for RecallReplayCompatibilityReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::LegacyUnversioned => "legacy_unversioned",
+            Self::IncompletePolicy => "incomplete_policy",
+            Self::InvalidQueryFingerprint => "invalid_query_fingerprint",
+            Self::UnsupportedFusionPolicy => "unsupported_fusion_policy",
+            Self::UnsupportedPreBoostAdjustmentPolicy => "unsupported_pre_boost_adjustment_policy",
+            Self::UnsupportedTieBreakPolicy => "unsupported_tie_break_policy",
+            Self::UnsupportedCandidatePolicy => "unsupported_candidate_policy",
+            Self::UnsupportedSchemaIdentity => "unsupported_schema_identity",
+        };
+        formatter.write_str(reason)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MemoryError {
     #[error("SQLite error: {0}")]
@@ -111,4 +149,14 @@ pub enum MemoryError {
          to bring an older schema forward)."
     )]
     DbCreateTargetExists { stored: u32, db_path: String },
+
+    /// A recall-impression group does not carry a replay policy that this
+    /// binary can execute. This is intentionally a typed, content-free
+    /// refusal: replay must not silently substitute current math for unknown
+    /// historical math.
+    #[error("recall impression replay refused for group {group_id}: {reason}")]
+    RecallReplayIncompatible {
+        group_id: String,
+        reason: RecallReplayCompatibilityReason,
+    },
 }

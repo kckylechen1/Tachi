@@ -4,7 +4,9 @@ use serde_json::json;
 
 use super::super::{atty_stdout, print_pretty_json};
 use super::apply::execute_tidy_apply;
-use super::migration::{build_migration_plan, execute_tidy_migrations, MigrationConfig};
+use super::migration::{
+    authorized_migration_sources, build_migration_plan, execute_tidy_migrations, MigrationConfig,
+};
 use super::render::{
     render_migration_plan, render_tidy_apply_summary, render_tidy_execute_summary,
     render_tidy_report,
@@ -60,6 +62,7 @@ pub(in crate::bootstrap) async fn run_tidy_command(
             .join("archive")
             .join(chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string());
         let plan = build_migration_plan(&report, &target_db, &archive_root, home);
+        let authorized_sources = authorized_migration_sources(&report);
 
         let cfg = MigrationConfig {
             target_db,
@@ -69,7 +72,7 @@ pub(in crate::bootstrap) async fn run_tidy_command(
             app_home: app_home.to_path_buf(),
         };
 
-        let summary = execute_tidy_migrations(&plan, &cfg)?;
+        let summary = execute_tidy_migrations(&plan, &cfg, &authorized_sources)?;
         drop(_lock); // explicitly release after migrations complete
 
         if json_output {

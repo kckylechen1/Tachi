@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::PathBuf;
 
 use super::super::{
@@ -25,6 +27,43 @@ pub(crate) struct MigrationConfig {
     pub app_home: PathBuf,
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn force_boundary_failure_after_archive_stage(enabled: bool) {
+    FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE.with(|flag| flag.set(enabled));
+}
+
+/// Scan-captured physical objects that may be used as migration sources.
+///
+/// The key remains the exact discovered primary alias for plan matching, but
+/// the value is the only authority accepted by the executor. A canonical path
+/// or inventory-selected `open_path` remains read-only evidence and cannot
+/// become rename/remove/archive authority.
+pub(crate) fn authorized_migration_sources(
+    report: &TidyReport,
+) -> BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority> {
+    report
+        .physical_stores
+        .iter()
+        .filter_map(|store| {
+            let eligible = report.databases.iter().any(|db| {
+                db.path == store.primary_path
+                    && db.status == "ok"
+                    && db.is_primary_alias
+                    && db.recommended_action == "review_for_legacy_migration"
+            });
+            eligible
+                .then(|| store.mutation_authority.clone())
+                .flatten()
+                .map(|authority| (store.primary_path.clone(), authority))
+        })
+        .collect()
+}
+
 /// Build the list of source DBs that are candidates for fragment-consolidation
 /// migration into a single target DB. Pure function — no I/O.
 ///
@@ -44,11 +83,30 @@ pub(crate) fn build_migration_plan(
     let target_str = target_db.to_string_lossy().to_string();
 
     for db in &report.databases {
-        if db.status != "ok" {
+        if db.status != "ok" || !db.is_primary_alias {
+            continue;
+        }
+        // Mutation authority is the exact discovered primary alias. The
+        // inventory open path may follow a symlink or select another
+        // hardlink for WAL visibility and must remain read-only evidence.
+        let source_path = db.path.as_str();
+        // An ambiguous physical store has independent live sidecar owners.
+        // It remains fully visible in the report, but no arbitrary alias can
+        // become a migration source until the owner adjudicates it.
+        let has_mutation_authority = report
+            .physical_stores
+            .iter()
+            .any(|store| store.primary_path == source_path && store.mutation_authority.is_some());
+        if !has_mutation_authority {
             continue;
         }
         // Never migrate the target onto itself.
-        if db.path == target_str {
+        if source_path == target_str
+            || crate::physical_db_identity::same_physical_file(
+                std::path::Path::new(source_path),
+                target_db,
+            )
+        {
             continue;
         }
         let should_migrate = matches!(
@@ -59,11 +117,11 @@ pub(crate) fn build_migration_plan(
             continue;
         }
 
-        let source = PathBuf::from(&db.path);
+        let source = PathBuf::from(source_path);
         let archive_path = archive_root.join(archive_relative_path(&source, home));
 
         plan.push(TidyMigration {
-            source_path: db.path.clone(),
+            source_path: source_path.to_string(),
             target_path: target_str.clone(),
             archive_path: archive_path.display().to_string(),
             scope_suggestion: db.scope_suggestion.clone(),
@@ -95,6 +153,7 @@ fn archive_relative_path(source: &std::path::Path, home: &std::path::Path) -> Pa
 pub(crate) fn execute_tidy_migrations(
     plan: &[TidyMigration],
     cfg: &MigrationConfig,
+    authorized_sources: &BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority>,
 ) -> Result<TidyExecuteSummary, Box<dyn std::error::Error>> {
     let mut outcomes = Vec::new();
     let mut migrated = 0usize;
@@ -113,15 +172,22 @@ pub(crate) fn execute_tidy_migrations(
         });
     }
 
-    // Ensure target parent exists (needed for both real run and creating a
-    // fresh empty target DB).
-    if let Some(parent) = cfg.target_db.parent() {
-        if !cfg.dry_run {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-
     for migration in plan {
+        let Some(authority) = authorized_sources.get(&migration.source_path) else {
+            failed += 1;
+            outcomes.push(TidyMigrationOutcome {
+                source_path: migration.source_path.clone(),
+                target_path: migration.target_path.clone(),
+                archive_path: None,
+                status: "failed".to_string(),
+                rows_before_target: 0,
+                rows_after_target: 0,
+                rows_copied: 0,
+                message: "invariant: tidy mutation source must hold scan-captured physical authority; read-only inventory paths and strings alone are not mutation authority".to_string(),
+            });
+            continue;
+        };
+
         // Interactive confirm.
         if cfg.interactive {
             let prompt = format!(
@@ -149,7 +215,7 @@ pub(crate) fn execute_tidy_migrations(
             }
         }
 
-        match migrate_single_db(migration, cfg) {
+        match migrate_single_db(migration, cfg, authority) {
             Ok(outcome) => {
                 if outcome.status == "migrated" {
                     migrated += 1;
@@ -199,22 +265,17 @@ pub(crate) fn execute_tidy_migrations(
 fn migrate_single_db(
     migration: &TidyMigration,
     cfg: &MigrationConfig,
+    authority: &crate::physical_db_identity::PhysicalMutationAuthority,
 ) -> Result<TidyMigrationOutcome, Box<dyn std::error::Error>> {
-    use std::collections::HashSet;
-
     let source_path = PathBuf::from(&migration.source_path);
     let target_path = cfg.target_db.clone();
 
-    let source_store = open_cli_store_read_only(&source_path)?;
-    let source_count: usize = {
-        let count: i64 =
-            source_store
-                .connection()
-                .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
-        count as usize
-    };
-
+    // Dry-run remains read-only and therefore does not acquire execution
+    // locks. Its count is advisory; the real execution path below takes the
+    // source lock before materializing the snapshot it may remove.
+    authority.revalidate_for_mutation(Some(&target_path))?;
     if cfg.dry_run {
+        let source_count = read_source_entries(&source_path)?.len();
         return Ok(TidyMigrationOutcome {
             source_path: migration.source_path.clone(),
             target_path: migration.target_path.clone(),
@@ -227,77 +288,12 @@ fn migrate_single_db(
         });
     }
 
+    if let Some(parent) = cfg.target_db.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    authority.revalidate_for_mutation(Some(&target_path))?;
     let mut target_store = open_cli_store(&target_path)?;
     let rows_before = target_store.stats(true)?.total as usize;
-
-    let existing_target_ids: HashSet<String> = {
-        let conn = target_store.connection();
-        let mut stmt = conn.prepare("SELECT id FROM memories")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?.into_iter().collect()
-    };
-
-    let mut copied = 0usize;
-    let mut newly_inserted_ids: Vec<String> = Vec::new();
-    let mut copy_err: Option<Box<dyn std::error::Error>> = None;
-
-    {
-        let conn = source_store.connection();
-        let mut stmt = conn.prepare(
-            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
-             FROM memories",
-        )?;
-        let rows = stmt.query_map([], memcore::row_to_entry)?;
-        for row in rows {
-            let entry = row?;
-            let existed_before = existing_target_ids.contains(&entry.id);
-            match target_store.upsert(&entry) {
-                Ok(()) => {
-                    if !existed_before {
-                        newly_inserted_ids.push(entry.id.clone());
-                    }
-                    copied += 1;
-                }
-                Err(e) => {
-                    copy_err = Some(Box::new(e));
-                    break;
-                }
-            }
-        }
-    }
-    // Drop the read-only source connection now — it is never used again in
-    // this function, and the archive-safety guard below probes whether some
-    // OTHER process still holds `source_path` open. Leaving this process's
-    // own connection alive across that probe would make lsof see this very
-    // call as a "holder" of the file it is about to archive-move, which
-    // (before `daemon_ownership`'s self-PID exclusion landed) made every
-    // migration look permanently `Owned` and roll back. Both layers matter:
-    // this drop removes the self-hold at its source; the self-PID exclusion
-    // in `db_ownership.rs` is defense in depth for any other call site that
-    // probes while holding its own connection.
-    drop(source_store);
-
-    if let Some(err) = copy_err {
-        // Best-effort rollback: delete rows we newly inserted in this run.
-        for id in &newly_inserted_ids {
-            let _ = target_store.delete(id);
-        }
-        return Ok(TidyMigrationOutcome {
-            source_path: migration.source_path.clone(),
-            target_path: migration.target_path.clone(),
-            archive_path: None,
-            status: "failed".to_string(),
-            rows_before_target: rows_before,
-            rows_after_target: rows_before,
-            rows_copied: 0,
-            message: format!(
-                "rolled back after {copied}/{source_count} rows ({} reverted): {err}",
-                newly_inserted_ids.len()
-            ),
-        });
-    }
-
-    let rows_after = target_store.stats(true)?.total as usize;
 
     // Source-scope lock: the caller's outer `DualDaemonLock` — acquired once
     // in `run_tidy_command` (`crates/tachi-server/src/bootstrap/tidy/command.rs:39`),
@@ -309,7 +305,8 @@ fn migrate_single_db(
     // nothing about — that daemon could start and begin writing
     // `source_path` in the window between the ownership probe below and the
     // archive-move further down. Acquire a *scoped-only* lock for
-    // `source_path` and hold it across both the probe and the archive-move.
+    // `source_path` and hold it across the ownership probe, source snapshot,
+    // target commit, archive staging, and source removal.
     //
     // Deliberately scoped-only, not another `DualDaemonLock` (do not
     // "reinstate" a legacy attempt here): the outer lock's legacy fd is
@@ -345,81 +342,138 @@ fn migrate_single_db(
             Err(crate::daemon_lock::ScopedLockError::Running { pid }) => {
                 let outcome = rollback_failed_outcome(
                     migration,
-                    &mut target_store,
-                    &newly_inserted_ids,
                     rows_before,
-                    copied,
-                    source_count,
+                    0,
+                    migration.source_row_count,
                     &format!(
                         "source DB's own daemon is running (pid {pid}, scoped lock); refusing to risk a torn archive copy"
                     ),
                 );
-                drop(target_store);
                 return Ok(outcome);
             }
             Err(crate::daemon_lock::ScopedLockError::Io(e)) => {
                 let outcome = rollback_failed_outcome(
                     migration,
-                    &mut target_store,
-                    &newly_inserted_ids,
                     rows_before,
-                    copied,
-                    source_count,
+                    0,
+                    migration.source_row_count,
                     &format!("source DB daemon lock probe failed: {e}"),
                 );
-                drop(target_store);
                 return Ok(outcome);
             }
         }
     };
 
-    // Ownership guard: the archive step below moves main/-wal/-shm as three
-    // sequential, non-atomic filesystem operations. If a live daemon still
-    // holds the source DB open — or ownership cannot be determined — that
-    // race can leave a torn archived copy. Roll back the rows we just
-    // copied into the target and fail the whole migration atomically (the
-    // same rollback path used for a mid-copy SQL error above) rather than
-    // leaving a copied-but-unarchived half-state; the source stays on disk
-    // untouched and will simply be reconsidered by the next `tidy` run.
+    // Probe ownership before this process opens the source. The scoped lock
+    // is already held, so an admitted writer cannot enter after this point;
+    // the row snapshot, archive snapshot, and removed source are therefore
+    // the same locked generation.
+    if let Err(reason) = authority.revalidate_for_mutation(Some(&target_path)) {
+        let outcome = rollback_failed_outcome(
+            migration,
+            rows_before,
+            0,
+            migration.source_row_count,
+            &reason,
+        );
+        return Ok(outcome);
+    }
     if let Some(reason) = archive_unsafe_reason(&source_path) {
         let outcome = rollback_failed_outcome(
             migration,
-            &mut target_store,
-            &newly_inserted_ids,
             rows_before,
-            copied,
-            source_count,
+            0,
+            migration.source_row_count,
             &reason,
         );
-        drop(target_store);
         return Ok(outcome);
     }
-    drop(target_store);
 
-    // Archive the source DB file. Move (rename) when possible; fall back to
-    // copy + remove across filesystems.
+    authority.revalidate_for_mutation(Some(&target_path))?;
+    let source_entries = read_source_entries(&source_path)?;
+    let source_count = source_entries.len();
+    // No target write may begin if the physical source changed while the
+    // locked snapshot was being read.
+    authority.revalidate_for_mutation(Some(&target_path))?;
+
     let archive_path = PathBuf::from(&migration.archive_path);
     if let Some(parent) = archive_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    match std::fs::rename(&source_path, &archive_path) {
-        Ok(()) => {}
-        Err(_) => {
-            std::fs::copy(&source_path, &archive_path)?;
-            std::fs::remove_file(&source_path)?;
+    // Keep every target row/projection write in one SQLite transaction until
+    // a durable archive copy exists. The live source is deliberately retained
+    // through SQLite commit: a commit failure must never strand the only good
+    // source at its archive path. Only a successful commit permits removal of
+    // the live source alias/file below.
+    let copied = source_entries.len();
+    let rows_after = match target_store.upsert_batch_with_precommit(&source_entries, |tx| {
+        // This is the last authority check before the non-atomic
+        // main/WAL/SHM archive move, while target writes remain uncommitted.
+        authority
+            .revalidate_for_mutation(Some(&target_path))
+            .map_err(memcore::MemoryError::InvalidArg)?;
+        stage_archive_copy(&source_path, &archive_path)?;
+        #[cfg(test)]
+        FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE.with(|flag| {
+            if flag.get() {
+                return Err(memcore::MemoryError::InvalidArg(
+                    "injected boundary failure after archive staging".to_string(),
+                ));
+            }
+            Ok::<(), memcore::MemoryError>(())
+        })?;
+        tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count as usize)
+        .map_err(memcore::MemoryError::from)
+    }) {
+        Ok(rows_after) => rows_after,
+        Err(memcore::MemoryError::InvalidArg(reason))
+            if reason.starts_with("invariant: mutation authority") =>
+        {
+            return Ok(rollback_failed_outcome(
+                migration,
+                rows_before,
+                copied,
+                source_count,
+                &reason,
+            ));
         }
+        Err(error) => return Err(Box::new(error)),
+    };
+
+    // SQLite is durable now. Revalidate once more before removing the live
+    // source path. A refusal or unlink failure leaves both the source and the
+    // staged archive copy intact and records an explicit failed outcome; it
+    // never claims an atomic rollback after target commit.
+    if let Err(reason) = authority.revalidate_for_mutation(Some(&target_path)) {
+        return Ok(committed_source_retained_outcome(
+            migration,
+            rows_before,
+            rows_after,
+            copied,
+            &reason,
+        ));
     }
-    // Also move sidecar WAL/SHM files if present.
+    if let Err(error) = std::fs::remove_file(&source_path) {
+        return Ok(committed_source_retained_outcome(
+            migration,
+            rows_before,
+            rows_after,
+            copied,
+            &format!("archive copy is durable but live source removal failed: {error}"),
+        ));
+    }
+    // Main source removal is the archive boundary. Sidecars are now orphaned
+    // rather than live database state; clean them best-effort and report any
+    // residue without misrepresenting the committed migration.
+    let mut sidecar_warnings = Vec::new();
     for ext in ["-wal", "-shm"] {
         let sidecar = PathBuf::from(format!("{}{ext}", source_path.display()));
         if sidecar.exists() {
-            let dst = PathBuf::from(format!("{}{ext}", archive_path.display()));
-            if let Err(e) = std::fs::rename(&sidecar, &dst).or_else(|_| {
-                std::fs::copy(&sidecar, &dst)
-                    .map(|_| ())
-                    .and_then(|_| std::fs::remove_file(&sidecar))
-            }) {
-                tracing::warn!("tidy: failed to move sidecar {}: {e}", sidecar.display());
+            if let Err(error) = std::fs::remove_file(&sidecar) {
+                sidecar_warnings.push(format!("{}: {error}", sidecar.display()));
             }
         }
     }
@@ -432,27 +486,130 @@ fn migrate_single_db(
         rows_before_target: rows_before,
         rows_after_target: rows_after,
         rows_copied: copied,
-        message: format!("migrated {copied} rows ({rows_before} -> {rows_after} on target)"),
+        message: if sidecar_warnings.is_empty() {
+            format!("migrated {copied} rows ({rows_before} -> {rows_after} on target)")
+        } else {
+            format!(
+                "migrated {copied} rows ({rows_before} -> {rows_after} on target); orphan sidecar cleanup warnings: {}",
+                sidecar_warnings.join("; ")
+            )
+        },
     })
 }
 
-/// Build a "failed, rolled back" `TidyMigrationOutcome`, deleting the rows
-/// this migration attempt newly inserted into `target_store` before
-/// reporting. Shared by every failure path downstream of a successful
-/// row-copy (source/legacy daemon-lock conflicts, the archive-safety probe)
-/// so the rollback + message shape stays identical across all of them.
+fn read_source_entries(
+    source_path: &PathBuf,
+) -> Result<Vec<memcore::MemoryEntry>, Box<dyn std::error::Error>> {
+    let source_store = open_cli_store_read_only(source_path)?;
+    let conn = source_store.connection();
+    let mut stmt = conn.prepare(
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+         FROM memories",
+    )?;
+    let rows = stmt.query_map([], memcore::row_to_entry)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn stage_archive_copy(
+    source_path: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut staged = Vec::new();
+    let result = (|| {
+        stage_one_archive_file(source_path, archive_path)?;
+        staged.push(archive_path.to_path_buf());
+        for ext in ["-wal", "-shm"] {
+            let source = PathBuf::from(format!("{}{ext}", source_path.display()));
+            if source.exists() {
+                let destination = PathBuf::from(format!("{}{ext}", archive_path.display()));
+                stage_one_archive_file(&source, &destination)?;
+                staged.push(destination);
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for path in staged.into_iter().rev() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    result
+}
+
+fn stage_one_archive_file(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(source)?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, destination)?;
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            if std::fs::metadata(source)?.is_dir() {
+                std::os::windows::fs::symlink_dir(target, destination)?;
+            } else {
+                std::os::windows::fs::symlink_file(target, destination)?;
+            }
+            return Ok(());
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "symlink archive staging is unsupported on this platform",
+            ));
+        }
+    }
+
+    let mut input = std::fs::File::open(source)?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.flush()?;
+    output.sync_all()?;
+    std::fs::set_permissions(destination, metadata.permissions())?;
+    Ok(())
+}
+
+fn committed_source_retained_outcome(
+    migration: &TidyMigration,
+    rows_before: usize,
+    rows_after: usize,
+    copied: usize,
+    reason: &str,
+) -> TidyMigrationOutcome {
+    TidyMigrationOutcome {
+        source_path: migration.source_path.clone(),
+        target_path: migration.target_path.clone(),
+        archive_path: Some(migration.archive_path.clone()),
+        status: "failed".to_string(),
+        rows_before_target: rows_before,
+        rows_after_target: rows_after,
+        rows_copied: copied,
+        message: format!(
+            "target committed and archive copy staged, but live source was retained: {reason}"
+        ),
+    }
+}
+
+/// Build a failed outcome after the caller has refused before beginning the
+/// target transaction or dropped that transaction without committing it.
+/// The phrase "rolled back" is literal: target main/FTS/vector state remains
+/// at its pre-migration snapshot even when source IDs overlap existing rows.
 fn rollback_failed_outcome(
     migration: &TidyMigration,
-    target_store: &mut memcore::MemoryStore,
-    newly_inserted_ids: &[String],
     rows_before: usize,
     copied: usize,
     source_count: usize,
     reason: &str,
 ) -> TidyMigrationOutcome {
-    for id in newly_inserted_ids {
-        let _ = target_store.delete(id);
-    }
     TidyMigrationOutcome {
         source_path: migration.source_path.clone(),
         target_path: migration.target_path.clone(),
@@ -462,8 +619,7 @@ fn rollback_failed_outcome(
         rows_after_target: rows_before,
         rows_copied: 0,
         message: format!(
-            "rolled back after {copied}/{source_count} rows ({} reverted): {reason}",
-            newly_inserted_ids.len()
+            "rolled back atomically before target commit after {copied}/{source_count} rows: {reason}"
         ),
     }
 }

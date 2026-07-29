@@ -28,7 +28,7 @@ pub(super) async fn run_cli_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Serve => Ok(()),
-        Commands::RecallCoverage { .. } => Err(
+        Commands::RecallCoverage(_) => Err(
             "recall coverage invariant: recall-coverage must run through the explicit in-process read-only route before generic CLI tool dispatch"
                 .into(),
         ),
