@@ -69,9 +69,11 @@ impl ProviderAuthProbeResult {
     }
 }
 
-/// Public-safe receipt for one successful provider HTTP completion. It names
-/// the endpoint and provider-reported identity, but deliberately never carries
-/// a secret value, request body, or response body.
+/// Internal receipt for one successful provider HTTP completion. It names the
+/// endpoint and provider-reported identity, but deliberately never carries a
+/// secret value, request body, or response body. Persisted provenance must use
+/// [`PersistedModelInvocationReceiptV1`] instead: that type has a deliberately
+/// closed serialization allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderInvocationReceipt {
     pub effective_provider: String,
@@ -85,6 +87,152 @@ pub struct ProviderInvocationReceipt {
     pub latency_ms: u128,
 }
 
+/// Stable schema tag for model-execution provenance written by downstream
+/// artifact producers.
+pub const MODEL_INVOCATION_SCHEMA_V1: &str = "model-invocation-v1";
+
+/// Typed failure returned when a provider marks a completion as truncated.
+///
+/// The receipt still identifies that invocation, but callers must not parse or
+/// persist its output as a clean model-derived artifact.
+pub const LLM_OUTPUT_TRUNCATED: &str = "llm_output_truncated";
+
+/// Chat lane recorded in durable model-invocation provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInvocationLaneV1 {
+    Extract,
+    Distill,
+    Reasoning,
+    Summary,
+}
+
+/// Execution engine recorded in durable model-invocation provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEngineKindV1 {
+    ProviderHttp,
+    ClaudeCli,
+}
+
+/// Whether the serving engine exposed a trustworthy completion signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionStatusV1 {
+    Complete,
+    Truncated,
+    Unknown,
+}
+
+/// Public-safe, schema-versioned model invocation receipt for durable
+/// provenance.
+///
+/// This is intentionally *not* a serialization derive on
+/// [`ProviderInvocationReceipt`]. Its fields are an explicit allowlist: no
+/// prompt/output content, request/response body, endpoint, credential, key
+/// identifier, raw provider detail, or vault identity can enter persistence by
+/// adding a field to an internal transport receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistedModelInvocationReceiptV1 {
+    pub schema: &'static str,
+    pub lane: ModelInvocationLaneV1,
+    pub engine_kind: ModelEngineKindV1,
+    pub effective_provider: Option<String>,
+    pub effective_model: Option<String>,
+    pub effective_version: Option<String>,
+    pub fallback_chain: Vec<String>,
+    pub degraded: bool,
+    pub completion_status: CompletionStatusV1,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub latency_ms: Option<u64>,
+}
+
+impl PersistedModelInvocationReceiptV1 {
+    const MAX_FALLBACK_CHAIN_ENTRIES: usize = 4;
+
+    /// Convert the internal provider receipt at the durable boundary. Existing
+    /// fallback labels are intentionally collapsed to a fixed routing marker:
+    /// producer/provider error text must never become durable provenance.
+    pub fn from_provider_http(
+        lane: ModelInvocationLaneV1,
+        receipt: ProviderInvocationReceipt,
+        truncated: bool,
+    ) -> Self {
+        let fallback_chain = receipt
+            .fallback_chain
+            .iter()
+            .take(Self::MAX_FALLBACK_CHAIN_ENTRIES)
+            .map(|_| "provider_http_fallback".to_string())
+            .collect();
+        Self {
+            schema: MODEL_INVOCATION_SCHEMA_V1,
+            lane,
+            engine_kind: ModelEngineKindV1::ProviderHttp,
+            effective_provider: non_empty(receipt.effective_provider),
+            effective_model: receipt.effective_model.and_then(non_empty),
+            effective_version: receipt.effective_version.and_then(non_empty),
+            fallback_chain,
+            degraded: receipt.degraded,
+            completion_status: if truncated {
+                CompletionStatusV1::Truncated
+            } else {
+                CompletionStatusV1::Complete
+            },
+            prompt_tokens: receipt.prompt_tokens,
+            completion_tokens: receipt.completion_tokens,
+            total_tokens: receipt.total_tokens,
+            latency_ms: Some(receipt.latency_ms.min(u128::from(u64::MAX)) as u64),
+        }
+    }
+
+    /// Claude CLI has no authoritative model, token, version, or completion
+    /// fields in its text protocol. Preserve that uncertainty rather than
+    /// projecting configured values into the durable receipt.
+    pub fn claude_cli_reasoning(latency_ms: u128) -> Self {
+        Self {
+            schema: MODEL_INVOCATION_SCHEMA_V1,
+            lane: ModelInvocationLaneV1::Reasoning,
+            engine_kind: ModelEngineKindV1::ClaudeCli,
+            effective_provider: Some("anthropic_cli".to_string()),
+            effective_model: None,
+            effective_version: None,
+            fallback_chain: Vec::new(),
+            degraded: false,
+            completion_status: CompletionStatusV1::Unknown,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            latency_ms: Some(latency_ms.min(u128::from(u64::MAX)) as u64),
+        }
+    }
+
+    /// The CLI failure/skip detail stays transient. Durable provenance records
+    /// only the fixed fact that provider HTTP served a CLI-first request.
+    pub fn mark_claude_cli_to_provider_http_fallback(&mut self) {
+        self.degraded = true;
+        if self.fallback_chain.len() < Self::MAX_FALLBACK_CHAIN_ENTRIES {
+            self.fallback_chain
+                .push("claude_cli_to_provider_http".to_string());
+        }
+    }
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// A parsed or text model result paired with the one persisted receipt for the
+/// invocation that produced it. It is the receipt-preserving API boundary for
+/// downstream producers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generated<T> {
+    pub value: T,
+    pub invocation: PersistedModelInvocationReceiptV1,
+}
+
 /// Completion text plus its public-safe execution receipt. Consumers that
 /// persist a report must deliberately retain only the receipt when the text is
 /// not itself an approved output surface.
@@ -93,6 +241,22 @@ pub struct ProviderInvocationOutcome {
     pub text: String,
     pub truncated: bool,
     pub receipt: ProviderInvocationReceipt,
+}
+
+impl ProviderInvocationOutcome {
+    /// Convert an internal transport outcome into the explicitly allowlisted
+    /// durable receipt shape. This consumes the raw transport receipt so a
+    /// producer cannot accidentally serialize it instead.
+    pub fn into_generated(self, lane: ModelInvocationLaneV1) -> Generated<String> {
+        Generated {
+            invocation: PersistedModelInvocationReceiptV1::from_provider_http(
+                lane,
+                self.receipt,
+                self.truncated,
+            ),
+            value: self.text,
+        }
+    }
 }
 
 /// Public-safe failure classes for spend-aware provider calls. These values
@@ -240,6 +404,100 @@ impl KeyAvailability {
             Self::Disabled => "disabled",
             Self::Exhausted => "exhausted",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_model_invocation_receipts_are_schema_stable_and_secret_negative() {
+        let provider = PersistedModelInvocationReceiptV1::from_provider_http(
+            ModelInvocationLaneV1::Extract,
+            ProviderInvocationReceipt {
+                effective_provider: "provider.fixture.test".to_string(),
+                effective_model: Some("served-model-v1".to_string()),
+                effective_version: Some("served-version-v1".to_string()),
+                fallback_chain: vec![
+                    "raw provider error Bearer fixture-secret-value".to_string(),
+                    "https://credential.example/v1/chat/completions".to_string(),
+                    "api-key-id=fixture-key-id".to_string(),
+                    "response body fixture-response-body".to_string(),
+                    "must be bounded away".to_string(),
+                ],
+                degraded: true,
+                prompt_tokens: Some(7),
+                completion_tokens: Some(3),
+                total_tokens: Some(10),
+                latency_ms: u128::from(u64::MAX) + 1,
+            },
+            false,
+        );
+        let cli = PersistedModelInvocationReceiptV1::claude_cli_reasoning(41);
+        let mut cli_to_http = provider.clone();
+        cli_to_http.mark_claude_cli_to_provider_http_fallback();
+
+        let expected_keys = [
+            "schema",
+            "lane",
+            "engine_kind",
+            "effective_provider",
+            "effective_model",
+            "effective_version",
+            "fallback_chain",
+            "degraded",
+            "completion_status",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "latency_ms",
+        ];
+        for receipt in [provider.clone(), cli.clone(), cli_to_http] {
+            let value = serde_json::to_value(&receipt).expect("receipt must serialize");
+            let object = value.as_object().expect("receipt serializes as object");
+            assert_eq!(
+                object.len(),
+                expected_keys.len(),
+                "closed allowlist changed"
+            );
+            for key in expected_keys {
+                assert!(object.contains_key(key), "missing allowlisted key {key}");
+            }
+            let serialized = serde_json::to_string(&receipt).expect("receipt JSON");
+            for forbidden in [
+                "fixture-secret-value",
+                "fixture-key-id",
+                "fixture-response-body",
+                "https://credential.example",
+                "raw provider error",
+                "api-key-id",
+                "prompt.md",
+                "Authorization",
+            ] {
+                assert!(
+                    !serialized.contains(forbidden),
+                    "persisted receipt leaked forbidden marker {forbidden}: {serialized}"
+                );
+            }
+            assert_eq!(receipt.schema, MODEL_INVOCATION_SCHEMA_V1);
+        }
+
+        assert_eq!(
+            provider.fallback_chain,
+            vec![
+                "provider_http_fallback".to_string(),
+                "provider_http_fallback".to_string(),
+                "provider_http_fallback".to_string(),
+                "provider_http_fallback".to_string(),
+            ],
+            "raw fallback detail must collapse to bounded predefined labels"
+        );
+        assert_eq!(provider.latency_ms, Some(u64::MAX));
+        assert_eq!(cli.engine_kind, ModelEngineKindV1::ClaudeCli);
+        assert_eq!(cli.completion_status, CompletionStatusV1::Unknown);
+        assert!(cli.effective_model.is_none());
+        assert!(cli.completion_tokens.is_none());
     }
 }
 

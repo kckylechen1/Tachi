@@ -7,8 +7,9 @@ use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
 use super::super::provider_health::{
-    ChatLane, ChatLaneConfig, ProviderInvocationFailure, ProviderInvocationFailureClass,
-    ProviderInvocationOutcome, ProviderInvocationReceipt, SelectedProviderSecret,
+    ChatLane, ChatLaneConfig, Generated, ModelInvocationLaneV1, ProviderInvocationFailure,
+    ProviderInvocationFailureClass, ProviderInvocationOutcome, ProviderInvocationReceipt,
+    SelectedProviderSecret,
 };
 
 #[derive(Clone, Copy)]
@@ -73,6 +74,22 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        self.call_extract_llm_with_receipt(system, user, model, temperature, max_tokens)
+            .await
+            .map(|generated| generated.value)
+    }
+
+    /// Extract-lane completion paired with its explicit, persisted-safe model
+    /// invocation receipt. The text-only sibling above remains a compatibility
+    /// adapter for callers that do not own durable provenance.
+    pub async fn call_extract_llm_with_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<Generated<String>, String> {
         self.call_lane_llm(
             ChatLane::Extract,
             system,
@@ -82,7 +99,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|outcome| outcome.text)
+        .map(|outcome| outcome.into_generated(ModelInvocationLaneV1::Extract))
     }
 
     /// Foundry batch distill and single-group fallback when
@@ -95,6 +112,21 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        self.call_distill_llm_with_receipt(system, user, model, temperature, max_tokens)
+            .await
+            .map(|generated| generated.value)
+    }
+
+    /// Distill-lane completion paired with its persisted-safe invocation
+    /// receipt. This does not change lane/model selection.
+    pub async fn call_distill_llm_with_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<Generated<String>, String> {
         self.call_lane_llm(
             ChatLane::Distill,
             system,
@@ -104,7 +136,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|outcome| outcome.text)
+        .map(|outcome| outcome.into_generated(ModelInvocationLaneV1::Distill))
     }
 
     /// Reasoning-lane HTTP call with **no** Claude-CLI-first behavior — a
@@ -197,6 +229,21 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        self.call_summary_llm_with_receipt(system, user, model, temperature, max_tokens)
+            .await
+            .map(|generated| generated.value)
+    }
+
+    /// Summary-lane completion paired with its persisted-safe invocation
+    /// receipt. Text/error compatibility remains in `call_summary_llm`.
+    pub async fn call_summary_llm_with_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<Generated<String>, String> {
         self.call_lane_llm(
             ChatLane::Summary,
             system,
@@ -206,7 +253,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|outcome| outcome.text)
+        .map(|outcome| outcome.into_generated(ModelInvocationLaneV1::Summary))
     }
 
     /// Returns `(text, truncated)` — `truncated` is `true` when the

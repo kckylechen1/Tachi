@@ -19,9 +19,11 @@ pub use chat_lanes::ReasoningOutcome;
 pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
 pub use provider_health::ProviderSecret;
 pub use provider_health::{
-    ChatLaneConfig, LaneFallbackConfig, ProviderAuthProbeClass, ProviderAuthProbeFamily,
-    ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
-    ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderRuntimeConfig,
+    ChatLaneConfig, CompletionStatusV1, Generated, LaneFallbackConfig, ModelEngineKindV1,
+    ModelInvocationLaneV1, PersistedModelInvocationReceiptV1, ProviderAuthProbeClass,
+    ProviderAuthProbeFamily, ProviderAuthProbeResult, ProviderInvocationFailure,
+    ProviderInvocationFailureClass, ProviderInvocationOutcome, ProviderInvocationReceipt,
+    ProviderRuntimeConfig, LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
 };
 use provider_health::{
     ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState, ProviderState,
