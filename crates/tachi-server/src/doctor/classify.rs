@@ -70,14 +70,10 @@ pub(super) fn classify_one_with_provider(
         };
     }
 
-    // 3. Try a read-only, immutable open (no WAL writes).
-    //    URI form: file:<path>?mode=ro&immutable=1
-    let uri = make_immutable_uri(path);
-
-    // Register sqlite-vec extension before opening so vec_version()/virtual table reads work.
-    memcore::db::register_sqlite_vec();
-
-    let conn = match memcore::db::open_immutable_readonly(&uri) {
+    // 3. Open read-only without `immutable=1`. Immutable SQLite handles ignore
+    // committed WAL frames, so they undercount a healthy live store. The
+    // shared inventory opener cannot create/migrate a DB or mutate authority.
+    let conn = match crate::physical_db_identity::open_read_only_connection(path) {
         Ok(c) => c,
         Err(e) => {
             return DoctorFinding {

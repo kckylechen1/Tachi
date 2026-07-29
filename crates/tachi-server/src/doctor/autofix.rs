@@ -1,6 +1,7 @@
 use chrono::Utc;
 #[cfg(all(test, unix))]
 use std::cell::Cell;
+use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -21,29 +22,83 @@ thread_local! {
 
 // ─── Auto-fix ────────────────────────────────────────────────────────────────
 
-/// Apply the SAFE auto-fix categories: quarantine placeholders, copy-checkpoint
-/// WAL orphans. Returns the action log. `quarantine_root` is created if needed.
-pub fn auto_fix_safe(findings: &[DoctorFinding], quarantine_root: &Path) -> Vec<AutoFixAction> {
+pub(crate) fn auto_fix_authorized(
+    findings: &[DoctorFinding],
+    authorities: &BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority>,
+    quarantine_root: &Path,
+) -> Vec<AutoFixAction> {
+    let mut actions = Vec::new();
+    let mut authorized_findings = Vec::new();
+
+    for f in findings {
+        let Some(authority) = authorities.get(&f.path) else {
+            if matches!(
+                f.classification,
+                DbClassification::Placeholder | DbClassification::WalOrphan
+            ) {
+                actions.push(AutoFixAction {
+                    path: f.path.clone(),
+                    action: "doctor_autofix".to_string(),
+                    outcome: "skipped".to_string(),
+                    note:
+                        "invariant: doctor mutation path must hold scan-captured physical authority"
+                            .to_string(),
+                    destination: None,
+                });
+            }
+            continue;
+        };
+
+        if let Err(reason) = authority.revalidate_for_mutation(None) {
+            actions.push(AutoFixAction {
+                path: f.path.clone(),
+                action: "doctor_autofix".to_string(),
+                outcome: "skipped".to_string(),
+                note: reason,
+                destination: None,
+            });
+            continue;
+        }
+
+        authorized_findings.push((f.clone(), authority.clone()));
+    }
+    actions.extend(apply_explicitly_authorized(
+        &authorized_findings,
+        quarantine_root,
+    ));
+    actions
+}
+
+fn apply_explicitly_authorized(
+    findings: &[(
+        DoctorFinding,
+        crate::physical_db_identity::PhysicalMutationAuthority,
+    )],
+    quarantine_root: &Path,
+) -> Vec<AutoFixAction> {
     let mut actions = Vec::new();
     let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
 
-    for f in findings {
+    for (f, authority) in findings {
         match f.classification {
             DbClassification::Placeholder => {
                 let dest_dir = quarantine_root.join("placeholders").join(&ts);
-                let action = quarantine_placeholder(&f.path, &dest_dir);
+                let action = quarantine_placeholder_authorized(authority, &dest_dir);
                 actions.push(action);
             }
             DbClassification::WalOrphan => {
-                let action = checkpoint_wal_copy(&f.path);
+                let action = checkpoint_wal_copy_authorized(authority);
                 actions.push(action);
             }
             _ => {}
         }
     }
-    actions.extend(plan_c_alias_retirement_actions(findings.iter().filter(
-        |finding| plan_c_alias_retirement_allowed(finding.classification),
-    )));
+    actions.extend(plan_c_alias_retirement_actions(
+        findings
+            .iter()
+            .map(|(finding, _)| finding)
+            .filter(|finding| plan_c_alias_retirement_allowed(finding.classification)),
+    ));
     actions
 }
 
@@ -380,8 +435,12 @@ mod tests {
     }
 }
 
-fn quarantine_placeholder(src: &str, dest_dir: &Path) -> AutoFixAction {
-    let src_path = Path::new(src);
+fn quarantine_placeholder_authorized(
+    authority: &crate::physical_db_identity::PhysicalMutationAuthority,
+    dest_dir: &Path,
+) -> AutoFixAction {
+    let src_path = authority.discovered_path();
+    let src = src_path.display().to_string();
     let basename = src_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -395,7 +454,16 @@ fn quarantine_placeholder(src: &str, dest_dir: &Path) -> AutoFixAction {
             destination: None,
         };
     }
-    let dest = dest_dir.join(quarantine_dest_filename(src, basename));
+    let dest = dest_dir.join(quarantine_dest_filename(&src, basename));
+    if let Err(reason) = authority.revalidate_for_mutation(None) {
+        return AutoFixAction {
+            path: src,
+            action: "quarantine_placeholder".to_string(),
+            outcome: "skipped".to_string(),
+            note: reason,
+            destination: None,
+        };
+    }
     match fs::rename(src_path, &dest) {
         Ok(_) => AutoFixAction {
             path: src.to_string(),
@@ -449,8 +517,11 @@ fn stable_hash(value: &str) -> u64 {
     hash
 }
 
-fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
-    let src_path = Path::new(src);
+fn checkpoint_wal_copy_authorized(
+    authority: &crate::physical_db_identity::PhysicalMutationAuthority,
+) -> AutoFixAction {
+    let src_path = authority.discovered_path();
+    let src = src_path.display().to_string();
 
     // Liveness guard: if a daemon is currently holding this DB, copying
     // the three files (main + -wal + -shm) non-atomically produces a
@@ -464,7 +535,7 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
     match daemon_ownership(src_path) {
         DbOwnership::Owned => {
             return AutoFixAction {
-                path: src.to_string(),
+                path: src.clone(),
                 action: "checkpoint_wal_copy".to_string(),
                 outcome: "skipped".to_string(),
                 note: "live daemon holds this DB; refuse to make a torn copy".to_string(),
@@ -473,7 +544,7 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
         }
         DbOwnership::Unknown(reason) => {
             return AutoFixAction {
-                path: src.to_string(),
+                path: src.clone(),
                 action: "checkpoint_wal_copy".to_string(),
                 outcome: "skipped".to_string(),
                 note: format!(
@@ -485,6 +556,16 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
         DbOwnership::NotOwned => {}
     }
 
+    if let Err(reason) = authority.revalidate_for_mutation(None) {
+        return AutoFixAction {
+            path: src,
+            action: "checkpoint_wal_copy".to_string(),
+            outcome: "skipped".to_string(),
+            note: reason,
+            destination: None,
+        };
+    }
+
     // Collision-resistant destination: timestamp (µs) + short uuid so two
     // runs in the same second cannot share a path. Pattern stays
     // `.checkpointed.<stamp>.db` for scan/GC recognition.
@@ -492,7 +573,7 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
         Ok(p) => p,
         Err(e) => {
             return AutoFixAction {
-                path: src.to_string(),
+                path: src.clone(),
                 action: "checkpoint_wal_copy".to_string(),
                 outcome: "error".to_string(),
                 note: format!("copy main: {e}"),
@@ -517,7 +598,8 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
     // must block success. Do not open/checkpoint an incomplete main-only copy.
     if wal.exists() {
         if let Err(e) = fs::copy(&wal, &wal_dest) {
-            let (action, skip_gc) = checkpoint_failure_action(src, &dest, format!("copy wal: {e}"));
+            let (action, skip_gc) =
+                checkpoint_failure_action(&src, &dest, format!("copy wal: {e}"));
             return finish_checkpoint_action(src_path, action, skip_gc);
         }
     }
@@ -554,7 +636,7 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
             match memcore::db::checkpoint_wal_truncate(&conn) {
                 Ok(_) => (
                     AutoFixAction {
-                        path: src.to_string(),
+                        path: src.clone(),
                         action: "checkpoint_wal_copy".to_string(),
                         outcome: "ok".to_string(),
                         note: format!(
@@ -565,16 +647,30 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
                     false,
                 ),
                 Err(e) => checkpoint_failure_action(
-                    src,
+                    &src,
                     &dest,
                     format!("wal_checkpoint failed on copy: {e}; {shm_token}"),
                 ),
             }
         }
-        Err(e) => checkpoint_failure_action(src, &dest, format!("open copy: {e}; {shm_token}")),
+        Err(e) => checkpoint_failure_action(&src, &dest, format!("open copy: {e}; {shm_token}")),
     };
 
     finish_checkpoint_action(src_path, result, skip_gc)
+}
+
+#[cfg(test)]
+fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
+    match crate::physical_db_identity::PhysicalMutationAuthority::capture(Path::new(src)) {
+        Ok(authority) => checkpoint_wal_copy_authorized(&authority),
+        Err(reason) => AutoFixAction {
+            path: src.to_string(),
+            action: "checkpoint_wal_copy".to_string(),
+            outcome: "skipped".to_string(),
+            note: reason,
+            destination: None,
+        },
+    }
 }
 
 /// GC after a checkpoint attempt, unless cleanup left a stuck ordinary

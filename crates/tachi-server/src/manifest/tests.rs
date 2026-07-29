@@ -33,6 +33,7 @@ fn mk_report(findings: Vec<DoctorFinding>) -> DoctorReport {
     DoctorReport {
         scanned_roots: vec![],
         findings,
+        physical_stores: vec![],
         summary: SummaryByClass::default(),
         warnings: vec![],
         auto_fix_actions: vec![],

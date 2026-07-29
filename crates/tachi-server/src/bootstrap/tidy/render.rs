@@ -5,11 +5,34 @@ pub(super) fn render_tidy_report(report: &TidyReport) -> String {
         "tachi tidy".to_string(),
         format!("scanned roots: {}", report.scanned_roots.join(", ")),
         format!(
-            "found {} databases, {} memories",
-            report.total_databases, report.total_memories
+            "found {} physical databases, {} resolved aliases, {} unresolved paths, {} path appearances, {} memories",
+            report.total_databases,
+            report.resolved_aliases,
+            report.unresolved_paths,
+            report.path_appearances,
+            report.total_memories
         ),
         String::new(),
     ];
+
+    if !report.physical_stores.is_empty() {
+        lines.push("Physical stores:".to_string());
+        for store in &report.physical_stores {
+            lines.push(format!(
+                "  - {} [{}] aliases={} open_path={} basis={} mutation_state={}",
+                store.canonical_path,
+                store.physical_id,
+                store.aliases.len(),
+                store.open_path,
+                store.open_path_basis.as_str(),
+                store.mutation_state.as_str()
+            ));
+            for sidecar_path in &store.sidecar_paths {
+                lines.push(format!("      sidecar-visible: {sidecar_path}"));
+            }
+        }
+        lines.push(String::new());
+    }
 
     for db in &report.databases {
         let emoji = if db.status == "ok" { "✅" } else { "⚠️" };
@@ -21,6 +44,19 @@ pub(super) fn render_tidy_report(report: &TidyReport) -> String {
             "{emoji} {} — entries: {count}, suggest: {}, action: {}, vectors: {}, status: {}",
             db.path, db.scope_suggestion, db.recommended_action, db.vec_available, db.status
         ));
+        if let Some(physical_id) = &db.physical_id {
+            lines.push(format!(
+                "   physical_id={physical_id} primary_alias={} canonical={}",
+                db.is_primary_alias,
+                db.canonical_path.as_deref().unwrap_or("<unknown>")
+            ));
+            if let Some(open_path) = &db.inventory_open_path {
+                lines.push(format!("   inventory_open_path={open_path}"));
+            }
+        }
+        if let Some(kind) = db.open_failure_kind {
+            lines.push(format!("   inventory_failure={}", kind.as_str()));
+        }
         if db.is_symlink {
             let target = db
                 .symlink_target
