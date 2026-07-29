@@ -7,13 +7,18 @@
 use std::error::Error;
 use std::path::Path;
 
-use memcore::{run_recall_coverage_probe, MemoryStore, RecallCoverageOptions};
+use memcore::{
+    format_recall_coverage_human, run_recall_coverage_probe, run_recall_coverage_probe_with_corpus,
+    MemoryStore, RecallCoverageEquivalenceCorpus, RecallCoverageOptions,
+};
 
 pub(super) fn run_recall_coverage_command(
     db: &Path,
     top_k: Option<usize>,
     candidates_per_channel: Option<usize>,
     limit: Option<usize>,
+    equivalence_file: Option<&Path>,
+    human: bool,
 ) -> Result<(), Box<dyn Error>> {
     let db = db.to_str().ok_or_else(|| {
         format!(
@@ -32,7 +37,25 @@ pub(super) fn run_recall_coverage_command(
     if let Some(candidates_per_channel) = candidates_per_channel {
         options.candidates_per_channel = candidates_per_channel;
     }
-    let report = run_recall_coverage_probe(&store, options)?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    let equivalence_corpus = equivalence_file
+        .map(
+            |path| -> Result<RecallCoverageEquivalenceCorpus, Box<dyn Error>> {
+                let encoded = std::fs::read_to_string(path)?;
+                let corpus: RecallCoverageEquivalenceCorpus = serde_json::from_str(&encoded)?;
+                corpus.validate()?;
+                Ok(corpus)
+            },
+        )
+        .transpose()?;
+    let report = if let Some(corpus) = equivalence_corpus.as_ref() {
+        run_recall_coverage_probe_with_corpus(&store, options, corpus)?
+    } else {
+        run_recall_coverage_probe(&store, options)?
+    };
+    if human {
+        print!("{}", format_recall_coverage_human(&report));
+    } else {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
     Ok(())
 }

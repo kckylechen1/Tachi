@@ -74,8 +74,21 @@ fn raw_below_floor_dropped_from_vector_channel_but_reachable_via_fts() {
         ..Default::default()
     };
 
-    let (candidates, _) =
-        collect_candidates(&conn, "quasar nebula probe", &opts, false, None, false).unwrap();
+    let (candidates, _) = collect_candidates(
+        &conn,
+        "quasar nebula probe",
+        &opts,
+        false,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        candidates.observed_evidence.is_none(),
+        "normal candidate collection must not allocate or populate observer evidence"
+    );
 
     assert!(
         !candidates.vec_scores.contains_key("raw-weak"),
@@ -123,7 +136,7 @@ fn consolidated_tier_unaffected_by_raw_vector_floor() {
     };
 
     let (candidates, _) =
-        collect_candidates(&conn, "quasar nebula", &opts, false, None, false).unwrap();
+        collect_candidates(&conn, "quasar nebula", &opts, false, None, false, None).unwrap();
 
     assert!(
         candidates.vec_scores.contains_key("consolidated-weak"),
@@ -186,7 +199,8 @@ fn vector_only_rows_below_floor_are_dropped_in_every_tier_before_access_or_recor
     }
 
     let opts = vector_only_floor_opts(query_vec, true);
-    let (candidates, _) = collect_candidates(&conn, query, &opts, false, None, false).unwrap();
+    let (candidates, _) =
+        collect_candidates(&conn, query, &opts, false, None, false, None).unwrap();
     for id in [
         "raw-vector-only",
         "consolidated-vector-only",
@@ -286,7 +300,7 @@ fn fts_symbolic_and_exact_id_evidence_bypass_vector_only_floor() {
     );
     let fts_opts = vector_only_floor_opts(query_vec.clone(), false);
     let (fts_candidates, _) =
-        collect_candidates(&conn, "eclipse", &fts_opts, false, None, false).unwrap();
+        collect_candidates(&conn, "eclipse", &fts_opts, false, None, false, None).unwrap();
     assert!(fts_candidates.fts_scores.contains_key("fts-evidence"));
     assert!(
         hybrid_search(&conn, "eclipse", &fts_opts)
@@ -302,8 +316,16 @@ fn fts_symbolic_and_exact_id_evidence_bypass_vector_only_floor() {
     symbolic.vector = Some(weak_doc_vec.clone());
     upsert(&mut conn, &symbolic, true).unwrap();
     let symbolic_opts = vector_only_floor_opts(query_vec.clone(), false);
-    let (symbolic_candidates, _) =
-        collect_candidates(&conn, "topicalpha", &symbolic_opts, false, None, false).unwrap();
+    let (symbolic_candidates, _) = collect_candidates(
+        &conn,
+        "topicalpha",
+        &symbolic_opts,
+        false,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
     assert!(
         !symbolic_candidates
             .fts_scores
@@ -330,7 +352,7 @@ fn fts_symbolic_and_exact_id_evidence_bypass_vector_only_floor() {
     );
     let exact_opts = vector_only_floor_opts(query_vec, false);
     let (exact_candidates, _) =
-        collect_candidates(&conn, exact_id, &exact_opts, false, None, false).unwrap();
+        collect_candidates(&conn, exact_id, &exact_opts, false, None, false, None).unwrap();
     assert_eq!(exact_candidates.exact_id.as_deref(), Some(exact_id));
     let exact_results = hybrid_search(&conn, exact_id, &exact_opts).unwrap();
     assert!(
@@ -386,7 +408,8 @@ fn rich_query_abstains_on_one_term_noise_but_keeps_multi_term_partial_recall() {
         ..Default::default()
     };
     let query = "orbital telescope mirror alignment calibration";
-    let (candidates, _) = collect_candidates(&conn, query, &opts, false, None, false).unwrap();
+    let (candidates, _) =
+        collect_candidates(&conn, query, &opts, false, None, false, None).unwrap();
     assert!(
         candidates.fts_scores.contains_key("multi-term-target"),
         "the qualified multi-term partial target must enter through OR fallback"
