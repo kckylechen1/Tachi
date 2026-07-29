@@ -2224,7 +2224,7 @@ mod tests {
                 "v26 group schema must contain {column}"
             );
         }
-        let (legacy_bucket, fingerprint, fusion, adjustment, tie_break, candidate, schema): (
+        type LegacyReplayRow = (
             String,
             Option<String>,
             Option<String>,
@@ -2232,7 +2232,9 @@ mod tests {
             Option<String>,
             Option<String>,
             Option<String>,
-        ) = verify
+        );
+        let (legacy_bucket, fingerprint, fusion, adjustment, tie_break, candidate, schema):
+            LegacyReplayRow = verify
             .query_row(
                 "SELECT legacy_query_bucket, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity FROM recall_impression_groups WHERE group_id = 'v25-group'",
                 [],
