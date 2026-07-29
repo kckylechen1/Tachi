@@ -1,5 +1,244 @@
 use super::*;
 
+fn confirmed_contradiction_edges(
+    source_id: &str,
+    target_id: &str,
+    completion_status: &str,
+) -> (MemoryEdge, MemoryEdge, String) {
+    let at = "2026-07-30T01:02:03Z".to_string();
+    let metadata = json!({
+        "auto_contradiction": true,
+        "llm_verified": true,
+        "confidence": 0.88,
+        "reason": "newer fact conflicts",
+        "provenance": {
+            "model_invocation": {
+                "schema": "model-invocation-v1",
+                "lane": "extract",
+                "engine_kind": "provider_http",
+                "effective_provider": "test-provider",
+                "effective_model": "test-model",
+                "effective_version": null,
+                "fallback_chain": [],
+                "degraded": false,
+                "completion_status": completion_status,
+                "prompt_tokens": 12,
+                "completion_tokens": 4,
+                "total_tokens": 16,
+                "latency_ms": 9
+            }
+        }
+    });
+    let edge = |relation: &str| MemoryEdge {
+        source_id: source_id.to_string(),
+        target_id: target_id.to_string(),
+        relation: relation.to_string(),
+        weight: 0.88,
+        metadata: metadata.clone(),
+        created_at: at.clone(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+    (edge("contradicts"), edge("supersedes"), at)
+}
+
+fn assert_no_contradiction_mutation(conn: &Connection, target_id: &str) {
+    let edge_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_edges WHERE relation IN ('contradicts', 'supersedes')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let observation_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edge_observations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let state: (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT superseded_by, valid_until FROM memories WHERE id = ?1",
+            [target_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(edge_count, 0, "failed mutation must leave no graph rows");
+    assert_eq!(
+        observation_count, 0,
+        "failed mutation must leave no edge observations"
+    );
+    assert_eq!(state, (None, None), "failed mutation must not supersede");
+}
+
+#[test]
+fn confirmed_contradiction_transaction_commits_edges_observations_and_lifecycle() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("confirmed-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("confirmed-old", "old fact"), false).unwrap();
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("confirmed-new", "confirmed-old", "complete");
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at).unwrap();
+    tx.commit().unwrap();
+
+    let edge_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_edges WHERE source_id = 'confirmed-new' AND target_id = 'confirmed-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let observation_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM edge_observations WHERE source_id = 'confirmed-new' AND target_id = 'confirmed-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let state: (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT superseded_by, valid_until FROM memories WHERE id = 'confirmed-old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(edge_count, 2);
+    assert_eq!(observation_count, 2);
+    assert_eq!(state.0.as_deref(), Some("confirmed-new"));
+    assert_eq!(state.1.as_deref(), Some("2026-07-30T01:02:03.000Z"));
+}
+
+#[test]
+fn confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary() {
+    let faults = [
+        (
+            "first_edge",
+            "CREATE TEMP TRIGGER fail_confirmed_first BEFORE INSERT ON memory_edges \
+             WHEN NEW.relation = 'contradicts' BEGIN SELECT RAISE(ABORT, 'first edge'); END;",
+        ),
+        (
+            "second_edge",
+            "CREATE TEMP TRIGGER fail_confirmed_second BEFORE INSERT ON memory_edges \
+             WHEN NEW.relation = 'supersedes' BEGIN SELECT RAISE(ABORT, 'second edge'); END;",
+        ),
+        (
+            "lifecycle",
+            "CREATE TEMP TRIGGER fail_confirmed_lifecycle BEFORE UPDATE OF superseded_by ON memories \
+             BEGIN SELECT RAISE(ABORT, 'lifecycle'); END;",
+        ),
+    ];
+
+    for (fault_name, trigger) in faults {
+        let mut conn = make_conn();
+        upsert(&mut conn, &make_entry("rollback-new", "new fact"), false).unwrap();
+        upsert(&mut conn, &make_entry("rollback-old", "old fact"), false).unwrap();
+        conn.execute_batch(trigger).unwrap();
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("rollback-new", "rollback-old", "complete");
+
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let error = persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at)
+            .expect_err("injected side-effect failure must abort the mutation");
+        assert!(
+            error
+                .to_string()
+                .contains(fault_name.split('_').next().unwrap()),
+            "unexpected {fault_name} error: {error}"
+        );
+        drop(tx);
+        assert_no_contradiction_mutation(&conn, "rollback-old");
+    }
+}
+
+#[test]
+fn confirmed_contradiction_transaction_rejects_truncated_receipt_before_writes() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("truncated-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("truncated-old", "old fact"), false).unwrap();
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("truncated-new", "truncated-old", "truncated");
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at)
+        .expect_err("truncated verification receipt must be rejected");
+    drop(tx);
+    assert_no_contradiction_mutation(&conn, "truncated-old");
+}
+
+#[test]
+fn confirmed_contradiction_transaction_rejects_non_allowlisted_receipt_fields() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("unsafe-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("unsafe-old", "old fact"), false).unwrap();
+    let (mut contradicts, mut supersedes, at) =
+        confirmed_contradiction_edges("unsafe-new", "unsafe-old", "complete");
+    for edge in [&mut contradicts, &mut supersedes] {
+        edge.metadata
+            .pointer_mut("/provenance/model_invocation")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("receipt object")
+            .insert(
+                "raw_provider_error".to_string(),
+                json!("must never become durable"),
+            );
+    }
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at)
+        .expect_err("receipt fields outside the persistence allowlist must fail closed");
+    drop(tx);
+    assert_no_contradiction_mutation(&conn, "unsafe-old");
+}
+
+#[test]
+fn confirmed_contradiction_transaction_rolls_back_when_lifecycle_cas_loses() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("cas-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("cas-old", "old fact"), false).unwrap();
+    conn.execute(
+        "UPDATE memories SET superseded_by = 'existing-winner' WHERE id = 'cas-old'",
+        [],
+    )
+    .unwrap();
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("cas-new", "cas-old", "complete");
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at)
+        .expect_err("lost lifecycle CAS must abort both edge writes");
+    drop(tx);
+
+    let edge_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))
+        .unwrap();
+    let observation_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edge_observations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let winner: Option<String> = conn
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id = 'cas-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(edge_count, 0);
+    assert_eq!(observation_count, 0);
+    assert_eq!(winner.as_deref(), Some("existing-winner"));
+}
+
 #[test]
 fn graph_add_and_get_edges() {
     let mut conn = make_conn();

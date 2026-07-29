@@ -3,11 +3,42 @@
 
 use std::collections::HashSet;
 
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
 impl MemoryStore {
+    /// Atomically persist the two graph projections and lifecycle transition
+    /// produced by one successful contradiction-verification invocation.
+    ///
+    /// The DB seam validates the fixed relations, matching endpoints, matching
+    /// receipt-bearing metadata, and the unsuperseded lifecycle CAS. Any
+    /// failure drops this `BEGIN IMMEDIATE`, including edge observations that
+    /// were appended before a later mutation failed.
+    pub fn commit_confirmed_contradiction(
+        &mut self,
+        contradicts_edge: &crate::MemoryEdge,
+        supersedes_edge: &crate::MemoryEdge,
+        superseded_at: &str,
+    ) -> Result<(), MemoryError> {
+        let db_label = self.db_label.clone();
+        let reserved_reference_write = self.reserved_reference_write.clone();
+        db::retry_memory_locked("confirmed_contradiction", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&reserved_reference_write)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            db::persist_confirmed_contradiction_within_tx(
+                &tx,
+                contradicts_edge,
+                supersedes_edge,
+                superseded_at,
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     /// Inspect the lifecycle supersession edge for any row, including rows
     /// excluded from active recall because they are archived.
     pub fn supersession_target(&self, id: &str) -> Result<Option<Option<String>>, MemoryError> {
