@@ -34,11 +34,13 @@ pub use rerank_blend::{
     apply_blend_relevance, merge_rerank_order_with_hybrid_floor, HYBRID_HEAD_FRACTION,
 };
 
-/// Content-free evidence that one observed row entered each executed candidate leg.
+/// Content-free evidence that one observed row entered each normal candidate leg.
 ///
 /// This reports membership only. It deliberately excludes query text, memory
 /// content, vectors, and channel scores so offline coverage can explain a miss
-/// without widening the production search result schema.
+/// without widening the production search result schema. The additive typo
+/// fallback is deliberately excluded so a RED fixture can prove that recovery
+/// was absent from vector, FTS, symbolic, and exact-ID retrieval first.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CandidateLegEvidence {
     pub vector: bool,
@@ -253,7 +255,7 @@ pub struct FtsExpansionGroupReceipt {
     pub hit_count: usize,
 }
 
-/// Candidate-collection phase receipt (vector KNN + FTS-with-expansion + symbolic).
+/// Candidate-collection phase receipt (normal legs plus optional typo fallback).
 #[derive(Debug, Clone)]
 pub struct CandidatePhaseReceipt {
     pub total_elapsed: Duration,
@@ -268,9 +270,36 @@ pub struct CandidatePhaseReceipt {
     pub fts_groups: Vec<FtsExpansionGroupReceipt>,
     pub fts_candidate_count: usize,
     pub symbolic: ChannelPhaseReceipt,
-    /// Deduplicated union of vec + fts + symbolic + exact-id across all
-    /// channels — the size of the candidate set that flows into fetch/rank.
+    /// `None` means the eligibility/weak-leg gate did not open. `Some` means
+    /// the bounded character fallback executed, including honest zero-result
+    /// work when its trigram prefilter or character filter contributed nothing.
+    pub typo_fallback: Option<TypoFallbackPhaseReceipt>,
+    /// Deduplicated union of vec + fts + symbolic + exact-id + typo fallback
+    /// across all channels — the size of the candidate set that flows into
+    /// fetch/rank.
     pub merged_candidate_count: usize,
+}
+
+/// Bounded work and latency for one executed character-level typo fallback.
+#[derive(Debug, Clone)]
+pub struct TypoFallbackPhaseReceipt {
+    pub elapsed: Duration,
+    pub prefilter_candidate_count: usize,
+    pub compared_candidate_count: usize,
+    pub token_comparison_count: usize,
+    pub edit_cell_count: usize,
+    pub contributed_candidate_count: usize,
+}
+
+/// Content-free fallback facts threaded into sampled #1447 impressions.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct TypoFallbackAttribution {
+    pub(super) activated: bool,
+    pub(super) prefilter_candidate_count: usize,
+    pub(super) compared_candidate_count: usize,
+    pub(super) token_comparison_count: usize,
+    pub(super) edit_cell_count: usize,
+    pub(super) contributed_candidate_count: usize,
 }
 
 /// Bulk-fetch-by-id phase receipt (`db::fetch_by_ids`).
@@ -544,6 +573,9 @@ fn hybrid_search_inner(
                 entries_map,
                 vec_scores: &candidates.vec_scores,
                 fts_scores: &candidates.fts_scores,
+                typo_scores: &candidates.typo_scores,
+                typo_candidate_ids: &candidates.typo_candidate_ids,
+                typo_attribution: candidates.typo_attribution,
                 exact_id: candidates.exact_id.as_deref(),
                 include_superseded,
                 as_of_utc: as_of_utc.as_deref(),
@@ -719,6 +751,9 @@ fn hybrid_search_with_attribution(
             entries_map,
             vec_scores: &candidates.vec_scores,
             fts_scores: &candidates.fts_scores,
+            typo_scores: &candidates.typo_scores,
+            typo_candidate_ids: &candidates.typo_candidate_ids,
+            typo_attribution: candidates.typo_attribution,
             exact_id: candidates.exact_id.as_deref(),
             include_superseded,
             as_of_utc: as_of_utc.as_deref(),

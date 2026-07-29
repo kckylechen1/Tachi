@@ -1,7 +1,7 @@
 //! Candidate scoring and top-k ranking for hybrid search.
 
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::{
@@ -22,6 +22,7 @@ use super::{
     expansion::symbolic_query_with_expansion,
     filtering::{is_search_noise_entry, newest_by_shared_entity, quality_multiplier, valid_at},
     recall_config, resolve_weights, ChannelPhaseReceipt, RankPhaseReceipt, SearchOptions,
+    TypoFallbackAttribution,
 };
 
 pub(super) struct CandidateRanking<'a> {
@@ -30,9 +31,19 @@ pub(super) struct CandidateRanking<'a> {
     pub(super) entries_map: HashMap<String, MemoryEntry>,
     pub(super) vec_scores: &'a HashMap<String, f64>,
     pub(super) fts_scores: &'a HashMap<String, f64>,
+    pub(super) typo_scores: &'a HashMap<String, f64>,
+    pub(super) typo_candidate_ids: &'a HashSet<String>,
+    pub(super) typo_attribution: TypoFallbackAttribution,
     pub(super) exact_id: Option<&'a str>,
     pub(super) include_superseded: bool,
     pub(super) as_of_utc: Option<&'a str>,
+}
+
+pub(super) struct NormalCandidateEligibility<'a> {
+    pub(super) entries: &'a HashMap<String, MemoryEntry>,
+    pub(super) vec_scores: &'a HashMap<String, f64>,
+    pub(super) fts_scores: &'a HashMap<String, f64>,
+    pub(super) exact_id: Option<&'a str>,
 }
 
 type RankedEntries = (
@@ -60,17 +71,21 @@ pub(super) fn rank_candidate_entries(
         entries_map,
         vec_scores,
         fts_scores,
+        typo_scores,
+        typo_candidate_ids,
+        typo_attribution,
         exact_id,
         include_superseded,
         as_of_utc,
     } = ranking;
-    let symbolic_scores = symbolic_scores(query, &entries_map);
+    let normal_symbolic_scores = symbolic_scores(query, &entries_map);
     let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
     let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
     let retrieval_evidence = RetrievalEvidence {
         vec_scores,
         fts_scores,
-        symbolic_scores: &symbolic_scores,
+        symbolic_scores: &normal_symbolic_scores,
+        typo_evidence: typo_candidate_ids,
         exact_id,
         recall_config: recall_config(opts),
         minimum_symbolic_coverage,
@@ -87,31 +102,16 @@ pub(super) fn rank_candidate_entries(
 
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
         .iter()
-        .filter(|(id, e)| {
-            if !valid_at(e, as_of_utc) {
-                return false;
-            }
-            if !include_superseded && superseded_ids.contains(*id) {
-                return false;
-            }
-            if is_search_noise_entry(e, opts.path_prefix.as_deref()) {
-                return false;
-            }
-            if let Some(prefix) = &opts.path_prefix {
-                if !e.path.starts_with(prefix.as_str()) {
-                    return false;
-                }
-            }
-            if let Some(domain) = &opts.domain {
-                match &e.domain {
-                    Some(d) if d == domain => {}
-                    _ => return false,
-                }
-            }
-            if below_minimum_retrieval_evidence(id, e, &retrieval_evidence) {
-                return false;
-            }
-            true
+        .filter(|(id, entry)| {
+            passes_final_candidate_eligibility(
+                id,
+                entry,
+                opts,
+                include_superseded,
+                as_of_utc,
+                &superseded_ids,
+                &retrieval_evidence,
+            )
         })
         .map(|(k, v)| (k.clone(), v))
         .collect();
@@ -148,6 +148,15 @@ pub(super) fn rank_candidate_entries(
     let access_times = read_access_times(conn, opts, &candidate_ids_vec)?;
     let access_elapsed = access_start.map(|s| s.elapsed());
     let weights = resolve_weights(opts);
+    // Typo scores affect fusion only after the typed evidence lane has decided
+    // survival. They must not masquerade as ordinary symbolic coverage.
+    let mut symbolic_scores = normal_symbolic_scores;
+    for (id, score) in typo_scores {
+        symbolic_scores
+            .entry(id.clone())
+            .and_modify(|existing| *existing = existing.max(*score))
+            .or_insert(*score);
+    }
     let mut scores = merge_pre_boost_scores(
         opts,
         &entries_ref,
@@ -228,6 +237,8 @@ pub(super) fn rank_candidate_entries(
             &pre_scores,
             &scores,
             &ranked_ids,
+            typo_candidate_ids,
+            typo_attribution,
             exact_id,
             include_superseded,
             &superseded_ids,
@@ -296,6 +307,8 @@ fn build_impression_payload(
     pre_scores: &HashMap<String, HybridScore>,
     final_scores: &HashMap<String, HybridScore>,
     ranked_ids: &[String],
+    typo_candidate_ids: &HashSet<String>,
+    typo_attribution: TypoFallbackAttribution,
     exact_id: Option<&str>,
     include_superseded: bool,
     superseded_ids: &std::collections::HashSet<String>,
@@ -356,6 +369,7 @@ fn build_impression_payload(
                 scored: true,
                 scored_returned: false,
                 access_count_at_recall: entries[&id].access_count,
+                typo_fallback_candidate: typo_candidate_ids.contains(&id),
             }
         })
         .collect();
@@ -385,6 +399,7 @@ fn build_impression_payload(
         top_k: opts.top_k,
         rows,
         displayed_count: 0,
+        typo_fallback: typo_attribution,
     }
 }
 
@@ -474,6 +489,11 @@ struct RetrievalEvidence<'a> {
     vec_scores: &'a HashMap<String, f64>,
     fts_scores: &'a HashMap<String, f64>,
     symbolic_scores: &'a HashMap<String, f64>,
+    /// Accepted bounded typo matches are a distinct retrieval-evidence lane.
+    /// Their fusion contribution may be below normal symbolic coverage, but
+    /// they have already satisfied the typo matcher’s all-term one-to-one
+    /// assignment contract.
+    typo_evidence: &'a HashSet<String>,
     exact_id: Option<&'a str>,
     recall_config: &'a crate::RecallConfig,
     minimum_symbolic_coverage: f64,
@@ -486,6 +506,9 @@ fn below_minimum_retrieval_evidence(
     evidence: &RetrievalEvidence<'_>,
 ) -> bool {
     if evidence.exact_id == Some(id) {
+        return false;
+    }
+    if evidence.typo_evidence.contains(id) {
         return false;
     }
     let has_fts_evidence = evidence
@@ -514,6 +537,74 @@ fn below_minimum_retrieval_evidence(
         return false;
     }
     !has_minimum_symbolic_coverage
+}
+
+fn passes_final_candidate_eligibility(
+    id: &str,
+    entry: &MemoryEntry,
+    opts: &SearchOptions,
+    include_superseded: bool,
+    as_of_utc: Option<&str>,
+    superseded_ids: &HashSet<String>,
+    retrieval_evidence: &RetrievalEvidence<'_>,
+) -> bool {
+    if !valid_at(entry, as_of_utc)
+        || (!include_superseded && superseded_ids.contains(id))
+        || is_search_noise_entry(entry, opts.path_prefix.as_deref())
+        || opts
+            .path_prefix
+            .as_ref()
+            .is_some_and(|prefix| !entry.path.starts_with(prefix))
+        || opts
+            .domain
+            .as_ref()
+            .is_some_and(|domain| entry.domain.as_deref() != Some(domain.as_str()))
+    {
+        return false;
+    }
+    !below_minimum_retrieval_evidence(id, entry, retrieval_evidence)
+}
+
+/// Apply the exact final retrieval-evidence predicate to normal candidate
+/// rows before deciding whether typo fallback should activate. This deliberately
+/// excludes typo evidence: activation answers whether the normal pipeline can
+/// already yield a survivor, not whether fallback could rescue one.
+pub(super) fn normal_candidates_have_final_retrieval_evidence(
+    conn: &Connection,
+    query: &str,
+    opts: &SearchOptions,
+    candidates: NormalCandidateEligibility<'_>,
+    include_superseded: bool,
+    as_of_utc: Option<&str>,
+) -> Result<bool, MemoryError> {
+    if candidates.entries.is_empty() {
+        return Ok(false);
+    }
+    let symbolic_scores = symbolic_scores(query, candidates.entries);
+    let empty_typo_evidence = HashSet::new();
+    let retrieval_evidence = RetrievalEvidence {
+        vec_scores: candidates.vec_scores,
+        fts_scores: candidates.fts_scores,
+        symbolic_scores: &symbolic_scores,
+        typo_evidence: &empty_typo_evidence,
+        exact_id: candidates.exact_id,
+        recall_config: recall_config(opts),
+        minimum_symbolic_coverage: minimum_symbolic_query_coverage(query, recall_config(opts)),
+        requires_pair_evidence: query_requires_pair_evidence(query, recall_config(opts)),
+    };
+    let candidate_ids = candidates.entries.keys().cloned().collect::<Vec<_>>();
+    let superseded_ids = get_superseded_ids(conn, &candidate_ids)?;
+    Ok(candidates.entries.iter().any(|(id, entry)| {
+        passes_final_candidate_eligibility(
+            id,
+            entry,
+            opts,
+            include_superseded,
+            as_of_utc,
+            &superseded_ids,
+            &retrieval_evidence,
+        )
+    }))
 }
 
 fn query_requires_pair_evidence(query: &str, recall_config: &crate::RecallConfig) -> bool {
@@ -1124,18 +1215,22 @@ pub(super) mod attribution {
             entries_map,
             vec_scores,
             fts_scores,
+            typo_scores,
+            typo_candidate_ids,
+            typo_attribution: _,
             exact_id,
             include_superseded,
             as_of_utc,
         } = ranking;
 
-        let symbolic_scores = symbolic_scores(query, &entries_map);
+        let normal_symbolic_scores = symbolic_scores(query, &entries_map);
         let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
         let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
         let retrieval_evidence = RetrievalEvidence {
             vec_scores,
             fts_scores,
-            symbolic_scores: &symbolic_scores,
+            symbolic_scores: &normal_symbolic_scores,
+            typo_evidence: typo_candidate_ids,
             exact_id,
             recall_config: recall_config(opts),
             minimum_symbolic_coverage,
@@ -1150,31 +1245,16 @@ pub(super) mod attribution {
         // observation-only twin does not need.
         let entries_ref: HashMap<String, &MemoryEntry> = entries_map
             .iter()
-            .filter(|(id, e)| {
-                if !valid_at(e, as_of_utc) {
-                    return false;
-                }
-                if !include_superseded && superseded_ids.contains(*id) {
-                    return false;
-                }
-                if is_search_noise_entry(e, opts.path_prefix.as_deref()) {
-                    return false;
-                }
-                if let Some(prefix) = &opts.path_prefix {
-                    if !e.path.starts_with(prefix.as_str()) {
-                        return false;
-                    }
-                }
-                if let Some(domain) = &opts.domain {
-                    match &e.domain {
-                        Some(d) if d == domain => {}
-                        _ => return false,
-                    }
-                }
-                if below_minimum_retrieval_evidence(id, e, &retrieval_evidence) {
-                    return false;
-                }
-                true
+            .filter(|(id, entry)| {
+                passes_final_candidate_eligibility(
+                    id,
+                    entry,
+                    opts,
+                    include_superseded,
+                    as_of_utc,
+                    &superseded_ids,
+                    &retrieval_evidence,
+                )
             })
             .map(|(k, v)| (k.clone(), v))
             .collect();
@@ -1190,6 +1270,13 @@ pub(super) mod attribution {
         let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
         let access_times = read_access_times(conn, opts, &candidate_ids_vec)?;
         let weights = resolve_weights(opts);
+        let mut symbolic_scores = normal_symbolic_scores;
+        for (id, score) in typo_scores {
+            symbolic_scores
+                .entry(id.clone())
+                .and_modify(|existing| *existing = existing.max(*score))
+                .or_insert(*score);
+        }
         let mut scores = merge_pre_boost_scores(
             opts,
             &entries_ref,

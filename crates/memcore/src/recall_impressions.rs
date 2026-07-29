@@ -11,9 +11,9 @@ use crate::{
 };
 
 pub(crate) const IMPRESSION_GROUP_INSERT_SQL: &str =
-    "INSERT INTO recall_impression_groups (group_id, created_at, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)";
+    "INSERT INTO recall_impression_groups (group_id, created_at, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count, typo_fallback_activated, typo_fallback_prefilter_count, typo_fallback_compared_count, typo_fallback_token_comparison_count, typo_fallback_edit_cell_count, typo_fallback_candidate_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)";
 pub(crate) const IMPRESSION_ROW_INSERT_SQL: &str =
-    "INSERT INTO recall_impressions (group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
+    "INSERT INTO recall_impressions (group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall, typo_fallback_candidate) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)";
 
 impl PreBoostAdjustment {
     fn as_str(self) -> &'static str {
@@ -57,6 +57,7 @@ pub(crate) struct RecallImpressionRowDraft {
     pub scored: bool,
     pub scored_returned: bool,
     pub access_count_at_recall: i64,
+    pub typo_fallback_candidate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +74,7 @@ pub(crate) struct RecallImpressionPayload {
     pub top_k: usize,
     pub rows: Vec<RecallImpressionRowDraft>,
     pub displayed_count: usize,
+    pub typo_fallback: crate::search::TypoFallbackAttribution,
 }
 
 /// Complete, persisted identity of the pre-boost replay algorithm.
@@ -264,6 +266,12 @@ pub(crate) fn insert_recall_impression(
             payload.rows.len() as i64,
             payload.displayed_count as i64,
             payload.scored_returned_count() as i64,
+            i64::from(payload.typo_fallback.activated),
+            payload.typo_fallback.prefilter_candidate_count as i64,
+            payload.typo_fallback.compared_candidate_count as i64,
+            payload.typo_fallback.token_comparison_count as i64,
+            payload.typo_fallback.edit_cell_count as i64,
+            payload.typo_fallback.contributed_candidate_count as i64,
         ],
     )?;
     let mut stmt = tx.prepare_cached(IMPRESSION_ROW_INSERT_SQL)?;
@@ -287,6 +295,7 @@ pub(crate) fn insert_recall_impression(
             i64::from(row.scored),
             i64::from(row.scored_returned),
             row.access_count_at_recall,
+            i64::from(row.typo_fallback_candidate),
         ])?;
     }
     Ok(())

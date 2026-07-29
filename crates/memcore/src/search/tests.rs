@@ -28,6 +28,7 @@ mod scored_count;
 mod supersession;
 mod surface;
 mod symbolic;
+mod typo_fallback;
 
 fn setup() -> Connection {
     crate::db::enable_simple_auto_extension().unwrap();
