@@ -748,6 +748,35 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  2026-07-26.",
     },
     Exemption {
+        path: "crates/memcore/src/db/tests/graph.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[
+            Site {
+                symbol: "confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary",
+                trigger: "FAIL_CONFIRMED_FIRST",
+                ddl: "8a89cd01d4e45380",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary",
+                trigger: "FAIL_CONFIRMED_LIFECYCLE",
+                ddl: "b1ebf1af945a77ea",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary",
+                trigger: "FAIL_CONFIRMED_SECOND",
+                ddl: "88c5f7e5dcc60ddd",
+                occurrences: 1,
+            },
+        ],
+        reason: "confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary \
+                 installs each temp trigger on the direct rusqlite Connection \
+                 returned by make_conn and executes the transaction on that same \
+                 unguarded connection. Body read 2026-07-30. The proof remains \
+                 valid only while this file names no MemoryStore doorway.",
+    },
+    Exemption {
         path: "crates/memcore/src/db/tests/search_generation.rs",
         basis: ExemptionBasis::Proven(MachineProof::MemcoreArmsTheMigrationToken),
         sites: &[
