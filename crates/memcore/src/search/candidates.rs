@@ -254,14 +254,16 @@ fn collect_typo_fallback_candidates(
     // query eligibility gate, so the normal hot path remains allocation/I/O
     // unchanged.
     let normal_candidate_entries = fetch_by_ids(conn, normal_candidate_ids, opts.include_archived)?;
-    if !normal_candidates_need_typo_fallback(
+    if super::ranking::normal_candidates_have_final_retrieval_evidence(
         conn,
         query,
         opts,
-        &normal_candidate_entries,
-        vec_scores,
-        fts_scores,
-        exact_id,
+        super::ranking::NormalCandidateEligibility {
+            entries: &normal_candidate_entries,
+            vec_scores,
+            fts_scores,
+            exact_id,
+        },
         include_superseded,
         as_of_utc,
     )? {
@@ -345,32 +347,6 @@ fn eligible_typo_query_terms(query: &str, config: &TypoFallbackConfig) -> Option
         return None;
     }
     Some(terms)
-}
-
-fn normal_candidates_need_typo_fallback(
-    conn: &Connection,
-    query: &str,
-    opts: &SearchOptions,
-    normal_candidate_entries: &HashMap<String, MemoryEntry>,
-    vec_scores: &HashMap<String, f64>,
-    fts_scores: &HashMap<String, f64>,
-    exact_id: Option<&str>,
-    include_superseded: bool,
-    as_of_utc: Option<&str>,
-) -> Result<bool, MemoryError> {
-    Ok(
-        !super::ranking::normal_candidates_have_final_retrieval_evidence(
-            conn,
-            query,
-            opts,
-            normal_candidate_entries,
-            vec_scores,
-            fts_scores,
-            exact_id,
-            include_superseded,
-            as_of_utc,
-        )?,
-    )
 }
 
 fn typo_prefilter_ids(
