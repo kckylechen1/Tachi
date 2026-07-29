@@ -20,8 +20,9 @@
 //! - **R6** VACUUM INTO + atomic swap. Requires daemon to not be running.
 //! - **R7** Orphan reference cleanup (memory_edges, agent_known_state,
 //!   processed_events, access_history).
-//! - **R8** Conservative ephemeral junk cleanup (foundry rerank cache and empty
-//!   JSON turn records only). Exact duplicates use `repair dedupe exact/apply`.
+//! - **R8** Conservative ephemeral recall-cache cleanup. Empty JSON turn shapes
+//!   lack canonical producer provenance and are retained. Exact duplicates use
+//!   `repair dedupe exact/apply`.
 //! - **R9** Domain normalization/backfill for missing and legacy path-like values.
 //! - **R10** Enrichment failure marker reset (explicit opt-in only).
 //! - **R11** Plan C split-brain repair: merge a stale regular alias DB into

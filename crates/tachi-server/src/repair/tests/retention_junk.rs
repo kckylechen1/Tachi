@@ -137,33 +137,19 @@ fn r8_routes_exact_duplicates_to_dedupe_without_deleting_evidence() {
 }
 
 #[test]
-fn r8_deletes_only_unprotected_ephemeral_junk_and_keeps_projections_consistent() {
+fn r8_deletes_marked_cache_and_keeps_empty_json_lookalikes_and_projections_consistent() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "junk-guards.db");
 
     insert_memory(
         &conn,
         "cache-eligible",
-        "/system/foundry_recall_rerank_cache",
+        "/system/cache/eligible",
         "cache body",
-        r#"{"cache_key":"foundry_recall_rerank_cache"}"#,
-        Some("durable"),
-        None,
-    );
-    insert_memory(
-        &conn,
-        "empty-eligible",
-        "/hermes/turns/eligible",
         "{}",
-        "{}",
-        Some("durable"),
-        None,
+        Some("ephemeral"),
+        Some(memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE),
     );
-    conn.execute(
-        "UPDATE memories SET category='other', topic='hermes_turn' WHERE id='empty-eligible'",
-        [],
-    )
-    .unwrap();
 
     for (id, retention) in [("cache-permanent", "permanent"), ("cache-pinned", "pinned")] {
         insert_memory(
@@ -211,18 +197,23 @@ fn r8_deletes_only_unprotected_ephemeral_junk_and_keeps_projections_consistent()
         [],
     )
     .unwrap();
-    for (id, retention) in [("empty-permanent", "permanent"), ("empty-used", "durable")] {
+    for (id, retention) in [
+        ("empty-permanent", Some("permanent")),
+        ("empty-used", Some("durable")),
+        ("empty-durable-lookalike", Some("durable")),
+        ("empty-null-lookalike", None),
+    ] {
         insert_memory(
             &conn,
             id,
-            &format!("/hermes/turns/{id}"),
+            &format!("/notes/turns/{id}"),
             "{}",
             "{}",
-            Some(retention),
-            None,
+            retention,
+            Some("manual"),
         );
         conn.execute(
-            "UPDATE memories SET category='other', topic='hermes_turn' WHERE id=?1",
+            "UPDATE memories SET category='fact', topic='interaction' WHERE id=?1",
             [id],
         )
         .unwrap();
@@ -243,7 +234,7 @@ fn r8_deletes_only_unprotected_ephemeral_junk_and_keeps_projections_consistent()
 
     // Discriminative seed: insert_memory does not project into symbolic FTS.
     // Seed the junk ids so a delete that forgets symbolic_fts fails red.
-    let junk_ids = ["cache-eligible", "empty-eligible"];
+    let junk_ids = ["cache-eligible"];
     {
         let tx = conn.unchecked_transaction().unwrap();
         for id in junk_ids {
@@ -266,10 +257,24 @@ fn r8_deletes_only_unprotected_ephemeral_junk_and_keeps_projections_consistent()
     let mut ctx = open_ctx(&path, "test");
     let dry = JunkCleanup.dry_run(&mut ctx).unwrap();
     let total: usize = dry.findings.iter().map(|f| f.count).sum();
-    assert_eq!(total, 2, "expected only 2 eligible junk rows, got {dry:?}");
+    assert_eq!(total, 1, "expected only producer-marked junk, got {dry:?}");
+    assert_eq!(
+        dry.findings
+            .iter()
+            .find(|finding| finding.kind == "foundry_recall_rerank_cache")
+            .map(|finding| finding.count),
+        Some(1),
+        "the canonical cache producer marker must identify the only target"
+    );
+    assert!(
+        dry.findings
+            .iter()
+            .all(|finding| finding.kind != "empty_json_turns"),
+        "unproven empty JSON turn shapes must not be physical-delete findings"
+    );
 
     let app = JunkCleanup.apply(&mut ctx).unwrap();
-    assert_eq!(app.applied, 2);
+    assert_eq!(app.applied, 1);
 
     for id in [
         "cache-permanent",
@@ -279,6 +284,8 @@ fn r8_deletes_only_unprotected_ephemeral_junk_and_keeps_projections_consistent()
         "cache-used",
         "empty-permanent",
         "empty-used",
+        "empty-durable-lookalike",
+        "empty-null-lookalike",
     ] {
         let rows: i64 = ctx
             .conn
@@ -335,24 +342,18 @@ fn r8_deletes_only_unprotected_ephemeral_junk_and_keeps_projections_consistent()
 }
 
 #[test]
-fn r8_overlap_is_classified_once_and_reports_one_unique_target() {
+fn r8_deletes_producer_marked_empty_json_cache_once() {
     let dir = TempDir::new().unwrap();
-    let (path, conn) = fresh_db(&dir, "junk-overlap.db");
+    let (path, conn) = fresh_db(&dir, "producer-marked-cache.db");
     insert_memory(
         &conn,
-        "cache-empty-overlap",
-        "/recall-cache/hermes-turn",
+        "producer-marked-empty-json-cache",
+        "/producer/empty-turn",
         "{}",
         "{}",
         Some("ephemeral"),
-        None,
+        Some(memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE),
     );
-    conn.execute(
-        "UPDATE memories SET category='other', topic='hermes_turn'
-         WHERE id='cache-empty-overlap'",
-        [],
-    )
-    .unwrap();
     drop(conn);
 
     let mut ctx = open_ctx(&path, "test");
@@ -360,7 +361,7 @@ fn r8_overlap_is_classified_once_and_reports_one_unique_target() {
     assert_eq!(
         dry.finding_total(),
         1,
-        "overlap must count as one unique R8 target, got {dry:?}"
+        "producer-marked cache must be one unique R8 target, got {dry:?}"
     );
     assert_eq!(
         dry.findings
@@ -368,13 +369,7 @@ fn r8_overlap_is_classified_once_and_reports_one_unique_target() {
             .find(|finding| finding.kind == "foundry_recall_rerank_cache")
             .map(|finding| finding.count),
         Some(1),
-        "overlap must retain its cache classification"
-    );
-    assert!(
-        dry.findings
-            .iter()
-            .all(|finding| finding.kind != "empty_json_turns"),
-        "cache ownership must make the empty-turn class exclusive"
+        "canonical source must classify the empty JSON cache row"
     );
 
     let applied = JunkCleanup.apply(&mut ctx).unwrap();
@@ -383,7 +378,7 @@ fn r8_overlap_is_classified_once_and_reports_one_unique_target() {
     let remaining: i64 = ctx
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM memories WHERE id='cache-empty-overlap'",
+            "SELECT COUNT(*) FROM memories WHERE id='producer-marked-empty-json-cache'",
             [],
             |row| row.get(0),
         )
@@ -405,7 +400,7 @@ async fn r8_cli_backend_keeps_dry_run_non_mutating_and_apply_opt_in() {
         "ephemeral CLI fixture",
         "{}",
         Some("ephemeral"),
-        None,
+        Some(memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE),
     );
     drop(conn);
 

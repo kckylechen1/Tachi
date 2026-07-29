@@ -1,8 +1,11 @@
-//! R8 — conservative ephemeral junk cleanup.
+//! R8 — conservative ephemeral recall-cache cleanup.
 //!
 //! Exact duplicates are deliberately outside this rule. Operators must use
 //! `tachi repair dedupe exact/apply`, which archives losers through a bound
 //! plan, receipt, CAS, and restore path instead of physically deleting them.
+//! Empty JSON turn shapes have no canonical producer marker, so R8 retains
+//! them rather than treating category, topic, or path substrings as deletion
+//! authority.
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
 use memcore::namespace::RECALL_CACHE_SQL_WHERE;
@@ -22,7 +25,7 @@ fn has_table(ctx: &DbContext, name: &str) -> bool {
 // Invariant: R8 may physically delete only active, non-protected rows that
 // carry no evidence of being recalled or genuinely used. `scored_count` is
 // intentionally absent because it is scorer-only instrumentation, not recall
-// or use evidence. Keep both junk shapes behind this same guard.
+// or use evidence. Keep every physical-delete class behind this same guard.
 const EPHEMERAL_JUNK_GUARDS_SQL: &str = r#"
     archived = 0
     AND superseded_by IS NULL
@@ -41,27 +44,6 @@ const EPHEMERAL_JUNK_GUARDS_SQL: &str = r#"
 fn rerank_cache_sql() -> String {
     format!(
         "SELECT id FROM memories WHERE ({RECALL_CACHE_SQL_WHERE}) AND ({EPHEMERAL_JUNK_GUARDS_SQL})"
-    )
-}
-
-fn empty_json_turn_sql() -> String {
-    format!(
-        r#"
-        SELECT id FROM memories
-        WHERE TRIM(COALESCE(text, '')) IN ('{{}}', '[]')
-          AND (
-              category IN ('hermes_turn', 'other', 'fact')
-              OR topic IN ('hermes_turn', 'turn', 'interaction')
-              OR path LIKE '%hermes%'
-              OR path LIKE '%turn%'
-          )
-          -- Classification is exclusive: recall-cache namespace ownership wins
-          -- when an ephemeral row also has an empty-turn shape. This preserves
-          -- per-kind observability while keeping finding_total equal to the
-          -- unique cleanup target count used by apply.
-          AND NOT ({RECALL_CACHE_SQL_WHERE})
-          AND ({EPHEMERAL_JUNK_GUARDS_SQL})
-        "#
     )
 }
 
@@ -84,7 +66,7 @@ impl RepairRule for JunkCleanup {
     }
 
     fn name(&self) -> &'static str {
-        "Ephemeral junk cleanup; exact duplicates use repair dedupe exact/apply"
+        "Ephemeral recall-cache cleanup; exact duplicates use repair dedupe exact/apply"
     }
 
     fn dry_run(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
@@ -93,11 +75,6 @@ impl RepairRule for JunkCleanup {
             &mut report,
             "foundry_recall_rerank_cache",
             count_query(ctx, &rerank_cache_sql())?,
-        );
-        push_count(
-            &mut report,
-            "empty_json_turns",
-            count_query(ctx, &empty_json_turn_sql())?,
         );
         Ok(report)
     }
@@ -115,13 +92,6 @@ impl RepairRule for JunkCleanup {
             &format!(
                 "INSERT OR IGNORE INTO cleanup_targets {}",
                 rerank_cache_sql()
-            ),
-            [],
-        )?;
-        tx.execute(
-            &format!(
-                "INSERT OR IGNORE INTO cleanup_targets {}",
-                empty_json_turn_sql()
             ),
             [],
         )?;
