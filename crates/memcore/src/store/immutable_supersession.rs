@@ -65,16 +65,14 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     ) -> Result<db::InsertMemoryResult, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        let exists = self.tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
-            [&entry.id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if exists {
-            return Ok(db::InsertMemoryResult::Existing);
-        }
-        db::upsert_within_tx(&self.tx, entry, self.vec_available, None)?;
-        Ok(db::InsertMemoryResult::Inserted)
+        db::insert_if_absent_within_tx(&self.tx, entry, self.vec_available)
+    }
+
+    /// Read a memory from the same transaction, including archived rows.
+    pub fn get_memory(&self, id: &str) -> Result<Option<MemoryEntry>, MemoryError> {
+        let ids = vec![id.to_string()];
+        let mut entries = db::fetch_by_ids(&self.tx, &ids, true)?;
+        Ok(entries.remove(id))
     }
 
     /// Persist an entry with server-authorized, shape-validated reference

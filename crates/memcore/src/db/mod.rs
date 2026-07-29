@@ -131,8 +131,8 @@ pub(crate) use memory_crud::{
 /// body (main row + FTS + vectors + idless semantics) inside a caller-owned
 /// `BEGIN IMMEDIATE` transaction. See `memory_crud::upsert_within_tx`.
 pub(crate) use memory_crud::{
-    insert_if_absent, upsert, upsert_idless, upsert_with_validated_reference_mutations_within_tx,
-    upsert_within_tx,
+    insert_if_absent, insert_if_absent_within_tx, upsert, upsert_idless,
+    upsert_with_validated_reference_mutations_within_tx, upsert_within_tx,
 };
 /// Public: see `open::ensure_reserved_reference_write_guard`'s doc comment.
 pub use open::ensure_reserved_reference_write_guard;

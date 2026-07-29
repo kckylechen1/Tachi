@@ -43,7 +43,7 @@ use memcore::MemoryEntry;
 #[cfg(test)]
 pub(crate) use parser::parse_distill_response;
 #[cfg(test)]
-use persist::persist_distill_memory;
+use persist::{normalized_source_memory_ids, persist_distill_memory, stable_distill_memory_id};
 // #1087: unit test asserts the flag-off default is unchanged.
 #[cfg(test)]
 pub(crate) use runner::call_claude_batch;

@@ -16,7 +16,7 @@ use super::types::{CandidateGroup, GroupPayload};
 
 const DAILY_DISTILL_SOURCE_SET_CONTRACT: &str = "daily-distill-source-set-v1";
 
-fn normalized_source_memory_ids(group: &CandidateGroup) -> Vec<String> {
+pub(super) fn normalized_source_memory_ids(group: &CandidateGroup) -> Vec<String> {
     let mut source_ids = group
         .entries
         .iter()
@@ -27,7 +27,10 @@ fn normalized_source_memory_ids(group: &CandidateGroup) -> Vec<String> {
     source_ids
 }
 
-fn stable_distill_memory_id(group: &CandidateGroup, source_memory_ids: &[String]) -> String {
+pub(super) fn stable_distill_memory_id(
+    group: &CandidateGroup,
+    source_memory_ids: &[String],
+) -> String {
     let identity = json!({
         "contract": DAILY_DISTILL_SOURCE_SET_CONTRACT,
         "path_prefix": group.path_prefix,
@@ -38,6 +41,43 @@ fn stable_distill_memory_id(group: &CandidateGroup, source_memory_ids: &[String]
         "distill:{}",
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.to_string().as_bytes())
     )
+}
+
+fn validate_existing_distill_winner(
+    existing: &MemoryEntry,
+    expected_id: &str,
+    expected_source_ids: &[String],
+) -> Result<(), MemoryError> {
+    let mut stored_source_ids = existing
+        .metadata
+        .get("source_memory_ids")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    stored_source_ids.sort();
+    stored_source_ids.dedup();
+    let contract_matches = existing
+        .metadata
+        .get("source_set_contract")
+        .and_then(|value| value.as_str())
+        == Some(DAILY_DISTILL_SOURCE_SET_CONTRACT);
+    let identity_matches = existing
+        .metadata
+        .get("source_set_identity")
+        .and_then(|value| value.as_str())
+        == Some(expected_id);
+    if existing.source != FOUNDRY_DISTILL_SOURCE
+        || !contract_matches
+        || !identity_matches
+        || stored_source_ids != expected_source_ids
+    {
+        return Err(MemoryError::InvalidArg(format!(
+            "daily distill source-set identity collision for {expected_id}"
+        )));
+    }
+    Ok(())
 }
 
 /// Claim every source before writing the candidate projection. The candidate
@@ -104,6 +144,21 @@ fn write_distill_entry(
         .with_immutable_supersession_transaction(|replacement| {
             let inserted = replacement.insert_if_absent(entry)?;
             if inserted == InsertMemoryResult::Existing {
+                let existing = replacement.get_memory(&entry.id)?.ok_or_else(|| {
+                    MemoryError::Internal(format!(
+                        "daily distill winner disappeared inside transaction: {}",
+                        entry.id
+                    ))
+                })?;
+                let expected_source_ids = entry
+                    .metadata
+                    .get("source_memory_ids")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                    .collect::<Vec<_>>();
+                validate_existing_distill_winner(&existing, &entry.id, &expected_source_ids)?;
                 return Ok(inserted);
             }
             let claimed_sources = claim_distilled_sources(replacement, entry, source_entries)?;

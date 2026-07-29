@@ -2200,6 +2200,35 @@ fn insert_if_absent_with_reference_mutations(
     metadata_patch: Option<&Map<String, Value>>,
     mutations: &[ValidatedReferenceMutation],
 ) -> Result<InsertMemoryResult, MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = insert_if_absent_with_reference_mutations_within_tx(
+        &tx,
+        entry,
+        vec_available,
+        metadata_patch,
+        mutations,
+    )?;
+    tx.commit()?;
+    Ok(result)
+}
+
+/// Caller-transaction insert-only body. Unlike [`upsert_within_tx`], this
+/// never invokes write-time Jaccard merging and never rewrites an existing id.
+pub(crate) fn insert_if_absent_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+) -> Result<InsertMemoryResult, MemoryError> {
+    insert_if_absent_with_reference_mutations_within_tx(tx, entry, vec_available, None, &[])
+}
+
+fn insert_if_absent_with_reference_mutations_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    metadata_patch: Option<&Map<String, Value>>,
+    mutations: &[ValidatedReferenceMutation],
+) -> Result<InsertMemoryResult, MemoryError> {
     if entry.id.trim().is_empty() || entry.id.starts_with("anchor:") {
         return Err(MemoryError::InvalidArg(
             "entry.id must be non-empty and outside the reserved 'anchor:' namespace".to_string(),
@@ -2239,10 +2268,9 @@ fn insert_if_absent_with_reference_mutations(
         .map(normalize_utc_iso)
         .transpose()?;
     let write_time_utc = now_utc_iso();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut metadata = match metadata_patch {
         Some(metadata_patch) => {
-            merge_validated_reference_metadata(&tx, &entry.id, metadata_patch, &[], mutations)?
+            merge_validated_reference_metadata(tx, &entry.id, metadata_patch, &[], mutations)?
         }
         None => strip_untrusted_reserved_metadata(&entry.metadata),
     };
@@ -2290,14 +2318,13 @@ fn insert_if_absent_with_reference_mutations(
         ],
     )?;
     if rows_changed == 0 {
-        tx.commit()?;
         return Ok(InsertMemoryResult::Existing);
     }
     let kws = entry.keywords.join(" ");
     let mut entities = entry.entities.clone();
     crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
     sync_memories_fts(
-        &tx,
+        tx,
         &entry.id,
         &path,
         &clean_summary,
@@ -2313,7 +2340,6 @@ fn insert_if_absent_with_reference_mutations(
             )?;
         }
     }
-    tx.commit()?;
     Ok(InsertMemoryResult::Inserted)
 }
 

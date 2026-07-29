@@ -632,6 +632,161 @@ fn persist_distill_memory_concurrent_protected_source_set_has_one_winner() {
 }
 
 #[test]
+fn persist_distill_memory_insert_once_bypasses_write_time_jaccard_merging() {
+    let temp = tempfile::tempdir().expect("temp daily distill jaccard db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    let payload = GroupPayload {
+        summary: "canonical jaccard-safe summary".to_string(),
+        text: "a unique distilled result that exactly matches an existing row".to_string(),
+        keywords: vec!["distill-only".to_string()],
+        skip_reason: None,
+    };
+    let mut existing = candidate_entry(99);
+    existing.id = "jaccard-existing".to_string();
+    existing.path = "/notes/jaccard-existing".to_string();
+    existing.timestamp = "2026-01-01T00:01:39Z".to_string();
+    existing.text = payload.text.clone();
+    existing.summary = "existing unrelated summary".to_string();
+    existing.keywords = vec!["existing-only".to_string()];
+    existing.entities = vec!["existing-entity".to_string()];
+    existing.importance = 0.2;
+    server
+        .with_project_store(|store| {
+            for entry in &entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            store.upsert(&existing).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed source and Jaccard candidate memories");
+    let group = CandidateGroup {
+        group_id: "jaccard-safe".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+
+    let memory_id = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-jaccard-safe",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("persist canonical output without ordinary-memory dedupe");
+    server
+        .with_project_store_read(|store| {
+            let conn = store.connection();
+            let distill_state: (Option<String>, String) = conn
+                .query_row(
+                    "SELECT superseded_by, tier FROM memories WHERE id = ?1",
+                    [&memory_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let existing_state: (String, f64) = conn
+                .query_row(
+                    "SELECT keywords, importance FROM memories WHERE id = ?1",
+                    [&existing.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(distill_state, (None, "consolidated".to_string()));
+            assert_eq!(existing_state.0, json!(["existing-only"]).to_string());
+            assert_eq!(existing_state.1, 0.2);
+            Ok(())
+        })
+        .expect("distill insert-once must not invoke ordinary Jaccard merging");
+}
+
+#[test]
+fn persist_distill_memory_refuses_a_noncanonical_stable_id_occupant() {
+    let temp = tempfile::tempdir().expect("temp daily distill identity collision db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    let group = CandidateGroup {
+        group_id: "identity-collision".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+    let source_ids = normalized_source_memory_ids(&group);
+    let stable_id = stable_distill_memory_id(&group, &source_ids);
+    let mut occupant = candidate_entry(99);
+    occupant.id = stable_id.clone();
+    occupant.path = "/notes/noncanonical-occupant".to_string();
+    occupant.timestamp = "2026-01-01T00:01:39Z".to_string();
+    occupant.text = "unrelated occupant text".to_string();
+    occupant.source = "manual".to_string();
+    server
+        .with_project_store(|store| {
+            for entry in &group.entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            store.upsert(&occupant).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed source memories and stable-id occupant");
+    let payload = GroupPayload {
+        summary: "collision summary".to_string(),
+        text: "collision output".to_string(),
+        keywords: vec!["collision".to_string()],
+        skip_reason: None,
+    };
+
+    let error = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-collision",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect_err("an arbitrary stable-id occupant is not a canonical replay winner");
+    assert!(error.contains("source-set identity collision"), "{error}");
+    server
+        .with_project_store_read(|store| {
+            let conn = store.connection();
+            let occupant_state: (String, String) = conn
+                .query_row(
+                    "SELECT source, text FROM memories WHERE id = ?1",
+                    [&stable_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let derived_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM derived_items", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            let edge_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            assert_eq!(occupant_state, ("manual".to_string(), occupant.text));
+            assert_eq!(derived_count, 0);
+            assert_eq!(edge_count, 0);
+            Ok(())
+        })
+        .expect("identity collision must leave every projection untouched");
+}
+
+#[test]
 fn persist_distill_memory_does_not_project_a_conflicted_supersession_source() {
     let temp = tempfile::tempdir().expect("temp daily distill conflict db");
     let server = crate::MemoryServer::new(
