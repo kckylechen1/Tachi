@@ -707,12 +707,12 @@ pub(crate) async fn handle_capture_session(
     });
     let request = serde_json::to_string_pretty(&payload)
         .map_err(|e| format!("Failed to serialize session capture payload: {e}"))?;
-    let drafts = if replay_manifest.is_some() {
-        Vec::new()
+    let (drafts, model_invocation) = if replay_manifest.is_some() {
+        (Vec::new(), None)
     } else {
         match server
             .llm
-            .call_extract_llm(
+            .call_extract_llm_with_receipt(
                 crate::prompts::SESSION_CAPTURE_PROMPT,
                 &request,
                 None,
@@ -721,9 +721,24 @@ pub(crate) async fn handle_capture_session(
             )
             .await
         {
-            Ok(raw) => match parse_session_capture_response(&raw) {
-                Ok(drafts) => drafts,
-                Err(err) if entries.is_empty() => {
+            Ok(raw)
+                if raw.invocation.completion_status()
+                    == tachi_llm::CompletionStatusV1::Truncated =>
+            {
+                return serde_json::to_string(&json!({
+                    "status": "failed",
+                    "reason": tachi_llm::LLM_OUTPUT_TRUNCATED,
+                    "error": tachi_llm::LLM_OUTPUT_TRUNCATED,
+                    "captured": 0,
+                    "conversation_id": params.conversation_id,
+                    "turn_id": params.turn_id,
+                    "agent_id": params.agent_id,
+                }))
+                .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+            }
+            Ok(raw) => match parse_session_capture_response(&raw.value) {
+                Ok(drafts) => (drafts, Some(raw.invocation)),
+                Err(err) => {
                     return serde_json::to_string(&json!({
                         "status": "failed",
                         "reason": "llm_capture_parse_failed",
@@ -735,7 +750,6 @@ pub(crate) async fn handle_capture_session(
                     }))
                     .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
                 }
-                Err(_) => Vec::new(),
             },
             Err(err) if entries.is_empty() => {
                 return serde_json::to_string(&json!({
@@ -749,7 +763,7 @@ pub(crate) async fn handle_capture_session(
                 }))
                 .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
             }
-            Err(_) => Vec::new(),
+            Err(_) => (Vec::new(), None),
         }
     };
 
@@ -830,6 +844,11 @@ pub(crate) async fn handle_capture_session(
             "session_capture",
             memcore::RetentionPolicy::Ephemeral,
         );
+        let invocation = model_invocation
+            .as_ref()
+            .ok_or_else(|| "capture_session model draft missing invocation receipt".to_string())?;
+        let metadata = crate::provenance::attach_model_invocation(metadata, invocation)
+            .map_err(|error| format!("attach capture_session receipt: {error}"))?;
 
         let summary = if draft.summary.trim().is_empty() {
             draft.text.chars().take(100).collect::<String>()
@@ -2003,10 +2022,22 @@ mod handler_tests {
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
         tokio::task::JoinHandle<()>,
     ) {
+        spawn_capture_llm_with_finish_reason(contents, "stop").await
+    }
+
+    async fn spawn_capture_llm_with_finish_reason(
+        contents: Vec<String>,
+        finish_reason: &str,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
         use axum::{routing::post, Json, Router};
 
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let handler_calls = calls.clone();
+        let finish_reason = finish_reason.to_string();
         let app = Router::new().route(
             "/chat/completions",
             post(move || {
@@ -2016,11 +2047,12 @@ mod handler_tests {
                     .or_else(|| contents.last())
                     .expect("fake LLM requires one payload")
                     .clone();
+                let finish_reason = finish_reason.clone();
                 async move {
                     Json(serde_json::json!({
                         "choices": [{
                             "message": {"role": "assistant", "content": content},
-                            "finish_reason": "stop"
+                            "finish_reason": finish_reason
                         }],
                         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
                     }))
@@ -2038,6 +2070,206 @@ mod handler_tests {
         });
         tokio::task::yield_now().await;
         (port, calls, handle)
+    }
+
+    fn assert_capture_rejected_model_output_has_no_writes_or_claims(
+        output: &str,
+        finish_reason: &str,
+        expected_reason: &str,
+    ) {
+        crate::test_support::with_tachi_home(|home| {
+            let global_db = home.join("global").join("memory.db");
+            let project_db = home
+                .join("projects")
+                .join("capture-reject")
+                .join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+            let params = CaptureSessionParams {
+                conversation_id: format!("reject-{expected_reason}"),
+                turn_id: "turn-1".to_string(),
+                agent_id: "capture-reject-agent".to_string(),
+                // Include a bracket note: the pre-fix path used this local
+                // artifact to mask malformed model output and then admitted
+                // a manifest plus a durable row.
+                messages: vec![Message {
+                    role: "assistant".to_string(),
+                    content: "（记住了模型输出拒绝时不能保存任何东西）".to_string(),
+                }],
+                path_prefix: None,
+                scope: "project".to_string(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let _persist = crate::test_support::EnvRestore::set(
+                "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                "1",
+            );
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+
+            let runtime = tokio::runtime::Runtime::new().expect("capture reject runtime");
+            let (response, server) = runtime.block_on(async {
+                let (port, calls, mock) =
+                    spawn_capture_llm_with_finish_reason(vec![output.to_string()], finish_reason)
+                        .await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model =
+                    crate::test_support::EnvRestore::set("EXTRACT_MODEL", "capture-reject-mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server = server_with_background_workers(global_db, Some(project_db));
+                let response = handle_capture_session(&server, params)
+                    .await
+                    .expect("capture rejection response");
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                mock.abort();
+                (response, server)
+            });
+            runtime.shutdown_timeout(std::time::Duration::from_millis(500));
+
+            let response: serde_json::Value =
+                serde_json::from_str(&response).expect("capture rejection JSON");
+            assert_eq!(response["status"], "failed", "response: {response}");
+            assert_eq!(response["reason"], expected_reason, "response: {response}");
+            server
+                .with_project_store_read(|store| {
+                    let memories: i64 = store
+                        .connection()
+                        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+                        .map_err(|error| error.to_string())?;
+                    assert_eq!(memories, 0, "rejected model output must write no artifacts");
+                    assert!(
+                        store
+                            .list_state(CAPTURE_MANIFEST_NAMESPACE)
+                            .map_err(|error| error.to_string())?
+                            .is_empty(),
+                        "rejected model output must admit or claim no capture manifest"
+                    );
+                    Ok(())
+                })
+                .expect("verify capture rejection state");
+        });
+    }
+
+    #[test]
+    fn truncated_capture_model_output_has_no_writes_or_claims() {
+        assert_capture_rejected_model_output_has_no_writes_or_claims(
+            r#"[{"text":"complete-looking but truncated","topic":"capture"}]"#,
+            "length",
+            tachi_llm::LLM_OUTPUT_TRUNCATED,
+        );
+    }
+
+    #[test]
+    fn malformed_capture_model_output_has_no_writes_or_claims() {
+        assert_capture_rejected_model_output_has_no_writes_or_claims(
+            "not valid capture JSON",
+            "stop",
+            "llm_capture_parse_failed",
+        );
+    }
+
+    #[test]
+    fn one_capture_invocation_is_copied_to_all_drafts_and_replay_preserves_it() {
+        crate::test_support::with_tachi_home(|home| {
+            let global_db = home.join("global").join("memory.db");
+            let project_db = home
+                .join("projects")
+                .join("capture-receipt")
+                .join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+            let params = CaptureSessionParams {
+                conversation_id: "capture-receipt-conversation".to_string(),
+                turn_id: "capture-receipt-turn".to_string(),
+                agent_id: "capture-receipt-agent".to_string(),
+                messages: vec![Message {
+                    role: "user".to_string(),
+                    content: "Persist the two independent durable facts in this turn.".to_string(),
+                }],
+                path_prefix: None,
+                scope: "project".to_string(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let output = r#"[
+                {"text":"first captured fact","topic":"first","scope":"project"},
+                {"text":"second captured fact","topic":"second","scope":"project"}
+            ]"#;
+            let _persist = crate::test_support::EnvRestore::set(
+                "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                "1",
+            );
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+
+            let runtime = tokio::runtime::Runtime::new().expect("capture receipt runtime");
+            let (first, replay, calls, server) = runtime.block_on(async {
+                let (port, calls, mock) = spawn_capture_llm(vec![output.to_string()]).await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model =
+                    crate::test_support::EnvRestore::set("EXTRACT_MODEL", "capture-receipt-mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server = server_with_background_workers(global_db, Some(project_db));
+                let first = handle_capture_session(&server, params.clone())
+                    .await
+                    .expect("first model capture");
+                let replay = handle_capture_session(&server, params)
+                    .await
+                    .expect("model capture replay");
+                mock.abort();
+                (first, replay, calls, server)
+            });
+            runtime.shutdown_timeout(std::time::Duration::from_millis(500));
+
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "completed replay must not resample the provider"
+            );
+            let first: serde_json::Value = serde_json::from_str(&first).expect("first JSON");
+            let replay: serde_json::Value = serde_json::from_str(&replay).expect("replay JSON");
+            assert_eq!(first["captured"], 2, "first: {first}");
+            assert_eq!(replay["captured"], 0, "replay: {replay}");
+            let ids = first["ids"].as_array().expect("first ids");
+            let stored = ids
+                .iter()
+                .map(|id| {
+                    server
+                        .with_project_store_read(|store| {
+                            store
+                                .get(id.as_str().expect("capture id"))
+                                .map_err(|error| error.to_string())
+                        })
+                        .expect("read capture receipt row")
+                        .expect("capture receipt row exists")
+                })
+                .collect::<Vec<_>>();
+            let first_receipt = stored[0]
+                .metadata
+                .pointer("/provenance/model_invocation")
+                .cloned()
+                .expect("first draft receipt");
+            let second_receipt = stored[1]
+                .metadata
+                .pointer("/provenance/model_invocation")
+                .cloned()
+                .expect("second draft receipt");
+            assert_eq!(first_receipt, second_receipt);
+            assert_eq!(first_receipt["schema"], "model-invocation-v1");
+            assert_eq!(first_receipt["lane"], "extract");
+            for row in stored {
+                assert_eq!(row.revision, 1, "replay must preserve the first winner");
+            }
+        });
     }
 
     #[test]

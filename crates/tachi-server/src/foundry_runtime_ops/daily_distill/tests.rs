@@ -224,6 +224,24 @@ fn model_derived_producers_use_receipt_bearing_llm_apis() {
             "call_extract_llm_with_receipt",
             ".call_extract_llm(",
         ),
+        (
+            "capture session",
+            include_str!("../handlers/capture_session.rs"),
+            "call_extract_llm_with_receipt",
+            ".call_extract_llm(",
+        ),
+        (
+            "registered skill execution",
+            include_str!("../../hub_ops/call.rs"),
+            "call_extract_llm_with_receipt",
+            ".call_extract_llm(",
+        ),
+        (
+            "trajectory distill",
+            include_str!("../../hub_ops/call/distill.rs"),
+            "execute_registered_skill_prompt_with_receipt",
+            "execute_registered_skill_prompt(",
+        ),
     ] {
         assert!(
             source.contains(receipt_call),

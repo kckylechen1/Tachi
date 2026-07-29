@@ -307,41 +307,35 @@ async fn extract_ingest_metadata(
     source: &str,
     topic_hint: Option<&str>,
     content: &str,
-) -> (Value, Option<tachi_llm::PersistedModelInvocationReceiptV1>) {
-    #[cfg(test)]
+) -> Result<(Value, Option<tachi_llm::PersistedModelInvocationReceiptV1>), String> {
+    let system = "Extract wiki ingestion metadata. Return JSON only with keys: title, topic, summary, keywords, entities.";
+    let user = format!(
+        "Source: {source}\nTopic hint: {}\n\nContent:\n{}",
+        topic_hint.unwrap_or(""),
+        content.chars().take(8000).collect::<String>()
+    );
+    match server
+        .llm
+        .call_extract_llm_with_receipt(system, &user, None, 0.2, 800)
+        .await
     {
-        let _ = server;
-        (derive_ingest_fallback(source, topic_hint, content), None)
-    }
-
-    #[cfg(not(test))]
-    {
-        let system = "Extract wiki ingestion metadata. Return JSON only with keys: title, topic, summary, keywords, entities.";
-        let user = format!(
-            "Source: {source}\nTopic hint: {}\n\nContent:\n{}",
-            topic_hint.unwrap_or(""),
-            content.chars().take(8000).collect::<String>()
-        );
-        match server
-            .llm
-            .call_extract_llm_with_receipt(system, &user, None, 0.2, 800)
-            .await
+        Ok(response)
+            if response.invocation.completion_status()
+                == tachi_llm::CompletionStatusV1::Truncated =>
         {
-            Ok(response)
-                if response.invocation.completion_status()
-                    == tachi_llm::CompletionStatusV1::Truncated =>
-            {
-                (derive_ingest_fallback(source, topic_hint, content), None)
-            }
-            Ok(response) => match tachi_llm::LlmClient::extract_json_payload(&response.value)
-                .ok()
-                .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
-            {
-                Some(value) => (value, Some(response.invocation)),
-                None => (derive_ingest_fallback(source, topic_hint, content), None),
-            },
-            Err(_) => (derive_ingest_fallback(source, topic_hint, content), None),
+            Err(tachi_llm::LLM_OUTPUT_TRUNCATED.to_string())
         }
+        Ok(response) => {
+            let payload = tachi_llm::LlmClient::extract_json_payload(&response.value)
+                .map_err(|error| format!("wiki ingest metadata parse failed: {error}"))?;
+            let value = serde_json::from_str::<Value>(payload)
+                .map_err(|error| format!("wiki ingest metadata parse failed: {error}"))?;
+            if !value.is_object() {
+                return Err("wiki ingest metadata parse failed: expected a JSON object".to_string());
+            }
+            Ok((value, Some(response.invocation)))
+        }
+        Err(_) => Ok((derive_ingest_fallback(source, topic_hint, content), None)),
     }
 }
 
@@ -393,7 +387,7 @@ pub(crate) async fn handle_wiki_ingest(
     }
 
     let (metadata, model_invocation) =
-        extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await;
+        extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await?;
     let title = metadata
         .get("title")
         .and_then(Value::as_str)
