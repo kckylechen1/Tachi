@@ -116,6 +116,8 @@ pub enum ModelEngineKindV1 {
 }
 
 /// Whether the serving engine exposed a trustworthy completion signal.
+/// `Complete` is reserved for an explicit provider `finish_reason="stop"`;
+/// missing, null, CLI-only, and all other provider signals remain `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionStatusV1 {
@@ -132,21 +134,48 @@ pub enum CompletionStatusV1 {
 /// prompt/output content, request/response body, endpoint, credential, key
 /// identifier, raw provider detail, or vault identity can enter persistence by
 /// adding a field to an internal transport receipt.
+///
+/// External crates can serialize and inspect receipts, but cannot construct or
+/// mutate their fields. Receipts are created only by the controlled model-call
+/// paths in this crate:
+///
+/// ```compile_fail
+/// use tachi_llm::{
+///     CompletionStatusV1, ModelEngineKindV1, ModelInvocationLaneV1,
+///     PersistedModelInvocationReceiptV1,
+/// };
+///
+/// let _forged = PersistedModelInvocationReceiptV1 {
+///     schema: "model-invocation-v1",
+///     lane: ModelInvocationLaneV1::Extract,
+///     engine_kind: ModelEngineKindV1::ProviderHttp,
+///     effective_provider: Some("raw-secret".to_string()),
+///     effective_model: None,
+///     effective_version: None,
+///     fallback_chain: vec!["raw provider error".to_string()],
+///     degraded: false,
+///     completion_status: CompletionStatusV1::Complete,
+///     prompt_tokens: None,
+///     completion_tokens: None,
+///     total_tokens: None,
+///     latency_ms: None,
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PersistedModelInvocationReceiptV1 {
-    pub schema: &'static str,
-    pub lane: ModelInvocationLaneV1,
-    pub engine_kind: ModelEngineKindV1,
-    pub effective_provider: Option<String>,
-    pub effective_model: Option<String>,
-    pub effective_version: Option<String>,
-    pub fallback_chain: Vec<String>,
-    pub degraded: bool,
-    pub completion_status: CompletionStatusV1,
-    pub prompt_tokens: Option<i64>,
-    pub completion_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-    pub latency_ms: Option<u64>,
+    schema: &'static str,
+    lane: ModelInvocationLaneV1,
+    engine_kind: ModelEngineKindV1,
+    effective_provider: Option<String>,
+    effective_model: Option<String>,
+    effective_version: Option<String>,
+    fallback_chain: Vec<String>,
+    degraded: bool,
+    completion_status: CompletionStatusV1,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    latency_ms: Option<u64>,
 }
 
 impl PersistedModelInvocationReceiptV1 {
@@ -155,10 +184,10 @@ impl PersistedModelInvocationReceiptV1 {
     /// Convert the internal provider receipt at the durable boundary. Existing
     /// fallback labels are intentionally collapsed to a fixed routing marker:
     /// producer/provider error text must never become durable provenance.
-    pub fn from_provider_http(
+    pub(crate) fn from_provider_http(
         lane: ModelInvocationLaneV1,
         receipt: ProviderInvocationReceipt,
-        truncated: bool,
+        completion_status: CompletionStatusV1,
     ) -> Self {
         let fallback_chain = receipt
             .fallback_chain
@@ -175,14 +204,10 @@ impl PersistedModelInvocationReceiptV1 {
             effective_version: receipt.effective_version.and_then(non_empty),
             fallback_chain,
             degraded: receipt.degraded,
-            completion_status: if truncated {
-                CompletionStatusV1::Truncated
-            } else {
-                CompletionStatusV1::Complete
-            },
-            prompt_tokens: receipt.prompt_tokens,
-            completion_tokens: receipt.completion_tokens,
-            total_tokens: receipt.total_tokens,
+            completion_status,
+            prompt_tokens: nonnegative(receipt.prompt_tokens),
+            completion_tokens: nonnegative(receipt.completion_tokens),
+            total_tokens: nonnegative(receipt.total_tokens),
             latency_ms: Some(receipt.latency_ms.min(u128::from(u64::MAX)) as u64),
         }
     }
@@ -190,7 +215,7 @@ impl PersistedModelInvocationReceiptV1 {
     /// Claude CLI has no authoritative model, token, version, or completion
     /// fields in its text protocol. Preserve that uncertainty rather than
     /// projecting configured values into the durable receipt.
-    pub fn claude_cli_reasoning(latency_ms: u128) -> Self {
+    pub(crate) fn claude_cli_reasoning(latency_ms: u128) -> Self {
         Self {
             schema: MODEL_INVOCATION_SCHEMA_V1,
             lane: ModelInvocationLaneV1::Reasoning,
@@ -210,18 +235,74 @@ impl PersistedModelInvocationReceiptV1 {
 
     /// The CLI failure/skip detail stays transient. Durable provenance records
     /// only the fixed fact that provider HTTP served a CLI-first request.
-    pub fn mark_claude_cli_to_provider_http_fallback(&mut self) {
+    pub(crate) fn mark_claude_cli_to_provider_http_fallback(&mut self) {
         self.degraded = true;
         if self.fallback_chain.len() < Self::MAX_FALLBACK_CHAIN_ENTRIES {
             self.fallback_chain
                 .push("claude_cli_to_provider_http".to_string());
         }
     }
+
+    pub const fn schema(&self) -> &'static str {
+        self.schema
+    }
+
+    pub const fn lane(&self) -> ModelInvocationLaneV1 {
+        self.lane
+    }
+
+    pub const fn engine_kind(&self) -> ModelEngineKindV1 {
+        self.engine_kind
+    }
+
+    pub fn effective_provider(&self) -> Option<&str> {
+        self.effective_provider.as_deref()
+    }
+
+    pub fn effective_model(&self) -> Option<&str> {
+        self.effective_model.as_deref()
+    }
+
+    pub fn effective_version(&self) -> Option<&str> {
+        self.effective_version.as_deref()
+    }
+
+    pub fn fallback_chain(&self) -> &[String] {
+        &self.fallback_chain
+    }
+
+    pub const fn degraded(&self) -> bool {
+        self.degraded
+    }
+
+    pub const fn completion_status(&self) -> CompletionStatusV1 {
+        self.completion_status
+    }
+
+    pub const fn prompt_tokens(&self) -> Option<i64> {
+        self.prompt_tokens
+    }
+
+    pub const fn completion_tokens(&self) -> Option<i64> {
+        self.completion_tokens
+    }
+
+    pub const fn total_tokens(&self) -> Option<i64> {
+        self.total_tokens
+    }
+
+    pub const fn latency_ms(&self) -> Option<u64> {
+        self.latency_ms
+    }
 }
 
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn nonnegative(value: Option<i64>) -> Option<i64> {
+    value.filter(|value| *value >= 0)
 }
 
 /// A parsed or text model result paired with the one persisted receipt for the
@@ -240,6 +321,7 @@ pub struct Generated<T> {
 pub struct ProviderInvocationOutcome {
     pub text: String,
     pub truncated: bool,
+    pub completion_status: CompletionStatusV1,
     pub receipt: ProviderInvocationReceipt,
 }
 
@@ -252,7 +334,7 @@ impl ProviderInvocationOutcome {
             invocation: PersistedModelInvocationReceiptV1::from_provider_http(
                 lane,
                 self.receipt,
-                self.truncated,
+                self.completion_status,
             ),
             value: self.text,
         }
@@ -432,7 +514,7 @@ mod tests {
                 total_tokens: Some(10),
                 latency_ms: u128::from(u64::MAX) + 1,
             },
-            false,
+            CompletionStatusV1::Complete,
         );
         let cli = PersistedModelInvocationReceiptV1::claude_cli_reasoning(41);
         let mut cli_to_http = provider.clone();
@@ -480,11 +562,11 @@ mod tests {
                     "persisted receipt leaked forbidden marker {forbidden}: {serialized}"
                 );
             }
-            assert_eq!(receipt.schema, MODEL_INVOCATION_SCHEMA_V1);
+            assert_eq!(receipt.schema(), MODEL_INVOCATION_SCHEMA_V1);
         }
 
         assert_eq!(
-            provider.fallback_chain,
+            provider.fallback_chain(),
             vec![
                 "provider_http_fallback".to_string(),
                 "provider_http_fallback".to_string(),
@@ -493,11 +575,11 @@ mod tests {
             ],
             "raw fallback detail must collapse to bounded predefined labels"
         );
-        assert_eq!(provider.latency_ms, Some(u64::MAX));
-        assert_eq!(cli.engine_kind, ModelEngineKindV1::ClaudeCli);
-        assert_eq!(cli.completion_status, CompletionStatusV1::Unknown);
-        assert!(cli.effective_model.is_none());
-        assert!(cli.completion_tokens.is_none());
+        assert_eq!(provider.latency_ms(), Some(u64::MAX));
+        assert_eq!(cli.engine_kind(), ModelEngineKindV1::ClaudeCli);
+        assert_eq!(cli.completion_status(), CompletionStatusV1::Unknown);
+        assert!(cli.effective_model().is_none());
+        assert!(cli.completion_tokens().is_none());
     }
 }
 

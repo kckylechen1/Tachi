@@ -61,7 +61,7 @@ pub struct RecordedCallOutcome {
 
 /// Text plus the closed, persisted-safe receipt for the engine that produced
 /// it. The recorder's filesystem elapsed time stays in `status.json` and must
-/// never replace `invocation.latency_ms`, which belongs to the serving engine.
+/// never replace `invocation.latency_ms()`, which belongs to the serving engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedCallWithReceipt {
     pub text: String,
@@ -427,7 +427,7 @@ mod tests {
             .expect("recorded invocation");
 
         assert_eq!(recorded.text, "provider result");
-        assert_eq!(recorded.invocation.latency_ms, Some(1));
+        assert_eq!(recorded.invocation.latency_ms(), Some(1));
         let run_dir = std::fs::read_dir(recorder.runs_dir())
             .expect("runs directory")
             .next()

@@ -148,7 +148,7 @@ impl super::super::LlmClient {
             text: outcome.value,
             used_fallback: true,
             truncated: matches!(
-                invocation.completion_status,
+                invocation.completion_status(),
                 super::super::provider_health::CompletionStatusV1::Truncated
             ),
             invocation,

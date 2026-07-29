@@ -508,26 +508,26 @@ async fn call_reasoning_llm_with_receipt_flags_truncation_and_fallback_honestly(
         "the lane path (not claude-cli) served this request — must report fallback: true"
     );
     assert_eq!(
-        outcome.invocation.engine_kind,
+        outcome.invocation.engine_kind(),
         ModelEngineKindV1::ProviderHttp
     );
     assert_eq!(
-        outcome.invocation.effective_model.as_deref(),
+        outcome.invocation.effective_model(),
         Some("http-after-cli-failure-model"),
         "the HTTP fallback must retain the actual provider identity"
     );
     assert_eq!(
-        outcome.invocation.effective_version.as_deref(),
+        outcome.invocation.effective_version(),
         Some("http-after-cli-failure-version")
     );
-    assert!(outcome.invocation.degraded);
+    assert!(outcome.invocation.degraded());
     assert_eq!(
-        outcome.invocation.fallback_chain,
-        vec!["claude_cli_to_provider_http".to_string()],
+        outcome.invocation.fallback_chain(),
+        &["claude_cli_to_provider_http".to_string()],
         "the durable fallback marker must be fixed and must not carry the CLI error"
     );
     assert_eq!(
-        outcome.invocation.completion_status,
+        outcome.invocation.completion_status(),
         CompletionStatusV1::Truncated
     );
 
@@ -1405,28 +1405,28 @@ async fn extract_receipt_maps_actual_primary_provider_identity() {
         .await
         .expect("primary response");
     assert_eq!(generated.value, "actual primary text");
-    assert_eq!(generated.invocation.lane, ModelInvocationLaneV1::Extract);
+    assert_eq!(generated.invocation.lane(), ModelInvocationLaneV1::Extract);
     assert_eq!(
-        generated.invocation.engine_kind,
+        generated.invocation.engine_kind(),
         ModelEngineKindV1::ProviderHttp
     );
     assert_eq!(
-        generated.invocation.effective_model.as_deref(),
+        generated.invocation.effective_model(),
         Some("provider-returned-primary-model")
     );
     assert_eq!(
-        generated.invocation.effective_version.as_deref(),
+        generated.invocation.effective_version(),
         Some("provider-returned-primary-version")
     );
-    assert_eq!(generated.invocation.prompt_tokens, Some(11));
-    assert_eq!(generated.invocation.completion_tokens, Some(7));
-    assert_eq!(generated.invocation.total_tokens, Some(18));
+    assert_eq!(generated.invocation.prompt_tokens(), Some(11));
+    assert_eq!(generated.invocation.completion_tokens(), Some(7));
+    assert_eq!(generated.invocation.total_tokens(), Some(18));
     assert_eq!(
-        generated.invocation.completion_status,
+        generated.invocation.completion_status(),
         CompletionStatusV1::Complete
     );
-    assert!(!generated.invocation.degraded);
-    assert!(generated.invocation.fallback_chain.is_empty());
+    assert!(!generated.invocation.degraded());
+    assert!(generated.invocation.fallback_chain().is_empty());
 
     let legacy_text = client
         .call_extract_llm("system", "user", None, 0.0, 16)
@@ -1501,18 +1501,18 @@ async fn extract_receipt_maps_effective_provider_fallback_not_configured_primary
         .await
         .expect("fallback response");
     assert_eq!(generated.value, "fallback text");
-    assert!(generated.invocation.degraded);
+    assert!(generated.invocation.degraded());
     assert_eq!(
-        generated.invocation.fallback_chain,
-        vec!["provider_http_fallback".to_string()]
+        generated.invocation.fallback_chain(),
+        &["provider_http_fallback".to_string()]
     );
     assert_eq!(
-        generated.invocation.effective_model.as_deref(),
+        generated.invocation.effective_model(),
         Some("actual-fallback-model"),
         "configured primary/fallback model IDs must not replace the actual serving model"
     );
     assert_eq!(
-        generated.invocation.effective_version.as_deref(),
+        generated.invocation.effective_version(),
         Some("actual-fallback-version")
     );
 
@@ -1568,6 +1568,75 @@ async fn extract_facts_with_receipt_rejects_truncated_output_before_parsing() {
         .await
         .expect_err("truncated output must not become parsed facts");
     assert_eq!(err, crate::LLM_OUTPUT_TRUNCATED);
+
+    server_task.abort();
+}
+
+/// Missing finish status is not authoritative evidence of completion. It
+/// remains parseable for legacy compatibility, while the receipt stays
+/// `Unknown`; malformed negative usage values are dropped at the persisted
+/// boundary instead of becoming durable counters.
+#[tokio::test]
+async fn unknown_finish_reason_stays_unknown_and_negative_tokens_are_dropped() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "[]"}
+                }],
+                "model": "malformed-usage-model",
+                "usage": {
+                    "prompt_tokens": -7,
+                    "completion_tokens": 3,
+                    "total_tokens": -4
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind malformed usage provider");
+    let port = listener
+        .local_addr()
+        .expect("malformed usage provider addr")
+        .port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("malformed usage provider");
+    });
+    let client = LlmClient::new_with_config(
+        config_with_extract(ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "configured-extract-model".to_string(),
+            api_key_envs: vec!["__1521_MALFORMED_USAGE_KEY"],
+        }),
+        None,
+    )
+    .expect("client");
+    client.set_provider_secret_pool(
+        "__1521_MALFORMED_USAGE_KEY",
+        vec![ProviderSecret {
+            key_id: "__1521_MALFORMED_USAGE_KEY".to_string(),
+            value: "fixture-malformed-usage-secret".to_string(),
+        }],
+    );
+
+    let generated = client
+        .extract_facts_with_receipt("valid empty fact set")
+        .await
+        .expect("Unknown is parseable but must remain labeled Unknown");
+    assert!(generated.value.is_empty());
+    assert_eq!(
+        generated.invocation.completion_status(),
+        CompletionStatusV1::Unknown
+    );
+    assert_eq!(generated.invocation.prompt_tokens(), None);
+    assert_eq!(generated.invocation.completion_tokens(), Some(3));
+    assert_eq!(generated.invocation.total_tokens(), None);
 
     server_task.abort();
 }

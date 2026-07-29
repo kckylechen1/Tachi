@@ -381,7 +381,11 @@ impl super::super::LlmClient {
     }
 
     fn reject_truncated(response: Generated<String>) -> Result<Generated<String>, String> {
-        if response.invocation.completion_status == CompletionStatusV1::Truncated {
+        // Unknown remains parseable for legacy compatibility: only the
+        // provider's explicit `finish_reason=length` is authoritative evidence
+        // of truncation. The receipt preserves Unknown so downstream policy can
+        // choose a stricter disposition without us mislabeling it Complete.
+        if response.invocation.completion_status() == CompletionStatusV1::Truncated {
             return Err(LLM_OUTPUT_TRUNCATED.to_string());
         }
         Ok(response)
