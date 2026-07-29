@@ -173,6 +173,32 @@ fn r8_deletes_marked_cache_and_keeps_empty_json_lookalikes_and_projections_consi
             None,
         );
     }
+    for (id, path, retention, topic) in [
+        (
+            "cache-path-durable-lookalike",
+            "/scratch/recall-cache/manual-empty",
+            Some("durable"),
+            "",
+        ),
+        (
+            "cache-topic-null-lookalike",
+            "/notes/manual-cache-lookalike",
+            None,
+            "recall_rerank_cache",
+        ),
+    ] {
+        insert_memory(
+            &conn,
+            id,
+            path,
+            "manual cache lookalike",
+            "{}",
+            retention,
+            Some("manual"),
+        );
+        conn.execute("UPDATE memories SET topic=?2 WHERE id=?1", [id, topic])
+            .unwrap();
+    }
     conn.execute(
         "UPDATE memories SET archived=1 WHERE id='cache-archived'",
         [],
@@ -282,6 +308,8 @@ fn r8_deletes_marked_cache_and_keeps_empty_json_lookalikes_and_projections_consi
         "cache-archived",
         "cache-superseded",
         "cache-used",
+        "cache-path-durable-lookalike",
+        "cache-topic-null-lookalike",
         "empty-permanent",
         "empty-used",
         "empty-durable-lookalike",

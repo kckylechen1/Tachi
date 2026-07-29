@@ -8,7 +8,7 @@
 //! authority.
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
-use memcore::namespace::RECALL_CACHE_SQL_WHERE;
+use memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE;
 
 pub struct JunkCleanup;
 
@@ -43,7 +43,7 @@ const EPHEMERAL_JUNK_GUARDS_SQL: &str = r#"
 
 fn rerank_cache_sql() -> String {
     format!(
-        "SELECT id FROM memories WHERE ({RECALL_CACHE_SQL_WHERE}) AND ({EPHEMERAL_JUNK_GUARDS_SQL})"
+        "SELECT id FROM memories WHERE source = '{FOUNDRY_RECALL_CACHE_SOURCE}' AND ({EPHEMERAL_JUNK_GUARDS_SQL})"
     )
 }
 
