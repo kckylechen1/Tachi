@@ -1988,6 +1988,14 @@ mod handler_tests {
     static FAILPOINT_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
         std::sync::OnceLock::new();
 
+    fn server_with_background_workers(
+        global_db: std::path::PathBuf,
+        project_db: Option<std::path::PathBuf>,
+    ) -> MemoryServer {
+        MemoryServer::new_with_background_workers_for_test(global_db, project_db, true)
+            .expect("server with background workers")
+    }
+
     async fn spawn_capture_llm(
         contents: Vec<String>,
     ) -> (
@@ -2089,8 +2097,6 @@ mod handler_tests {
                 force: true,
             };
 
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _persist = crate::test_support::EnvRestore::set(
                 "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
                 "1",
@@ -2106,8 +2112,7 @@ mod handler_tests {
                 );
                 let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "capture-mock");
                 let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                let server =
-                    MemoryServer::new(global_db, Some(project_db)).expect("capture server");
+                let server = server_with_background_workers(global_db, Some(project_db));
                 let first = handle_capture_session(&server, params.clone())
                     .await
                     .expect("first capture");
@@ -2143,8 +2148,6 @@ mod handler_tests {
             let project_db = home.join("projects/bracket-source/memory.db");
             std::fs::create_dir_all(global_db.parent().unwrap()).unwrap();
             std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
             let rt = tokio::runtime::Runtime::new().unwrap();
             let server = rt.block_on(async move {
@@ -2155,7 +2158,7 @@ mod handler_tests {
                 );
                 let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
                 let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                let server = MemoryServer::new(global_db, Some(project_db)).unwrap();
+                let server = server_with_background_workers(global_db, Some(project_db));
                 let params = |turn: &str, content: &str| CaptureSessionParams {
                     conversation_id: "source-conversation".into(),
                     turn_id: turn.into(),
@@ -2255,8 +2258,6 @@ mod handler_tests {
                 min_chars: 1,
                 force: true,
             };
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             let project_db_for_query = project_db.clone();
@@ -2269,7 +2270,7 @@ mod handler_tests {
                     );
                     let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
                     let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                    let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                    let server = server_with_background_workers(global_db, Some(project_db));
                     let (left, right) = tokio::join!(
                         handle_capture_session(&server, params.clone()),
                         handle_capture_session(&server, params.clone())
@@ -2381,8 +2382,6 @@ mod handler_tests {
                 "importance": 0.8
             }])
             .to_string();
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
             let rt = tokio::runtime::Runtime::new().expect("runtime");
             rt.block_on(async move {
@@ -2393,7 +2392,7 @@ mod handler_tests {
                 );
                 let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
                 let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                let server = server_with_background_workers(global_db, Some(project_db));
 
                 set_capture_failpoint("after_artifact_0");
                 handle_capture_session(&server, params.clone())
@@ -2544,10 +2543,6 @@ mod handler_tests {
                     "importance": 0.8
                 }])
                 .to_string();
-                let _workers = crate::test_support::EnvRestore::set(
-                    "TACHI_TEST_ENABLE_BACKGROUND_WORKERS",
-                    "1",
-                );
                 let _persist = crate::test_support::EnvRestore::set(
                     "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
                     "1",
@@ -2563,7 +2558,7 @@ mod handler_tests {
                     );
                     let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
                     let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                    let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                    let server = server_with_background_workers(global_db, Some(project_db));
                     set_capture_failpoint(stage);
                     let first = handle_capture_session(&server, params.clone()).await;
                     assert!(
@@ -2755,8 +2750,6 @@ mod handler_tests {
                 "importance": 0.8
             }])
             .to_string();
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _persist = crate::test_support::EnvRestore::set(
                 "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
                 "1",
@@ -2771,7 +2764,7 @@ mod handler_tests {
                 );
                 let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
                 let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                let server = server_with_background_workers(global_db, Some(project_db));
                 set_capture_failpoint(stage);
                 let err = handle_capture_session(&server, params)
                     .await
@@ -2859,8 +2852,6 @@ mod handler_tests {
                 "importance": 0.8
             }])
             .to_string();
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _persist = crate::test_support::EnvRestore::set(
                 "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
                 "1",
@@ -2875,7 +2866,7 @@ mod handler_tests {
                 );
                 let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
                 let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                let server = server_with_background_workers(global_db, Some(project_db));
                 set_capture_failpoint(stage);
                 let err = handle_capture_session(&server, params)
                     .await
@@ -3027,8 +3018,6 @@ mod handler_tests {
                 min_chars: 1,
                 force: true,
             };
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
             let rt = tokio::runtime::Runtime::new().expect("runtime");
             rt.block_on(async {
@@ -3036,7 +3025,7 @@ mod handler_tests {
                 let _base = crate::test_support::EnvRestore::set("EXTRACT_BASE_URL", &format!("http://127.0.0.1:{port}/chat/completions"));
                 let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
                 let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                let server = server_with_background_workers(global_db, Some(project_db));
                 let receipt: serde_json::Value = serde_json::from_str(&handle_capture_session(&server, params.clone()).await.expect("seed")).unwrap();
                 let id = receipt["ids"][0].as_str().unwrap().to_string();
                 let mut fixture = server.with_project_store_read(|s| s.get(&id).map_err(|e| e.to_string())).unwrap().unwrap();
@@ -3151,8 +3140,6 @@ mod handler_tests {
                         .map_err(|e| e.to_string())
                 })
                 .expect("snapshot tombstone");
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
             let rt = tokio::runtime::Runtime::new().expect("runtime");
             rt.block_on(async {
@@ -3254,8 +3241,6 @@ mod handler_tests {
             ])
             .to_string();
 
-            let _workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
             let _persist = crate::test_support::EnvRestore::set(
                 "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
                 "1",
@@ -3282,8 +3267,7 @@ mod handler_tests {
                     let _model =
                         crate::test_support::EnvRestore::set("EXTRACT_MODEL", "capture-draft-mock");
                     let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
-                    let server =
-                        MemoryServer::new(global_db, Some(project_db)).expect("capture server");
+                    let server = server_with_background_workers(global_db, Some(project_db));
 
                     let first = handle_capture_session(&server, params.clone())
                         .await
@@ -3453,15 +3437,15 @@ mod handler_tests {
 
             // Oz r5 fixture fix: `handle_capture_session` unconditionally
             // calls `enqueue_capture_maintenance_jobs`, which `try_send`s
-            // onto the foundry-maintenance mpsc channel — under `#[cfg(test)]`,
-            // `background_workers_enabled()` (server_state/init.rs:37-46)
-            // defaults OFF unless `TACHI_TEST_ENABLE_BACKGROUND_WORKERS` is
-            // set, so `MemoryServer::new` never spawns the worker that would
-            // hold the receiver open; the sender side is immediately
-            // disconnected and the real handler call fails with "foundry
-            // maintenance worker unavailable". This is a TEST-fixture gap,
-            // not a production one — the fix is enabling the real worker for
-            // this test, NOT teaching the handler to tolerate a missing one
+            // onto the foundry-maintenance mpsc channel. Tests default those
+            // workers off, so this fixture must opt in through the explicit
+            // thread-local constructor seam; a process-global environment
+            // switch would leak into unrelated parallel tests. The sender
+            // side would otherwise be disconnected and the real handler call
+            // would fail with "foundry maintenance worker unavailable". This
+            // is a TEST-fixture requirement, not a production one — enable
+            // the real worker here rather than teaching the handler to
+            // tolerate a missing one
             // (that would mask a genuinely dead worker in production, the
             // same "拒必有声" reasoning the write-affinity gate itself
             // follows). `MemoryServer::new` spawns via `tokio::spawn` when
@@ -3469,9 +3453,6 @@ mod handler_tests {
             // INSIDE the same `block_on`'d runtime, not constructed before
             // it: calling `tokio::spawn` with no active runtime context
             // panics.
-            let _background_workers =
-                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
-
             // The spawned foundry-maintenance worker's `while let Some(item)
             // = rx.recv().await` loop (maintenance/worker.rs:120) only ever
             // exits when its Sender is dropped — but `server` (which owns
@@ -3484,8 +3465,7 @@ mod handler_tests {
             // failing fast.
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             let (response, server) = rt.block_on(async move {
-                let server =
-                    MemoryServer::new(global_db, Some(quant_db)).expect("bind quant daemon");
+                let server = server_with_background_workers(global_db, Some(quant_db));
                 let response = handle_capture_session(&server, params)
                     .await
                     .expect("capture_session should complete");
@@ -3535,19 +3515,11 @@ mod handler_tests {
     // `handle_capture_session_infers_domain_from_entry_and_reroutes` above
     // (which only needs state written BEFORE that call), there is no way to
     // observe this fix without the maintenance-enqueue call actually
-    // succeeding, which needs `TACHI_TEST_ENABLE_BACKGROUND_WORKERS`
-    // enabled. That would reintroduce EXACTLY the process-env-var
-    // concurrency race item 5 was fixed for (`EnvRestore` prevents the
-    // value LEAKING after this test ends; it does not prevent OTHER,
-    // concurrently-running tests that don't hold `global_test_lock` from
-    // OBSERVING it while set — and per codex's own grep,
-    // `server_state/init.rs`'s tests around lines 371-379 are exactly such
-    // tests) — multiplying the exact class of risk this round exists to
-    // eliminate, not adding a new instance of it. A safe test would need
-    // either (a) reordering `capture_session.rs` so the continuity event is
-    // written before maintenance-enqueue, or (b) extracting the
-    // destination-group loop body into a directly-testable seam — both are
-    // production changes, out of scope for a test-quality-only round. The
+    // succeeding, which requires the explicit worker-enabled test
+    // constructor and bounded runtime shutdown used above. Adding that
+    // lifecycle-specific regression remains separate from this historical
+    // destination-fallback review; a process-global worker switch must not
+    // be reintroduced. The
     // fix itself (verified correct by codex's own production-logic review
     // this round) stays confirmed by code inspection only:
     // `emit_session_captured_event`'s call now passes `group_named_project
