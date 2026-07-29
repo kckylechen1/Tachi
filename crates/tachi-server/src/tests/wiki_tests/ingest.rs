@@ -19,13 +19,19 @@ impl Drop for MockWikiIngestProvider {
 
 impl MockWikiIngestProvider {
     async fn start(content: &str, finish_reason: &str) -> Self {
+        Self::start_with_model(content, finish_reason, "mock-wiki-ingest").await
+    }
+
+    async fn start_with_model(content: &str, finish_reason: &str, model: &str) -> Self {
         let content = content.to_string();
         let finish_reason = finish_reason.to_string();
+        let response_model = model.to_string();
         let app = Router::new().route(
             "/chat/completions",
             post(move || {
                 let content = content.clone();
                 let finish_reason = finish_reason.clone();
+                let response_model = response_model.clone();
                 async move {
                     Json(json!({
                         "choices": [{
@@ -33,7 +39,7 @@ impl MockWikiIngestProvider {
                             "finish_reason": finish_reason,
                         }],
                         "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
-                        "model": "mock-wiki-ingest",
+                        "model": response_model,
                     }))
                     .into_response()
                 }
@@ -54,6 +60,7 @@ impl MockWikiIngestProvider {
         let llm = wiki_ingest_llm(
             format!("http://127.0.0.1:{port}/chat/completions"),
             "WIKI_INGEST_TEST_API_KEY",
+            model,
         );
         assert!(llm.set_provider_secret_pool(
             "WIKI_INGEST_TEST_API_KEY",
@@ -66,10 +73,10 @@ impl MockWikiIngestProvider {
     }
 }
 
-fn wiki_ingest_llm(base_url: String, key_env: &'static str) -> LlmClient {
+fn wiki_ingest_llm(base_url: String, key_env: &'static str, model: &str) -> LlmClient {
     let lane = || ChatLaneConfig {
         base_url: base_url.clone(),
-        model: "mock-wiki-ingest".to_string(),
+        model: model.to_string(),
         api_key_envs: vec![key_env],
     };
     LlmClient::new_with_config(
@@ -92,6 +99,7 @@ fn install_unavailable_wiki_ingest_llm(server: &mut crate::MemoryServer) {
     server.llm = Arc::new(wiki_ingest_llm(
         "http://127.0.0.1:1/chat/completions".to_string(),
         "WIKI_INGEST_TEST_MISSING_API_KEY",
+        "unavailable-wiki-ingest",
     ));
 }
 
@@ -193,6 +201,106 @@ async fn tachi_wiki_ingest_persists_real_extract_receipt_on_first_write() {
     assert_eq!(receipt["schema"], "model-invocation-v1");
     assert_eq!(receipt["lane"], "extract");
     assert_eq!(receipt["completion_status"], "complete");
+}
+
+#[tokio::test]
+async fn tachi_wiki_ingest_update_preserves_trusted_first_receipt_exactly() {
+    let provider_a = MockWikiIngestProvider::start_with_model(
+        r#"{"title":"First Wiki","topic":"stable-receipt-topic","summary":"first summary","keywords":["first"],"entities":["Tachi"]}"#,
+        "stop",
+        "wiki-receipt-a",
+    )
+    .await;
+    let (mut server, home) = seed_wiki_project_entries(vec![]);
+    server.llm = Arc::new(provider_a.llm.clone());
+    let first_source = write_wiki_ingest_source(&home, "ingest-first-receipt-a.md");
+    let first_response = server
+        .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
+            source: first_source,
+            topic: None,
+            update_related: false,
+        }))
+        .await
+        .expect("first typed wiki write");
+    let first_response: Value = serde_json::from_str(&first_response).expect("first wiki response");
+    let first_id = first_response["id"].as_str().expect("first wiki id");
+    let receipt_a = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(first_id).map_err(|error| error.to_string())
+        })
+        .expect("read first wiki row")
+        .expect("first wiki row exists")
+        .metadata
+        .pointer("/provenance/model_invocation")
+        .cloned()
+        .expect("first typed invocation receipt");
+    assert_eq!(receipt_a["effective_model"], "wiki-receipt-a");
+
+    let provider_b = MockWikiIngestProvider::start_with_model(
+        r#"{
+            "title":"Updated Wiki",
+            "topic":"stable-receipt-topic",
+            "summary":"updated summary",
+            "keywords":["updated"],
+            "entities":["Tachi"],
+            "provenance": {
+                "caller_marker":"hostile",
+                "model_invocation":{"schema":"hostile-model-invocation"}
+            }
+        }"#,
+        "stop",
+        "wiki-receipt-b",
+    )
+    .await;
+    server.llm = Arc::new(provider_b.llm.clone());
+    let second_source = write_wiki_ingest_source(&home, "ingest-update-receipt-b.md");
+    let second_response = server
+        .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
+            source: second_source.clone(),
+            topic: None,
+            update_related: false,
+        }))
+        .await
+        .expect("wiki update with a second invocation");
+    let second_response: Value =
+        serde_json::from_str(&second_response).expect("second wiki response");
+    let second_id = second_response["id"].as_str().expect("second wiki id");
+    assert_ne!(second_id, first_id, "update must create a replacement row");
+
+    let replacement = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(second_id).map_err(|error| error.to_string())
+        })
+        .expect("read replacement wiki row")
+        .expect("replacement wiki row exists");
+    assert_eq!(
+        replacement.metadata.pointer("/provenance/model_invocation"),
+        Some(&receipt_a),
+        "replacement must preserve receipt A as an exact JSON value"
+    );
+    assert_eq!(replacement.metadata["ingest_source"], second_source);
+    assert_eq!(
+        replacement.metadata["provenance"]["tool_name"],
+        "wiki_ingest"
+    );
+    assert_eq!(
+        replacement.metadata["provenance"]["source_kind"],
+        "wiki_ingest"
+    );
+    assert_eq!(
+        replacement.metadata["provenance"]["context"]["source"],
+        replacement.metadata["ingest_source"]
+    );
+    assert!(
+        replacement.metadata["provenance"]
+            .get("caller_marker")
+            .is_none(),
+        "untyped model/caller provenance must not survive inject_provenance"
+    );
+    assert_ne!(
+        replacement.metadata["provenance"]["model_invocation"]["effective_model"], "wiki-receipt-b",
+        "the update invocation must not overwrite the first receipt"
+    );
 }
 
 #[tokio::test]

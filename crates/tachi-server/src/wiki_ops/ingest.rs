@@ -342,20 +342,78 @@ async fn extract_ingest_metadata(
 /// Persist a new ingest entry only after it has claimed any active predecessor.
 /// A false supersession CAS means another writer already owns that predecessor,
 /// so the new entry must not become a competing wiki candidate.
+#[derive(Clone)]
+struct TrustedExistingModelInvocationReceipt(Value);
+
+impl TrustedExistingModelInvocationReceipt {
+    /// This constructor is deliberately private and accepts only a row read
+    /// from the replacement transaction. Caller/model metadata never reaches
+    /// this preservation seam.
+    fn from_existing_row(entry: &MemoryEntry) -> Option<Self> {
+        entry
+            .metadata
+            .pointer("/provenance/model_invocation")
+            .cloned()
+            .map(Self)
+    }
+
+    fn attach_exactly(&self, mut metadata: Value) -> Result<Value, memcore::MemoryError> {
+        let metadata_obj = metadata.as_object_mut().ok_or_else(|| {
+            memcore::MemoryError::InvalidArg(
+                "wiki ingest metadata must be an object before receipt preservation".to_string(),
+            )
+        })?;
+        let provenance = metadata_obj
+            .get_mut("provenance")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                memcore::MemoryError::InvalidArg(
+                    "wiki ingest provenance must be an object before receipt preservation"
+                        .to_string(),
+                )
+            })?;
+        provenance.insert("model_invocation".to_string(), self.0.clone());
+        Ok(metadata)
+    }
+}
+
 fn persist_wiki_ingest_entry(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
     old_id: Option<&str>,
     reference_appends: &[memcore::db::ValidatedReferenceMutation],
+    new_invocation: Option<&tachi_llm::PersistedModelInvocationReceiptV1>,
 ) -> Result<(), String> {
-    let metadata_patch = entry.metadata.as_object().cloned().unwrap_or_default();
     store
         .with_immutable_supersession_transaction(|replacement| {
+            let trusted_existing_receipt = old_id
+                .map(|old_id| replacement.get_memory(old_id))
+                .transpose()?
+                .flatten()
+                .as_ref()
+                .and_then(TrustedExistingModelInvocationReceipt::from_existing_row);
+            let mut replacement_entry = entry.clone();
+            replacement_entry.metadata = match trusted_existing_receipt {
+                Some(receipt) => receipt.attach_exactly(replacement_entry.metadata)?,
+                None => match new_invocation {
+                    Some(invocation) => crate::provenance::attach_model_invocation(
+                        replacement_entry.metadata,
+                        invocation,
+                    )
+                    .map_err(memcore::MemoryError::InvalidArg)?,
+                    None => replacement_entry.metadata,
+                },
+            };
+            let metadata_patch = replacement_entry
+                .metadata
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
             if let Some(old_id) = old_id {
-                replacement.claim_immutable_supersession(old_id, &entry.id)?;
+                replacement.claim_immutable_supersession(old_id, &replacement_entry.id)?;
             }
             replacement.upsert_with_validated_reference_mutations(
-                entry,
+                &replacement_entry,
                 &metadata_patch,
                 reference_appends,
             )?;
@@ -461,12 +519,6 @@ pub(crate) async fn handle_wiki_ingest(
         crate::server_state::DbScope::Project,
         json!({"source": params.source.clone()}),
     );
-    let metadata = match model_invocation.as_ref() {
-        Some(invocation) => crate::provenance::attach_model_invocation(metadata, invocation)
-            .map_err(|error| format!("attach wiki ingest receipt: {error}"))?,
-        None => metadata,
-    };
-
     let entry = MemoryEntry {
         id: id.clone(),
         path: path.clone(),
@@ -521,7 +573,13 @@ pub(crate) async fn handle_wiki_ingest(
             }
         };
 
-        persist_wiki_ingest_entry(store, &entry, old_id.as_deref(), &reference_appends)
+        persist_wiki_ingest_entry(
+            store,
+            &entry,
+            old_id.as_deref(),
+            &reference_appends,
+            model_invocation.as_ref(),
+        )
     })?;
 
     let mut related = Vec::new();
@@ -703,7 +761,7 @@ mod immutable_supersession_tests {
             .supersede_memory(&old.id, &canonical.id)
             .expect("seed immutable predecessor edge"));
 
-        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id), &[])
+        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id), &[], None)
             .expect_err("conflicted predecessor must refuse wiki candidate");
         assert!(err.contains("immutable supersession CAS"), "err: {err}");
         let old_after = store
