@@ -270,23 +270,12 @@ fn migrate_single_db(
     let source_path = PathBuf::from(&migration.source_path);
     let target_path = cfg.target_db.clone();
 
-    // Revalidate directly before the only source open. This catches a path
-    // replacement, symlink substitution, identity drift, or source->target
-    // transition before either source or target can be opened for mutation.
+    // Dry-run remains read-only and therefore does not acquire execution
+    // locks. Its count is advisory; the real execution path below takes the
+    // source lock before materializing the snapshot it may remove.
     authority.revalidate_for_mutation(Some(&target_path))?;
-    let source_store = open_cli_store_read_only(&source_path)?;
-    let source_entries = {
-        let conn = source_store.connection();
-        let mut stmt = conn.prepare(
-            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
-             FROM memories",
-        )?;
-        let rows = stmt.query_map([], memcore::row_to_entry)?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-    let source_count = source_entries.len();
-
     if cfg.dry_run {
+        let source_count = read_source_entries(&source_path)?.len();
         return Ok(TidyMigrationOutcome {
             source_path: migration.source_path.clone(),
             target_path: migration.target_path.clone(),
@@ -299,27 +288,12 @@ fn migrate_single_db(
         });
     }
 
-    // The source was read-only, but no target write may begin if the source
-    // changed while it was being read.
-    authority.revalidate_for_mutation(Some(&target_path))?;
     if let Some(parent) = cfg.target_db.parent() {
         std::fs::create_dir_all(parent)?;
     }
     authority.revalidate_for_mutation(Some(&target_path))?;
     let mut target_store = open_cli_store(&target_path)?;
     let rows_before = target_store.stats(true)?.total as usize;
-
-    // Drop the read-only source connection now — it is never used again in
-    // this function, and the archive-safety guard below probes whether some
-    // OTHER process still holds `source_path` open. Leaving this process's
-    // own connection alive across that probe would make lsof see this very
-    // call as a "holder" of the file it is about to archive-move, which
-    // (before `daemon_ownership`'s self-PID exclusion landed) made every
-    // migration look permanently `Owned` and roll back. Both layers matter:
-    // this drop removes the self-hold at its source; the self-PID exclusion
-    // in `db_ownership.rs` is defense in depth for any other call site that
-    // probes while holding its own connection.
-    drop(source_store);
 
     // Source-scope lock: the caller's outer `DualDaemonLock` — acquired once
     // in `run_tidy_command` (`crates/tachi-server/src/bootstrap/tidy/command.rs:39`),
@@ -331,7 +305,8 @@ fn migrate_single_db(
     // nothing about — that daemon could start and begin writing
     // `source_path` in the window between the ownership probe below and the
     // archive-move further down. Acquire a *scoped-only* lock for
-    // `source_path` and hold it across both the probe and the archive-move.
+    // `source_path` and hold it across the ownership probe, source snapshot,
+    // target commit, archive staging, and source removal.
     //
     // Deliberately scoped-only, not another `DualDaemonLock` (do not
     // "reinstate" a legacy attempt here): the outer lock's legacy fd is
@@ -369,7 +344,7 @@ fn migrate_single_db(
                     migration,
                     rows_before,
                     0,
-                    source_count,
+                    migration.source_row_count,
                     &format!(
                         "source DB's own daemon is running (pid {pid}, scoped lock); refusing to risk a torn archive copy"
                     ),
@@ -381,7 +356,7 @@ fn migrate_single_db(
                     migration,
                     rows_before,
                     0,
-                    source_count,
+                    migration.source_row_count,
                     &format!("source DB daemon lock probe failed: {e}"),
                 );
                 return Ok(outcome);
@@ -389,22 +364,38 @@ fn migrate_single_db(
         }
     };
 
-    // Ownership guard: the archive step below moves main/-wal/-shm as three
-    // sequential, non-atomic filesystem operations. If a live daemon still
-    // holds the source DB open — or ownership cannot be determined — that
-    // race can leave a torn archived copy. Refuse before the target
-    // transaction starts; the source stays untouched and will simply be
-    // reconsidered by the next `tidy` run.
+    // Probe ownership before this process opens the source. The scoped lock
+    // is already held, so an admitted writer cannot enter after this point;
+    // the row snapshot, archive snapshot, and removed source are therefore
+    // the same locked generation.
     if let Err(reason) = authority.revalidate_for_mutation(Some(&target_path)) {
-        let outcome = rollback_failed_outcome(migration, rows_before, 0, source_count, &reason);
+        let outcome = rollback_failed_outcome(
+            migration,
+            rows_before,
+            0,
+            migration.source_row_count,
+            &reason,
+        );
         return Ok(outcome);
     }
     if let Some(reason) = archive_unsafe_reason(&source_path) {
-        let outcome = rollback_failed_outcome(migration, rows_before, 0, source_count, &reason);
+        let outcome = rollback_failed_outcome(
+            migration,
+            rows_before,
+            0,
+            migration.source_row_count,
+            &reason,
+        );
         return Ok(outcome);
     }
-    // Archive the source DB file. Move (rename) when possible; fall back to
-    // copy + remove across filesystems.
+
+    authority.revalidate_for_mutation(Some(&target_path))?;
+    let source_entries = read_source_entries(&source_path)?;
+    let source_count = source_entries.len();
+    // No target write may begin if the physical source changed while the
+    // locked snapshot was being read.
+    authority.revalidate_for_mutation(Some(&target_path))?;
+
     let archive_path = PathBuf::from(&migration.archive_path);
     if let Some(parent) = archive_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -504,6 +495,19 @@ fn migrate_single_db(
             )
         },
     })
+}
+
+fn read_source_entries(
+    source_path: &PathBuf,
+) -> Result<Vec<memcore::MemoryEntry>, Box<dyn std::error::Error>> {
+    let source_store = open_cli_store_read_only(source_path)?;
+    let conn = source_store.connection();
+    let mut stmt = conn.prepare(
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+         FROM memories",
+    )?;
+    let rows = stmt.query_map([], memcore::row_to_entry)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn stage_archive_copy(
