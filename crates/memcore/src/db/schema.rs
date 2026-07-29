@@ -142,7 +142,15 @@ pub(crate) mod test_hooks {
 /// particular is a no-op/error mid-transaction — so callers apply this before
 /// opening the compatibility transaction, not inside `init_schema_inner`.
 fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
-    execute_batch_retry(conn, ddl::CONNECTION_PRAGMA_SQL)
+    execute_batch_retry(conn, ddl::CONNECTION_PRAGMA_SQL)?;
+    // `MemoryStore::open_with_context_and_busy_timeout` installs a scoped
+    // local deadline before schema work begins. Do not overwrite that writer's
+    // busy budget here. Raw/direct schema callers without such a deadline keep
+    // the historical five-second connection policy.
+    if super::sqlite_busy_deadline_remaining().is_none() {
+        super::configure_connection(conn)?;
+    }
+    Ok(())
 }
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
@@ -422,7 +430,12 @@ fn retry_locked<T>(
     for attempt in 1..=attempts {
         match operation() {
             Ok(value) => return Ok(value),
-            Err(error) if is_locked_error(&error) && attempt < attempts => {
+            Err(error)
+                if is_locked_error(&error)
+                    && attempt < attempts
+                    && super::sqlite_busy_deadline_remaining()
+                        .is_none_or(|remaining| !remaining.is_zero() && backoff < remaining) =>
+            {
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(max_backoff);
             }

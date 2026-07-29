@@ -73,7 +73,7 @@ async fn provider_key_health_persists_off_async_runtime_thread() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn provider_key_health_phase_boundary_joins_contested_writer() {
+async fn provider_key_health_contested_writer_hits_its_own_deadline_then_releases_ownership() {
     let _lock = crate::test_support::global_test_lock().lock();
     let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
     let temp = tempfile::tempdir().expect("temp vault db");
@@ -97,32 +97,25 @@ async fn provider_key_health_phase_boundary_joins_contested_writer() {
     );
     assert_eq!(health.status, HEALTH_RATE_LIMITED);
 
-    let terminal = client.await_provider_health_persistence();
-    tokio::pin!(terminal);
-    tokio::select! {
-        biased;
-        result = &mut terminal => {
-            panic!("phase boundary returned before the contested writer terminated: {result:?}");
-        }
-        _ = tokio::task::yield_now() => {}
-    }
+    let terminal_error = client
+        .await_provider_health_persistence()
+        .await
+        .expect_err("joined writer must surface its local SQLite deadline while another owner holds BEGIN IMMEDIATE");
+    assert!(
+        terminal_error.contains(PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE),
+        "lock exhaustion must carry the typed local-deadline cause: {terminal_error}"
+    );
 
     writer_gate
         .execute_batch("COMMIT")
         .expect("release the vault writer boundary");
-    terminal
-        .await
-        .expect("phase boundary should finish after the writer releases");
 
-    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("reopen vault db");
-    let persisted = store
-        .vault_get_key_health(
-            "TACHI_TEST_ONLY_API_KEY_PHASE_BOUNDARY",
-            "TACHI_TEST_ONLY_API_KEY_PHASE_BOUNDARY_1",
-        )
-        .expect("read persisted health")
-        .expect("joined writer must be visible at the next phase");
-    assert_eq!(persisted.status, HEALTH_RATE_LIMITED);
+    let release_probe = rusqlite::Connection::open(&db_path).expect("open post-writer lock probe");
+    release_probe
+        .execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+        .expect(
+            "joined persistence writer must release SQLite ownership before the next owner opens",
+        );
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -161,6 +154,38 @@ async fn provider_key_health_persist_errors_are_visible_in_status() {
         "unexpected persist error: {error}"
     );
     assert_eq!(terminal_error, error);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn provider_key_health_terminal_failure_is_visible_to_every_concurrent_waiter() {
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let temp = tempfile::tempdir().expect("temp vault db");
+    let db_path = temp.path().join("missing-parent").join("vault.db");
+    let client = LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
+
+    client.record_provider_key_result(
+        "TACHI_TEST_ONLY_API_KEY_CONCURRENT_PERSIST_ERROR",
+        "TACHI_TEST_ONLY_API_KEY_CONCURRENT_PERSIST_ERROR_1",
+        Some(429),
+        None,
+        Some(30),
+        Some("provider throttled"),
+    );
+
+    let (first, second) = tokio::join!(
+        client.await_provider_health_persistence(),
+        client.await_provider_health_persistence(),
+    );
+    let first = first.expect_err("first waiter must observe terminal persistence failure");
+    let second =
+        second.expect_err("second concurrent waiter must observe the same terminal failure");
+    assert_eq!(
+        first, second,
+        "terminal failure must not be consumed by one waiter"
+    );
+    assert!(first.contains("TACHI_TEST_ONLY_API_KEY_CONCURRENT_PERSIST_ERROR"));
 }
 
 #[tokio::test]

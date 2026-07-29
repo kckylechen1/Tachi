@@ -126,7 +126,10 @@ pub(in crate::llm) struct ProviderHealthPersistState {
 pub(in crate::llm) struct ProviderHealthPersistTracker {
     pending: std::sync::atomic::AtomicUsize,
     terminal: tokio::sync::Notify,
-    first_unreported_error: std::sync::Mutex<Option<String>>,
+    /// A terminal failure is a phase fact, not a one-consumer message. Every
+    /// waiter joining the same persistence boundary must see it; taking this
+    /// value would let the first waiter authorize a later waiter incorrectly.
+    first_terminal_error: std::sync::Mutex<Option<String>>,
 }
 
 impl ProviderHealthReloadState {
@@ -193,7 +196,7 @@ impl ProviderHealthPersistTracker {
 
     pub(in crate::llm) fn record_error(&self, error: String) {
         let mut first_error = self
-            .first_unreported_error
+            .first_terminal_error
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if first_error.is_none() {
@@ -220,10 +223,10 @@ impl ProviderHealthPersistTracker {
             notified.as_mut().enable();
             if self.pending.load(std::sync::atomic::Ordering::Acquire) == 0 {
                 let error = self
-                    .first_unreported_error
+                    .first_terminal_error
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
+                    .clone();
                 return error.map_or(Ok(()), Err);
             }
             notified.await;

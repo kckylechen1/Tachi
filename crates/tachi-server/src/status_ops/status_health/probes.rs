@@ -17,7 +17,8 @@ where
     F: Future<Output = Result<(), String>>,
 {
     let started = tokio::time::Instant::now();
-    match tokio::time::timeout(timeout, terminal).await {
+    let mut terminal = Box::pin(terminal);
+    match tokio::time::timeout(timeout, &mut terminal).await {
         Ok(Ok(())) => ProviderProbeResult {
             name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
             status: "ok".to_string(),
@@ -26,23 +27,45 @@ where
                 started.elapsed().as_millis()
             )),
         },
-        Ok(Err(cause)) => ProviderProbeResult {
-            name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
-            status: "failed".to_string(),
-            message: Some(format!(
-                "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={} cause={cause}",
-                started.elapsed().as_millis()
-            )),
-        },
+        Ok(Err(cause)) => provider_health_persist_failure_receipt(started, cause),
         Err(_) => ProviderProbeResult {
             name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
             status: "timeout".to_string(),
             message: Some(format!(
-                "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={} timeout_ms={} cause=provider_health_persist_join_timeout",
+                "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={} timeout_ms={} cause=provider_health_persist_join_timeout writer_joined=true terminal_cause={}",
                 started.elapsed().as_millis(),
-                timeout.as_millis()
+                timeout.as_millis(),
+                provider_health_persist_terminal_cause(terminal.await),
             )),
         },
+    }
+}
+
+fn provider_health_persist_terminal_cause(result: Result<(), String>) -> String {
+    match result {
+        Ok(()) => "none".to_string(),
+        Err(cause) => cause,
+    }
+}
+
+fn provider_health_persist_failure_receipt(
+    started: tokio::time::Instant,
+    cause: String,
+) -> ProviderProbeResult {
+    let status = if cause.contains(tachi_llm::PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE) {
+        "timeout"
+    } else if cause.contains(tachi_llm::PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE) {
+        "cancelled"
+    } else {
+        "failed"
+    };
+    ProviderProbeResult {
+        name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
+        status: status.to_string(),
+        message: Some(format!(
+            "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={} cause={cause}",
+            started.elapsed().as_millis()
+        )),
     }
 }
 
@@ -455,11 +478,30 @@ mod persistence_phase_tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn persistence_join_timeout_and_failure_are_typed_receipts() {
+    async fn persistence_join_timeout_waits_for_terminal_completion_before_emitting_receipt() {
         let timeout = Duration::from_secs(7);
-        let timeout_receipt =
-            provider_health_persist_receipt(std::future::pending::<Result<(), String>>(), timeout)
-                .await;
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let receipt_task = tokio::spawn(provider_health_persist_receipt(
+            async move {
+                release_rx
+                    .await
+                    .expect("test writer completion sender remains alive")
+            },
+            timeout,
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(timeout).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !receipt_task.is_finished(),
+            "a join timeout must not emit before the actual writer reports terminal completion"
+        );
+        release_tx
+            .send(Err(
+                "controlled writer completion after deadline".to_string()
+            ))
+            .expect("release timed-out writer");
+        let timeout_receipt = receipt_task.await.expect("receipt task should join");
         assert_eq!(timeout_receipt.name, PROVIDER_HEALTH_PERSIST_PHASE);
         assert_eq!(timeout_receipt.status, "timeout");
         let timeout_json =
@@ -471,6 +513,10 @@ mod persistence_phase_tests {
         assert!(timeout_message.contains("elapsed_ms=7000"));
         assert!(timeout_message.contains("timeout_ms=7000"));
         assert!(timeout_message.contains("cause=provider_health_persist_join_timeout"));
+        assert!(timeout_message.contains("writer_joined=true"));
+        assert!(
+            timeout_message.contains("terminal_cause=controlled writer completion after deadline")
+        );
 
         let failed_receipt = provider_health_persist_receipt(
             std::future::ready(Err("controlled writer failure".to_string())),
@@ -483,5 +529,37 @@ mod persistence_phase_tests {
             .message
             .as_deref()
             .is_some_and(|message| message.contains("cause=controlled writer failure")));
+    }
+
+    #[test]
+    fn persistence_sqlite_deadline_is_a_terminal_timeout_not_a_generic_failure() {
+        let receipt = provider_health_persist_failure_receipt(
+            tokio::time::Instant::now(),
+            format!(
+                "persist failed: {}: database is locked",
+                tachi_llm::PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE
+            ),
+        );
+        assert_eq!(receipt.status, "timeout");
+        assert!(receipt
+            .message
+            .as_deref()
+            .is_some_and(|message| message
+                .contains(tachi_llm::PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE)));
+    }
+
+    #[test]
+    fn persistence_cancellation_is_a_terminal_receipt_not_a_generic_failure() {
+        let receipt = provider_health_persist_failure_receipt(
+            tokio::time::Instant::now(),
+            format!(
+                "persist cancelled: {}",
+                tachi_llm::PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE
+            ),
+        );
+        assert_eq!(receipt.status, "cancelled");
+        assert!(receipt.message.as_deref().is_some_and(
+            |message| message.contains(tachi_llm::PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE)
+        ));
     }
 }

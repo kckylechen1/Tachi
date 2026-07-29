@@ -31,6 +31,16 @@ pub use rerank::{
     RERANK_VOYAGE_ENDPOINT_ENV,
 };
 
+/// Stable phase cause for a provider-health write whose own SQLite busy
+/// budget expired. Doctor maps this to a terminal timeout receipt only after
+/// joining the blocking writer.
+pub const PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE: &str =
+    "provider_health_persist_sqlite_deadline";
+/// Stable phase cause when Tokio cancels a persistence task before its
+/// blocking closure begins. A cancelled task is never permission to advance
+/// the next write-capable owner.
+pub const PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE: &str = "provider_health_persist_cancelled";
+
 /// LLM and embedding client using Voyage API for embeddings
 /// and lane-specific OpenAI-compatible chat providers.
 #[derive(Clone)]

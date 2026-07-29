@@ -1,5 +1,13 @@
 use super::*;
 
+// This is deliberately below doctor's 10-second join deadline. A one-shot
+// doctor process may not time out a waiter and then leave a `spawn_blocking`
+// SQLite writer alive; the writer itself must return before the process may
+// emit its terminal receipt. The two-second SQLite budget leaves room for the
+// bounded MemCore startup retry to return its typed BUSY/LOCKED error and for
+// the supervisor to join the exact blocking task.
+const PROVIDER_HEALTH_PERSIST_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[cfg(test)]
 fn provider_key_health_persist_disabled_for_tests() -> bool {
     matches!(
@@ -53,7 +61,12 @@ impl super::super::super::LlmClient {
                 })
                 .await
                 .map_err(|err| {
-                    format!("persist vault key health for {logical_name}:{key_id}: {err}")
+                    let cause = if err.is_cancelled() {
+                        crate::llm::PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE
+                    } else {
+                        "provider_health_persist_join_failure"
+                    };
+                    format!("persist vault key health for {logical_name}:{key_id}: {cause}: {err}")
                 })
                 .and_then(|inner| inner);
                 Self::record_key_health_persist_result(&persist_state, result);
@@ -97,14 +110,33 @@ impl super::super::super::LlmClient {
             intent: memcore::OpenIntent::OpenExisting,
             migration,
         };
-        match memcore::MemoryStore::open_with_context(db_path, &open_context) {
+        match memcore::MemoryStore::open_with_context_and_busy_timeout(
+            db_path,
+            &open_context,
+            PROVIDER_HEALTH_PERSIST_SQLITE_BUSY_TIMEOUT,
+        ) {
             Ok(store) => {
                 store
                     .vault_upsert_key_health(&health)
-                    .map_err(|err| format!("persist vault key health for {target}: {err}"))?;
+                    .map_err(|err| Self::provider_health_persist_error(&target, err))?;
                 Ok(())
             }
-            Err(err) => Err(format!("persist vault key health for {target}: {err}")),
+            Err(err) => Err(Self::provider_health_persist_error(&target, err)),
+        }
+    }
+
+    fn provider_health_persist_error(target: &str, error: memcore::MemoryError) -> String {
+        let deadline_exhausted = matches!(
+            &error,
+            memcore::MemoryError::Sqlite(sqlite) if memcore::db::sqlite_error_is_locked(sqlite)
+        );
+        if deadline_exhausted {
+            format!(
+                "persist vault key health for {target}: {}: {error}",
+                crate::llm::PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE
+            )
+        } else {
+            format!("persist vault key health for {target}: {error}")
         }
     }
 
