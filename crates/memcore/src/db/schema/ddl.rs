@@ -1,11 +1,12 @@
 /// Connection-level PRAGMAs that must run OUTSIDE any transaction.
 /// `journal_mode` in particular is a no-op (and on some SQLite builds an
 /// error) when issued mid-transaction, so this is executed before any
-/// `BEGIN` — see `init_schema_with_label_mut` (#984 F1 round 3).
+/// `BEGIN` — see `init_schema_with_label_mut` (#984 F1 round 3). SQLite busy
+/// policy is deliberately configured by `db::open` before this batch so a
+/// bounded one-shot writer cannot have its caller-owned budget overwritten.
 pub(super) const CONNECTION_PRAGMA_SQL: &str = r#"
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
-        PRAGMA busy_timeout = 5000;
         PRAGMA cache_size = -16000;   -- 16 MB page cache
 "#;
 

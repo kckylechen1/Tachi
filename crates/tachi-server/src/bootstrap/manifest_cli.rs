@@ -435,6 +435,104 @@ mod tests {
             "allow must re-stamp the global DB at the current schema version"
         );
     }
+
+    #[test]
+    fn doctor_run_daily_blocks_distill_owner_after_missing_timeout_or_failure() {
+        for status in [None, Some("timeout"), Some("failed")] {
+            let refresh = doctor_probe_refresh_fixture(status, Ok(()));
+            if let Some(status) = status {
+                assert!(provider_persistence_receipt(&refresh)
+                    .is_some_and(|receipt| receipt.status == status));
+            } else {
+                assert!(provider_persistence_receipt(&refresh).is_none());
+            }
+            assert!(
+                !provider_persistence_allows_distill(&refresh),
+                "a {status:?} persistence phase must block the distill DB owner"
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_run_daily_preserves_timeout_when_probe_cache_write_fails() {
+        let refresh = doctor_probe_refresh_fixture(
+            Some("timeout"),
+            Err("controlled probe-cache write failure".to_string()),
+        );
+
+        let summary = provider_probe_refresh_summary(&refresh);
+        assert!(summary.contains("probe cache write failed: controlled probe-cache write failure"));
+        assert!(summary.contains("provider_health_persist status=timeout"));
+        assert!(summary.contains("cause=provider_health_persist_join_timeout"));
+        assert!(
+            !provider_persistence_allows_distill(&refresh),
+            "cache-write failure must not discard the timeout receipt or permit distill"
+        );
+    }
+
+    #[test]
+    fn doctor_run_daily_fails_closed_when_client_construction_left_no_persistence_receipt() {
+        let refresh = doctor_probe_refresh_fixture(None, Ok(()));
+        let summary = provider_persistence_distill_skip_summary(&refresh);
+
+        assert!(!provider_persistence_allows_distill(&refresh));
+        assert!(summary.contains("status=missing"));
+        assert!(summary.contains("cause=provider_health_persist_receipt_missing"));
+    }
+
+    #[test]
+    fn doctor_run_daily_fails_closed_when_cache_write_and_persistence_receipt_are_both_missing() {
+        let refresh = doctor_probe_refresh_fixture(
+            None,
+            Err("controlled probe-cache write failure".to_string()),
+        );
+        let summary = provider_probe_refresh_summary(&refresh);
+        let distill_skip = provider_persistence_distill_skip_summary(&refresh);
+
+        assert!(!provider_persistence_allows_distill(&refresh));
+        assert!(summary.contains("probe cache write failed: controlled probe-cache write failure"));
+        assert!(distill_skip.contains("status=missing"));
+        assert!(distill_skip.contains("cause=provider_health_persist_receipt_missing"));
+    }
+
+    fn doctor_probe_refresh_fixture(
+        persistence_status: Option<&str>,
+        cache_write: Result<(), String>,
+    ) -> crate::status_ops::status_health::DoctorProbeCacheRefresh {
+        let probes = persistence_status
+            .map(|persistence_status| {
+                vec![crate::status_ops::status_health::ProviderProbeResult {
+                    name: crate::status_ops::status_health::PROVIDER_HEALTH_PERSIST_PHASE
+                        .to_string(),
+                    status: persistence_status.to_string(),
+                    message: Some(format!(
+                        "phase=provider_health_persist cause=provider_health_persist_join_{persistence_status}"
+                    )),
+                }]
+            })
+            .unwrap_or_else(|| {
+                vec![crate::status_ops::status_health::ProviderProbeResult {
+                    name: "llm_client".to_string(),
+                    status: "failed".to_string(),
+                    message: Some("controlled LLM client construction failure".to_string()),
+                }]
+            });
+        let report = crate::status_ops::status_health::ProviderProbeReport {
+            probes: probes.clone(),
+            rotation_groups: Vec::new(),
+        };
+        let cache_write =
+            cache_write.map(|()| crate::status_ops::status_health::ProviderProbeCache {
+                last_probe_at: chrono::Utc::now().to_rfc3339(),
+                ttl_seconds: 60,
+                probes,
+                rotation_groups: Vec::new(),
+            });
+        crate::status_ops::status_health::DoctorProbeCacheRefresh {
+            report,
+            cache_write,
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -484,53 +582,53 @@ async fn run_daily_pipeline_remediation(
     schema_migration: &memcore::MigrationAuthority,
 ) -> String {
     // Step 1: refresh provider probe cache.
-    let probe_result =
-        crate::status_ops::status_health::refresh_doctor_probe_cache(app_home, global_db_path)
-            .await;
-    let probe_summary = match &probe_result {
-        Ok(cache) => {
-            let failed = cache.probes.iter().filter(|p| p.status != "ok").count();
-            format!(
-                "probe cache refreshed ({} probes, {failed} failed)",
-                cache.probes.len()
-            )
-        }
-        Err(e) => format!("probe cache refresh failed: {e}"),
-    };
+    let probe_refresh = crate::status_ops::status_health::refresh_doctor_probe_cache(
+        app_home,
+        global_db_path,
+        schema_migration,
+    )
+    .await;
+    let probe_summary = provider_probe_refresh_summary(&probe_refresh);
 
-    // Step 2: run distill batch (requires a project DB).
-    let distill_summary = match project_db_path {
-        Some(_) => {
-            let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
-            // Codex review (2026-07-17, checkpoint 7, MERGE-BLOCKING) + leader
-            // adjudication: `doctor --allow-schema-migration --fix --run-daily`
-            // must thread the resolved authority into this in-process open,
-            // same as every other CLI in-process DB open (#1181's frozen
-            // contract) — `MemoryServer::new` hardcodes Deny and would
-            // silently refuse the distill step on a stamped-older DB even
-            // when the operator explicitly authorized migration.
-            match crate::MemoryServer::new_with_migration_authority(
-                global_db_path.to_path_buf(),
-                project_db_path.map(|p| p.to_path_buf()),
-                schema_migration.clone(),
-            ) {
-                Ok(server) => {
-                    match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
-                        Ok(report) => {
-                            // Write success marker (same shape as the scheduler).
-                            if let Some(parent) = marker_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            let marker_body = serde_json::json!({
-                                "ts": chrono::Utc::now().to_rfc3339(),
-                                "groups_distilled": report.groups_distilled,
-                                "groups_skipped": report.groups_skipped,
-                                "fallback_used": report.fallback_used,
-                                "errors": report.errors.len(),
-                            })
-                            .to_string();
-                            let _ = std::fs::write(&marker_path, marker_body);
-                            format!(
+    // Step 2: run distill batch (requires a project DB). Only an explicit
+    // successful receipt may authorize the next write-capable owner. Missing,
+    // timeout, and failure all fail closed; cache-write failure cannot erase
+    // the in-memory typed receipt (#1505).
+    let distill_summary = if !provider_persistence_allows_distill(&probe_refresh) {
+        provider_persistence_distill_skip_summary(&probe_refresh)
+    } else {
+        match project_db_path {
+            Some(_) => {
+                let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
+                // Codex review (2026-07-17, checkpoint 7, MERGE-BLOCKING) + leader
+                // adjudication: `doctor --allow-schema-migration --fix --run-daily`
+                // must thread the resolved authority into this in-process open,
+                // same as every other CLI in-process DB open (#1181's frozen
+                // contract) — `MemoryServer::new` hardcodes Deny and would
+                // silently refuse the distill step on a stamped-older DB even
+                // when the operator explicitly authorized migration.
+                match crate::MemoryServer::new_with_migration_authority(
+                    global_db_path.to_path_buf(),
+                    project_db_path.map(|p| p.to_path_buf()),
+                    schema_migration.clone(),
+                ) {
+                    Ok(server) => {
+                        match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
+                            Ok(report) => {
+                                // Write success marker (same shape as the scheduler).
+                                if let Some(parent) = marker_path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                let marker_body = serde_json::json!({
+                                    "ts": chrono::Utc::now().to_rfc3339(),
+                                    "groups_distilled": report.groups_distilled,
+                                    "groups_skipped": report.groups_skipped,
+                                    "fallback_used": report.fallback_used,
+                                    "errors": report.errors.len(),
+                                })
+                                .to_string();
+                                let _ = std::fs::write(&marker_path, marker_body);
+                                format!(
                                 "distill: dispatched={} distilled={} skipped={} fallback={} errors={}",
                                 report.batches_dispatched,
                                 report.groups_distilled,
@@ -538,33 +636,93 @@ async fn run_daily_pipeline_remediation(
                                 report.fallback_used,
                                 report.errors.len()
                             )
-                        }
-                        Err(e) => {
-                            // Write failure marker so status surfaces the reason.
-                            if let Some(parent) = marker_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
                             }
-                            let marker_body = serde_json::json!({
-                                "ts": chrono::Utc::now().to_rfc3339(),
-                                "error": e.to_string(),
-                                "groups_distilled": 0,
-                                "groups_skipped": 0,
-                                "fallback_used": 0,
-                                "errors": 0,
-                            })
-                            .to_string();
-                            let _ = std::fs::write(&marker_path, marker_body);
-                            format!("distill batch failed: {e}")
+                            Err(e) => {
+                                // Write failure marker so status surfaces the reason.
+                                if let Some(parent) = marker_path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                let marker_body = serde_json::json!({
+                                    "ts": chrono::Utc::now().to_rfc3339(),
+                                    "error": e.to_string(),
+                                    "groups_distilled": 0,
+                                    "groups_skipped": 0,
+                                    "fallback_used": 0,
+                                    "errors": 0,
+                                })
+                                .to_string();
+                                let _ = std::fs::write(&marker_path, marker_body);
+                                format!("distill batch failed: {e}")
+                            }
                         }
                     }
+                    Err(e) => format!("distill skipped (server init failed): {e}"),
                 }
-                Err(e) => format!("distill skipped (server init failed): {e}"),
             }
+            None => "distill skipped (no project DB)".to_string(),
         }
-        None => "distill skipped (no project DB)".to_string(),
     };
 
     format!("  {probe_summary}\n  {distill_summary}")
+}
+
+fn provider_persistence_receipt(
+    refresh: &crate::status_ops::status_health::DoctorProbeCacheRefresh,
+) -> Option<&crate::status_ops::status_health::ProviderProbeResult> {
+    refresh
+        .report
+        .probes
+        .iter()
+        .find(|probe| probe.name == crate::status_ops::status_health::PROVIDER_HEALTH_PERSIST_PHASE)
+}
+
+fn provider_persistence_allows_distill(
+    refresh: &crate::status_ops::status_health::DoctorProbeCacheRefresh,
+) -> bool {
+    provider_persistence_receipt(refresh).is_some_and(|receipt| receipt.status.as_str() == "ok")
+}
+
+fn provider_persistence_distill_skip_summary(
+    refresh: &crate::status_ops::status_health::DoctorProbeCacheRefresh,
+) -> String {
+    match provider_persistence_receipt(refresh) {
+        Some(receipt) => format!(
+            "distill skipped (provider_health_persist status={} {}; second writer forbidden)",
+            receipt.status,
+            receipt.message.as_deref().unwrap_or("cause=unknown")
+        ),
+        None => "distill skipped (provider_health_persist status=missing cause=provider_health_persist_receipt_missing; second writer forbidden)".to_string(),
+    }
+}
+
+fn provider_probe_refresh_summary(
+    refresh: &crate::status_ops::status_health::DoctorProbeCacheRefresh,
+) -> String {
+    let failed = refresh
+        .report
+        .probes
+        .iter()
+        .filter(|probe| probe.status != "ok")
+        .count();
+    let mut summary = match &refresh.cache_write {
+        Ok(_) => format!(
+            "probe cache refreshed ({} probes, {failed} failed)",
+            refresh.report.probes.len()
+        ),
+        Err(error) => format!(
+            "probe cache write failed: {error} ({} probes, {failed} failed)",
+            refresh.report.probes.len()
+        ),
+    };
+    if let Some(receipt) = provider_persistence_receipt(refresh) {
+        summary.push_str(&format!(
+            "; {} status={} {}",
+            receipt.name,
+            receipt.status,
+            receipt.message.as_deref().unwrap_or("cause=unknown")
+        ));
+    }
+    summary
 }
 
 async fn collect_provider_key_report(global_db_path: &Path, probe_keys: bool) -> ProviderKeyReport {

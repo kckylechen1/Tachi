@@ -398,10 +398,21 @@ impl super::super::LlmClient {
     }
 
     pub fn new_with_vault_db(vault_db_path: Option<&Path>) -> Result<Self, String> {
-        Self::new_with_config_and_fallbacks(
+        Self::new_with_vault_db_and_migration_authority(
+            vault_db_path,
+            memcore::MigrationAuthority::Deny,
+        )
+    }
+
+    pub fn new_with_vault_db_and_migration_authority(
+        vault_db_path: Option<&Path>,
+        vault_db_migration: memcore::MigrationAuthority,
+    ) -> Result<Self, String> {
+        Self::new_with_config_fallbacks_and_migration_authority(
             ProviderRuntimeConfig::from_env()?,
             LaneFallbackConfig::from_env(),
             vault_db_path,
+            vault_db_migration,
         )
     }
 
@@ -428,6 +439,20 @@ impl super::super::LlmClient {
         config: ProviderRuntimeConfig,
         fallbacks: LaneFallbackConfig,
         vault_db_path: Option<&Path>,
+    ) -> Result<Self, String> {
+        Self::new_with_config_fallbacks_and_migration_authority(
+            config,
+            fallbacks,
+            vault_db_path,
+            memcore::MigrationAuthority::Deny,
+        )
+    }
+
+    fn new_with_config_fallbacks_and_migration_authority(
+        config: ProviderRuntimeConfig,
+        fallbacks: LaneFallbackConfig,
+        vault_db_path: Option<&Path>,
+        vault_db_migration: memcore::MigrationAuthority,
     ) -> Result<Self, String> {
         let vault_db_path = vault_db_path.map(|path| path.to_path_buf());
 
@@ -472,6 +497,7 @@ impl super::super::LlmClient {
             summary_fallback: fallbacks.summary,
             rerank_config: config.rerank,
             vault_db_path,
+            vault_db_migration,
             provider_state: Arc::new(RwLock::new(ProviderState::with_health(provider_health))),
             provider_materialization_lock: Arc::new(std::sync::Mutex::new(())),
             provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),
