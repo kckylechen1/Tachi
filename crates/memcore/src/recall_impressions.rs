@@ -103,27 +103,35 @@ impl RecallReplayPolicy {
         Self::CURRENT
     }
 
-    fn validate_stored(
-        group_id: &str,
-        stored: &StoredReplayPolicy,
-    ) -> Result<Self, MemoryError> {
-        let fields = [
+    fn validate_stored(group_id: &str, stored: &StoredReplayPolicy) -> Result<Self, MemoryError> {
+        let policy_fields = [
             stored.fusion_policy_version.as_deref(),
             stored.pre_boost_adjustment_version.as_deref(),
             stored.tie_break_policy_version.as_deref(),
             stored.candidate_policy_version.as_deref(),
             stored.schema_identity.as_deref(),
         ];
-        if fields.iter().all(|field| field.is_none()) {
+        if stored.query_fingerprint.is_none() && policy_fields.iter().all(|field| field.is_none()) {
             return Err(replay_incompatible(
                 group_id,
                 RecallReplayCompatibilityReason::LegacyUnversioned,
             ));
         }
-        if fields.iter().any(|field| field.is_none()) {
+        if policy_fields.iter().any(|field| field.is_none()) {
             return Err(replay_incompatible(
                 group_id,
                 RecallReplayCompatibilityReason::IncompletePolicy,
+            ));
+        }
+        if !stored.query_fingerprint.as_deref().is_some_and(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(replay_incompatible(
+                group_id,
+                RecallReplayCompatibilityReason::InvalidQueryFingerprint,
             ));
         }
         if stored.fusion_policy_version.as_deref() != Some(Self::CURRENT.fusion_policy_version) {
@@ -168,6 +176,7 @@ impl RecallReplayPolicy {
 
 #[derive(Debug)]
 struct StoredReplayPolicy {
+    query_fingerprint: Option<String>,
     fusion_policy_version: Option<String>,
     pre_boost_adjustment_version: Option<String>,
     tie_break_policy_version: Option<String>,
@@ -175,10 +184,7 @@ struct StoredReplayPolicy {
     schema_identity: Option<String>,
 }
 
-fn replay_incompatible(
-    group_id: &str,
-    reason: RecallReplayCompatibilityReason,
-) -> MemoryError {
+fn replay_incompatible(group_id: &str, reason: RecallReplayCompatibilityReason) -> MemoryError {
     MemoryError::RecallReplayIncompatible {
         group_id: group_id.to_string(),
         reason,
@@ -353,7 +359,7 @@ pub fn replay_recall_impression_group(
     group_id: &str,
 ) -> Result<RecallReplayReport, MemoryError> {
     let group = conn.query_row(
-        "SELECT semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity FROM recall_impression_groups WHERE group_id = ?1",
+        "SELECT semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity FROM recall_impression_groups WHERE group_id = ?1",
         [group_id],
         |row| {
             Ok(StoredGroup {
@@ -366,11 +372,12 @@ pub fn replay_recall_impression_group(
                 },
                 rrf_k: row.get(5)?,
                 policy: StoredReplayPolicy {
-                    fusion_policy_version: row.get(6)?,
-                    pre_boost_adjustment_version: row.get(7)?,
-                    tie_break_policy_version: row.get(8)?,
-                    candidate_policy_version: row.get(9)?,
-                    schema_identity: row.get(10)?,
+                    query_fingerprint: row.get(6)?,
+                    fusion_policy_version: row.get(7)?,
+                    pre_boost_adjustment_version: row.get(8)?,
+                    tie_break_policy_version: row.get(9)?,
+                    candidate_policy_version: row.get(10)?,
+                    schema_identity: row.get(11)?,
                 },
             })
         },

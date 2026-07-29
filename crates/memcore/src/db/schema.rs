@@ -493,6 +493,39 @@ pub(crate) fn validate_recall_impression_ledger_schema(
             )));
         }
     }
+    let malformed_identity_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM recall_impression_groups
+             WHERE CASE
+                 WHEN query_fingerprint IS NULL
+                      AND fusion_policy_version IS NULL
+                      AND pre_boost_adjustment_version IS NULL
+                      AND tie_break_policy_version IS NULL
+                      AND candidate_policy_version IS NULL
+                      AND schema_identity IS NULL
+                 THEN 0
+                 WHEN query_fingerprint IS NOT NULL
+                      AND length(query_fingerprint) = 64
+                      AND query_fingerprint NOT GLOB '*[^0-9a-f]*'
+                      AND fusion_policy_version IS NOT NULL
+                      AND pre_boost_adjustment_version IS NOT NULL
+                      AND tie_break_policy_version IS NOT NULL
+                      AND candidate_policy_version IS NOT NULL
+                      AND schema_identity IS NOT NULL
+                 THEN 0
+                 ELSE 1
+             END = 1
+             LIMIT 1
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if malformed_identity_exists {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v26 recall impression ledger: malformed replay identity row".to_string(),
+        ));
+    }
     Ok(())
 }
 

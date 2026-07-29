@@ -134,7 +134,9 @@ pub struct AccessEventDensity {
     pub memories_total: i64,
 }
 
-/// FNV-1a query identity shared by access history and sampled impressions.
+/// Legacy FNV-1a bucket used only by access history and query-diversity
+/// telemetry. Sampled recall impressions use a separate SHA-256 fingerprint;
+/// this value is neither their identity nor their cohort key.
 pub(crate) fn query_hash(query: &str) -> String {
     let mut hash: u32 = 2_166_136_261;
     for byte in query.bytes() {

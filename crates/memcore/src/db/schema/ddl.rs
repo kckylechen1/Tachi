@@ -1066,7 +1066,9 @@ pub(super) const RECALL_IMPRESSION_LEDGER_V26_SQL: &str = r#"
                  AND candidate_policy_version IS NULL
                  AND schema_identity IS NULL)
                 OR
-                (length(query_fingerprint) = 64
+                (query_fingerprint IS NOT NULL
+                 AND length(query_fingerprint) = 64
+                 AND query_fingerprint NOT GLOB '*[^0-9a-f]*'
                  AND fusion_policy_version IS NOT NULL
                  AND pre_boost_adjustment_version IS NOT NULL
                  AND tie_break_policy_version IS NOT NULL
