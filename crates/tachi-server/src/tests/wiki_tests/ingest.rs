@@ -304,6 +304,132 @@ async fn tachi_wiki_ingest_update_preserves_trusted_first_receipt_exactly() {
 }
 
 #[tokio::test]
+async fn model_derived_wiki_facade_update_preserves_trusted_first_receipt_exactly() {
+    let provider_a = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-facade-a").await;
+    let provider_b = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-facade-b").await;
+    let (server, _home) = seed_wiki_project_entries(vec![]);
+
+    let invocation_a = provider_a
+        .llm
+        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
+        .await
+        .expect("receipt A")
+        .invocation;
+    let first = crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
+        &server,
+        WikiWriteParams {
+            title: "Facade receipt".to_string(),
+            text: "First model-derived wiki facade write.".to_string(),
+            path: Some("/wiki/agent/tachi/facade-receipt".to_string()),
+            topic: Some("facade-receipt".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["receipt".to_string()],
+            entities: vec!["Tachi".to_string()],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        },
+        invocation_a,
+    )
+    .await
+    .expect("first model-derived wiki facade write");
+    let first_json: Value = serde_json::from_str(&first).expect("first facade response");
+    let first_id = first_json["id"].as_str().expect("first facade id");
+    let receipt_a = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(first_id).map_err(|error| error.to_string())
+        })
+        .expect("read first facade row")
+        .expect("first facade row exists")
+        .metadata
+        .pointer("/provenance/model_invocation")
+        .cloned()
+        .expect("first facade typed receipt");
+    assert_eq!(receipt_a["effective_model"], "wiki-facade-a");
+
+    let invocation_b = provider_b
+        .llm
+        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
+        .await
+        .expect("receipt B")
+        .invocation;
+    let second = crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
+        &server,
+        WikiWriteParams {
+            title: "Facade receipt".to_string(),
+            text: "Second model-derived wiki facade write must not overwrite receipt A."
+                .to_string(),
+            path: Some("/wiki/agent/tachi/facade-receipt".to_string()),
+            topic: Some("facade-receipt".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["receipt".to_string()],
+            entities: vec!["Tachi".to_string()],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: Some(json!({
+                "provenance": {
+                    "caller_marker": "hostile",
+                    "model_invocation": {
+                        "schema": "model-invocation-v1",
+                        "effective_model": "hostile-forgery"
+                    }
+                }
+            })),
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        },
+        invocation_b,
+    )
+    .await
+    .expect("second model-derived wiki facade write");
+    let second_json: Value = serde_json::from_str(&second).expect("second facade response");
+    let second_id = second_json["id"].as_str().expect("second facade id");
+    assert_eq!(second_id, first_id, "wiki facade update stays in place");
+
+    let updated = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(second_id).map_err(|error| error.to_string())
+        })
+        .expect("read updated facade row")
+        .expect("updated facade row exists");
+    assert_eq!(
+        updated.metadata.pointer("/provenance/model_invocation"),
+        Some(&receipt_a),
+        "model-derived facade update must preserve trusted receipt A exactly"
+    );
+    assert!(
+        updated.metadata["provenance"]
+            .get("caller_marker")
+            .is_none(),
+        "public/untyped metadata must not select the trusted receipt slot"
+    );
+    assert_ne!(
+        updated.metadata["provenance"]["model_invocation"]["effective_model"], "wiki-facade-b",
+        "invocation B must not overwrite the first model-derived receipt"
+    );
+    assert_ne!(
+        updated.metadata["provenance"]["model_invocation"]["effective_model"], "hostile-forgery",
+        "caller metadata must not forge the model invocation receipt"
+    );
+}
+
+#[tokio::test]
 async fn tachi_wiki_ingest_truncated_metadata_writes_nothing() {
     let provider = MockWikiIngestProvider::start(
         r#"{"title":"Looks complete","topic":"truncated"}"#,

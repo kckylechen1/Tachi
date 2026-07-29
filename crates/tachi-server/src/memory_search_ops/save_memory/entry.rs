@@ -104,11 +104,17 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
             "topic": topic,
         }),
     );
-    // A typed receipt belongs to the artifact's first durable write. Preserve
-    // an existing winner exactly as stored rather than turning a replay or
-    // wiki update into a provenance overwrite.
-    if existing.is_none() {
-        if let Some(invocation) = model_invocation {
+    // A typed receipt belongs to the artifact's first model-derived durable
+    // write. Public metadata cannot populate this channel: `inject_provenance`
+    // above replaces caller-provided provenance wholesale before we look at
+    // the typed internal invocation seam. On model-derived replacement of a
+    // trusted existing artifact, preserve the existing receipt exactly rather
+    // than overwriting it with invocation B or losing it when the provenance
+    // object is restamped.
+    if let Some(invocation) = model_invocation {
+        if let Some(existing_invocation) = trusted_existing_model_invocation(existing) {
+            attach_trusted_existing_model_invocation(&mut metadata, existing_invocation)?;
+        } else {
             metadata = crate::provenance::attach_model_invocation(metadata, invocation)?;
         }
     }
@@ -175,6 +181,34 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
         query_diversity: 0,
         tier,
     })
+}
+
+fn trusted_existing_model_invocation(existing: Option<&MemoryEntry>) -> Option<serde_json::Value> {
+    existing?
+        .metadata
+        .pointer("/provenance/model_invocation")
+        .filter(|value| {
+            value.is_object()
+                && value.get("schema").and_then(serde_json::Value::as_str)
+                    == Some(tachi_llm::MODEL_INVOCATION_SCHEMA_V1)
+        })
+        .cloned()
+}
+
+fn attach_trusted_existing_model_invocation(
+    metadata: &mut serde_json::Value,
+    invocation: serde_json::Value,
+) -> Result<(), String> {
+    let metadata_obj = metadata
+        .as_object_mut()
+        .ok_or_else(|| "trusted model invocation metadata must be a JSON object".to_string())?;
+    let provenance = metadata_obj
+        .entry("provenance")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "trusted model invocation provenance must be a JSON object".to_string())?;
+    provenance.insert("model_invocation".to_string(), invocation);
+    Ok(())
 }
 
 fn patch_string_field(

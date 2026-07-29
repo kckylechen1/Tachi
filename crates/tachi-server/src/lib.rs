@@ -251,4 +251,6 @@ pub fn resolve_standalone_tachi_model_client() -> Result<(tachi_llm::LlmClient, 
 }
 
 #[cfg(test)]
+mod model_call_census_tests;
+#[cfg(test)]
 mod tests;
