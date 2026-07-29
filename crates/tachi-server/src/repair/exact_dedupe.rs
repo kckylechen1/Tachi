@@ -7,7 +7,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-fn target_and_daemon_scope(
+pub(super) fn target_and_daemon_scope(
+    operation: &str,
     db: &str,
     app_home: &Path,
     require_write: bool,
@@ -32,20 +33,20 @@ fn target_and_daemon_scope(
         .find(|entry| std::fs::canonicalize(&entry.path).is_ok_and(|path| path == target))
         .ok_or_else(|| {
             format!(
-                "exact-dedupe target {} is not authorized by manifest",
+                "{operation} target {} is not authorized by manifest",
                 target.display()
             )
         })?;
     if authorized.schema_kind != "tachi" {
         return Err(format!(
-            "exact-dedupe target {} is not a Tachi-schema manifest DB",
+            "{operation} target {} is not a Tachi-schema manifest DB",
             target.display()
         )
         .into());
     }
     if require_write && !authorized.allow_write {
         return Err(format!(
-            "exact-dedupe target {} is not writable by manifest authority",
+            "{operation} target {} is not writable by manifest authority",
             target.display()
         )
         .into());
@@ -67,7 +68,7 @@ pub fn plan(
     prefix: Option<&str>,
     app_home: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (target, _) = target_and_daemon_scope(db, app_home, false)?;
+    let (target, _) = target_and_daemon_scope("exact-dedupe", db, app_home, false)?;
     if output == target || std::fs::canonicalize(output).is_ok_and(|path| path == target) {
         return Err("exact-dedupe output must not be the target DB".into());
     }
@@ -104,7 +105,7 @@ pub fn apply(
         )
         .into());
     }
-    let (target, daemon_scope) = target_and_daemon_scope(db, app_home, true)?;
+    let (target, daemon_scope) = target_and_daemon_scope("exact-dedupe", db, app_home, true)?;
     if receipt_out == target || std::fs::canonicalize(receipt_out).is_ok_and(|path| path == target)
     {
         return Err("exact-dedupe receipt output must not be the target DB".into());
@@ -195,7 +196,7 @@ pub fn restore(
     if !yes {
         return Err("exact-dedupe restore requires --yes".into());
     }
-    let (target, daemon_scope) = target_and_daemon_scope(db, app_home, true)?;
+    let (target, daemon_scope) = target_and_daemon_scope("exact-dedupe", db, app_home, true)?;
     let receipt: ExactDedupeReceipt = serde_json::from_slice(&std::fs::read(receipt_path)?)?;
     receipt.validate()?;
     if std::fs::canonicalize(&receipt.target_db_identity)? != target {

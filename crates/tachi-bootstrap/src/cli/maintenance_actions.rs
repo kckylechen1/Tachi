@@ -349,11 +349,50 @@ pub enum DedupeAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum LifecycleConsistencyAction {
+    /// Plan safe lifecycle-state normalization and report ambiguous rows.
+    Plan {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        output: std::path::PathBuf,
+        /// Emit the complete machine-readable plan on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a saved lifecycle-consistency plan atomically.
+    Apply {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        plan: std::path::PathBuf,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, value_name = "FILE")]
+        receipt_out: std::path::PathBuf,
+    },
+    /// Restore every lifecycle mutation recorded by one apply receipt.
+    Restore {
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        #[arg(long)]
+        receipt: std::path::PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum RepairAction {
     /// Plan or apply deterministic duplicate repair.
     Dedupe {
         #[command(subcommand)]
         action: DedupeAction,
+    },
+    /// Plan, apply, or restore lifecycle-state consistency repair.
+    Lifecycle {
+        #[command(subcommand)]
+        action: LifecycleConsistencyAction,
     },
     /// Quarantine resolution helpers (PR-3 v4 migration aftermath).
     Quarantine {
