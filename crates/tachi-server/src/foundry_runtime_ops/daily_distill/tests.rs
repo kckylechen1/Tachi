@@ -1,4 +1,349 @@
 use super::*;
+use axum::{
+    extract::State,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use tachi_llm::{
+    llm::{ChatLaneConfig, ProviderRuntimeConfig},
+    LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
+};
+
+struct DailyMockResponses {
+    calls: Arc<AtomicUsize>,
+    bodies: Vec<String>,
+}
+
+struct MockDailyProvider {
+    llm: LlmClient,
+    calls: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for MockDailyProvider {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl MockDailyProvider {
+    async fn start(bodies: Vec<String>) -> Self {
+        assert!(!bodies.is_empty(), "daily mock needs at least one response");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(DailyMockResponses {
+            calls: Arc::clone(&calls),
+            bodies,
+        });
+        let app = Router::new()
+            .route("/chat/completions", post(daily_mock_response))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock daily provider");
+        let port = listener
+            .local_addr()
+            .expect("mock daily provider address")
+            .port();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock daily provider");
+        });
+
+        let unused_lane = || ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        };
+        let llm = LlmClient::new_with_config(
+            ProviderRuntimeConfig {
+                extract: unused_lane(),
+                summary: unused_lane(),
+                reasoning: unused_lane(),
+                distill: ChatLaneConfig {
+                    base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+                    model: "mock-daily-distill".to_string(),
+                    api_key_envs: vec!["DAILY_TEST_DISTILL_API_KEY"],
+                },
+                rerank: RerankConfig {
+                    provider: RerankProviderKind::Voyage,
+                    local_endpoint: None,
+                },
+            },
+            None,
+        )
+        .expect("initialize mock daily LLM client");
+        assert!(llm.set_provider_secret_pool(
+            "DAILY_TEST_DISTILL_API_KEY",
+            vec![ProviderSecret {
+                key_id: "daily-test-key".to_string(),
+                value: "test-key".to_string(),
+            }],
+        ));
+
+        Self { llm, calls, task }
+    }
+}
+
+async fn daily_mock_response(State(state): State<Arc<DailyMockResponses>>) -> Response {
+    let call = state.calls.fetch_add(1, Ordering::SeqCst);
+    let content = state
+        .bodies
+        .get(call)
+        .or_else(|| state.bodies.last())
+        .expect("daily mock always has a response")
+        .clone();
+    Json(json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "model": "mock-daily-distill",
+    }))
+    .into_response()
+}
+
+fn daily_server_with_llm(path: std::path::PathBuf, llm: &LlmClient) -> crate::MemoryServer {
+    let mut server =
+        crate::MemoryServer::new(path.join("global.db"), Some(path.join("project.db")))
+            .expect("open daily test server");
+    server.llm = Arc::new(llm.clone());
+    server
+}
+
+fn receipt_test_group(group_id: &str, offset: usize) -> CandidateGroup {
+    let entries = (offset..offset + 3)
+        .map(|idx| {
+            let mut entry = candidate_entry(idx);
+            entry.id = format!("receipt-{group_id}-{idx}");
+            entry.path = format!("/project/receipt/{group_id}/{idx}");
+            entry.topic = group_id.to_string();
+            entry.entities = vec![group_id.to_string()];
+            entry
+        })
+        .collect::<Vec<_>>();
+    CandidateGroup {
+        group_id: group_id.to_string(),
+        path_prefix: format!("/project/receipt/{group_id}"),
+        coherence_key: group_id.to_string(),
+        entries,
+    }
+}
+
+fn seed_receipt_test_groups(server: &crate::MemoryServer, groups: &[CandidateGroup]) {
+    server
+        .with_project_store(|store| {
+            for entry in groups.iter().flat_map(|group| &group.entries) {
+                store.upsert(entry).map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed daily receipt source entries");
+}
+
+fn persisted_daily_metadata(server: &crate::MemoryServer) -> Vec<serde_json::Value> {
+    server
+        .with_project_store_read(|store| {
+            let mut statement = store
+                .connection()
+                .prepare(
+                    "SELECT metadata FROM memories WHERE source = 'foundry_distill' ORDER BY id",
+                )
+                .map_err(|error| format!("prepare daily metadata query: {error}"))?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("query daily metadata: {error}"))?;
+            rows.map(|row| {
+                let value = row.map_err(|error| format!("read daily metadata: {error}"))?;
+                serde_json::from_str(&value)
+                    .map_err(|error| format!("parse daily metadata: {error}"))
+            })
+            .collect()
+        })
+        .expect("read persisted daily metadata")
+}
+
+#[test]
+fn model_derived_producers_use_receipt_bearing_llm_apis() {
+    // This is an intentionally source-level census guard for #1522's first
+    // write boundary. Runtime tests below exercise the two most indirect
+    // paths (conversation ingest and REM -> wiki facade); this guard keeps a
+    // future edit from dropping receipts in any remaining listed producer.
+    for (producer, source, receipt_call, legacy_call) in [
+        (
+            "standalone fact extraction",
+            include_str!("../../pipeline_ops/ingest/extract.rs"),
+            "extract_facts_with_receipt",
+            ".extract_facts(",
+        ),
+        (
+            "event fact extraction",
+            include_str!("../../pipeline_ops/ingest/event.rs"),
+            "extract_facts_with_receipt",
+            ".extract_facts(",
+        ),
+        (
+            "daily distill",
+            include_str!("runner.rs"),
+            "call_distill_llm_with_receipt",
+            ".call_distill_llm(",
+        ),
+        (
+            "maintenance distill",
+            include_str!("../maintenance/distill_job.rs"),
+            "generate_distill_with_receipt",
+            ".generate_distill(",
+        ),
+        (
+            "continuity",
+            include_str!("../../continuity_ops/pipeline.rs"),
+            "call_reasoning_llm_with_receipt",
+            ".call_reasoning_llm(",
+        ),
+        (
+            "REM wiki evolver",
+            include_str!("../wiki_evolver.rs"),
+            "call_distill_llm_with_receipt",
+            ".call_distill_llm(",
+        ),
+        (
+            "workflow closure",
+            include_str!("../../workflow_closure.rs"),
+            "generate_distill_with_receipt",
+            ".generate_distill(",
+        ),
+        (
+            "wiki ingest",
+            include_str!("../../wiki_ops/ingest.rs"),
+            "call_extract_llm_with_receipt",
+            ".call_extract_llm(",
+        ),
+    ] {
+        assert!(
+            source.contains(receipt_call),
+            "{producer} must retain its receipt-bearing LLM call"
+        );
+        assert!(
+            !source.contains(legacy_call),
+            "{producer} must not fall back to a text-only LLM call"
+        );
+    }
+    let continuity = include_str!("../../continuity_ops/pipeline.rs");
+    assert!(
+        continuity.contains("call_distill_llm_with_receipt"),
+        "continuity distill must retain its receipt-bearing LLM call"
+    );
+}
+
+#[tokio::test]
+async fn daily_batch_copies_one_invocation_receipt_to_every_group_first_write() {
+    let provider = MockDailyProvider::start(vec![r#"[
+            {"group_id":"receipt-a","summary":"A","text":"batch output A","keywords":["batch"]},
+            {"group_id":"receipt-b","summary":"B","text":"batch output B","keywords":["batch"]}
+        ]"#
+    .to_string()])
+    .await;
+    let temp = tempfile::tempdir().expect("temp daily batch receipt database");
+    let server = daily_server_with_llm(temp.path().to_path_buf(), &provider.llm);
+    let groups = vec![
+        receipt_test_group("receipt-a", 0),
+        receipt_test_group("receipt-b", 10),
+    ];
+    seed_receipt_test_groups(&server, &groups);
+
+    let mut report = DistillBatchReport::default();
+    let mut manifest = Vec::new();
+    process_api_batch(
+        &server,
+        &groups,
+        0,
+        &mut report,
+        &mut manifest,
+        "receipt-batch",
+        None,
+    )
+    .await;
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(report.groups_distilled, 2);
+    assert_eq!(report.fallback_used, 0);
+    let metadata = persisted_daily_metadata(&server);
+    assert_eq!(metadata.len(), 2);
+    let first = metadata[0]
+        .pointer("/provenance/model_invocation")
+        .cloned()
+        .expect("first batch artifact receipt");
+    let second = metadata[1]
+        .pointer("/provenance/model_invocation")
+        .cloned()
+        .expect("second batch artifact receipt");
+    assert_eq!(
+        first, second,
+        "one batch invocation must be copied verbatim"
+    );
+    assert_eq!(first["schema"], "model-invocation-v1");
+    assert_eq!(first["lane"], "distill");
+    assert_eq!(metadata[0]["fallback_used"], false);
+    assert_eq!(metadata[1]["fallback_used"], false);
+}
+
+#[tokio::test]
+async fn daily_parse_failure_uses_a_fresh_receipt_for_each_group_fallback() {
+    // One malformed two-group response is split into two malformed one-group
+    // responses; only then does each group invoke its own successful fallback.
+    let provider = MockDailyProvider::start(vec![
+        "not-json-batch".to_string(),
+        "not-json-left".to_string(),
+        "not-json-right".to_string(),
+        "fallback output for one group".to_string(),
+        "fallback output for the other group".to_string(),
+    ])
+    .await;
+    let temp = tempfile::tempdir().expect("temp daily fallback receipt database");
+    let server = daily_server_with_llm(temp.path().to_path_buf(), &provider.llm);
+    let groups = vec![
+        receipt_test_group("fallback-a", 30),
+        receipt_test_group("fallback-b", 40),
+    ];
+    seed_receipt_test_groups(&server, &groups);
+
+    let mut report = DistillBatchReport::default();
+    let mut manifest = Vec::new();
+    process_api_batch(
+        &server,
+        &groups,
+        0,
+        &mut report,
+        &mut manifest,
+        "receipt-fallback",
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        5,
+        "the batch plus each leaf parse and fallback must be separate calls"
+    );
+    assert_eq!(report.groups_distilled, 2);
+    assert_eq!(report.fallback_used, 2);
+    let metadata = persisted_daily_metadata(&server);
+    assert_eq!(metadata.len(), 2);
+    for item in metadata {
+        assert_eq!(item["fallback_used"], true);
+        let receipt = item
+            .pointer("/provenance/model_invocation")
+            .expect("fallback durable write receipt");
+        assert_eq!(receipt["schema"], "model-invocation-v1");
+        assert_eq!(receipt["lane"], "distill");
+    }
+}
 
 #[test]
 fn parse_distill_response_handles_array() {

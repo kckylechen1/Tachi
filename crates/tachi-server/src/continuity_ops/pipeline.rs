@@ -79,7 +79,7 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
 
         match server_clone
             .llm
-            .call_distill_llm(
+            .call_distill_llm_with_receipt(
                 crate::prompts::CONTINUITY_CANDIDATE_PROMPT,
                 &request,
                 None,
@@ -88,7 +88,13 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
             )
             .await
         {
-            Ok(raw) => match parse_continuity_candidate_batch(&raw) {
+            Ok(raw)
+                if raw.invocation.completion_status()
+                    == tachi_llm::CompletionStatusV1::Truncated =>
+            {
+                tracing::warn!("[continuity] candidate distill rejected: llm_output_truncated");
+            }
+            Ok(raw) => match parse_continuity_candidate_batch(&raw.value) {
                 Ok(batch) => {
                     for candidate in batch.candidates {
                         let event_type = candidate
@@ -98,6 +104,21 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
                             .unwrap_or_else(|| {
                                 projection_candidate_event_type(candidate.projection).to_string()
                             });
+                        let provenance = match crate::provenance::attach_model_invocation(
+                            json!({
+                                "source": "continuity_distill",
+                                "lane": "distill",
+                            }),
+                            &raw.invocation,
+                        ) {
+                            Ok(provenance) => provenance,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "[continuity] candidate receipt attachment failed: {error}"
+                                );
+                                continue;
+                            }
+                        };
                         let event = TachiEventRecord {
                             id: stable_event_payload_id(&[
                                 event_type.as_str(),
@@ -122,10 +143,7 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
                                 "candidate": candidate,
                                 "auto_applied": false,
                             }),
-                            provenance: json!({
-                                "source": "continuity_distill",
-                                "lane": "distill",
-                            }),
+                            provenance,
                             created_at: now_rfc3339(),
                         };
                         if let Err(error) = write_event(&server_clone, &target, &event) {
@@ -140,7 +158,7 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
 
         match server_clone
             .llm
-            .call_reasoning_llm(
+            .call_reasoning_llm_with_receipt(
                 crate::prompts::SESSION_OUTCOME_LABEL_PROMPT,
                 &request,
                 None,
@@ -149,8 +167,27 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
             )
             .await
         {
-            Ok(raw) => match parse_continuity_outcome_label(&raw) {
+            Ok(raw) if raw.truncated => {
+                tracing::warn!("[continuity] outcome label rejected: llm_output_truncated");
+            }
+            Ok(raw) => match parse_continuity_outcome_label(&raw.text) {
                 Ok(label) => {
+                    let provenance = match crate::provenance::attach_model_invocation(
+                        json!({
+                            "source": "continuity_labeler",
+                            "lane": "reasoning",
+                            "note": "read-only signal; projectors must calibrate before automatic counter updates",
+                        }),
+                        &raw.invocation,
+                    ) {
+                        Ok(provenance) => provenance,
+                        Err(error) => {
+                            tracing::warn!(
+                                "[continuity] outcome receipt attachment failed: {error}"
+                            );
+                            return;
+                        }
+                    };
                     let event = TachiEventRecord {
                         id: stable_event_payload_id(&[
                             "session.outcome",
@@ -183,11 +220,7 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
                             "claims": label.claims,
                             "open_questions": label.open_questions,
                         }),
-                        provenance: json!({
-                            "source": "continuity_labeler",
-                            "lane": "reasoning",
-                            "note": "read-only signal; projectors must calibrate before automatic counter updates",
-                        }),
+                        provenance,
                         created_at: now_rfc3339(),
                     };
                     if let Err(error) = write_event(&server_clone, &target, &event) {

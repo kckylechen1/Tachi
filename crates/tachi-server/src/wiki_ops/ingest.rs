@@ -307,11 +307,11 @@ async fn extract_ingest_metadata(
     source: &str,
     topic_hint: Option<&str>,
     content: &str,
-) -> Value {
+) -> (Value, Option<tachi_llm::PersistedModelInvocationReceiptV1>) {
     #[cfg(test)]
     {
         let _ = server;
-        derive_ingest_fallback(source, topic_hint, content)
+        (derive_ingest_fallback(source, topic_hint, content), None)
     }
 
     #[cfg(not(test))]
@@ -324,17 +324,23 @@ async fn extract_ingest_metadata(
         );
         match server
             .llm
-            .call_extract_llm(system, &user, None, 0.2, 800)
+            .call_extract_llm_with_receipt(system, &user, None, 0.2, 800)
             .await
         {
-            Ok(response) => match tachi_llm::LlmClient::extract_json_payload(&response)
+            Ok(response)
+                if response.invocation.completion_status()
+                    == tachi_llm::CompletionStatusV1::Truncated =>
+            {
+                (derive_ingest_fallback(source, topic_hint, content), None)
+            }
+            Ok(response) => match tachi_llm::LlmClient::extract_json_payload(&response.value)
                 .ok()
                 .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
             {
-                Some(value) => value,
-                None => derive_ingest_fallback(source, topic_hint, content),
+                Some(value) => (value, Some(response.invocation)),
+                None => (derive_ingest_fallback(source, topic_hint, content), None),
             },
-            Err(_) => derive_ingest_fallback(source, topic_hint, content),
+            Err(_) => (derive_ingest_fallback(source, topic_hint, content), None),
         }
     }
 }
@@ -386,7 +392,7 @@ pub(crate) async fn handle_wiki_ingest(
         .map_err(|e| format!("serialize wiki_ingest: {e}"));
     }
 
-    let metadata =
+    let (metadata, model_invocation) =
         extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await;
     let title = metadata
         .get("title")
@@ -433,6 +439,40 @@ pub(crate) async fn handle_wiki_ingest(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let metadata = crate::provenance::inject_provenance(
+        server,
+        json!({
+            "wiki": true,
+            "wiki_title": title,
+            "ingest_source": params.source.clone(),
+            "allow_cross_project": true,
+            // #1072 fix-round (#1215 BUG 6): `wiki_ingest` used to upsert
+            // straight into `/wiki/general/...` with no lifecycle/authority
+            // marker at all, so `derive_wiki_lifecycle`'s no-marker default
+            // (`Active`, kept for pre-#1072 back-compat on entries that
+            // predate the lifecycle vocabulary) silently promoted arbitrary
+            // fetched URL/file content to reviewed truth — a bypass named
+            // explicitly in the cross-vendor review ("ingest writers").
+            // Ingested content is unreviewed by construction (no approval
+            // step exists here); stamp it `pending_review` honestly, same
+            // vocabulary `wiki_layer_metadata` stamps for the MCP write
+            // path, with the ingest source recorded as its typed evidence ref.
+            "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
+            "authority": WikiAuthorityV1::Advisory.as_str(),
+            "artifact_kind": WikiArtifactKindV1::Wiki.as_str(),
+        }),
+        "wiki_ingest",
+        "wiki_ingest",
+        Some("global"),
+        crate::server_state::DbScope::Project,
+        json!({"source": params.source.clone()}),
+    );
+    let metadata = match model_invocation.as_ref() {
+        Some(invocation) => crate::provenance::attach_model_invocation(metadata, invocation)
+            .map_err(|error| format!("attach wiki ingest receipt: {error}"))?,
+        None => metadata,
+    };
+
     let entry = MemoryEntry {
         id: id.clone(),
         path: path.clone(),
@@ -456,26 +496,7 @@ pub(crate) async fn handle_wiki_ingest(
         last_access: None,
         last_use_at: None,
         revision: 1,
-        metadata: json!({
-            "wiki": true,
-            "wiki_title": title,
-            "ingest_source": params.source.clone(),
-            "allow_cross_project": true,
-            // #1072 fix-round (#1215 BUG 6): `wiki_ingest` used to upsert
-            // straight into `/wiki/general/...` with no lifecycle/authority
-            // marker at all, so `derive_wiki_lifecycle`'s no-marker default
-            // (`Active`, kept for pre-#1072 back-compat on entries that
-            // predate the lifecycle vocabulary) silently promoted arbitrary
-            // fetched URL/file content to reviewed truth — a bypass named
-            // explicitly in the cross-vendor review ("ingest writers").
-            // Ingested content is unreviewed by construction (no approval
-            // step exists here); stamp it `pending_review` honestly, same
-            // vocabulary `wiki_layer_metadata` stamps for the MCP write
-            // path, with the ingest source recorded as its typed evidence ref.
-            "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
-            "authority": WikiAuthorityV1::Advisory.as_str(),
-            "artifact_kind": WikiArtifactKindV1::Wiki.as_str(),
-        }),
+        metadata,
         vector: None,
         retention_policy: Some("permanent".to_string()),
         domain: Some("wiki".to_string()),

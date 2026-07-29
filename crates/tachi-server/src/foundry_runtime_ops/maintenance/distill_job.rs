@@ -84,11 +84,12 @@ pub(super) async fn process_memory_distill_job(
         )));
     }
 
-    let distill_text = server
+    let distill = server
         .llm
-        .generate_distill(&build_memory_distill_input(&bucket))
+        .generate_distill_with_receipt(&build_memory_distill_input(&bucket))
         .await
         .map_err(|e| format!("Foundry distill summary failed: {e}"))?;
+    let distill_text = distill.value;
     if distill_text.trim().is_empty() {
         return Ok(DistillOutcome::Skipped(SKIP_EMPTY_LLM_OUTPUT.to_string()));
     }
@@ -140,6 +141,8 @@ pub(super) async fn process_memory_distill_job(
             item.target_db,
         );
     }
+    metadata = crate::provenance::attach_model_invocation(metadata, &distill.invocation)
+        .map_err(|error| format!("attach foundry distill receipt: {error}"))?;
 
     let distill_entry = MemoryEntry {
         id: memory_id.clone(),

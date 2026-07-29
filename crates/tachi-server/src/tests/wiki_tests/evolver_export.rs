@@ -109,14 +109,19 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         .await
         .expect("wiki evolution");
     assert_eq!(report.drafts_written, 1);
-    let review_status = server.with_named_project_store_read("wiki", |store| {
+    let (review_status, model_receipt) = server.with_named_project_store_read("wiki", |store| {
         store.connection().query_row(
-            "SELECT json_extract(metadata, '$.review_status') FROM memories WHERE path LIKE '/wiki/drafts/%' LIMIT 1",
+            "SELECT json_extract(metadata, '$.review_status'), json_extract(metadata, '$.provenance.model_invocation.schema') FROM memories WHERE path LIKE '/wiki/drafts/%' LIMIT 1",
             [],
-            |row| row.get::<_, Option<String>>(0),
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
         ).map_err(|e| e.to_string())
     }).expect("read wiki draft metadata");
     assert_eq!(review_status.as_deref(), Some("pending"));
+    assert_eq!(
+        model_receipt.as_deref(),
+        Some("model-invocation-v1"),
+        "REM's first wiki draft write must carry the typed model receipt"
+    );
     let sft_processed: Option<i64> = server
         .with_project_store_read(|store| {
             store

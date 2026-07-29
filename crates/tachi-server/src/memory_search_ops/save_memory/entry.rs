@@ -2,6 +2,7 @@ use crate::tool_params::SaveMemoryParams;
 use crate::{DbScope, MemoryServer};
 use memcore::MemoryEntry;
 use serde_json::json;
+use tachi_llm::PersistedModelInvocationReceiptV1;
 
 pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
     server: &MemoryServer,
@@ -12,7 +13,8 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
     valid_from: String,
     target_db: DbScope,
     existing: Option<&MemoryEntry>,
-) -> MemoryEntry {
+    model_invocation: Option<&PersistedModelInvocationReceiptV1>,
+) -> Result<MemoryEntry, String> {
     let is_patch = params.id.is_some() && existing.is_some();
     let requested_scope = params.scope;
     let path = patch_string_field(
@@ -102,6 +104,14 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
             "topic": topic,
         }),
     );
+    // A typed receipt belongs to the artifact's first durable write. Preserve
+    // an existing winner exactly as stored rather than turning a replay or
+    // wiki update into a provenance overwrite.
+    if existing.is_none() {
+        if let Some(invocation) = model_invocation {
+            metadata = crate::provenance::attach_model_invocation(metadata, invocation)?;
+        }
+    }
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("force".to_string(), serde_json::Value::Bool(params.force));
         if !params.location.trim().is_empty() {
@@ -134,7 +144,7 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
         params.keywords
     };
 
-    MemoryEntry {
+    Ok(MemoryEntry {
         id,
         path,
         summary,
@@ -164,7 +174,7 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
         recall_count: 0,
         query_diversity: 0,
         tier,
-    }
+    })
 }
 
 fn patch_string_field(

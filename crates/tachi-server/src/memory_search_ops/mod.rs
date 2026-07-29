@@ -32,6 +32,7 @@ pub(crate) use save_memory::handle_save_memory_with_references;
 pub(crate) use save_memory::save_eval_memory;
 pub(crate) use save_memory::{
     handle_save_memory_with_authorized_reference_mutations,
+    handle_save_memory_with_authorized_reference_mutations_and_invocation,
     save_eval_memory_with_authorized_reference_mutations,
 };
 pub(crate) use search_helpers::client_project_precedence;

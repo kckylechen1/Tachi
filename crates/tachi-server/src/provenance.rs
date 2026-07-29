@@ -2,6 +2,7 @@ use crate::{DbScope, MemoryServer};
 use chrono::Utc;
 use serde_json::json;
 use std::path::Path;
+use tachi_llm::PersistedModelInvocationReceiptV1;
 
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key)
@@ -91,6 +92,30 @@ pub(super) fn inject_provenance(
 
     metadata_obj.insert("provenance".into(), serde_json::Value::Object(provenance));
     serde_json::Value::Object(metadata_obj)
+}
+
+/// Attach the closed `model-invocation-v1` receipt before an artifact's first
+/// durable write. Callers must invoke this after [`inject_provenance`]: that
+/// boundary intentionally replaces caller-provided provenance wholesale, so
+/// untyped input cannot impersonate a provider receipt. This keeps
+/// facade-backed writes atomic rather than requiring a post-write metadata
+/// patch.
+pub(super) fn attach_model_invocation(
+    mut metadata: serde_json::Value,
+    invocation: &PersistedModelInvocationReceiptV1,
+) -> Result<serde_json::Value, String> {
+    let metadata_obj = metadata
+        .as_object_mut()
+        .ok_or_else(|| "model invocation metadata must be a JSON object".to_string())?;
+    let provenance = metadata_obj
+        .entry("provenance")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "model invocation provenance must be a JSON object".to_string())?;
+    let receipt = serde_json::to_value(invocation)
+        .map_err(|error| format!("serialize model invocation receipt: {error}"))?;
+    provenance.insert("model_invocation".into(), receipt);
+    Ok(metadata)
 }
 
 /// #1041 F3 fix: correct ONLY `provenance.db_path` to point at a
@@ -296,5 +321,30 @@ mod tests {
         let prov = r.get("provenance").unwrap();
         assert_eq!(prov.get("db_path").unwrap(), "/x.db");
         assert_eq!(prov.get("db_scope").unwrap(), "global");
+    }
+
+    #[test]
+    fn inject_provenance_discards_hostile_untyped_model_invocation() {
+        let server = crate::tests::make_server();
+        let metadata = inject_provenance(
+            &server,
+            json!({
+                "provenance": {
+                    "model_invocation": {
+                        "schema": "model-invocation-v1",
+                        "effective_model": "raw provider error containing secret-value",
+                    },
+                },
+            }),
+            "hostile_fixture",
+            "test",
+            Some("global"),
+            DbScope::Global,
+            json!({}),
+        );
+        assert!(
+            metadata.pointer("/provenance/model_invocation").is_none(),
+            "caller-controlled metadata must not populate the typed receipt slot"
+        );
     }
 }
