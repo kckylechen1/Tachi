@@ -9,35 +9,21 @@
 //! * tachi#1344's rank attribution snapshots supply each production boost
 //!   step's before/after ordering.
 //!
-//! Counts are exact fixture observations, not pass thresholds. Every named
-//! lever is emitted even when its observed effect is zero. A separate gate runs
-//! each exact corpus query twice with `record_access=true` and the unmodified
-//! default recall config; exposure alone must leave the returned order exact.
+//! Counts are exact fixture observations, not pass thresholds. For every
+//! production boost, they are sequential marginal effects in the production
+//! execution order, not isolated causal effects, Shapley values, or independent
+//! lever importance. `decay` is the preceding pre-boost zero-decay
+//! counterfactual. Changed-candidate totals aggregate candidate-query pairs:
+//! the same memory id in multiple queries contributes multiple observations and
+//! is never presented as a unique-memory-id count. Every observed production
+//! lever is emitted even when its effect is zero. A separate gate runs each
+//! exact corpus query twice with `record_access=true` and the unmodified default
+//! recall config; exposure alone must leave the returned order exact.
 
 use super::golden_corpus;
 use super::ops_audit_corpus;
 use super::*;
 use std::collections::BTreeMap;
-
-const BOOST_LEVERS: [&str; 7] = [
-    "precision",
-    "quality",
-    "access_feedback",
-    "tier",
-    "entity_recency",
-    "decision",
-    "lexical_overlap",
-];
-const ALL_LEVERS: [&str; 8] = [
-    "decay",
-    "precision",
-    "quality",
-    "access_feedback",
-    "tier",
-    "entity_recency",
-    "decision",
-    "lexical_overlap",
-];
 
 /// The attribution twin reruns scoring after the production search, and both
 /// calls read the live clock for decay. At the corpus's strongest decay slope
@@ -49,15 +35,22 @@ const ATTRIBUTION_CLOCK_SKEW_RELATIVE_BOUND: f64 = 1e-6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct LeverEffect {
-    rank_changed_candidates: usize,
-    pairwise_inversions: usize,
+    sequential_changed_candidate_query_observations: usize,
+    sequential_pairwise_inversions: usize,
 }
 
-fn empty_effects() -> BTreeMap<&'static str, LeverEffect> {
-    ALL_LEVERS
-        .into_iter()
-        .map(|lever| (lever, LeverEffect::default()))
-        .collect()
+struct CorpusEffects {
+    production_levers: Option<Vec<&'static str>>,
+    values: BTreeMap<&'static str, LeverEffect>,
+}
+
+fn empty_effects() -> CorpusEffects {
+    let mut effects = BTreeMap::new();
+    effects.insert("decay", LeverEffect::default());
+    CorpusEffects {
+        production_levers: None,
+        values: effects,
+    }
 }
 
 fn impression_group_id(conn: &Connection) -> String {
@@ -77,16 +70,26 @@ fn measure_case(
     conn: &Connection,
     query: &str,
     mut opts: SearchOptions,
-    totals: &mut BTreeMap<&'static str, LeverEffect>,
+    totals: &mut CorpusEffects,
 ) {
     let (ranked, attribution) =
         hybrid_search_with_attribution(conn, query, &opts).expect("rank attribution");
-    let labels = attribution
+    let production_levers = attribution
         .steps
         .iter()
         .map(|step| step.label)
         .collect::<Vec<_>>();
-    assert_eq!(labels, BOOST_LEVERS, "production boost sequence drifted");
+    assert!(
+        !production_levers.is_empty(),
+        "rank-effect corpus query must observe the production boost sequence"
+    );
+    match &totals.production_levers {
+        Some(previous) => assert_eq!(
+            previous, &production_levers,
+            "production boost sequence changed between corpus queries"
+        ),
+        None => totals.production_levers = Some(production_levers),
+    }
     for result in &ranked {
         let attributed = attribution
             .final_scores
@@ -105,11 +108,10 @@ fn measure_case(
     }
 
     for step in &attribution.steps {
-        let total = totals
-            .get_mut(step.label)
-            .expect("every attribution step has a named lever bucket");
-        total.rank_changed_candidates += step.rank_changed_candidates();
-        total.pairwise_inversions += step.pairwise_rank_inversions();
+        let total = totals.values.entry(step.label).or_default();
+        total.sequential_changed_candidate_query_observations +=
+            step.sequential_changed_candidate_query_observations();
+        total.sequential_pairwise_inversions += step.sequential_pairwise_inversions();
     }
 
     opts.record_access = true;
@@ -127,26 +129,34 @@ fn measure_case(
         !report.post_boost_claimed,
         "decay replay is pre-boost evidence only"
     );
-    let decay = totals.get_mut("decay").expect("decay lever bucket");
-    decay.rank_changed_candidates += report
+    let decay = totals.values.get_mut("decay").expect("decay lever bucket");
+    decay.sequential_changed_candidate_query_observations += report
         .candidates
         .iter()
         .filter(|candidate| candidate.recorded_pre_boost_rank != candidate.decay_zero_rank)
         .count();
-    decay.pairwise_inversions += report.decay_zero_rank_inversions;
+    decay.sequential_pairwise_inversions += report.decay_zero_rank_inversions;
 }
 
-fn print_effects(corpus: &str, query_count: usize, effects: &BTreeMap<&'static str, LeverEffect>) {
-    for lever in ALL_LEVERS {
-        let effect = effects[lever];
+fn print_effects(corpus: &str, query_count: usize, effects: &CorpusEffects) {
+    for lever in std::iter::once("decay").chain(
+        effects
+            .production_levers
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .copied(),
+    ) {
+        let effect = effects.values[lever];
         println!(
-            "RANK_EFFECT corpus={corpus} lever={lever} queries={query_count} rank_changed_candidates={} pairwise_inversions={}",
-            effect.rank_changed_candidates, effect.pairwise_inversions
+            "RANK_EFFECT corpus={corpus} lever={lever} queries={query_count} sequential_changed_candidate_query_observations={} sequential_pairwise_inversions={}",
+            effect.sequential_changed_candidate_query_observations,
+            effect.sequential_pairwise_inversions,
         );
     }
 }
 
-fn golden_effects() -> BTreeMap<&'static str, LeverEffect> {
+fn golden_effects() -> CorpusEffects {
     let mut totals = empty_effects();
     for spec in golden_corpus::QUERIES {
         let mut conn = setup();
@@ -161,7 +171,7 @@ fn golden_effects() -> BTreeMap<&'static str, LeverEffect> {
     totals
 }
 
-fn ops_audit_effects() -> BTreeMap<&'static str, LeverEffect> {
+fn ops_audit_effects() -> CorpusEffects {
     let mut totals = empty_effects();
     for case in ops_audit_corpus::CASES {
         let mut conn = setup();

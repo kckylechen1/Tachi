@@ -26,12 +26,12 @@
 //! # How it observes without changing scoring
 //! This file is pure driver/printer. The actual observation machinery lives
 //! in `ranking.rs`'s `#[cfg(test)] pub(super) mod attribution` (a twin of
-//! `rank_candidate_entries` that snapshots `scores` before/after each of the
-//! same 7 `apply_*_boost` calls the production function makes, in the same
-//! order) and `search.rs`'s `hybrid_search_with_attribution` (pairs that
-//! breakdown with the real ranked order from the unmodified `hybrid_search`).
-//! Neither is reachable outside a test build — see those modules' own doc
-//! comments for the zero-production-overhead argument.
+//! `rank_candidate_entries` that gives the one production boost sequence a
+//! snapshot observer before/after each sequential marginal step) and
+//! `search.rs`'s `hybrid_search_with_attribution` (pairs that breakdown with
+//! the real ranked order from the unmodified `hybrid_search`).
+//! The observation output remains test-only; the observer cannot alter the
+//! production calls, arguments, or rank order.
 //!
 //! # Corpus reuse
 //! Reuses `golden_corpus::{seed_corpus, QUERIES, Slice}` and
