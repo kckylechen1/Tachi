@@ -330,6 +330,12 @@ mod tests {
             "PendingGuideLifecycleNeedle malformed lifecycle must stay out too.".to_string();
         malformed.summary = malformed.text.clone();
         malformed.metadata = json!({"lifecycle": "not-a-real-lifecycle"});
+        let mut non_string = crate::tests::make_entry("non-string-feature-guide");
+        non_string.path = "/guide/non-string-feature-guide".to_string();
+        non_string.text =
+            "PendingGuideLifecycleNeedle non-string lifecycle must stay out too.".to_string();
+        non_string.summary = non_string.text.clone();
+        non_string.metadata = json!({"lifecycle": 123});
         let mut missing = crate::tests::make_entry("missing-feature-guide-lifecycle");
         missing.path = "/guide/missing-feature-guide-lifecycle".to_string();
         missing.text =
@@ -341,6 +347,9 @@ mod tests {
                 store.upsert(&pending).map_err(|error| error.to_string())?;
                 store
                     .upsert(&malformed)
+                    .map_err(|error| error.to_string())?;
+                store
+                    .upsert(&non_string)
                     .map_err(|error| error.to_string())?;
                 store.upsert(&missing).map_err(|error| error.to_string())
             })
@@ -366,6 +375,7 @@ mod tests {
         assert!(
             !ids.contains(&"pending-feature-guide")
                 && !ids.contains(&"malformed-feature-guide")
+                && !ids.contains(&"non-string-feature-guide")
                 && !ids.contains(&"missing-feature-guide-lifecycle"),
             "RED: pending/malformed/missing guide lifecycle leaked as active: {hits:?}"
         );

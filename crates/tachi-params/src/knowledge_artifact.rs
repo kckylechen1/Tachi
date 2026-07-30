@@ -262,15 +262,16 @@ pub struct KnowledgeArtifactV1 {
 /// field at all), so existing non-draft wiki reads stay behavior-frozen.
 ///
 /// Fail-closed correction (cross-vendor review, #1215): a *present but
-/// malformed* `metadata.lifecycle` string (garbage/typo, not simply absent)
+/// malformed* `metadata.lifecycle` value (garbage/typo/non-string, not absent)
 /// used to fall through to every later check and could land on the `Active`
 /// default — a corrupted/unrecognized lifecycle marker must never resolve to
 /// the most-trusted state. It now resolves to `PendingReview` (not
 /// default-retrievable) instead, regardless of path or `review_status`.
 pub fn derive_wiki_lifecycle(metadata: &serde_json::Value, path: &str) -> WikiLifecycleV1 {
-    if let Some(explicit) = metadata.get("lifecycle").and_then(|v| v.as_str()) {
+    if let Some(explicit) = metadata.get("lifecycle") {
         return explicit
-            .parse::<WikiLifecycleV1>()
+            .as_str()
+            .and_then(|value| value.parse::<WikiLifecycleV1>().ok())
             .unwrap_or(WikiLifecycleV1::PendingReview);
     }
     if metadata
@@ -612,16 +613,22 @@ mod tests {
     /// check into the drafts-path/default-Active fallback below.
     #[test]
     fn derive_wiki_lifecycle_malformed_explicit_value_fails_closed_to_pending_review() {
-        let lifecycle = derive_wiki_lifecycle(
-            &serde_json::json!({"lifecycle": "bogus-not-a-real-lifecycle"}),
-            "/wiki/engineering/ordinary-path",
-        );
-        assert_eq!(
-            lifecycle,
-            WikiLifecycleV1::PendingReview,
-            "malformed lifecycle must fail closed, not default to Active"
-        );
-        assert!(!lifecycle.is_default_retrievable());
+        for explicit in [
+            serde_json::json!("bogus-not-a-real-lifecycle"),
+            serde_json::json!(123),
+            serde_json::json!({"bad": true}),
+        ] {
+            let lifecycle = derive_wiki_lifecycle(
+                &serde_json::json!({"lifecycle": explicit}),
+                "/wiki/engineering/ordinary-path",
+            );
+            assert_eq!(
+                lifecycle,
+                WikiLifecycleV1::PendingReview,
+                "malformed lifecycle must fail closed, not default to Active"
+            );
+            assert!(!lifecycle.is_default_retrievable());
+        }
     }
 
     #[test]
