@@ -30,6 +30,143 @@ fn parse_distill_response_rejects_non_array() {
 }
 
 #[test]
+fn daily_distill_source_set_v1_has_frozen_name_bytes_and_uuid() {
+    let group = CandidateGroup {
+        group_id: "golden".to_string(),
+        path_prefix: "/project/example".to_string(),
+        coherence_key: "example".to_string(),
+        entries: Vec::new(),
+    };
+    let source_ids = vec!["a".to_string(), "b".to_string()];
+    let bytes = serialized_source_set_identity_bytes(&group, &source_ids);
+
+    assert_eq!(
+        String::from_utf8(bytes).expect("identity bytes are UTF-8 JSON"),
+        r#"{"contract":"daily-distill-source-set-v1","path_prefix":"/project/example","coherence_key":"example","source_memory_ids":["a","b"]}"#
+    );
+    assert_eq!(
+        stable_distill_memory_id(&group, &source_ids),
+        "distill:c189ceb9-dd50-5af4-95a7-34e89b2d3669"
+    );
+}
+
+#[test]
+fn daily_distill_source_set_v1_distinguishes_each_identity_dimension() {
+    let base = CandidateGroup {
+        group_id: "identity-dimensions".to_string(),
+        path_prefix: "/project/base".to_string(),
+        coherence_key: "base-key".to_string(),
+        entries: vec![candidate_entry(0), candidate_entry(1)],
+    };
+    let base_source_ids = normalized_source_memory_ids(&base);
+    let base_id = stable_distill_memory_id(&base, &base_source_ids);
+
+    let mut different_sources = base.clone();
+    different_sources.entries.push(candidate_entry(2));
+    let different_source_ids = normalized_source_memory_ids(&different_sources);
+    assert_ne!(
+        base_id,
+        stable_distill_memory_id(&different_sources, &different_source_ids)
+    );
+
+    let mut different_path = base.clone();
+    different_path.path_prefix = "/project/other".to_string();
+    assert_ne!(
+        base_id,
+        stable_distill_memory_id(&different_path, &base_source_ids)
+    );
+
+    let mut different_coherence = base.clone();
+    different_coherence.coherence_key = "other-key".to_string();
+    assert_ne!(
+        base_id,
+        stable_distill_memory_id(&different_coherence, &base_source_ids)
+    );
+}
+
+#[test]
+fn daily_distill_existing_winner_validation_is_strict_and_typed() {
+    let group = CandidateGroup {
+        group_id: "strict-validation".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries: (0..3).map(candidate_entry).collect(),
+    };
+    let source_ids = normalized_source_memory_ids(&group);
+    let stable_id = stable_distill_memory_id(&group, &source_ids);
+    let mut canonical = candidate_entry(99);
+    canonical.id = stable_id.clone();
+    canonical.source = "foundry_distill".to_string();
+    canonical.metadata = json!({
+        "source_memory_ids": source_ids,
+        "source_set_contract": "daily-distill-source-set-v1",
+        "source_set_identity": stable_id,
+        "source_path_prefix": group.path_prefix,
+        "coherence_key": group.coherence_key,
+    });
+    validate_existing_distill_winner(
+        &canonical,
+        &stable_id,
+        &group.path_prefix,
+        &group.coherence_key,
+        &source_ids,
+    )
+    .expect("canonical winner must validate");
+
+    let assert_conflict = |occupant: &MemoryEntry| {
+        let error = validate_existing_distill_winner(
+            occupant,
+            &stable_id,
+            &group.path_prefix,
+            &group.coherence_key,
+            &source_ids,
+        )
+        .expect_err("malformed identity evidence must fail");
+        assert!(
+            matches!(error, memcore::MemoryError::InvalidArg(_)),
+            "identity collision must remain a typed InvalidArg: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("daily_distill_identity_conflict"),
+            "identity collision must retain its stable marker: {error}"
+        );
+    };
+
+    let mut non_string = canonical.clone();
+    non_string.metadata["source_memory_ids"] =
+        json!(["candidate-0", 17, "candidate-1", "candidate-2"]);
+    assert_conflict(&non_string);
+
+    let mut duplicate = canonical.clone();
+    duplicate.metadata["source_memory_ids"] =
+        json!(["candidate-0", "candidate-1", "candidate-2", "candidate-2"]);
+    assert_conflict(&duplicate);
+
+    let mut wrong_order = canonical.clone();
+    wrong_order.metadata["source_memory_ids"] =
+        json!(["candidate-2", "candidate-1", "candidate-0"]);
+    assert_conflict(&wrong_order);
+
+    let mut wrong_path = canonical.clone();
+    wrong_path.metadata["source_path_prefix"] = json!("/project/forged");
+    assert_conflict(&wrong_path);
+
+    let mut wrong_coherence = canonical.clone();
+    wrong_coherence.metadata["coherence_key"] = json!("forged-key");
+    assert_conflict(&wrong_coherence);
+
+    let mut missing_contract = canonical;
+    missing_contract
+        .metadata
+        .as_object_mut()
+        .expect("metadata object")
+        .remove("source_set_contract");
+    assert_conflict(&missing_contract);
+}
+
+#[test]
 fn resolve_distill_backend_defaults_to_raw_api() {
     with_backend_env(None, || {
         assert_eq!(resolve_distill_backend(), DistillBackend::RawApi);
@@ -260,6 +397,11 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
                 metadata["source_memory_ids"],
                 json!(["candidate-0", "candidate-1", "candidate-2"])
             );
+            assert_eq!(
+                metadata["source_set_contract"],
+                json!("daily-distill-source-set-v1")
+            );
+            assert_eq!(metadata["source_set_identity"], json!(memory_id));
             assert!(
                 edge_count >= 3,
                 "expected at least one distill edge per source, got {edge_count}"
@@ -359,6 +501,539 @@ fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
             Ok(())
         })
         .expect("verify guarded sources");
+}
+
+#[test]
+fn persist_distill_memory_replay_preserves_the_first_protected_source_set_output() {
+    let temp = tempfile::tempdir().expect("temp daily distill replay db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+
+    server
+        .with_project_store(|store| {
+            for entry in &entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed protected source memories");
+
+    let group = CandidateGroup {
+        group_id: "protected-replay".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries: entries.clone(),
+    };
+    let first_payload = GroupPayload {
+        summary: "first committed summary".to_string(),
+        text: "first committed distilled output".to_string(),
+        keywords: vec!["first".to_string()],
+        skip_reason: None,
+    };
+    let first_id = persist_distill_memory(
+        &server,
+        &group,
+        &first_payload,
+        "batch-first",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("persist first output");
+
+    let snapshot = || {
+        server.with_project_store_read(|store| {
+            let conn = store.connection();
+            let memory: (String, String, String, String, bool, Option<String>) = conn
+                .query_row(
+                    "SELECT summary, text, keywords, metadata, archived, superseded_by
+                     FROM memories WHERE id = ?1",
+                    [&first_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            let fts: (i64, String, String, String) = conn
+                .query_row(
+                    "SELECT COUNT(*), summary, text, keywords FROM memories_fts WHERE id = ?1",
+                    [&first_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let vector_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memories_vec WHERE id = ?1",
+                    [&first_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let derived: (String, String, String) = conn
+                .query_row(
+                    "SELECT text, summary, metadata FROM derived_items WHERE id = ?1",
+                    [format!("derived:{first_id}")],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let edge_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_edges WHERE source_id = ?1 OR target_id = ?1",
+                    [&first_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let source_projection: (i64, i64) = conn
+                .query_row(
+                    "SELECT
+                         SUM(CASE WHEN archived = 1 THEN 1 ELSE 0 END),
+                         SUM(CASE WHEN superseded_by IS NOT NULL THEN 1 ELSE 0 END)
+                     FROM memories WHERE id LIKE 'candidate-%'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "memory": memory,
+                "fts": fts,
+                "vector_count": vector_count,
+                "derived": derived,
+                "edge_count": edge_count,
+                "source_projection": source_projection,
+            }))
+        })
+    };
+    let first_state = snapshot().expect("snapshot first committed projection set");
+
+    let mut replay_group = group.clone();
+    replay_group.entries.reverse();
+    let replay_payload = GroupPayload {
+        summary: "conflicting replay summary".to_string(),
+        text: "conflicting replay output must not overwrite the winner".to_string(),
+        keywords: vec!["replay".to_string()],
+        skip_reason: None,
+    };
+    let replay_id = persist_distill_memory(
+        &server,
+        &replay_group,
+        &replay_payload,
+        "batch-replay",
+        "raw_api",
+        true,
+        None,
+    )
+    .expect("replay returns the canonical output");
+
+    assert_eq!(
+        replay_id, first_id,
+        "source ordering cannot change identity"
+    );
+    let replay_state = snapshot().expect("snapshot replay projection set");
+    assert_eq!(
+        replay_state, first_state,
+        "Existing must not mutate memory, FTS, vector, derived, graph, archive, supersession, or metadata projections"
+    );
+}
+
+#[test]
+fn persist_distill_memory_replay_finds_an_archived_canonical_output() {
+    let temp = tempfile::tempdir().expect("temp archived daily distill replay db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    server
+        .with_project_store(|store| {
+            for entry in &entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed protected source memories");
+    let group = CandidateGroup {
+        group_id: "archived-replay".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+    let payload = GroupPayload {
+        summary: "archived canonical summary".to_string(),
+        text: "archived canonical output".to_string(),
+        keywords: vec!["archived".to_string()],
+        skip_reason: None,
+    };
+    let first_id = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-archived-first",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("persist canonical output");
+    server
+        .with_project_store(|store| {
+            assert!(store.archive_memory(&first_id).map_err(|e| e.to_string())?);
+            Ok(())
+        })
+        .expect("archive canonical output");
+
+    let replay_id = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-archived-replay",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("archived replay returns canonical output");
+    assert_eq!(replay_id, first_id);
+    server
+        .with_project_store_read(|store| {
+            let state: (i64, bool) = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*), archived FROM memories WHERE source = 'foundry_distill'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(state, (1, true));
+            Ok(())
+        })
+        .expect("archived replay must not resurrect or duplicate the winner");
+}
+
+#[test]
+fn persist_distill_memory_concurrent_protected_source_set_has_one_winner() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = tempfile::tempdir().expect("temp concurrent daily distill db");
+    let global_db = temp.path().join("global.db");
+    let project_db = temp.path().join("project.db");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    {
+        let server =
+            crate::MemoryServer::new(global_db.clone(), Some(project_db.clone())).expect("server");
+        server
+            .with_project_store(|store| {
+                for entry in &entries {
+                    store.upsert(entry).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .expect("seed protected source memories");
+    }
+
+    let group = CandidateGroup {
+        group_id: "concurrent-protected".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+    let barrier = Arc::new(Barrier::new(2));
+    let mut writers = Vec::new();
+    for writer in 0..2 {
+        let global_db = global_db.clone();
+        let project_db = project_db.clone();
+        let group = group.clone();
+        let barrier = Arc::clone(&barrier);
+        writers.push(std::thread::spawn(move || {
+            let server = crate::MemoryServer::new(global_db, Some(project_db)).expect("server");
+            let payload = GroupPayload {
+                summary: format!("writer {writer} summary"),
+                text: format!("writer {writer} output"),
+                keywords: vec![format!("writer-{writer}")],
+                skip_reason: None,
+            };
+            barrier.wait();
+            persist_distill_memory(
+                &server,
+                &group,
+                &payload,
+                &format!("batch-writer-{writer}"),
+                "raw_api",
+                false,
+                None,
+            )
+            .expect("concurrent writer")
+        }));
+    }
+    let ids = writers
+        .into_iter()
+        .map(|writer| writer.join().expect("join concurrent writer"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids[0], ids[1]);
+
+    let verifier = crate::MemoryServer::new(global_db, Some(project_db)).expect("verifier");
+    verifier
+        .with_project_store_read(|store| {
+            let conn = store.connection();
+            let output_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE source = 'foundry_distill'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let derived_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM derived_items", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            let edge_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_edges WHERE source_id = ?1",
+                    [&ids[0]],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(output_count, 1);
+            assert_eq!(derived_count, 1);
+            assert_eq!(edge_count, 3);
+            Ok(())
+        })
+        .expect("verify one concurrent side-effect set");
+}
+
+#[test]
+fn persist_distill_memory_insert_once_bypasses_write_time_jaccard_merging() {
+    let temp = tempfile::tempdir().expect("temp daily distill jaccard db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    let payload = GroupPayload {
+        summary: "canonical jaccard-safe summary".to_string(),
+        text: "a unique distilled result that exactly matches an existing row".to_string(),
+        keywords: vec!["distill-only".to_string()],
+        skip_reason: None,
+    };
+    let mut existing = candidate_entry(99);
+    existing.id = "jaccard-existing".to_string();
+    existing.path = "/notes/jaccard-existing".to_string();
+    existing.timestamp = "2026-01-01T00:01:39Z".to_string();
+    existing.text = payload.text.clone();
+    existing.summary = "existing unrelated summary".to_string();
+    existing.keywords = vec!["existing-only".to_string()];
+    existing.entities = vec!["existing-entity".to_string()];
+    existing.importance = 0.2;
+    server
+        .with_project_store(|store| {
+            for entry in &entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            store.upsert(&existing).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed source and Jaccard candidate memories");
+    let group = CandidateGroup {
+        group_id: "jaccard-safe".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+
+    let memory_id = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-jaccard-safe",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("persist canonical output without ordinary-memory dedupe");
+    server
+        .with_project_store_read(|store| {
+            let conn = store.connection();
+            let distill_state: (Option<String>, String) = conn
+                .query_row(
+                    "SELECT superseded_by, tier FROM memories WHERE id = ?1",
+                    [&memory_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let existing_state: (String, f64) = conn
+                .query_row(
+                    "SELECT keywords, importance FROM memories WHERE id = ?1",
+                    [&existing.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(distill_state, (None, "consolidated".to_string()));
+            assert_eq!(existing_state.0, json!(["existing-only"]).to_string());
+            assert_eq!(existing_state.1, 0.2);
+            Ok(())
+        })
+        .expect("distill insert-once must not invoke ordinary Jaccard merging");
+}
+
+#[test]
+fn persist_distill_memory_refuses_a_noncanonical_stable_id_occupant() {
+    let temp = tempfile::tempdir().expect("temp daily distill identity collision db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    let group = CandidateGroup {
+        group_id: "identity-collision".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+    let source_ids = normalized_source_memory_ids(&group);
+    let stable_id = stable_distill_memory_id(&group, &source_ids);
+    let mut occupant = candidate_entry(99);
+    occupant.id = stable_id.clone();
+    occupant.path = "/notes/noncanonical-occupant".to_string();
+    occupant.timestamp = "2026-01-01T00:01:39Z".to_string();
+    occupant.text = "unrelated occupant text".to_string();
+    occupant.source = "manual".to_string();
+    server
+        .with_project_store(|store| {
+            for entry in &group.entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            store.upsert(&occupant).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed source memories and stable-id occupant");
+    let payload = GroupPayload {
+        summary: "collision summary".to_string(),
+        text: "collision output".to_string(),
+        keywords: vec!["collision".to_string()],
+        skip_reason: None,
+    };
+
+    let error = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-collision",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect_err("an arbitrary stable-id occupant is not a canonical replay winner");
+    assert!(error.contains("source-set identity collision"), "{error}");
+    server
+        .with_project_store_read(|store| {
+            let conn = store.connection();
+            let occupant_state: (String, String) = conn
+                .query_row(
+                    "SELECT source, text FROM memories WHERE id = ?1",
+                    [&stable_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let derived_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM derived_items", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            let edge_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            assert_eq!(occupant_state, ("manual".to_string(), occupant.text));
+            assert_eq!(derived_count, 0);
+            assert_eq!(edge_count, 0);
+            Ok(())
+        })
+        .expect("identity collision must leave every projection untouched");
+}
+
+#[test]
+fn persist_distill_memory_refuses_malformed_self_asserted_identity_metadata() {
+    let temp = tempfile::tempdir().expect("temp malformed daily distill identity db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    for entry in &mut entries {
+        entry.retention_policy = Some("pinned".to_string());
+    }
+    let group = CandidateGroup {
+        group_id: "malformed-identity".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+    let source_ids = normalized_source_memory_ids(&group);
+    let stable_id = stable_distill_memory_id(&group, &source_ids);
+    let mut occupant = candidate_entry(99);
+    occupant.id = stable_id.clone();
+    occupant.path = "/foundry/forged-occupant".to_string();
+    occupant.timestamp = "2026-01-01T00:01:39Z".to_string();
+    occupant.source = "foundry_distill".to_string();
+    occupant.metadata = json!({
+        "source_memory_ids": ["candidate-0", 17, "candidate-1", "candidate-2"],
+        "source_set_contract": "daily-distill-source-set-v1",
+        "source_set_identity": stable_id,
+        "source_path_prefix": group.path_prefix,
+        "coherence_key": group.coherence_key,
+    });
+    server
+        .with_project_store(|store| {
+            for entry in &group.entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            store.upsert(&occupant).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed source memories and forged occupant");
+    let payload = GroupPayload {
+        summary: "malformed identity summary".to_string(),
+        text: "malformed identity output".to_string(),
+        keywords: vec!["malformed".to_string()],
+        skip_reason: None,
+    };
+
+    let error = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-malformed-identity",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect_err("self-asserted metadata with a non-string source id is not canonical");
+    assert!(
+        error.contains("daily_distill_identity_conflict"),
+        "identity refusal must expose the stable conflict marker: {error}"
+    );
 }
 
 #[test]
