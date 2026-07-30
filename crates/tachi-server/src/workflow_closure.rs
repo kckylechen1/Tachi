@@ -3,6 +3,7 @@
 use crate::tool_params::{TachiWorkflowParams, WikiWriteParams};
 use crate::MemoryServer;
 use serde_json::{json, Value};
+use tachi_llm::PersistedModelInvocationReceiptV1;
 
 /// Footer stamped on every closure write-back comment. Also the idempotency
 /// key: if an issue/PR already carries a comment containing this, close_loop
@@ -244,12 +245,18 @@ async fn post_closure_comment(
 /// dump is the guaranteed fallback. The model is purely advisory: the call is
 /// best-effort + time-bounded and NEVER blocks or fails the closure (GitHub
 /// outage, missing provider key, slow model → fall back). Returns the draft
-/// plus its source ("llm" | "result_md"), or None if there's nothing to draft.
+/// plus its source and optional model receipt, or None if there's nothing to
+/// draft. A deterministic fallback intentionally carries no receipt.
 async fn draft_from_result(
     server: &MemoryServer,
     flow_id: &str,
     issue_ref: &str,
-) -> Option<(String, String, &'static str)> {
+) -> Option<(
+    String,
+    String,
+    &'static str,
+    Option<PersistedModelInvocationReceiptV1>,
+)> {
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).ok()?;
     let result = std::fs::read_to_string(run_dir.join("result.md")).ok()?;
     let trimmed = result.trim();
@@ -279,22 +286,30 @@ async fn draft_from_result(
         );
         let llm = server.llm.clone();
         let distilled = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
-            llm.generate_distill(&input).await
+            llm.generate_distill_with_receipt(&input).await
         })
         .await;
-        if let Ok(Ok(body)) = distilled {
-            let body = body.trim();
+        if let Ok(Ok(generated)) = distilled {
+            let body = generated.value.trim();
             if !body.is_empty() {
-                return Some((title, body.to_string(), "llm"));
+                return Some((title, body.to_string(), "llm", Some(generated.invocation)));
             }
         }
     }
 
-    Some((title, fallback_body, "result_md"))
+    Some((title, fallback_body, "result_md", None))
 }
 
 /// Draft wiki title/body from caller `notes` when result.md is unavailable (#925).
-fn draft_from_notes(notes: &str, issue_ref: &str) -> Option<(String, String, &'static str)> {
+fn draft_from_notes(
+    notes: &str,
+    issue_ref: &str,
+) -> Option<(
+    String,
+    String,
+    &'static str,
+    Option<PersistedModelInvocationReceiptV1>,
+)> {
     let trimmed = notes.trim();
     if trimmed.is_empty() {
         return None;
@@ -309,7 +324,7 @@ fn draft_from_notes(notes: &str, issue_ref: &str) -> Option<(String, String, &'s
     } else {
         trimmed.to_string()
     };
-    Some((title, body, "notes"))
+    Some((title, body, "notes", None))
 }
 
 fn first_heading_or_closure_title(text: &str, issue_ref: &str) -> String {
@@ -370,38 +385,39 @@ pub(crate) async fn handle_workflow(
             let explicit_text = params.wiki_text.clone().filter(|s| !s.trim().is_empty());
             let mut auto_drafted = false;
             let mut draft_source = "explicit";
-            let (title, text) = match (explicit_title.clone(), explicit_text.clone()) {
-                (Some(t), Some(x)) => (t, x),
-                (maybe_t, maybe_x) => {
-                    let drafted = match params.flow_id.as_deref() {
-                        Some(fid) => draft_from_result(server, fid, &issue_ref).await,
-                        None => None,
-                    };
-                    let drafted = match drafted {
-                        Some(d) => Some(d),
-                        None => params
-                            .notes
-                            .as_deref()
-                            .and_then(|notes| draft_from_notes(notes, &issue_ref)),
-                    };
-                    match drafted {
-                        Some((dt, dx, src)) => {
-                            auto_drafted = maybe_t.is_none() || maybe_x.is_none();
-                            draft_source = src;
-                            (maybe_t.unwrap_or(dt), maybe_x.unwrap_or(dx))
-                        }
-                        None => {
-                            return Err(close_loop_missing_draft_error(
-                                params.flow_id.as_deref(),
-                                params
-                                    .notes
-                                    .as_deref()
-                                    .is_some_and(|n| !n.trim().is_empty()),
-                            ));
+            let (title, text, model_invocation) =
+                match (explicit_title.clone(), explicit_text.clone()) {
+                    (Some(t), Some(x)) => (t, x, None),
+                    (maybe_t, maybe_x) => {
+                        let drafted = match params.flow_id.as_deref() {
+                            Some(fid) => draft_from_result(server, fid, &issue_ref).await,
+                            None => None,
+                        };
+                        let drafted = match drafted {
+                            Some(d) => Some(d),
+                            None => params
+                                .notes
+                                .as_deref()
+                                .and_then(|notes| draft_from_notes(notes, &issue_ref)),
+                        };
+                        match drafted {
+                            Some((dt, dx, src, invocation)) => {
+                                auto_drafted = maybe_t.is_none() || maybe_x.is_none();
+                                draft_source = src;
+                                (maybe_t.unwrap_or(dt), maybe_x.unwrap_or(dx), invocation)
+                            }
+                            None => {
+                                return Err(close_loop_missing_draft_error(
+                                    params.flow_id.as_deref(),
+                                    params
+                                        .notes
+                                        .as_deref()
+                                        .is_some_and(|n| !n.trim().is_empty()),
+                                ));
+                            }
                         }
                     }
-                }
-            };
+                };
 
             let references =
                 build_closure_references(&issue_ref, &doc_paths, &params.related_issues);
@@ -432,37 +448,44 @@ pub(crate) async fn handle_workflow(
                 text.chars().take(500).collect::<String>()
             );
 
-            let wiki_result = crate::copilot_ops::handle_tachi_wiki_write(
-                server,
-                WikiWriteParams {
-                    title,
-                    text,
-                    path: params.wiki_path.clone(),
-                    topic: params.wiki_topic.clone(),
-                    summary: params.wiki_summary.clone(),
-                    category: params
-                        .wiki_category
-                        .clone()
-                        .unwrap_or_else(|| "experience".to_string()),
-                    keywords: params.wiki_keywords.clone(),
-                    entities: params.wiki_entities.clone(),
-                    importance: params.wiki_importance.unwrap_or(0.85),
-                    scope: params
-                        .wiki_scope
-                        .clone()
-                        .unwrap_or_else(|| "global".to_string()),
-                    retention_policy: "permanent".to_string(),
-                    domain: params.wiki_domain.clone(),
-                    project: params.project.clone(),
-                    metadata: Some(metadata),
-                    force: params.force,
-                    references,
-                    include_patterns: true,
-                    pattern_query: Some(pattern_query),
-                    pattern_top_k: Some(5),
-                },
-            )
-            .await?;
+            let wiki_params = WikiWriteParams {
+                title,
+                text,
+                path: params.wiki_path.clone(),
+                topic: params.wiki_topic.clone(),
+                summary: params.wiki_summary.clone(),
+                category: params
+                    .wiki_category
+                    .clone()
+                    .unwrap_or_else(|| "experience".to_string()),
+                keywords: params.wiki_keywords.clone(),
+                entities: params.wiki_entities.clone(),
+                importance: params.wiki_importance.unwrap_or(0.85),
+                scope: params
+                    .wiki_scope
+                    .clone()
+                    .unwrap_or_else(|| "global".to_string()),
+                retention_policy: "permanent".to_string(),
+                domain: params.wiki_domain.clone(),
+                project: params.project.clone(),
+                metadata: Some(metadata),
+                force: params.force,
+                references,
+                include_patterns: true,
+                pattern_query: Some(pattern_query),
+                pattern_top_k: Some(5),
+            };
+            let wiki_result = match model_invocation {
+                Some(invocation) => {
+                    crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
+                        server,
+                        wiki_params,
+                        invocation,
+                    )
+                    .await?
+                }
+                None => crate::copilot_ops::handle_tachi_wiki_write(server, wiki_params).await?,
+            };
             let wiki_json =
                 serde_json::from_str::<Value>(&wiki_result).unwrap_or(json!(wiki_result));
             let pattern_refs = wiki_json

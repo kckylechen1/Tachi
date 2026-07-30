@@ -49,11 +49,11 @@ use persist::{
 };
 // #1087: unit test asserts the flag-off default is unchanged.
 #[cfg(test)]
-pub(crate) use runner::call_claude_batch;
+pub(crate) use runner::{call_claude_batch, process_api_batch};
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]
-use types::{CandidateGroup, GroupPayload};
+use types::{CandidateGroup, DistillBatchReport, GroupPayload};
 
 #[cfg(test)]
 mod tests;

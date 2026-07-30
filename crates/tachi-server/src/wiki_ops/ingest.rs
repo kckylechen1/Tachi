@@ -307,55 +307,109 @@ async fn extract_ingest_metadata(
     source: &str,
     topic_hint: Option<&str>,
     content: &str,
-) -> Value {
-    #[cfg(test)]
+) -> Result<(Value, Option<tachi_llm::PersistedModelInvocationReceiptV1>), String> {
+    let system = "Extract wiki ingestion metadata. Return JSON only with keys: title, topic, summary, keywords, entities.";
+    let user = format!(
+        "Source: {source}\nTopic hint: {}\n\nContent:\n{}",
+        topic_hint.unwrap_or(""),
+        content.chars().take(8000).collect::<String>()
+    );
+    match server
+        .llm
+        .call_extract_llm_with_receipt(system, &user, None, 0.2, 800)
+        .await
     {
-        let _ = server;
-        derive_ingest_fallback(source, topic_hint, content)
-    }
-
-    #[cfg(not(test))]
-    {
-        let system = "Extract wiki ingestion metadata. Return JSON only with keys: title, topic, summary, keywords, entities.";
-        let user = format!(
-            "Source: {source}\nTopic hint: {}\n\nContent:\n{}",
-            topic_hint.unwrap_or(""),
-            content.chars().take(8000).collect::<String>()
-        );
-        match server
-            .llm
-            .call_extract_llm(system, &user, None, 0.2, 800)
-            .await
+        Ok(response)
+            if response.invocation.completion_status()
+                == tachi_llm::CompletionStatusV1::Truncated =>
         {
-            Ok(response) => match tachi_llm::LlmClient::extract_json_payload(&response)
-                .ok()
-                .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
-            {
-                Some(value) => value,
-                None => derive_ingest_fallback(source, topic_hint, content),
-            },
-            Err(_) => derive_ingest_fallback(source, topic_hint, content),
+            Err(tachi_llm::LLM_OUTPUT_TRUNCATED.to_string())
         }
+        Ok(response) => {
+            let payload = tachi_llm::LlmClient::extract_json_payload(&response.value)
+                .map_err(|error| format!("wiki ingest metadata parse failed: {error}"))?;
+            let value = serde_json::from_str::<Value>(payload)
+                .map_err(|error| format!("wiki ingest metadata parse failed: {error}"))?;
+            if !value.is_object() {
+                return Err("wiki ingest metadata parse failed: expected a JSON object".to_string());
+            }
+            Ok((value, Some(response.invocation)))
+        }
+        Err(_) => Ok((derive_ingest_fallback(source, topic_hint, content), None)),
     }
 }
 
 /// Persist a new ingest entry only after it has claimed any active predecessor.
 /// A false supersession CAS means another writer already owns that predecessor,
 /// so the new entry must not become a competing wiki candidate.
+#[derive(Clone)]
+struct TrustedExistingModelInvocationReceipt(Value);
+
+impl TrustedExistingModelInvocationReceipt {
+    /// This constructor is deliberately private and accepts only a row read
+    /// from the replacement transaction. Caller/model metadata never reaches
+    /// this preservation seam.
+    fn from_existing_row(entry: &MemoryEntry) -> Option<Self> {
+        crate::provenance::trusted_existing_model_invocation(&entry.metadata).map(Self)
+    }
+
+    fn attach_exactly(&self, mut metadata: Value) -> Result<Value, memcore::MemoryError> {
+        let metadata_obj = metadata.as_object_mut().ok_or_else(|| {
+            memcore::MemoryError::InvalidArg(
+                "wiki ingest metadata must be an object before receipt preservation".to_string(),
+            )
+        })?;
+        let provenance = metadata_obj
+            .get_mut("provenance")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                memcore::MemoryError::InvalidArg(
+                    "wiki ingest provenance must be an object before receipt preservation"
+                        .to_string(),
+                )
+            })?;
+        provenance.insert("model_invocation".to_string(), self.0.clone());
+        Ok(metadata)
+    }
+}
+
 fn persist_wiki_ingest_entry(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
     old_id: Option<&str>,
     reference_appends: &[memcore::db::ValidatedReferenceMutation],
+    new_invocation: Option<&tachi_llm::PersistedModelInvocationReceiptV1>,
 ) -> Result<(), String> {
-    let metadata_patch = entry.metadata.as_object().cloned().unwrap_or_default();
     store
         .with_immutable_supersession_transaction(|replacement| {
+            let trusted_existing_receipt = old_id
+                .map(|old_id| replacement.get_memory(old_id))
+                .transpose()?
+                .flatten()
+                .as_ref()
+                .and_then(TrustedExistingModelInvocationReceipt::from_existing_row);
+            let mut replacement_entry = entry.clone();
+            replacement_entry.metadata = match trusted_existing_receipt {
+                Some(receipt) => receipt.attach_exactly(replacement_entry.metadata)?,
+                None => match new_invocation {
+                    Some(invocation) => crate::provenance::attach_model_invocation(
+                        replacement_entry.metadata,
+                        invocation,
+                    )
+                    .map_err(memcore::MemoryError::InvalidArg)?,
+                    None => replacement_entry.metadata,
+                },
+            };
+            let metadata_patch = replacement_entry
+                .metadata
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
             if let Some(old_id) = old_id {
-                replacement.claim_immutable_supersession(old_id, &entry.id)?;
+                replacement.claim_immutable_supersession(old_id, &replacement_entry.id)?;
             }
             replacement.upsert_with_validated_reference_mutations(
-                entry,
+                &replacement_entry,
                 &metadata_patch,
                 reference_appends,
             )?;
@@ -386,8 +440,8 @@ pub(crate) async fn handle_wiki_ingest(
         .map_err(|e| format!("serialize wiki_ingest: {e}"));
     }
 
-    let metadata =
-        extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await;
+    let (metadata, model_invocation) =
+        extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await?;
     let title = metadata
         .get("title")
         .and_then(Value::as_str)
@@ -433,6 +487,34 @@ pub(crate) async fn handle_wiki_ingest(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let metadata = crate::provenance::inject_provenance(
+        server,
+        json!({
+            "wiki": true,
+            "wiki_title": title,
+            "ingest_source": params.source.clone(),
+            "allow_cross_project": true,
+            // #1072 fix-round (#1215 BUG 6): `wiki_ingest` used to upsert
+            // straight into `/wiki/general/...` with no lifecycle/authority
+            // marker at all, so `derive_wiki_lifecycle`'s no-marker default
+            // (`Active`, kept for pre-#1072 back-compat on entries that
+            // predate the lifecycle vocabulary) silently promoted arbitrary
+            // fetched URL/file content to reviewed truth — a bypass named
+            // explicitly in the cross-vendor review ("ingest writers").
+            // Ingested content is unreviewed by construction (no approval
+            // step exists here); stamp it `pending_review` honestly, same
+            // vocabulary `wiki_layer_metadata` stamps for the MCP write
+            // path, with the ingest source recorded as its typed evidence ref.
+            "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
+            "authority": WikiAuthorityV1::Advisory.as_str(),
+            "artifact_kind": WikiArtifactKindV1::Wiki.as_str(),
+        }),
+        "wiki_ingest",
+        "wiki_ingest",
+        Some("global"),
+        crate::server_state::DbScope::Project,
+        json!({"source": params.source.clone()}),
+    );
     let entry = MemoryEntry {
         id: id.clone(),
         path: path.clone(),
@@ -456,26 +538,7 @@ pub(crate) async fn handle_wiki_ingest(
         last_access: None,
         last_use_at: None,
         revision: 1,
-        metadata: json!({
-            "wiki": true,
-            "wiki_title": title,
-            "ingest_source": params.source.clone(),
-            "allow_cross_project": true,
-            // #1072 fix-round (#1215 BUG 6): `wiki_ingest` used to upsert
-            // straight into `/wiki/general/...` with no lifecycle/authority
-            // marker at all, so `derive_wiki_lifecycle`'s no-marker default
-            // (`Active`, kept for pre-#1072 back-compat on entries that
-            // predate the lifecycle vocabulary) silently promoted arbitrary
-            // fetched URL/file content to reviewed truth — a bypass named
-            // explicitly in the cross-vendor review ("ingest writers").
-            // Ingested content is unreviewed by construction (no approval
-            // step exists here); stamp it `pending_review` honestly, same
-            // vocabulary `wiki_layer_metadata` stamps for the MCP write
-            // path, with the ingest source recorded as its typed evidence ref.
-            "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
-            "authority": WikiAuthorityV1::Advisory.as_str(),
-            "artifact_kind": WikiArtifactKindV1::Wiki.as_str(),
-        }),
+        metadata,
         vector: None,
         retention_policy: Some("permanent".to_string()),
         domain: Some("wiki".to_string()),
@@ -506,7 +569,13 @@ pub(crate) async fn handle_wiki_ingest(
             }
         };
 
-        persist_wiki_ingest_entry(store, &entry, old_id.as_deref(), &reference_appends)
+        persist_wiki_ingest_entry(
+            store,
+            &entry,
+            old_id.as_deref(),
+            &reference_appends,
+            model_invocation.as_ref(),
+        )
     })?;
 
     let mut related = Vec::new();
@@ -688,7 +757,7 @@ mod immutable_supersession_tests {
             .supersede_memory(&old.id, &canonical.id)
             .expect("seed immutable predecessor edge"));
 
-        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id), &[])
+        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id), &[], None)
             .expect_err("conflicted predecessor must refuse wiki candidate");
         assert!(err.contains("immutable supersession CAS"), "err: {err}");
         let old_after = store

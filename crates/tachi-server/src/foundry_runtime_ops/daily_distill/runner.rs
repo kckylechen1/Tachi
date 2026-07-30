@@ -5,16 +5,15 @@ use chrono::Utc;
 use serde_json::json;
 
 use crate::server_state::MemoryServer;
-use tachi_llm::LlmClient;
+use tachi_foundry::{build_fallback_user_payload, DISTILL_DAILY_SYSTEM_PROMPT_SINGLE};
+use tachi_llm::{CompletionStatusV1, Generated, LlmClient, PersistedModelInvocationReceiptV1};
 
 use super::candidates::collect_candidate_groups;
 use super::config::{resolve_batch_size, resolve_distill_backend, DistillBackend};
 use super::consolidate_prepass::consolidate_duplicate_candidates;
 use super::parser::parse_distill_response;
-use super::persist::persist_distill_memory;
-use super::prompt::{
-    build_batch_prompt, build_batch_user_payload, fallback_distill, DISTILL_DAILY_SYSTEM_PROMPT,
-};
+use super::persist::persist_distill_memory_with_receipt;
+use super::prompt::{build_batch_prompt, build_batch_user_payload, DISTILL_DAILY_SYSTEM_PROMPT};
 use super::types::{CandidateGroup, DistillBatchReport, GroupPayload, SourceManifestEntry};
 
 /// Entry point invoked by the bootstrap scheduler.
@@ -201,12 +200,21 @@ async fn process_claude_batch(
     let prompt = build_batch_prompt(chunk);
     let call_result = call_claude_batch(server, &label, &prompt, chunk).await;
     match call_result {
+        Ok(outcome) if outcome.invocation.completion_status() == CompletionStatusV1::Truncated => {
+            report.errors.push(format!(
+                "claude batch {chunk_idx}: llm_output_truncated; rejecting incomplete output"
+            ));
+            for group in chunk {
+                fallback_one_group(server, group, batch_run_id, report, manifest, project).await;
+            }
+        }
         Ok(outcome) => match parse_distill_response(&outcome.text) {
             Ok(per_group) => {
                 apply_parsed_groups(
                     server,
                     chunk,
                     &per_group,
+                    &outcome.invocation,
                     batch_run_id,
                     DistillBackend::ClaudeCli,
                     false,
@@ -237,7 +245,7 @@ async fn process_claude_batch(
     }
 }
 
-async fn process_api_batch(
+pub(crate) async fn process_api_batch(
     server: &MemoryServer,
     chunk: &[CandidateGroup],
     chunk_idx: usize,
@@ -254,12 +262,23 @@ async fn process_api_batch(
         }
         report.batches_dispatched += 1;
         match call_api_batch_distill(&server.llm, batch).await {
-            Ok(raw) => match parse_distill_response(&raw) {
+            Ok(raw) if raw.invocation.completion_status() == CompletionStatusV1::Truncated => {
+                let err = "llm_output_truncated";
+                report.errors.push(format!(
+                    "api batch {chunk_idx}: {err}; rejecting incomplete output"
+                ));
+                for group in batch {
+                    fallback_one_group(server, group, batch_run_id, report, manifest, project)
+                        .await;
+                }
+            }
+            Ok(raw) => match parse_distill_response(&raw.value) {
                 Ok(per_group) => {
                     apply_parsed_groups(
                         server,
                         batch,
                         &per_group,
+                        &raw.invocation,
                         batch_run_id,
                         DistillBackend::RawApi,
                         false,
@@ -312,6 +331,7 @@ async fn apply_parsed_groups(
     server: &MemoryServer,
     chunk: &[CandidateGroup],
     per_group: &HashMap<String, GroupPayload>,
+    invocation: &PersistedModelInvocationReceiptV1,
     batch_run_id: &str,
     backend: DistillBackend,
     fallback_used: bool,
@@ -324,10 +344,11 @@ async fn apply_parsed_groups(
         let item = per_group.get(&group.group_id);
         match item {
             Some(payload) if !payload.text.trim().is_empty() => {
-                match persist_distill_memory(
+                match persist_distill_memory_with_receipt(
                     server,
                     group,
                     payload,
+                    invocation,
                     batch_run_id,
                     backend_label,
                     fallback_used,
@@ -383,7 +404,7 @@ async fn apply_parsed_groups(
 
 /// Run the daily distill batch through the API recorder. The run-directory
 /// artifact contract (`prompt.md`/`result.md`/`status.json`) is preserved,
-/// since the path goes through `LlmCallRecorder::record_call`. The
+/// since the path goes through `LlmCallRecorder::record_call_with_receipt`. The
 /// `call_claude_batch` name and `claude_cli` selector are retained for
 /// compatibility, but this path invokes `call_distill_llm` only and never a
 /// Claude subprocess.
@@ -392,14 +413,14 @@ pub(crate) async fn call_claude_batch(
     label: &str,
     prompt: &str,
     chunk: &[CandidateGroup],
-) -> Result<tachi_llm::llm_recorder::RecordedCallOutcome, String> {
+) -> Result<tachi_llm::llm_recorder::RecordedCallWithReceipt, String> {
     let llm = server.llm.clone();
     let user_payload = build_batch_user_payload(chunk);
     let max_tokens = batch_max_tokens(chunk.len());
     server
         .llm_recorder
-        .record_call(label, prompt, move || async move {
-            llm.call_distill_llm(
+        .record_call_with_receipt(label, prompt, move || async move {
+            llm.call_distill_llm_with_receipt(
                 DISTILL_DAILY_SYSTEM_PROMPT,
                 &user_payload,
                 None,
@@ -414,10 +435,10 @@ pub(crate) async fn call_claude_batch(
 async fn call_api_batch_distill(
     llm: &LlmClient,
     groups: &[CandidateGroup],
-) -> Result<String, String> {
+) -> Result<Generated<String>, String> {
     let user = build_batch_user_payload(groups);
     let max_tokens = batch_max_tokens(groups.len());
-    llm.call_distill_llm(DISTILL_DAILY_SYSTEM_PROMPT, &user, None, 0.3, max_tokens)
+    llm.call_distill_llm_with_receipt(DISTILL_DAILY_SYSTEM_PROMPT, &user, None, 0.3, max_tokens)
         .await
 }
 
@@ -434,12 +455,13 @@ async fn fallback_one_group(
     manifest: &mut Vec<SourceManifestEntry>,
     project: Option<&str>,
 ) {
-    match fallback_distill(&server.llm, group).await {
-        Ok(payload) => {
-            match persist_distill_memory(
+    match fallback_distill_with_receipt(&server.llm, group).await {
+        Ok(generated) => {
+            match persist_distill_memory_with_receipt(
                 server,
                 group,
-                &payload,
+                &generated.value,
+                &generated.invocation,
                 batch_run_id,
                 "raw_api",
                 true,
@@ -483,6 +505,46 @@ async fn fallback_one_group(
             });
         }
     }
+}
+
+async fn fallback_distill_with_receipt(
+    llm: &LlmClient,
+    group: &CandidateGroup,
+) -> Result<Generated<GroupPayload>, String> {
+    let user = build_fallback_user_payload(group);
+    let response = llm
+        .call_distill_llm_with_receipt(DISTILL_DAILY_SYSTEM_PROMPT_SINGLE, &user, None, 0.4, 600)
+        .await?;
+    if response.invocation.completion_status() == CompletionStatusV1::Truncated {
+        return Err("llm_output_truncated".to_string());
+    }
+    let text = response.value.trim().to_string();
+    if text.is_empty() {
+        return Err("fallback llm returned empty text".to_string());
+    }
+    let summary: String = text.chars().take(120).collect();
+    let mut keywords = Vec::new();
+    for entry in &group.entries {
+        keywords.extend(
+            entry
+                .keywords
+                .iter()
+                .filter(|keyword| !keyword.trim().is_empty())
+                .cloned(),
+        );
+    }
+    keywords.sort();
+    keywords.dedup();
+    keywords.truncate(12);
+    Ok(Generated {
+        value: GroupPayload {
+            summary,
+            text,
+            keywords,
+            skip_reason: None,
+        },
+        invocation: response.invocation,
+    })
 }
 
 fn derive_project_label(server: &MemoryServer) -> String {

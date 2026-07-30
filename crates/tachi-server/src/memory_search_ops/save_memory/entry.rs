@@ -2,6 +2,7 @@ use crate::tool_params::SaveMemoryParams;
 use crate::{DbScope, MemoryServer};
 use memcore::MemoryEntry;
 use serde_json::json;
+use tachi_llm::PersistedModelInvocationReceiptV1;
 
 pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
     server: &MemoryServer,
@@ -12,7 +13,8 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
     valid_from: String,
     target_db: DbScope,
     existing: Option<&MemoryEntry>,
-) -> MemoryEntry {
+    model_invocation: Option<&PersistedModelInvocationReceiptV1>,
+) -> Result<MemoryEntry, String> {
     let is_patch = params.id.is_some() && existing.is_some();
     let requested_scope = params.scope;
     let path = patch_string_field(
@@ -102,6 +104,18 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
             "topic": topic,
         }),
     );
+    // A typed receipt belongs to the artifact's first model-derived durable
+    // write. Public metadata cannot populate this channel: `inject_provenance`
+    // above replaces caller-provided provenance wholesale before we look at
+    // the typed internal invocation seam. Always restore a trusted existing
+    // receipt from the actual DB row after restamping provenance, including
+    // ordinary public replacements that have no invocation B. Only a row with
+    // no trusted existing receipt may attach the new typed invocation.
+    if let Some(existing_invocation) = trusted_existing_model_invocation(existing) {
+        attach_trusted_existing_model_invocation(&mut metadata, existing_invocation)?;
+    } else if let Some(invocation) = model_invocation {
+        metadata = crate::provenance::attach_model_invocation(metadata, invocation)?;
+    }
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("force".to_string(), serde_json::Value::Bool(params.force));
         if !params.location.trim().is_empty() {
@@ -134,7 +148,7 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
         params.keywords
     };
 
-    MemoryEntry {
+    Ok(MemoryEntry {
         id,
         path,
         summary,
@@ -164,7 +178,27 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
         recall_count: 0,
         query_diversity: 0,
         tier,
-    }
+    })
+}
+
+fn trusted_existing_model_invocation(existing: Option<&MemoryEntry>) -> Option<serde_json::Value> {
+    existing.and_then(|entry| crate::provenance::trusted_existing_model_invocation(&entry.metadata))
+}
+
+fn attach_trusted_existing_model_invocation(
+    metadata: &mut serde_json::Value,
+    invocation: serde_json::Value,
+) -> Result<(), String> {
+    let metadata_obj = metadata
+        .as_object_mut()
+        .ok_or_else(|| "trusted model invocation metadata must be a JSON object".to_string())?;
+    let provenance = metadata_obj
+        .entry("provenance")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "trusted model invocation provenance must be a JSON object".to_string())?;
+    provenance.insert("model_invocation".to_string(), invocation);
+    Ok(())
 }
 
 fn patch_string_field(

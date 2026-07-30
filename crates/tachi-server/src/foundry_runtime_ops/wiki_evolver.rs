@@ -24,14 +24,13 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
 use super::scrub_agent_noise;
 use crate::server_state::MemoryServer;
-use crate::tool_params::TachiSaveParams;
+use crate::tool_params::WikiWriteParams;
 use memcore::types::MemoryEntry;
-use tachi_llm::LlmClient;
+use tachi_llm::{CompletionStatusV1, Generated, LlmClient, PersistedModelInvocationReceiptV1};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -222,14 +221,14 @@ async fn synthesize_and_save(
     members: &[&MemoryEntry],
 ) -> Result<(), String> {
     let draft = synthesize_wiki_draft(server, topic, members).await?;
-    save_wiki_draft(server, topic, draft).await
+    save_wiki_draft(server, topic, draft.value, &draft.invocation).await
 }
 
 async fn synthesize_wiki_draft(
     server: &MemoryServer,
     topic: &str,
     members: &[&MemoryEntry],
-) -> Result<WikiDraft, String> {
+) -> Result<Generated<WikiDraft>, String> {
     let scrubbed = members
         .iter()
         .take(MAX_ENTRIES_PER_CLUSTER)
@@ -260,11 +259,17 @@ async fn synthesize_wiki_draft(
 
     let raw = server
         .llm
-        .call_distill_llm(WIKI_SYNTHESIS_SYSTEM, &user_payload, None, 0.2, 1200)
+        .call_distill_llm_with_receipt(WIKI_SYNTHESIS_SYSTEM, &user_payload, None, 0.2, 1200)
         .await
         .map_err(|e| format!("wiki synthesis LLM call: {e}"))?;
+    if raw.invocation.completion_status() == CompletionStatusV1::Truncated {
+        return Err("wiki synthesis LLM call: llm_output_truncated".to_string());
+    }
 
-    parse_wiki_draft(&raw, topic)
+    Ok(Generated {
+        value: parse_wiki_draft(&raw.value, topic)?,
+        invocation: raw.invocation,
+    })
 }
 
 fn parse_wiki_draft(raw: &str, fallback_topic: &str) -> Result<WikiDraft, String> {
@@ -335,6 +340,7 @@ async fn save_wiki_draft(
     server: &MemoryServer,
     topic: &str,
     draft: WikiDraft,
+    invocation: &PersistedModelInvocationReceiptV1,
 ) -> Result<(), String> {
     // Slugify: lowercase, spaces → hyphens, strip non-alphanumeric
     let slug = draft
@@ -370,43 +376,38 @@ async fn save_wiki_draft(
     kw.push("pending-review".to_string());
     kw.dedup();
 
-    let result = server
-        .tachi_save(Parameters(TachiSaveParams {
+    let result = crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
+        server,
+        WikiWriteParams {
+            title: draft.title.clone(),
             text: full_text,
-            id: None,
-            kind: Some("wiki".to_string()),
-            title: Some(draft.title.clone()),
-            summary: Some(draft.summary),
             path: Some(path.clone()),
-            importance: Some(DRAFT_IMPORTANCE),
-            category: Some("experience".to_string()),
+            topic: Some(topic.to_string()),
+            summary: Some(draft.summary),
+            category: "experience".to_string(),
             keywords: kw,
             entities: draft.entities,
-            scope: Some("global".to_string()),
-            project: Some("wiki".to_string()),
-            // #1041 F2: server-internal, hardcoded deliberate placement
-            // (kind="wiki" also means this never reaches the #1041 S1
-            // write-affinity gate at all — wiki writes are a separate path).
-            project_explicit: true,
+            importance: DRAFT_IMPORTANCE,
+            scope: "global".to_string(),
+            retention_policy: "durable".to_string(),
             domain: Some(draft.domain),
-            retention_policy: Some("durable".to_string()),
+            project: Some("wiki".to_string()),
+            metadata: None,
             force: true,
             references: Vec::new(),
-            topic: Some(topic.to_string()),
-            source: Some("rem_wiki_evolver".to_string()),
-            valid_from: None,
-            valid_until: None,
-            metadata: None,
-            emit_continuity: false,
-            files: Vec::new(),
-            format: None,
-        }))
-        .await;
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        },
+        invocation.clone(),
+    )
+    .await;
 
     match result {
         Ok(_) => {
-            // Patch metadata to set review_status=pending. The tachi_save route
-            // does not expose a metadata field, so we update directly after save.
+            // `review_status` is a lifecycle transition owned by the wiki
+            // store. The model receipt was already present in the first write
+            // above and is never attached by this patch.
             let now = Utc::now().to_rfc3339();
             if let Err(e) = server.with_named_project_store("wiki", |store| {
                 store

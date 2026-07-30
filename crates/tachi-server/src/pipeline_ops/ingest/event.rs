@@ -78,7 +78,7 @@ pub(crate) async fn handle_ingest_event(
         claim,
     );
 
-    let facts = match server.llm.extract_facts(&combined_text).await {
+    let extracted = match server.llm.extract_facts_with_receipt(&combined_text).await {
         Ok(facts) => facts,
         Err(error) => {
             return Err(lease
@@ -92,8 +92,14 @@ pub(crate) async fn handle_ingest_event(
         }
     };
 
-    let entries = match build_conversation_entries(server, &params, target_db, &event_hash, &facts)
-    {
+    let entries = match build_conversation_entries(
+        server,
+        &params,
+        target_db,
+        &event_hash,
+        &extracted.value,
+        &extracted.invocation,
+    ) {
         Ok(entries) => entries,
         Err(error) => {
             return Err(lease
@@ -114,7 +120,7 @@ pub(crate) async fn handle_ingest_event(
 
     eprintln!(
         "[ingest_event] saved {saved}/{} facts for {event_id}",
-        facts.len()
+        extracted.value.len()
     );
     serialize_json(serde_json::json!({
         "status": "completed",
@@ -128,6 +134,7 @@ fn build_conversation_entries(
     target_db: DbScope,
     event_hash: &str,
     facts: &[serde_json::Value],
+    invocation: &tachi_llm::PersistedModelInvocationReceiptV1,
 ) -> Result<Vec<MemoryEntry>, String> {
     let domain = resolve_domain(params.domain.clone());
     let mut entries = Vec::new();
@@ -147,6 +154,8 @@ fn build_conversation_entries(
                 "domain": domain,
             }),
         );
+        let metadata = crate::provenance::attach_model_invocation(metadata, invocation)
+            .map_err(|error| format!("attach ingest event receipt: {error}"))?;
         let Some(mut entry) = fact_to_entry(
             fact,
             &format!("conversation:{}", params.conversation_id),

@@ -173,11 +173,15 @@ async fn abandoned_ingest_claim_reopens_retries_and_persists_once() {
     let duplicate: Value = serde_json::from_str(&duplicate).expect("duplicate JSON");
     assert_eq!(duplicate["status"], "skipped");
 
-    let (fact_count, success_audits) = reopened
+    let (fact_count, success_audits, model_invocation) = reopened
         .with_global_store_read(|store| {
             let facts = store
                 .list_by_path("/general/ingest_durability", 10, false)
                 .map_err(|error| format!("list persisted facts: {error}"))?;
+            let model_invocation = facts
+                .first()
+                .and_then(|fact| fact.metadata.pointer("/provenance/model_invocation"))
+                .cloned();
             let audits: i64 = store
                 .connection()
                 .query_row(
@@ -186,7 +190,7 @@ async fn abandoned_ingest_claim_reopens_retries_and_persists_once() {
                     |row| row.get(0),
                 )
                 .map_err(|error| format!("count success audits: {error}"))?;
-            Ok((facts.len(), audits))
+            Ok((facts.len(), audits, model_invocation))
         })
         .expect("read durable ingest state");
     assert_eq!(fact_count, 1, "retries must not duplicate the fact row");
@@ -194,6 +198,23 @@ async fn abandoned_ingest_claim_reopens_retries_and_persists_once() {
         success_audits, 1,
         "retries must not duplicate success audit"
     );
+    let receipt = model_invocation.expect("first durable event fact must retain its typed receipt");
+    assert_eq!(receipt["schema"], "model-invocation-v1");
+    assert_eq!(receipt["lane"], "extract");
+    assert_eq!(receipt["engine_kind"], "provider_http");
+    for forbidden in [
+        "key_id",
+        "api_key",
+        "raw_error",
+        "request",
+        "response",
+        "endpoint",
+    ] {
+        assert!(
+            receipt.get(forbidden).is_none(),
+            "typed receipt must not persist {forbidden}"
+        );
+    }
 }
 
 #[tokio::test]

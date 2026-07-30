@@ -233,12 +233,18 @@ pub(crate) async fn handle_extract_facts(
     let source = params.source.clone();
     let project = params.project.clone();
 
-    let facts = match server.llm.extract_facts(&params.text).await {
+    let extracted = match server.llm.extract_facts_with_receipt(&params.text).await {
         Ok(facts) => facts,
         Err(err) => return llm_extraction_failed_response(&source, &err),
     };
 
-    save_atomized_facts(server, facts, source, project)
+    save_atomized_facts_with_invocation(
+        server,
+        extracted.value,
+        source,
+        project,
+        Some(&extracted.invocation),
+    )
 }
 
 /// Degrade-path response when the LLM atomizer itself is unavailable/errors.
@@ -266,11 +272,22 @@ fn llm_extraction_failed_response(source: &str, err: &str) -> Result<String, Str
 /// Split out of `handle_extract_facts` so the multi-row save behavior is
 /// directly unit-testable with a hand-built facts array — no live LLM call
 /// required to exercise "N facts in -> N rows out".
+#[cfg(test)]
 pub(crate) fn save_atomized_facts(
     server: &MemoryServer,
     facts: Vec<serde_json::Value>,
     source: String,
     project: Option<String>,
+) -> Result<String, String> {
+    save_atomized_facts_with_invocation(server, facts, source, project, None)
+}
+
+fn save_atomized_facts_with_invocation(
+    server: &MemoryServer,
+    facts: Vec<serde_json::Value>,
+    source: String,
+    project: Option<String>,
+    invocation: Option<&tachi_llm::PersistedModelInvocationReceiptV1>,
 ) -> Result<String, String> {
     let (target_db, warning) = if project.is_some() {
         (DbScope::Project, None)
@@ -321,6 +338,13 @@ pub(crate) fn save_atomized_facts(
                     "extract_source": source.clone(),
                 }),
             );
+            let metadata = match invocation {
+                Some(invocation) => {
+                    crate::provenance::attach_model_invocation(metadata, invocation)
+                        .map_err(|error| format!("attach extract receipt: {error}"))?
+                }
+                None => metadata,
+            };
             // Apply capture_gate filters (min-length and noise assessment) and
             // surface the rejection reason so facts_extracted vs facts_saved
             // gaps are explainable instead of silently vanishing.

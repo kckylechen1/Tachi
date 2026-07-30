@@ -11,6 +11,7 @@ use tachi_foundry::{
     plan_daily_distill_memory, plan_distill_edges, should_archive_daily_distill_source,
     DailyDistillMemoryInput,
 };
+use tachi_llm::PersistedModelInvocationReceiptV1;
 
 use super::types::{CandidateGroup, GroupPayload};
 
@@ -254,10 +255,55 @@ fn write_distill_entry(
         .map_err(|e| format!("persist daily distill replacement: {e}"))
 }
 
+#[cfg(test)]
 pub(crate) fn persist_distill_memory(
     server: &MemoryServer,
     group: &CandidateGroup,
     payload: &GroupPayload,
+    batch_run_id: &str,
+    backend: &str,
+    fallback_used: bool,
+    project: Option<&str>,
+) -> Result<String, String> {
+    persist_distill_memory_with_optional_receipt(
+        server,
+        group,
+        payload,
+        None,
+        batch_run_id,
+        backend,
+        fallback_used,
+        project,
+    )
+}
+
+pub(crate) fn persist_distill_memory_with_receipt(
+    server: &MemoryServer,
+    group: &CandidateGroup,
+    payload: &GroupPayload,
+    invocation: &PersistedModelInvocationReceiptV1,
+    batch_run_id: &str,
+    backend: &str,
+    fallback_used: bool,
+    project: Option<&str>,
+) -> Result<String, String> {
+    persist_distill_memory_with_optional_receipt(
+        server,
+        group,
+        payload,
+        Some(invocation),
+        batch_run_id,
+        backend,
+        fallback_used,
+        project,
+    )
+}
+
+fn persist_distill_memory_with_optional_receipt(
+    server: &MemoryServer,
+    group: &CandidateGroup,
+    payload: &GroupPayload,
+    invocation: Option<&PersistedModelInvocationReceiptV1>,
     batch_run_id: &str,
     backend: &str,
     fallback_used: bool,
@@ -308,6 +354,11 @@ pub(crate) fn persist_distill_memory(
             "path_prefix": group.path_prefix,
         }),
     );
+    let metadata = match invocation {
+        Some(invocation) => crate::provenance::attach_model_invocation(metadata, invocation)
+            .map_err(|error| format!("attach daily distill receipt: {error}"))?,
+        None => metadata,
+    };
 
     let entry = MemoryEntry {
         id: memory_id.clone(),

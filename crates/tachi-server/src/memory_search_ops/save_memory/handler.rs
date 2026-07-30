@@ -313,6 +313,7 @@ pub(crate) async fn handle_save_memory(
         AuthorizedReferenceMutations::empty(),
         SaveMetadataAuthority::Public,
         SaveInitiator::System,
+        None,
     )
     .await
 }
@@ -330,6 +331,7 @@ pub(crate) async fn handle_save_memory_from_caller(
         AuthorizedReferenceMutations::empty(),
         SaveMetadataAuthority::Public,
         SaveInitiator::Caller,
+        None,
     )
     .await
 }
@@ -349,6 +351,7 @@ pub(crate) async fn handle_save_memory_with_references(
         evidence_refs,
         SaveMetadataAuthority::Public,
         SaveInitiator::Caller,
+        None,
     )
     .await
 }
@@ -364,6 +367,26 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
         AuthorizedReferenceMutations::from_authorized(mutations),
         SaveMetadataAuthority::ServerVerified,
         SaveInitiator::System,
+        None,
+    )
+    .await
+}
+
+/// Server-internal first-write seam for durable model-derived artifacts.
+/// The receipt is typed and never passes through public JSON metadata.
+pub(crate) async fn handle_save_memory_with_authorized_reference_mutations_and_invocation(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+    mutations: Vec<memcore::db::ValidatedReferenceMutation>,
+    invocation: tachi_llm::PersistedModelInvocationReceiptV1,
+) -> Result<String, String> {
+    handle_save_memory_impl(
+        server,
+        params,
+        AuthorizedReferenceMutations::from_authorized(mutations),
+        SaveMetadataAuthority::ServerVerified,
+        SaveInitiator::System,
+        Some(invocation),
     )
     .await
 }
@@ -374,6 +397,7 @@ async fn handle_save_memory_impl(
     evidence_refs: AuthorizedReferenceMutations,
     metadata_authority: SaveMetadataAuthority,
     initiator: SaveInitiator,
+    model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
 ) -> Result<String, String> {
     strip_reserved_reference_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
@@ -549,7 +573,8 @@ async fn handle_save_memory_impl(
         valid_from,
         target_db,
         existing_entry.as_ref(),
-    );
+        model_invocation.as_ref(),
+    )?;
 
     // #1041 F3/C5: `build_save_entry` -> `inject_provenance` resolves
     // `provenance.db_path` from `target_db` alone, which only ever knows

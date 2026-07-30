@@ -4,6 +4,25 @@ pub(crate) async fn handle_tachi_wiki_write(
     server: &MemoryServer,
     params: WikiWriteParams,
 ) -> Result<String, String> {
+    handle_tachi_wiki_write_inner(server, params, None).await
+}
+
+/// Internal model-derived wiki write. The receipt travels through the typed
+/// save seam and is attached while building the entry for the first durable
+/// write; public metadata can never populate this channel.
+pub(crate) async fn handle_tachi_wiki_write_with_model_invocation(
+    server: &MemoryServer,
+    params: WikiWriteParams,
+    invocation: tachi_llm::PersistedModelInvocationReceiptV1,
+) -> Result<String, String> {
+    handle_tachi_wiki_write_inner(server, params, Some(invocation)).await
+}
+
+async fn handle_tachi_wiki_write_inner(
+    server: &MemoryServer,
+    params: WikiWriteParams,
+    model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
+) -> Result<String, String> {
     crate::wiki_ops::validate_references(&params.references)?;
 
     if !params.force && memcore::is_noise_text(&params.text) {
@@ -129,45 +148,58 @@ pub(crate) async fn handle_tachi_wiki_write(
             .push(memcore::db::ValidatedReferenceMutation::tombstone_legacy_source_refs());
     }
 
-    let save_result =
-        crate::memory_search_ops::handle_save_memory_with_authorized_reference_mutations(
-            server,
-            SaveMemoryParams {
-                text: entry_text.clone(),
-                summary,
-                path: path.clone(),
-                importance: params.importance.clamp(0.0, 1.0),
-                category: params.category,
-                topic: topic.clone(),
-                keywords,
-                persons: vec![],
-                entities: params.entities,
-                location: String::new(),
-                scope: params.scope,
-                vector: None,
-                id: update_id.clone(),
-                force: true,
-                auto_link: true,
-                project: target_project.clone(),
-                // #1041 F2: server-internal, programmatic construction (wiki
-                // writes are their own write path, out of #1041 S1's scope per
-                // F1) — `target_project.is_some()` preserves the exact pre-F2
-                // gate behavior (this is not the raw client `project=`, it may
-                // already be a resolved "wiki" default, but it was always this
-                // call's own deliberate placement, never a session-identity
-                // transport default).
-                project_explicit: target_project.is_some(),
-                retention_policy: Some(params.retention_policy),
-                domain: domain.clone(),
-                timestamp: None,
-                valid_from: None,
-                valid_until: None,
-                metadata: Some(wiki_metadata),
-                emit_continuity: false,
-            },
-            reference_mutations,
-        )
-        .await?;
+    let save_params = SaveMemoryParams {
+        text: entry_text.clone(),
+        summary,
+        path: path.clone(),
+        importance: params.importance.clamp(0.0, 1.0),
+        category: params.category,
+        topic: topic.clone(),
+        keywords,
+        persons: vec![],
+        entities: params.entities,
+        location: String::new(),
+        scope: params.scope,
+        vector: None,
+        id: update_id.clone(),
+        force: true,
+        auto_link: true,
+        project: target_project.clone(),
+        // #1041 F2: server-internal, programmatic construction (wiki
+        // writes are their own write path, out of #1041 S1's scope per
+        // F1) — `target_project.is_some()` preserves the exact pre-F2
+        // gate behavior (this is not the raw client `project=`, it may
+        // already be a resolved "wiki" default, but it was always this
+        // call's own deliberate placement, never a session-identity
+        // transport default).
+        project_explicit: target_project.is_some(),
+        retention_policy: Some(params.retention_policy),
+        domain: domain.clone(),
+        timestamp: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: Some(wiki_metadata),
+        emit_continuity: false,
+    };
+    let save_result = match model_invocation {
+        Some(invocation) => {
+            crate::memory_search_ops::handle_save_memory_with_authorized_reference_mutations_and_invocation(
+                server,
+                save_params,
+                reference_mutations,
+                invocation,
+            )
+            .await?
+        }
+        None => {
+            crate::memory_search_ops::handle_save_memory_with_authorized_reference_mutations(
+                server,
+                save_params,
+                reference_mutations,
+            )
+            .await?
+        }
+    };
 
     let mut response: Value =
         serde_json::from_str(&save_result).map_err(|e| format!("parse wiki save response: {e}"))?;

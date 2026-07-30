@@ -1,4 +1,4 @@
-use super::execute_registered_skill_prompt;
+use super::execute_registered_skill_prompt_with_receipt;
 use crate::tool_params::DistillTrajectoryParams;
 use crate::utils::sanitize_safe_path_name;
 use crate::{DbScope, MemoryServer};
@@ -21,7 +21,7 @@ pub(crate) async fn handle_distill_trajectory(
     // absent domain classifies to `general`, it no longer inherits the
     // daemon-wide `TACHI_DOMAIN` env var (see that function's doc for why).
     let domain = crate::pipeline_ops::helpers::resolve_domain(params.domain.clone());
-    let distilled_execution = execute_registered_skill_prompt(
+    let distilled_execution = execute_registered_skill_prompt_with_receipt(
         server,
         "skill:trajectory-distiller",
         &json!({
@@ -34,7 +34,11 @@ pub(crate) async fn handle_distill_trajectory(
         }),
     )
     .await?;
-    let distilled_markdown = distilled_execution.output;
+    let model_invocation = distilled_execution.model_invocation.ok_or_else(|| {
+        "trajectory distiller produced no model invocation receipt; refusing durable artifacts"
+            .to_string()
+    })?;
+    let distilled_markdown = distilled_execution.execution.output;
 
     let timestamp = Utc::now().to_rfc3339();
     let skill_id = params.skill_id.clone().unwrap_or_else(|| {
@@ -68,6 +72,9 @@ pub(crate) async fn handle_distill_trajectory(
             "domain": domain,
         }),
     );
+    let snapshot_metadata =
+        crate::provenance::attach_model_invocation(snapshot_metadata, &model_invocation)
+            .map_err(|error| format!("attach trajectory invocation receipt: {error}"))?;
     let snapshot_entry = MemoryEntry {
         id: uuid::Uuid::new_v4().to_string(),
         path: snapshot_path.clone(),
@@ -195,6 +202,8 @@ pub(crate) async fn handle_distill_trajectory(
         "provenance": {
             "agent_id": params.agent_id,
             "final_outcome": params.final_outcome,
+            "model_invocation": serde_json::to_value(&model_invocation)
+                .map_err(|error| format!("serialize trajectory invocation receipt: {error}"))?,
         },
         "tags": ["distilled", "trajectory", "permanent"],
     });
