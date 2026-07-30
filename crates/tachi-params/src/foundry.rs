@@ -65,10 +65,6 @@ fn default_wiki_top_k() -> usize {
     3
 }
 
-fn default_wiki_project_name() -> String {
-    "wiki".to_string()
-}
-
 // ─── Recall ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
@@ -121,9 +117,10 @@ pub struct RecallContextParams {
     #[serde(default = "default_wiki_top_k")]
     pub wiki_top_k: usize,
 
-    /// Named project DB for wiki memories (default: "wiki")
-    #[serde(default = "default_wiki_project_name")]
-    pub wiki_project: String,
+    /// Optional named project DB for wiki memories. When omitted, Wiki reads
+    /// use the bound project plus the logical shared Wiki store.
+    #[serde(default)]
+    pub wiki_project: Option<String>,
 }
 
 // ─── Capture ────────────────────────────────────────────────────────────────

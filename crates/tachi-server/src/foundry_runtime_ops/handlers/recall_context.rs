@@ -117,8 +117,8 @@ pub(crate) async fn handle_recall_context(
     // ── Wiki auto-search: enrich recall with wiki knowledge ─────────────
     let (wiki_rows, wiki_context) = if params.include_wiki && !params.query.trim().is_empty() {
         let wiki_top_k = params.wiki_top_k.max(1).min(10);
-        let wiki_plan = WikiReadPlan::from_project(Some(params.wiki_project.as_str()))?;
-        match crate::wiki_ops::search_wiki_rows_for_plan(
+        let wiki_plan = WikiReadPlan::from_project(params.wiki_project.as_deref())?;
+        let result = crate::wiki_ops::search_wiki_rows_for_plan(
             server,
             SearchMemoryParams {
                 query: params.query.clone(),
@@ -134,7 +134,7 @@ pub(crate) async fn handle_recall_context(
                 weights: None,
                 context_symbols: Vec::new(),
                 agent_role: None,
-                project: Some(params.wiki_project.clone()),
+                project: params.wiki_project.clone(),
                 domain: None,
                 file_context: None,
                 error_context: None,
@@ -147,17 +147,12 @@ pub(crate) async fn handle_recall_context(
             None,
             false,
         )
-        .await
-        {
-            Ok(result) if !result.rows.is_empty() => {
-                let ctx = build_wiki_context(&result.rows);
-                (result.rows, ctx)
-            }
-            Ok(_) => (vec![], String::new()),
-            Err(err) => {
-                tracing::warn!("[recall_context] wiki search failed, skipping: {err}");
-                (vec![], String::new())
-            }
+        .await?;
+        if result.rows.is_empty() {
+            (vec![], String::new())
+        } else {
+            let ctx = build_wiki_context(&result.rows);
+            (result.rows, ctx)
         }
     } else {
         (vec![], String::new())

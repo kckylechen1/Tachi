@@ -220,6 +220,42 @@ async fn wiki_search_does_not_apply_generic_noise_skip_to_explicit_lookup() {
     );
 }
 
+#[tokio::test]
+async fn recall_context_omitted_wiki_project_uses_bound_and_shared_plan() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
+    crate::tests::register_logical_shared_wiki(&server);
+    let query = "RecallContextFederatedWikiNeedle";
+    let bound = wiki_entry(
+        "recall-context-bound-wiki",
+        "/wiki/read-plan/recall-context",
+        &format!("{query} bound project sentinel"),
+    );
+    server
+        .with_project_store(|store| store.upsert(&bound).map_err(|error| error.to_string()))
+        .expect("seed bound recall-context wiki");
+
+    let params: crate::tool_params::RecallContextParams = serde_json::from_value(json!({
+        "query": query,
+        "top_k": 1,
+        "wiki_top_k": 3
+    }))
+    .expect("deserialize omitted wiki_project");
+    assert!(params.wiki_project.is_none());
+    let response = crate::foundry_runtime_ops::handle_recall_context(&server, params)
+        .await
+        .expect("federated recall context");
+    let value: Value = serde_json::from_str(&response).expect("recall context JSON");
+    assert!(
+        value["wiki_results"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| {
+                row["id"] == "recall-context-bound-wiki"
+                    && row["store"] == json!({"kind": "bound_project"})
+            })),
+        "RED: omitted wiki_project failed to search the bound Wiki store: {value:#}"
+    );
+}
+
 #[test]
 fn federated_browse_round_robins_store_budgets() {
     let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
