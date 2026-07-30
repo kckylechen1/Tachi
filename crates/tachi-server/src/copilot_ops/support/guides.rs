@@ -105,7 +105,9 @@ fn guide_scope_matches(
         return false;
     }
     match effective.knowledge_scope {
-        WikiKnowledgeScopeV1::Unspecified => false,
+        WikiKnowledgeScopeV1::Unspecified => {
+            effective.applicability_status == WikiApplicabilityStatusV1::Bounded
+        }
         WikiKnowledgeScopeV1::Shared => {
             effective.applicability_status == WikiApplicabilityStatusV1::Bounded
         }
