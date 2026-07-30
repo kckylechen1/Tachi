@@ -526,8 +526,13 @@ pub(crate) fn handle_wiki_read_for_plan(
             .get("candidate_count")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        return Ok(format!(
-            "## Wiki read\n\n_Ambiguous path `{resolved}` matched {count} entries._\n\nUse `tachi_wiki(action=\"search\")` or read by a more specific path."
+        let candidates = value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        return Ok(crate::agent_markdown::format_wiki_read_ambiguity(
+            resolved, count, candidates,
         ));
     }
     let resolved = value

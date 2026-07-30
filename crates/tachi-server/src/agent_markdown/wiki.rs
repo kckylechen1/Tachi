@@ -1,5 +1,29 @@
 use super::*;
 
+fn wiki_store_label(store: Option<&Value>) -> Option<String> {
+    let store = store?;
+    let kind = store.get("kind").and_then(Value::as_str)?;
+    let label = match kind {
+        "bound_project" => "bound project".to_string(),
+        "named_project" => {
+            let project = store
+                .get("project")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!("named {}", compact_text_line(project, 60))
+        }
+        "legacy_global" => "legacy global".to_string(),
+        other => compact_text_line(other, 60),
+    };
+    Some(md_escape(&label))
+}
+
+fn wiki_store_badge(row: &Value) -> String {
+    wiki_store_label(row.get("store"))
+        .map(|label| format!(" [store: {label}]"))
+        .unwrap_or_default()
+}
+
 pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> String {
     let mut out = vec![
         format!("## Wiki search: \"{query}\""),
@@ -30,8 +54,9 @@ pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> 
                 Some(lifecycle) if lifecycle != "active" => format!(" [{lifecycle}]"),
                 _ => String::new(),
             };
+            let store_badge = wiki_store_badge(row);
             out.push(format!(
-                "{}. {relevance} `{path}`{lifecycle_badge} - {}",
+                "{}. {relevance} `{path}`{lifecycle_badge}{store_badge} - {}",
                 idx + 1,
                 md_escape(&compact_text_line(summary, 120)),
             ));
@@ -82,8 +107,9 @@ pub(crate) fn format_wiki_browse_category(path: &str, entries: &[Value]) -> Stri
             Some(lifecycle) if lifecycle != "active" => format!(" [{lifecycle}]"),
             _ => String::new(),
         };
+        let store_badge = wiki_store_badge(entry);
         out.push(format!(
-            "{}. **`{entry_path}`**{lifecycle_badge} (importance {importance})\n   {}",
+            "{}. **`{entry_path}`**{lifecycle_badge}{store_badge} (importance {importance})\n   {}",
             idx + 1,
             md_escape(summary),
         ));
@@ -131,7 +157,8 @@ pub(crate) fn format_wiki_read(entry: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("active");
 
-    let mut out = vec![format!("## Wiki: `{path}`")];
+    let store_badge = wiki_store_badge(entry);
+    let mut out = vec![format!("## Wiki: `{path}`{store_badge}")];
     // #1072 RED case 2/3: a non-`active` entry (e.g. a `pending_review`
     // draft reached by its exact path) must never render as plain reviewed
     // wiki content — the caller sees this before the body.
@@ -156,5 +183,26 @@ pub(crate) fn format_wiki_read(entry: &Value) -> String {
     }
     out.push("\n---\n".to_string());
     out.push(text.to_string());
+    out.join("\n")
+}
+
+pub(crate) fn format_wiki_read_ambiguity(path: &str, count: u64, candidates: &[Value]) -> String {
+    let mut out = vec![
+        "## Wiki read".to_string(),
+        format!("\n_Ambiguous path `{path}` matched {count} entries._"),
+    ];
+    for candidate in candidates {
+        let candidate_path = candidate
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or(path);
+        let id = candidate
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let store_badge = wiki_store_badge(candidate);
+        out.push(format!("- `{candidate_path}`{store_badge} (id `{id}`)"));
+    }
+    out.push("\nUse `tachi_wiki(action=\"search\")` or read by a more specific path.".to_string());
     out.join("\n")
 }

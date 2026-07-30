@@ -116,7 +116,7 @@ pub struct RecallContextParams {
     #[serde(default = "default_wiki_top_k")]
     pub wiki_top_k: usize,
 
-    // Named-only Wiki store; omitted federates bound and shared stores.
+    /// Named-only Wiki store; omitted federates bound and shared stores.
     #[serde(default)]
     pub wiki_project: Option<String>,
 }

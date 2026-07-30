@@ -35,6 +35,7 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
         response.contains("/wiki/engineering/debugging/beta"),
         "browse markdown should contain beta path"
     );
+    assert!(response.contains("[store: named wiki]"), "{response}");
 
     let log = server
         .with_named_project_store_read("wiki", |store| {

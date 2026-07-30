@@ -238,7 +238,7 @@ pub struct WikiSearchParams {
     #[serde(default)]
     pub agent_role: Option<String>,
 
-    /// Optional named project DB.
+    /// Named-only Wiki store; omitted federates bound and shared stores.
     #[serde(default)]
     pub project: Option<String>,
 
@@ -279,15 +279,11 @@ pub struct WikiBrowseParams {
     #[serde(default = "default_wiki_browse_limit")]
     pub limit: usize,
 
-    // Named-only store when set; omitted federates bound and shared Wiki.
+    /// Named-only Wiki store; omitted federates bound and shared stores.
     #[serde(default)]
     pub project: Option<String>,
 
-    /// #1072 explicit lifecycle scope. Omitted (default): only `active`
-    /// wiki/guide entries are returned (the truthful-retrieval gate). Pass
-    /// one of `candidate | pending_review | active | stale | superseded |
-    /// rejected` to browse that lifecycle explicitly, or `"all"` to disable
-    /// the gate entirely.
+    /// Lifecycle filter; omitted returns active only, `all` disables the gate.
     #[serde(default)]
     pub lifecycle: Option<String>,
 }

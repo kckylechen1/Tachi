@@ -16,7 +16,8 @@ pub(crate) use alerts::format_alerts;
 pub(crate) use briefing::{format_briefing, render_issue_freshness_section};
 pub(crate) use search::{format_search_memory_markdown, format_search_sections};
 pub(crate) use wiki::{
-    format_wiki_browse_category, format_wiki_browse_stats, format_wiki_read, format_wiki_search,
+    format_wiki_browse_category, format_wiki_browse_stats, format_wiki_read,
+    format_wiki_read_ambiguity, format_wiki_search,
 };
 
 /// Format polarity for the raw `search_memory` / `tachi_status` MCP tools
