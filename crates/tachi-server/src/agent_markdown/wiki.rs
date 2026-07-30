@@ -4,30 +4,78 @@ fn effective_artifact_badge(row: &Value) -> String {
     let Some(artifact) = row.get("effective_artifact") else {
         return String::new();
     };
-    let scope = artifact
-        .get("knowledge_scope")
-        .and_then(Value::as_str)
-        .unwrap_or("unspecified");
-    let applicability = artifact
-        .get("applicability_status")
-        .and_then(Value::as_str)
-        .unwrap_or("unspecified");
-    let origins = artifact
-        .get("origin_projects")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .unwrap_or_default();
-    if origins.is_empty() {
-        format!(" [{scope}; applicability={applicability}]")
-    } else {
-        format!(" [{scope}; origin={origins}; applicability={applicability}]")
+    let scalar = |key: &str, fallback: &str| {
+        artifact
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    let list = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|value| compact_text_line(value, value.chars().count().saturating_add(1)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default()
+    };
+    let mut parts = vec![
+        format!("kind={}", scalar("artifact_kind", "wiki")),
+        format!("scope={}", scalar("knowledge_scope", "unspecified")),
+        format!("lifecycle={}", scalar("lifecycle", "pending_review")),
+        format!("authority={}", scalar("authority", "advisory")),
+        format!(
+            "applicability={}",
+            scalar("applicability_status", "unspecified")
+        ),
+    ];
+    let origins = list(artifact.get("origin_projects"));
+    parts.push(format!(
+        "origin={}",
+        if origins.is_empty() { "none" } else { &origins }
+    ));
+    let applies_to = artifact.get("applies_to");
+    let mut restrictions = Vec::new();
+    for axis in [
+        "projects",
+        "repos",
+        "domains",
+        "task_type",
+        "profiles",
+        "stage",
+    ] {
+        let values = list(applies_to.and_then(|value| value.get(axis)));
+        if !values.is_empty() {
+            restrictions.push(format!("{axis}={values}"));
+        }
     }
+    parts.push(format!(
+        "applies={}",
+        if restrictions.is_empty() {
+            "none".to_string()
+        } else {
+            restrictions.join(",")
+        }
+    ));
+    let exceptions = list(artifact.get("known_exceptions"));
+    parts.push(format!(
+        "exceptions={}",
+        if exceptions.is_empty() {
+            "none"
+        } else {
+            &exceptions
+        }
+    ));
+    let issues = list(artifact.get("validation_issues"));
+    if !issues.is_empty() {
+        parts.push(format!("issues={issues}"));
+    }
+    format!(" [{}]", md_escape(&parts.join("; ")))
 }
 
 pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> String {
@@ -213,8 +261,63 @@ pub(crate) fn format_wiki_read_ambiguity(path: &str, count: u64, candidates: &[V
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         let store_badge = wiki_store_badge(candidate);
-        out.push(format!("- `{candidate_path}`{store_badge} (id `{id}`)"));
+        let artifact_badge = effective_artifact_badge(candidate);
+        out.push(format!(
+            "- `{candidate_path}`{store_badge}{artifact_badge} (id `{id}`)"
+        ));
     }
     out.push("\nUse `tachi_wiki(action=\"search\")` or read by a more specific path.".to_string());
     out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn shared_artifact_row() -> Value {
+        json!({
+            "id": "shared-guide",
+            "path": "/guide/shared",
+            "effective_artifact": {
+                "artifact_kind": "guide",
+                "knowledge_scope": "shared",
+                "origin_projects": ["Quant_Analyzer_2026"],
+                "applies_to": {
+                    "projects": [],
+                    "repos": ["kckylechen1/tachi"],
+                    "domains": ["memory"],
+                    "task_type": [],
+                    "profiles": [],
+                    "stage": ["implementation"]
+                },
+                "applicability_status": "bounded",
+                "known_exceptions": ["legacy adapter"],
+                "lifecycle": "active",
+                "authority": "playbook"
+            }
+        })
+    }
+
+    #[test]
+    fn markdown_exposes_complete_effective_artifact_semantics() {
+        let row = shared_artifact_row();
+        let badge = effective_artifact_badge(&row);
+        for expected in [
+            "kind=guide",
+            "scope=shared",
+            "authority=playbook",
+            "origin=Quant\\_Analyzer\\_2026",
+            "repos=kckylechen1/tachi",
+            "domains=memory",
+            "stage=implementation",
+            "exceptions=legacy adapter",
+        ] {
+            assert!(badge.contains(expected), "missing {expected}: {badge}");
+        }
+
+        let ambiguity = format_wiki_read_ambiguity("/guide/shared", 1, &[row]);
+        assert!(ambiguity.contains("kind=guide"));
+        assert!(ambiguity.contains("repos=kckylechen1/tachi"));
+    }
 }

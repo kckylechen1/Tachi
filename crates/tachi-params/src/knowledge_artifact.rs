@@ -440,10 +440,20 @@ pub fn derive_wiki_authority(metadata: &serde_json::Value) -> WikiAuthorityV1 {
 /// exists so a future writer's receipt is honestly surfaced without another
 /// wire-shape change.
 pub fn derive_wiki_review_receipt(metadata: &serde_json::Value) -> Option<WikiReviewReceiptV1> {
-    metadata
+    let receipt = metadata
         .get("review_receipt")
         .cloned()
-        .and_then(|v| serde_json::from_value(v).ok())
+        .and_then(|v| serde_json::from_value::<WikiReviewReceiptV1>(v).ok())?;
+    if receipt.approver.trim().is_empty()
+        || !matches!(
+            receipt.decision.trim().to_ascii_lowercase().as_str(),
+            "approved" | "rejected"
+        )
+        || chrono::DateTime::parse_from_rfc3339(receipt.decided_at.trim()).is_err()
+    {
+        return None;
+    }
+    Some(receipt)
 }
 
 fn artifact_kind_from_path(path: &str) -> WikiArtifactKindV1 {
@@ -688,6 +698,10 @@ pub fn derive_effective_knowledge_artifact(
         parse_optional_string_array(metadata, "known_exceptions", &mut validation_issues);
     let (applies_to, mut applicability_status) =
         parse_wiki_applicability(metadata, &mut validation_issues);
+    let review_receipt = derive_wiki_review_receipt(metadata);
+    if metadata.get("review_receipt").is_some() && review_receipt.is_none() {
+        validation_issues.push("malformed_review_receipt".to_string());
+    }
     if let Some(declared_status) = metadata.get("applicability_status") {
         match declared_status
             .as_str()
@@ -717,7 +731,7 @@ pub fn derive_effective_knowledge_artifact(
             .get("source_bundle_hash")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|hash| !hash.trim().is_empty())
-            && derive_wiki_review_receipt(metadata)
+            && review_receipt
                 .is_some_and(|receipt| receipt.decision.eq_ignore_ascii_case("approved")))
     {
         lifecycle = WikiLifecycleV1::PendingReview;
@@ -1168,6 +1182,31 @@ mod tests {
         assert!(shared
             .validation_issues
             .contains(&"shared_active_without_review".to_string()));
+    }
+
+    #[test]
+    fn malformed_review_receipt_cannot_activate_shared_knowledge() {
+        let shared = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "knowledge_scope": "shared",
+                "origin_projects": ["Sigil"],
+                "applies_to": {"repos": ["Sigil", "Quant_Analyzer_2026"]},
+                "lifecycle": "active",
+                "authority": "advisory",
+                "source_bundle_hash": "reviewed-source-bundle",
+                "review_receipt": {
+                    "approver": "",
+                    "decision": "approved",
+                    "decided_at": "not-a-date"
+                }
+            }),
+            "/wiki/shared-malformed-review",
+            "global",
+        );
+        assert_eq!(shared.lifecycle, WikiLifecycleV1::PendingReview);
+        assert!(shared
+            .validation_issues
+            .contains(&"malformed_review_receipt".to_string()));
     }
 
     #[test]

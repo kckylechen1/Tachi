@@ -15,19 +15,27 @@ pub(in crate::copilot_ops) fn feature_guide_hits(
     });
     let stage = params.stage.as_deref().unwrap_or(current_stage);
     let task_type = params.task_type.as_deref();
+    let applicability_context = GuideApplicabilityContext {
+        project: params.project.as_deref(),
+        repo: params.repo.as_deref(),
+        domain: params.domain.as_deref(),
+        task_type,
+        profile,
+        stage: Some(stage),
+    };
     let query_tokens = tokenize_skill_text(query);
     let mut candidates = load_feature_guide_candidates(server, params, limit.max(20));
 
     candidates.retain(|(entry, _)| {
         feature_guide_lifecycle(entry).is_default_retrievable()
             && entry.is_guide()
-            && guide_applies_to(entry, task_type, profile, Some(stage), &query_tokens)
+            && guide_applies_to(entry, &applicability_context)
     });
 
     let mut scored = candidates
         .into_iter()
         .map(|(entry, store)| {
-            let score = score_feature_guide(&entry, task_type, profile, Some(stage), &query_tokens);
+            let score = score_feature_guide(&entry, &applicability_context, &query_tokens);
             (score, entry, store)
         })
         .filter(|(score, entry, _)| *score > 0 || !guide_has_restrictive_applies_to(entry))
@@ -71,13 +79,7 @@ pub(in crate::copilot_ops) fn load_feature_guide_candidates(
         .collect()
 }
 
-pub(in crate::copilot_ops) fn guide_applies_to(
-    entry: &MemoryEntry,
-    task_type: Option<&str>,
-    profile: Option<&str>,
-    stage: Option<&str>,
-    query_tokens: &HashSet<String>,
-) -> bool {
+fn guide_applies_to(entry: &MemoryEntry, context: &GuideApplicabilityContext<'_>) -> bool {
     let effective = derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
     if effective.applicability_status == WikiApplicabilityStatusV1::Malformed
         || (effective.knowledge_scope == WikiKnowledgeScopeV1::Shared
@@ -85,57 +87,70 @@ pub(in crate::copilot_ops) fn guide_applies_to(
     {
         return false;
     }
-    let applies = serde_json::to_value(&effective.applies_to).unwrap_or(Value::Null);
-    guide_filter_matches(applies.get("task_type"), task_type, query_tokens)
-        && guide_filter_matches(applies.get("profiles"), profile, query_tokens)
-        && guide_filter_matches(applies.get("stage"), stage, query_tokens)
+    guide_context_filter_matches(&effective.applies_to.projects, context.project)
+        && guide_context_filter_matches(&effective.applies_to.repos, context.repo)
+        && guide_context_filter_matches(&effective.applies_to.domains, context.domain)
+        && guide_context_filter_matches(&effective.applies_to.task_type, context.task_type)
+        && guide_context_filter_matches(&effective.applies_to.profiles, context.profile)
+        && guide_context_filter_matches(&effective.applies_to.stage, context.stage)
 }
 
-pub(in crate::copilot_ops) fn guide_filter_matches(
-    filter: Option<&Value>,
-    actual: Option<&str>,
-    query_tokens: &HashSet<String>,
-) -> bool {
-    let values = guide_string_values(filter.unwrap_or(&Value::Null));
+struct GuideApplicabilityContext<'a> {
+    project: Option<&'a str>,
+    repo: Option<&'a str>,
+    domain: Option<&'a str>,
+    task_type: Option<&'a str>,
+    profile: Option<&'a str>,
+    stage: Option<&'a str>,
+}
+
+fn guide_context_filter_matches(values: &[String], actual: Option<&str>) -> bool {
     if values.is_empty() {
         return true;
     }
-    if let Some(actual) = actual.map(|value| value.to_ascii_lowercase()) {
-        if values
-            .iter()
-            .any(|value| value == "*" || value.eq_ignore_ascii_case(&actual))
-        {
-            return true;
-        }
-    }
-    values.iter().any(|value| {
-        query_tokens.contains(value)
-            || query_tokens.contains(&value.replace('_', "-"))
-            || query_tokens.contains(&value.replace('-', "_"))
+    actual.is_some_and(|actual| {
+        let actual = actual.trim();
+        !actual.is_empty()
+            && values
+                .iter()
+                .any(|value| value == "*" || value.eq_ignore_ascii_case(actual))
     })
 }
 
-pub(in crate::copilot_ops) fn score_feature_guide(
+fn score_feature_guide(
     entry: &MemoryEntry,
-    task_type: Option<&str>,
-    profile: Option<&str>,
-    stage: Option<&str>,
+    context: &GuideApplicabilityContext<'_>,
     query_tokens: &HashSet<String>,
 ) -> usize {
-    let applies = entry.metadata.get("applies_to").unwrap_or(&Value::Null);
+    let effective = derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
     let mut score = 0usize;
-    if !guide_string_values(applies.get("task_type").unwrap_or(&Value::Null)).is_empty()
-        && guide_filter_matches(applies.get("task_type"), task_type, query_tokens)
+    if !effective.applies_to.projects.is_empty()
+        && guide_context_filter_matches(&effective.applies_to.projects, context.project)
+    {
+        score += 6;
+    }
+    if !effective.applies_to.repos.is_empty()
+        && guide_context_filter_matches(&effective.applies_to.repos, context.repo)
+    {
+        score += 6;
+    }
+    if !effective.applies_to.domains.is_empty()
+        && guide_context_filter_matches(&effective.applies_to.domains, context.domain)
+    {
+        score += 3;
+    }
+    if !effective.applies_to.task_type.is_empty()
+        && guide_context_filter_matches(&effective.applies_to.task_type, context.task_type)
     {
         score += 5;
     }
-    if !guide_string_values(applies.get("profiles").unwrap_or(&Value::Null)).is_empty()
-        && guide_filter_matches(applies.get("profiles"), profile, query_tokens)
+    if !effective.applies_to.profiles.is_empty()
+        && guide_context_filter_matches(&effective.applies_to.profiles, context.profile)
     {
         score += 4;
     }
-    if !guide_string_values(applies.get("stage").unwrap_or(&Value::Null)).is_empty()
-        && guide_filter_matches(applies.get("stage"), stage, query_tokens)
+    if !effective.applies_to.stage.is_empty()
+        && guide_context_filter_matches(&effective.applies_to.stage, context.stage)
     {
         score += 2;
     }
@@ -150,10 +165,8 @@ pub(in crate::copilot_ops) fn score_feature_guide(
 }
 
 pub(in crate::copilot_ops) fn guide_has_restrictive_applies_to(entry: &MemoryEntry) -> bool {
-    let applies = entry.metadata.get("applies_to").unwrap_or(&Value::Null);
-    ["task_type", "profiles", "stage"]
-        .iter()
-        .any(|key| !guide_string_values(applies.get(*key).unwrap_or(&Value::Null)).is_empty())
+    let effective = derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
+    !effective.applies_to.is_empty()
 }
 
 pub(in crate::copilot_ops) fn guide_hit_haystack(entry: &MemoryEntry) -> String {
@@ -434,10 +447,14 @@ mod tests {
         });
         assert!(!guide_applies_to(
             &malformed,
-            Some("review"),
-            None,
-            None,
-            &HashSet::new(),
+            &GuideApplicabilityContext {
+                project: None,
+                repo: None,
+                domain: None,
+                task_type: Some("review"),
+                profile: None,
+                stage: None,
+            },
         ));
 
         let mut unbounded_shared = crate::tests::make_entry("unbounded-shared-guide");
@@ -452,10 +469,88 @@ mod tests {
         });
         assert!(!guide_applies_to(
             &unbounded_shared,
-            None,
-            None,
-            None,
-            &HashSet::new(),
+            &GuideApplicabilityContext {
+                project: None,
+                repo: None,
+                domain: None,
+                task_type: None,
+                profile: None,
+                stage: None,
+            },
         ));
+
+        let mut task_bounded = crate::tests::make_entry("task-bounded-guide");
+        task_bounded.path = "/guide/task-bounded".to_string();
+        task_bounded.metadata = json!({
+            "artifact_kind": "guide",
+            "knowledge_scope": "project",
+            "lifecycle": "active",
+            "authority": "playbook",
+            "applies_to": {"task_type": ["review"]},
+        });
+        assert!(!guide_applies_to(
+            &task_bounded,
+            &GuideApplicabilityContext {
+                project: None,
+                repo: None,
+                domain: None,
+                task_type: Some("implementation"),
+                profile: None,
+                stage: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn federated_guide_does_not_cross_a_project_applicability_boundary() {
+        let server = crate::tests::make_server();
+        seed_wiki_guide(
+            &server.tachi_home_dir(),
+            "fixture-guide-store",
+            "fixture guide store registration",
+        );
+        let mut guide = crate::tests::make_entry("quant-only-shared-guide");
+        guide.path = "/guide/quant-only-shared-guide".to_string();
+        guide.summary = "CrossRepoApplicabilityNeedle".to_string();
+        guide.text = guide.summary.clone();
+        guide.metadata = json!({
+            "artifact_kind": "guide",
+            "knowledge_scope": "shared",
+            "origin_projects": ["Quant_Analyzer_2026"],
+            "applies_to": {"projects": ["Quant_Analyzer_2026"]},
+            "lifecycle": "active",
+            "authority": "playbook",
+            "source_bundle_hash": "quant-guide-source-bundle",
+            "review_receipt": {
+                "approver": "owner",
+                "decision": "approved",
+                "decided_at": "2026-07-31T00:00:00Z"
+            }
+        });
+        server
+            .with_named_project_store("wiki", |store| {
+                store.upsert(&guide).map_err(|error| error.to_string())
+            })
+            .expect("seed shared guide");
+
+        let params: TachiTaskParams = serde_json::from_value(json!({
+            "action": "briefing",
+            "repo": "kckylechen1/tachi",
+            "domain": "rust"
+        }))
+        .expect("feature briefing params");
+        let hits = feature_guide_hits(
+            &server,
+            &params,
+            "CrossRepoApplicabilityNeedle",
+            "implementation",
+            &json!({}),
+            10,
+        );
+        assert!(
+            hits.iter()
+                .all(|hit| hit["id"] != "quant-only-shared-guide"),
+            "a federated read must not widen a project-bounded guide: {hits:?}"
+        );
     }
 }
