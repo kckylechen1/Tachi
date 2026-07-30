@@ -24,6 +24,64 @@ fn pending_review_draft_entry() -> memcore::MemoryEntry {
     entry
 }
 
+fn reviewed_unbounded_shared_entry() -> memcore::MemoryEntry {
+    let mut entry = make_entry("wiki-reviewed-unbounded-shared");
+    entry.path = "/wiki/engineering/lifecycle/reviewed-unbounded-shared".to_string();
+    entry.summary = "Reviewed but unbounded shared entry".to_string();
+    entry.text = "LifecycleGateNeedle must not make unbounded shared knowledge active.".to_string();
+    entry.metadata = json!({
+        "artifact_kind": "wiki",
+        "knowledge_scope": "shared",
+        "origin_projects": ["Sigil"],
+        "lifecycle": "active",
+        "authority": "advisory",
+        "source_bundle_hash": "reviewed-source-bundle",
+        "review_receipt": {
+            "approver": "owner",
+            "decision": "approved",
+            "decided_at": "2026-07-31T00:00:00Z"
+        }
+    });
+    entry
+}
+
+fn declared_malformed_applicability_entry() -> memcore::MemoryEntry {
+    let mut entry = make_entry("wiki-declared-malformed-applicability");
+    entry.path = "/wiki/engineering/lifecycle/declared-malformed".to_string();
+    entry.text =
+        "LifecycleGateNeedle declared malformed applicability must stay pending.".to_string();
+    entry.metadata = json!({
+        "artifact_kind": "wiki",
+        "knowledge_scope": "project",
+        "applies_to": {"repos": ["kckylechen1/tachi"]},
+        "applicability_status": "malformed",
+        "lifecycle": "active",
+        "authority": "advisory"
+    });
+    entry
+}
+
+fn shared_with_only_legacy_origin_entry() -> memcore::MemoryEntry {
+    let mut entry = make_entry("wiki-shared-legacy-origin-only");
+    entry.path = "/wiki/engineering/lifecycle/shared-legacy-origin-only".to_string();
+    entry.text = "LifecycleGateNeedle shared knowledge needs a typed origin.".to_string();
+    entry.metadata = json!({
+        "artifact_kind": "wiki",
+        "knowledge_scope": "shared",
+        "applies_to": {"repos": ["kckylechen1/tachi"]},
+        "lifecycle": "active",
+        "authority": "advisory",
+        "source_bundle_hash": "reviewed-source-bundle",
+        "review_receipt": {
+            "approver": "owner",
+            "decision": "approved",
+            "decided_at": "2026-07-31T00:00:00Z"
+        },
+        "provenance": {"db_path": "/work/Sigil/.tachi/memory.db"}
+    });
+    entry
+}
+
 fn search_params(query: &str, lifecycle: Option<&str>) -> WikiSearchParams {
     WikiSearchParams {
         query: query.to_string(),
@@ -88,6 +146,52 @@ async fn wiki_search_excludes_pending_review_drafts_by_default_and_includes_with
         !draft_paths.contains(&"/wiki/engineering/lifecycle/active-entry"),
         "explicit pending_review scope must not surface the active entry: {draft_paths:?}"
     );
+}
+
+#[tokio::test]
+async fn wiki_search_keeps_invalid_effective_artifacts_pending() {
+    let entries = vec![
+        reviewed_unbounded_shared_entry(),
+        declared_malformed_applicability_entry(),
+        shared_with_only_legacy_origin_entry(),
+    ];
+    let expected_paths = entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    let (server, _home) = seed_wiki_project_entries(entries);
+
+    let default_scope =
+        collect_wiki_search_value(&server, search_params("LifecycleGateNeedle", None))
+            .await
+            .expect("default-scope search should succeed");
+    assert!(
+        default_scope["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .all(|row| !expected_paths.iter().any(|path| row["path"] == *path)),
+        "invalid effective artifacts must not be default-retrievable"
+    );
+
+    let pending_scope = collect_wiki_search_value(
+        &server,
+        search_params("LifecycleGateNeedle", Some("pending_review")),
+    )
+    .await
+    .expect("pending-scope search should succeed");
+    let pending_paths = pending_scope["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .filter_map(|row| row["path"].as_str())
+        .collect::<Vec<_>>();
+    for expected_path in &expected_paths {
+        assert!(
+            pending_paths.contains(&expected_path.as_str()),
+            "invalid artifact {expected_path} must remain inspectable as pending: {pending_paths:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -205,6 +309,133 @@ async fn search_read_and_browse_expose_the_same_effective_artifact() {
     assert_eq!(
         search_artifact["applies_to"]["repos"],
         json!(["Quant_Analyzer_2026", "Sigil"])
+    );
+}
+
+#[tokio::test]
+async fn public_search_read_and_browse_reach_guide_artifacts() {
+    let mut entry = active_wiki_entry();
+    entry.path = "/guide/global/workflows/agent-review".to_string();
+    entry.metadata = json!({
+        "artifact_kind": "guide",
+        "knowledge_scope": "shared",
+        "origin_projects": ["Sigil"],
+        "applies_to": {"task_type": ["agent_review"]},
+        "lifecycle": "active",
+        "authority": "playbook",
+        "source_bundle_hash": "reviewed-guide-source-bundle",
+        "review_receipt": {
+            "approver": "owner",
+            "decision": "approved",
+            "decided_at": "2026-07-31T00:00:00Z"
+        },
+    });
+    let expected_path = entry.path.clone();
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let search_params: TachiWikiParams = serde_json::from_value(json!({
+        "action": "search",
+        "query": "LifecycleGateNeedle",
+        "project": "wiki"
+    }))
+    .expect("search params");
+    let search: Value = serde_json::from_str(
+        &server
+            .tachi_wiki(Parameters(search_params))
+            .await
+            .expect("search guide"),
+    )
+    .expect("search JSON");
+
+    let read_params: TachiWikiParams = serde_json::from_value(json!({
+        "action": "read",
+        "path": "/guide/global/workflows/agent-review",
+        "project": "wiki"
+    }))
+    .expect("read params");
+    let read: Value = serde_json::from_str(
+        &server
+            .tachi_wiki(Parameters(read_params))
+            .await
+            .expect("read guide"),
+    )
+    .expect("read JSON");
+
+    let browse_params: TachiWikiParams = serde_json::from_value(json!({
+        "action": "browse",
+        "category": "/guide/global/workflows",
+        "project": "wiki"
+    }))
+    .expect("browse params");
+    let browse: Value = serde_json::from_str(
+        &server
+            .tachi_wiki(Parameters(browse_params))
+            .await
+            .expect("browse guide"),
+    )
+    .expect("browse JSON");
+
+    assert_eq!(search["results"][0]["path"], expected_path);
+    assert_eq!(read["status"], json!("found"));
+    assert_eq!(read["entry"]["path"], expected_path);
+    assert_eq!(browse["entries"][0]["path"], expected_path);
+    assert_eq!(
+        search["results"][0]["effective_artifact"],
+        read["entry"]["effective_artifact"]
+    );
+    assert_eq!(
+        search["results"][0]["effective_artifact"],
+        browse["entries"][0]["effective_artifact"]
+    );
+}
+
+#[tokio::test]
+async fn public_read_and_browse_normalize_backslash_guide_paths() {
+    let mut entry = active_wiki_entry();
+    entry.path = "/guide/global/workflows/agent-review".to_string();
+    let expected_path = entry.path.clone();
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    for path in [
+        "guide\\global\\workflows\\agent-review",
+        "/guide\\global\\workflows\\agent-review",
+    ] {
+        let read_params: TachiWikiParams = serde_json::from_value(json!({
+            "action": "read",
+            "path": path,
+            "project": "wiki"
+        }))
+        .expect("read params");
+        let read: Value = serde_json::from_str(
+            &server
+                .tachi_wiki(Parameters(read_params))
+                .await
+                .expect("read guide through normalized path"),
+        )
+        .expect("read JSON");
+        assert_eq!(
+            read["entry"]["path"], expected_path,
+            "RED: accepted backslash read path {path:?} did not reach the stored guide"
+        );
+    }
+
+    let browse_params: TachiWikiParams = serde_json::from_value(json!({
+        "action": "browse",
+        "category": "guide\\global\\workflows",
+        "project": "wiki"
+    }))
+    .expect("browse params");
+    let browse: Value = serde_json::from_str(
+        &server
+            .tachi_wiki(Parameters(browse_params))
+            .await
+            .expect("browse guide through normalized category"),
+    )
+    .expect("browse JSON");
+
+    assert_eq!(
+        browse["entries"][0]["path"], expected_path,
+        "RED: accepted backslash browse category did not reach the stored guide"
     );
 }
 

@@ -686,6 +686,7 @@ pub fn derive_effective_knowledge_artifact(
         }
     };
 
+    let has_typed_origin_projects = metadata.get("origin_projects").is_some();
     let mut origin_projects =
         parse_optional_string_array(metadata, "origin_projects", &mut validation_issues);
     if metadata.get("origin_projects").is_none() && origin_projects.is_empty() {
@@ -709,6 +710,7 @@ pub fn derive_effective_knowledge_artifact(
         {
             Some(WikiApplicabilityStatusV1::Malformed) => {
                 applicability_status = WikiApplicabilityStatusV1::Malformed;
+                validation_issues.push("malformed_applicability_status".to_string());
             }
             Some(_) => {}
             None => {
@@ -717,25 +719,44 @@ pub fn derive_effective_knowledge_artifact(
             }
         }
     }
-    if knowledge_scope == WikiKnowledgeScopeV1::Shared
-        && applicability_status != WikiApplicabilityStatusV1::Malformed
-        && (origin_projects.is_empty()
-            || applicability_status == WikiApplicabilityStatusV1::Unspecified)
+    if validation_issues
+        .iter()
+        .any(|issue| issue.starts_with("malformed_"))
     {
-        applicability_status = WikiApplicabilityStatusV1::Unspecified;
-        validation_issues.push("shared_scope_not_bounded".to_string());
+        lifecycle = WikiLifecycleV1::PendingReview;
+        applicability_status = WikiApplicabilityStatusV1::Malformed;
     }
     if knowledge_scope == WikiKnowledgeScopeV1::Shared
-        && lifecycle == WikiLifecycleV1::Active
-        && !(metadata
+        && applicability_status != WikiApplicabilityStatusV1::Malformed
+    {
+        if !has_typed_origin_projects {
+            validation_issues.push("shared_scope_missing_typed_origin".to_string());
+        }
+        if !has_typed_origin_projects
+            || origin_projects.is_empty()
+            || applicability_status == WikiApplicabilityStatusV1::Unspecified
+        {
+            applicability_status = WikiApplicabilityStatusV1::Unspecified;
+            validation_issues.push("shared_scope_not_bounded".to_string());
+        }
+    }
+    if knowledge_scope == WikiKnowledgeScopeV1::Shared && lifecycle == WikiLifecycleV1::Active {
+        let bounded = applicability_status == WikiApplicabilityStatusV1::Bounded;
+        let reviewed = metadata
             .get("source_bundle_hash")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|hash| !hash.trim().is_empty())
             && review_receipt
-                .is_some_and(|receipt| receipt.decision.eq_ignore_ascii_case("approved")))
-    {
-        lifecycle = WikiLifecycleV1::PendingReview;
-        validation_issues.push("shared_active_without_review".to_string());
+                .is_some_and(|receipt| receipt.decision.eq_ignore_ascii_case("approved"));
+        if !bounded {
+            validation_issues.push("shared_active_without_bounded_applicability".to_string());
+        }
+        if !reviewed {
+            validation_issues.push("shared_active_without_review".to_string());
+        }
+        if !bounded || !reviewed {
+            lifecycle = WikiLifecycleV1::PendingReview;
+        }
     }
     validation_issues.sort();
     validation_issues.dedup();
@@ -1159,6 +1180,56 @@ mod tests {
     }
 
     #[test]
+    fn malformed_typed_identity_fields_fail_closed() {
+        for (field, value, expected_issue) in [
+            (
+                "artifact_kind",
+                serde_json::json!(42),
+                "malformed_artifact_kind",
+            ),
+            (
+                "knowledge_scope",
+                serde_json::json!("not-a-scope"),
+                "malformed_knowledge_scope",
+            ),
+            (
+                "authority",
+                serde_json::json!({"forged": true}),
+                "malformed_authority",
+            ),
+        ] {
+            let mut metadata = serde_json::json!({
+                "artifact_kind": "guide",
+                "knowledge_scope": "project",
+                "lifecycle": "active",
+                "authority": "playbook",
+                "applies_to": {"repos": ["kckylechen1/tachi"]},
+            });
+            metadata[field] = value;
+
+            let effective =
+                derive_effective_knowledge_artifact(&metadata, "/guide/review", "project");
+            assert_eq!(
+                effective.lifecycle,
+                WikiLifecycleV1::PendingReview,
+                "RED: malformed {field} remained default-retrievable"
+            );
+            assert_eq!(
+                effective.applicability_status,
+                WikiApplicabilityStatusV1::Malformed,
+                "RED: malformed {field} retained applicable authority"
+            );
+            assert!(
+                effective
+                    .validation_issues
+                    .contains(&expected_issue.to_string()),
+                "missing validation issue for {field}: {:?}",
+                effective.validation_issues
+            );
+        }
+    }
+
+    #[test]
     fn non_string_lifecycle_and_unreviewed_active_shared_fail_closed() {
         let malformed = derive_effective_knowledge_artifact(
             &serde_json::json!({"lifecycle": 42}),
@@ -1207,6 +1278,104 @@ mod tests {
         assert!(shared
             .validation_issues
             .contains(&"malformed_review_receipt".to_string()));
+    }
+
+    #[test]
+    fn reviewed_but_unbounded_shared_knowledge_stays_pending() {
+        let shared = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "artifact_kind": "wiki",
+                "knowledge_scope": "shared",
+                "origin_projects": ["Sigil"],
+                "lifecycle": "active",
+                "authority": "advisory",
+                "source_bundle_hash": "reviewed-source-bundle",
+                "review_receipt": {
+                    "approver": "owner",
+                    "decision": "approved",
+                    "decided_at": "2026-07-31T00:00:00Z"
+                }
+            }),
+            "/wiki/shared-unbounded",
+            "global",
+        );
+        assert_eq!(
+            shared.lifecycle,
+            WikiLifecycleV1::PendingReview,
+            "RED: review approval activated shared knowledge without an applicability boundary"
+        );
+        assert_eq!(
+            shared.applicability_status,
+            WikiApplicabilityStatusV1::Unspecified
+        );
+        assert!(shared
+            .validation_issues
+            .contains(&"shared_active_without_bounded_applicability".to_string()));
+    }
+
+    #[test]
+    fn declared_malformed_applicability_status_fails_closed() {
+        let effective = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "artifact_kind": "wiki",
+                "knowledge_scope": "project",
+                "applies_to": {"repos": ["kckylechen1/tachi"]},
+                "applicability_status": "malformed",
+                "lifecycle": "active",
+                "authority": "advisory"
+            }),
+            "/wiki/project-malformed-status",
+            "project",
+        );
+        assert_eq!(
+            effective.lifecycle,
+            WikiLifecycleV1::PendingReview,
+            "RED: declared malformed applicability remained default-retrievable"
+        );
+        assert_eq!(
+            effective.applicability_status,
+            WikiApplicabilityStatusV1::Malformed
+        );
+        assert!(effective
+            .validation_issues
+            .contains(&"malformed_applicability_status".to_string()));
+    }
+
+    #[test]
+    fn shared_active_requires_typed_origin_not_legacy_provenance() {
+        let shared = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "artifact_kind": "wiki",
+                "knowledge_scope": "shared",
+                "applies_to": {"repos": ["kckylechen1/tachi"]},
+                "lifecycle": "active",
+                "authority": "advisory",
+                "source_bundle_hash": "reviewed-source-bundle",
+                "review_receipt": {
+                    "approver": "owner",
+                    "decision": "approved",
+                    "decided_at": "2026-07-31T00:00:00Z"
+                },
+                "provenance": {
+                    "db_path": "/work/Sigil/.tachi/memory.db"
+                }
+            }),
+            "/wiki/shared-derived-origin",
+            "global",
+        );
+        assert_eq!(shared.origin_projects, vec!["Sigil"]);
+        assert_eq!(
+            shared.lifecycle,
+            WikiLifecycleV1::PendingReview,
+            "RED: legacy-derived origin activated typed shared knowledge"
+        );
+        assert_eq!(
+            shared.applicability_status,
+            WikiApplicabilityStatusV1::Unspecified
+        );
+        assert!(shared
+            .validation_issues
+            .contains(&"shared_scope_missing_typed_origin".to_string()));
     }
 
     #[test]

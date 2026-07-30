@@ -122,11 +122,14 @@ fn guide_scope_matches(
                 return guide_context_filter_matches(&effective.origin_projects, context.project);
             }
             match (store, context.project) {
-                (StoreRef::BoundProject, _) => true,
+                (StoreRef::BoundProject, Some(_)) => true,
                 (StoreRef::NamedProject { project }, Some(actual)) => {
                     project.eq_ignore_ascii_case(actual.trim())
                 }
-                (StoreRef::NamedProject { .. } | StoreRef::LegacyGlobal, _) => false,
+                (
+                    StoreRef::BoundProject | StoreRef::NamedProject { .. } | StoreRef::LegacyGlobal,
+                    _,
+                ) => false,
             }
         }
     }
@@ -478,6 +481,27 @@ mod tests {
 
     #[test]
     fn malformed_or_unbounded_shared_applicability_fails_closed() {
+        let mut malformed_identity = crate::tests::make_entry("malformed-identity-guide");
+        malformed_identity.path = "/guide/malformed-identity".to_string();
+        malformed_identity.metadata = json!({
+            "artifact_kind": 42,
+            "knowledge_scope": "project",
+            "lifecycle": "active",
+            "authority": "playbook",
+        });
+        assert!(!guide_applies_to(
+            &malformed_identity,
+            &StoreRef::BoundProject,
+            &GuideApplicabilityContext {
+                project: Some("Sigil"),
+                repo: Some("kckylechen1/tachi"),
+                domain: None,
+                task_type: None,
+                profile: None,
+                stage: None,
+            },
+        ));
+
         let mut malformed = crate::tests::make_entry("malformed-applicability-guide");
         malformed.path = "/guide/malformed-applicability".to_string();
         malformed.metadata = json!({
@@ -544,6 +568,43 @@ mod tests {
                 stage: None,
             },
         ));
+    }
+
+    #[test]
+    fn federated_guide_requires_project_identity_for_project_scoped_bound_rows() {
+        let mut guide = crate::tests::make_entry("bound-project-guide");
+        guide.path = "/guide/review".to_string();
+        guide.metadata = json!({
+            "artifact_kind": "guide",
+            "knowledge_scope": "project",
+            "lifecycle": "active",
+            "authority": "playbook",
+        });
+
+        assert!(guide_applies_to(
+            &guide,
+            &StoreRef::BoundProject,
+            &GuideApplicabilityContext {
+                project: Some("Sigil"),
+                repo: Some("kckylechen1/tachi"),
+                domain: None,
+                task_type: None,
+                profile: None,
+                stage: None,
+            },
+        ));
+        assert!(!guide_applies_to(
+            &guide,
+            &StoreRef::BoundProject,
+            &GuideApplicabilityContext {
+                project: None,
+                repo: Some("some/other-repo"),
+                domain: None,
+                task_type: None,
+                profile: None,
+                stage: None,
+            },
+        ), "RED: a project-scoped bound guide became cross-repo authority when project identity was omitted");
     }
 
     #[test]
