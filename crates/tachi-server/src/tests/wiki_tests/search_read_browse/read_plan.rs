@@ -55,7 +55,9 @@ fn register_named_project(server: &MemoryServer, name: &str) {
         scope_hint: format!("project:{name}"),
         notes: String::new(),
     });
-    manifest.save(&manifest_path).expect("register named project");
+    manifest
+        .save(&manifest_path)
+        .expect("register named project");
 }
 
 #[tokio::test]
@@ -95,12 +97,10 @@ async fn explicit_named_wiki_search_never_falls_back_to_bound_or_legacy_global()
         })
         .expect("seed legacy global wiki store");
 
-    let result = collect_wiki_search_value(
-        &server,
-        planned_wiki_search(query, Some("named-only"), 10),
-    )
-    .await
-    .expect("named wiki search");
+    let result =
+        collect_wiki_search_value(&server, planned_wiki_search(query, Some("named-only"), 10))
+            .await
+            .expect("named wiki search");
     let ids = result["results"]
         .as_array()
         .expect("results array")
@@ -108,7 +108,10 @@ async fn explicit_named_wiki_search_never_falls_back_to_bound_or_legacy_global()
         .filter_map(|row| row["id"].as_str())
         .collect::<Vec<_>>();
 
-    assert!(ids.contains(&"wiki-read-plan-named"), "named hit missing: {ids:?}");
+    assert!(
+        ids.contains(&"wiki-read-plan-named"),
+        "named hit missing: {ids:?}"
+    );
     assert!(
         !ids.contains(&"wiki-read-plan-bound"),
         "RED: explicit project=named-only must not fall back to the bound project: {ids:?}"
@@ -116,6 +119,84 @@ async fn explicit_named_wiki_search_never_falls_back_to_bound_or_legacy_global()
     assert!(
         !ids.contains(&"wiki-read-plan-legacy-global"),
         "RED: explicit project=named-only must not fall back to legacy global /wiki: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn omitted_project_federates_bound_and_shared_but_not_legacy_global() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
+    let query = "WikiReadPlanFederatedNeedle";
+    let bound = wiki_entry(
+        "wiki-read-plan-federated-bound",
+        "/wiki/read-plan/federated-bound",
+        &format!("{query} bound-store sentinel"),
+    );
+    let shared = wiki_entry(
+        "wiki-read-plan-federated-shared",
+        "/wiki/read-plan/federated-shared",
+        &format!("{query} shared-store sentinel"),
+    );
+    let legacy_global = wiki_entry(
+        "wiki-read-plan-federated-legacy-global",
+        "/wiki/read-plan/federated-legacy-global",
+        &format!("{query} legacy-global sentinel"),
+    );
+
+    register_named_project(&server, "wiki");
+    server
+        .with_project_store(|store| store.upsert(&bound).map_err(|error| error.to_string()))
+        .expect("seed bound Wiki");
+    server
+        .with_named_project_store("wiki", |store| {
+            store.upsert(&shared).map_err(|error| error.to_string())
+        })
+        .expect("seed shared Wiki");
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&legacy_global)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed legacy global Wiki");
+
+    let result = collect_wiki_search_value(&server, planned_wiki_search(query, None, 50))
+        .await
+        .expect("federated Wiki search");
+    let rows = result["results"].as_array().expect("results array");
+    let ids = rows
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&"wiki-read-plan-federated-bound"),
+        "bound Wiki hit missing: {rows:?}"
+    );
+    assert!(
+        ids.contains(&"wiki-read-plan-federated-shared"),
+        "shared Wiki hit missing: {rows:?}"
+    );
+    assert!(
+        !ids.contains(&"wiki-read-plan-federated-legacy-global"),
+        "RED: legacy global is a migration input, not a default Wiki authority: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row["store"].is_null()),
+        "every federated row must carry physical store identity: {rows:?}"
+    );
+
+    let candidate_counts = result["candidate_counts"]
+        .as_array()
+        .expect("candidate counts array");
+    assert_eq!(
+        candidate_counts.len(),
+        2,
+        "default federation must plan exactly bound + shared stores: {candidate_counts:?}"
+    );
+    assert!(
+        candidate_counts
+            .iter()
+            .all(|candidate| candidate["count"].as_u64().unwrap_or(0) > 0),
+        "each store must receive an independent candidate budget: {candidate_counts:?}"
     );
 }
 
@@ -149,7 +230,9 @@ fn federated_same_path_read_returns_store_qualified_candidates() {
     let candidates = read["candidates"].as_array().expect("candidate array");
     assert_eq!(candidates.len(), 2, "expected one candidate per store");
     assert!(
-        candidates.iter().all(|candidate| !candidate["store"].is_null()),
+        candidates
+            .iter()
+            .all(|candidate| !candidate["store"].is_null()),
         "RED: cross-store ambiguity must carry store-qualified candidates: {candidates:?}"
     );
 }

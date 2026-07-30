@@ -437,6 +437,90 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
 }
 
 #[tokio::test]
+async fn wiki_lint_explicit_named_store_is_strict_and_reports_store_identity() {
+    let server = make_server();
+    let db_path = server
+        .tachi_home_dir()
+        .join("projects")
+        .join("named-lint")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(db_path.parent().expect("named lint project parent"))
+        .expect("create named lint project parent");
+    drop(
+        MemoryStore::open(db_path.to_str().expect("utf8 named lint DB"))
+            .expect("create named lint DB"),
+    );
+    let manifest_path = server.tachi_home_dir().join("manifest.json");
+    let mut manifest = crate::manifest::Manifest::load_or_empty(&manifest_path);
+    manifest.dbs.push(crate::manifest::DbEntry {
+        path: db_path.display().to_string(),
+        role: crate::manifest::DbRole::Project,
+        owner: "test".to_string(),
+        schema_kind: "tachi".to_string(),
+        vec_enabled: true,
+        allow_write: true,
+        last_doctor_at: Utc::now().to_rfc3339(),
+        last_classification: "healthy".to_string(),
+        scope_hint: "project:named-lint".to_string(),
+        notes: String::new(),
+    });
+    manifest
+        .save(&manifest_path)
+        .expect("register named lint project");
+
+    let mut named = make_entry("wiki-lint-named-only");
+    named.path = "/wiki/lint/named-only".to_string();
+    named.metadata = json!({"lifecycle": "active"});
+    let mut global = make_entry("wiki-lint-global-decoy");
+    global.path = "/wiki/lint/global-decoy".to_string();
+    global.metadata = json!({"lifecycle": "active"});
+
+    server
+        .with_named_project_store("named-lint", |store| {
+            store.upsert(&named).map_err(|error| error.to_string())
+        })
+        .expect("seed named lint store");
+    server
+        .with_global_store(|store| store.upsert(&global).map_err(|error| error.to_string()))
+        .expect("seed global lint decoy");
+
+    let raw = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki/lint".to_string()),
+            checks: vec!["orphans".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: 0.85,
+            contradiction_threshold: 0.85,
+            include_skill_quality: false,
+            persist_stale: false,
+            project: Some("named-lint".to_string()),
+        }))
+        .await
+        .expect("lint named store");
+    let value: Value = serde_json::from_str(&raw).expect("lint JSON");
+    let orphans = value["orphans"].as_array().expect("orphans array");
+    assert!(
+        orphans
+            .iter()
+            .any(|row| row["id"] == json!("wiki-lint-named-only")),
+        "named-store fixture missing: {orphans:?}"
+    );
+    assert!(
+        orphans
+            .iter()
+            .all(|row| row["id"] != json!("wiki-lint-global-decoy")),
+        "RED: explicit named lint must not append global/workspace findings: {orphans:?}"
+    );
+    let named_row = orphans
+        .iter()
+        .find(|row| row["id"] == json!("wiki-lint-named-only"))
+        .expect("named lint row");
+    assert_eq!(named_row["store"]["kind"], json!("named_project"));
+    assert_eq!(named_row["store"]["project"], json!("named-lint"));
+}
+
+#[tokio::test]
 async fn wiki_lint_ignores_operation_log_rows() {
     let server = make_server();
     server

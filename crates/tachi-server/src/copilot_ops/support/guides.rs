@@ -344,12 +344,14 @@ mod tests {
         );
         let mut pending = crate::tests::make_entry("pending-feature-guide");
         pending.path = "/guide/pending-feature-guide".to_string();
-        pending.text = "PendingGuideLifecycleNeedle must stay out of active guide hits.".to_string();
+        pending.text =
+            "PendingGuideLifecycleNeedle must stay out of active guide hits.".to_string();
         pending.summary = pending.text.clone();
         pending.metadata = json!({"lifecycle": "pending_review"});
         let mut malformed = crate::tests::make_entry("malformed-feature-guide");
         malformed.path = "/guide/malformed-feature-guide".to_string();
-        malformed.text = "PendingGuideLifecycleNeedle malformed lifecycle must stay out too.".to_string();
+        malformed.text =
+            "PendingGuideLifecycleNeedle malformed lifecycle must stay out too.".to_string();
         malformed.summary = malformed.text.clone();
         malformed.metadata = json!({"lifecycle": "not-a-real-lifecycle"});
         server

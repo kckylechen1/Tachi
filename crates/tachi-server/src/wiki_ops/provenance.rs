@@ -68,7 +68,10 @@ pub(crate) fn apply_wiki_lifecycle_gate_for_plan(
         .map_err(|e| format!("wiki lifecycle gate candidate lookup failed: {e}"))?;
     let mut by_id: HashMap<&str, Vec<&StoredWikiEntry>> = HashMap::new();
     for entry in &entries {
-        by_id.entry(entry.entry.id.as_str()).or_default().push(entry);
+        by_id
+            .entry(entry.entry.id.as_str())
+            .or_default()
+            .push(entry);
     }
 
     rows.retain_mut(|row| {
@@ -161,7 +164,7 @@ pub(super) fn preferred_wiki_references(metadata: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn attach_wiki_provenance(
+pub(super) fn attach_wiki_provenance(
     row: &mut Value,
     entry: &MemoryEntry,
     store_ref: &StoreRef,

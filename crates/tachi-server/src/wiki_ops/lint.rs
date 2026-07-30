@@ -65,7 +65,10 @@ pub(crate) async fn handle_wiki_lint(
     let path_prefix = params.path_prefix.as_deref().unwrap_or("/wiki");
     let limit = params.limit.max(1).min(500);
     let stale_cutoff = Utc::now() - ChronoDuration::days(params.stale_days as i64);
-    let plan = WikiReadPlan::from_project(params.project.as_deref())?;
+    let plan = match params.project.as_deref() {
+        Some(project) => WikiReadPlan::from_project(Some(project))?,
+        None => WikiReadPlan::MigrationAudit,
+    };
     let nodes = list_wiki_entries_for_plan(server, &plan, path_prefix, limit)?;
 
     let mut orphans = Vec::new();
@@ -201,10 +204,10 @@ pub(crate) async fn handle_wiki_lint(
             json!("semantic_stale_contradicted_or_superseded"),
         );
         let write_result = with_wiki_store(server, &store_ref, |store| {
-                store
-                    .upsert(&entry)
-                    .map_err(|e| format!("wiki_lint stale persist: {e}"))
-            });
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("wiki_lint stale persist: {e}"))
+        });
         if let Err(err) = write_result {
             tracing::warn!(
                 "wiki_lint persist_stale write failed for {}: {err}",

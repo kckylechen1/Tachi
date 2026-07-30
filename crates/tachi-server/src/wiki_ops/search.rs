@@ -94,16 +94,18 @@ pub(crate) async fn collect_wiki_search_value(
         .map(resolve_wiki_category)
         .or_else(|| params.path_prefix.clone())
         .or_else(|| Some("/wiki".to_string()));
-    let mut rows = search_memory_rows(
+    let final_top_k = params.top_k.max(1).min(50);
+    let per_store_candidate_budget = final_top_k.max(20);
+    let mut candidates = search_wiki_store_candidates(
         server,
         SearchMemoryParams {
             query: query.clone(),
             query_vec: None,
-            top_k: params.top_k.max(1).min(50),
+            top_k: per_store_candidate_budget,
             path_prefix: path_prefix.clone(),
             include_training: false,
             include_archived: params.include_archived,
-            candidates_per_channel: params.top_k.max(20),
+            candidates_per_channel: per_store_candidate_budget,
             mmr_threshold: Some(0.85),
             graph_expand_hops: 1,
             graph_relation_filter: None,
@@ -125,18 +127,81 @@ pub(crate) async fn collect_wiki_search_value(
             include_metadata: false,
             format: None,
         },
-        matches!(plan, WikiReadPlan::NamedOnly(_)),
+        &stores_for_wiki_plan(server, &plan),
     )
     .await?;
-    filter_user_facing_wiki_rows(&mut rows);
-    let unfiltered_count = rows.len();
-    rows.retain(wiki_row_has_direct_match_signal);
-    apply_wiki_lifecycle_gate_for_plan(
-        server,
-        &plan,
-        &mut rows,
-        params.lifecycle.as_deref(),
-    )?;
+    candidates.retain(|candidate| is_user_facing_wiki_entry(&candidate.result.entry));
+    let unfiltered_count = candidates.len();
+    let candidate_counts = stores_for_wiki_plan(server, &plan)
+        .into_iter()
+        .map(|store| {
+            let count = candidates
+                .iter()
+                .filter(|candidate| candidate.store == store)
+                .count();
+            json!({"store": store, "count": count})
+        })
+        .collect::<Vec<_>>();
+    candidates.retain(wiki_candidate_has_direct_match_signal);
+
+    let mut eligible = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if wiki_entry_matches_lifecycle_scope(&candidate.result.entry, params.lifecycle.as_deref())?
+        {
+            eligible.push(candidate);
+        }
+    }
+    eligible.sort_by(|left, right| {
+        right
+            .result
+            .score
+            .final_score
+            .partial_cmp(&left.result.score.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                right
+                    .result
+                    .entry
+                    .timestamp
+                    .cmp(&left.result.entry.timestamp)
+            })
+            .then_with(|| left.result.entry.id.cmp(&right.result.entry.id))
+            .then_with(|| format!("{:?}", left.store).cmp(&format!("{:?}", right.store)))
+    });
+    let mut seen = HashSet::new();
+    eligible.retain(|candidate| {
+        seen.insert((candidate.store.clone(), candidate.result.entry.id.clone()))
+    });
+    eligible.truncate(final_top_k);
+    normalize_wiki_candidate_relevance(&mut eligible);
+
+    let mut rows = eligible
+        .iter()
+        .map(|candidate| {
+            let db_scope = match candidate.store {
+                StoreRef::LegacyGlobal => DbScope::Global,
+                StoreRef::BoundProject | StoreRef::NamedProject { .. } => DbScope::Project,
+            };
+            let mut row = slim_search_result(&candidate.result, db_scope, false);
+            let lifecycle = derive_wiki_lifecycle(
+                &candidate.result.entry.metadata,
+                &candidate.result.entry.path,
+            );
+            attach_wiki_provenance(
+                &mut row,
+                &candidate.result.entry,
+                &candidate.store,
+                lifecycle,
+            );
+            if let Some(recall_quality) = &candidate.recall_quality {
+                if let Some(object) = row.as_object_mut() {
+                    object.insert("recall_quality".to_string(), recall_quality.clone());
+                }
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    annotate_wiki_exact_token_matches(&mut rows, &query);
 
     append_wiki_log(
         server,
@@ -152,11 +217,32 @@ pub(crate) async fn collect_wiki_search_value(
         "stores": stores_for_wiki_plan(server, &plan),
         "domain": params.domain,
         "unfiltered_count": unfiltered_count,
+        "candidate_counts": candidate_counts,
         "count": rows.len(),
         "results": rows,
     }))
 }
 
+fn wiki_candidate_has_direct_match_signal(candidate: &WikiStoreSearchCandidate) -> bool {
+    candidate.result.score.fts > 0.0 || candidate.result.score.symbolic > 0.0
+}
+
+fn normalize_wiki_candidate_relevance(candidates: &mut [WikiStoreSearchCandidate]) {
+    let max_score = candidates
+        .iter()
+        .map(|candidate| candidate.result.score.final_score)
+        .filter(|score| score.is_finite() && *score > 0.0)
+        .fold(0.0_f64, f64::max);
+    if max_score <= f64::EPSILON {
+        return;
+    }
+    for candidate in candidates {
+        candidate.result.score.final_score =
+            (candidate.result.score.final_score / max_score).clamp(0.0, 1.0);
+    }
+}
+
+#[cfg(test)]
 pub(super) fn wiki_row_has_direct_match_signal(row: &Value) -> bool {
     let score = row.get("score").and_then(Value::as_object);
     let fts = score
@@ -332,6 +418,7 @@ pub(crate) fn collect_wiki_browse_value(
 
 // ─── Wiki Read ──────────────────────────────────────────────────────────────
 
+#[cfg(test)]
 pub(crate) fn handle_wiki_read(
     server: &MemoryServer,
     path: &str,
@@ -380,6 +467,7 @@ pub(crate) fn handle_wiki_read_for_plan(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn collect_wiki_read_value(
     server: &MemoryServer,
     path: &str,
@@ -389,6 +477,7 @@ pub(crate) fn collect_wiki_read_value(
     collect_wiki_read_value_for_plan(server, path, &plan)
 }
 
+#[cfg(test)]
 fn legacy_wiki_read_plan(project: &str) -> WikiReadPlan {
     if project == LOGICAL_SHARED_WIKI_PROJECT {
         WikiReadPlan::Federated

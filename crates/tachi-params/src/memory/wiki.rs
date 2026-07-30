@@ -74,6 +74,10 @@ pub enum WikiReadPlan {
     Federated,
     ProjectOnly,
     SharedOnly,
+    /// Hygiene/migration census over every existing Wiki-shaped store.
+    /// This is never a normal retrieval plan: legacy global remains an input
+    /// to migration, not an implicit source of reviewed shared knowledge.
+    MigrationAudit,
 }
 
 impl WikiReadPlan {
@@ -133,7 +137,8 @@ pub struct WikiLintParams {
     pub persist_stale: bool,
 
     /// Optional named Wiki store. When supplied, lint targets only that store.
-    /// Omitted uses the bound project + logical shared Wiki federation.
+    /// Omitted runs a migration/health census over bound, shared, and legacy
+    /// global Wiki-shaped stores; this does not make legacy global retrievable.
     #[serde(default)]
     pub project: Option<String>,
 }

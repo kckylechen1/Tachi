@@ -111,10 +111,7 @@ fn same_store_path(server: &MemoryServer) -> bool {
         .is_some_and(|(bound, shared)| bound == shared)
 }
 
-pub(super) fn stores_for_wiki_plan(
-    server: &MemoryServer,
-    plan: &WikiReadPlan,
-) -> Vec<StoreRef> {
+pub(super) fn stores_for_wiki_plan(server: &MemoryServer, plan: &WikiReadPlan) -> Vec<StoreRef> {
     match plan {
         WikiReadPlan::NamedOnly(store) => vec![store.clone()],
         WikiReadPlan::Federated => {
@@ -122,10 +119,13 @@ pub(super) fn stores_for_wiki_plan(
             if server.has_project_db() {
                 stores.push(StoreRef::BoundProject);
             }
-            if !same_store_path(server) {
+            if crate::memory_search_ops::named_project_db_exists(
+                server,
+                LOGICAL_SHARED_WIKI_PROJECT,
+            ) && !same_store_path(server)
+            {
                 stores.push(StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT));
             }
-            stores.push(StoreRef::LegacyGlobal);
             stores
         }
         WikiReadPlan::ProjectOnly => server
@@ -134,6 +134,21 @@ pub(super) fn stores_for_wiki_plan(
             .into_iter()
             .collect(),
         WikiReadPlan::SharedOnly => vec![StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT)],
+        WikiReadPlan::MigrationAudit => {
+            let mut stores = Vec::new();
+            if server.has_project_db() {
+                stores.push(StoreRef::BoundProject);
+            }
+            if crate::memory_search_ops::named_project_db_exists(
+                server,
+                LOGICAL_SHARED_WIKI_PROJECT,
+            ) && !same_store_path(server)
+            {
+                stores.push(StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT));
+            }
+            stores.push(StoreRef::LegacyGlobal);
+            stores
+        }
     }
 }
 
@@ -144,9 +159,7 @@ pub(super) fn with_wiki_store_read<T>(
 ) -> Result<T, String> {
     match store_ref {
         StoreRef::BoundProject => server.with_project_store_read(action),
-        StoreRef::NamedProject { project } => {
-            server.with_named_project_store_read(project, action)
-        }
+        StoreRef::NamedProject { project } => server.with_named_project_store_read(project, action),
         StoreRef::LegacyGlobal => server.with_global_store_read(action),
     }
 }
