@@ -108,8 +108,7 @@ pub struct RecallContextParams {
     #[serde(default)]
     pub project: Option<String>,
 
-    /// When true, automatically search the wiki knowledge base and include
-    /// relevant wiki entries in the prepend_context block (default: true)
+    /// Include Wiki hits in `prepend_context` (default: true).
     #[serde(default = "default_true_wiki")]
     pub include_wiki: bool,
 
@@ -117,8 +116,7 @@ pub struct RecallContextParams {
     #[serde(default = "default_wiki_top_k")]
     pub wiki_top_k: usize,
 
-    /// Optional named project DB for wiki memories. When omitted, Wiki reads
-    /// use the bound project plus the logical shared Wiki store.
+    // Named-only Wiki store; omitted federates bound and shared stores.
     #[serde(default)]
     pub wiki_project: Option<String>,
 }

@@ -235,8 +235,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 199573,
-                "total_tool_definition_bytes": 238064,
+                "total_input_schema_bytes": 199085,
+                "total_tool_definition_bytes": 237576,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -345,8 +345,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 134651,
-                "total_tool_definition_bytes": 153830,
+                "total_input_schema_bytes": 134596,
+                "total_tool_definition_bytes": 153775,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -392,8 +392,8 @@
                 ]
             },
             "delegate": {
-                "total_input_schema_bytes": 68679,
-                "total_tool_definition_bytes": 74155,
+                "total_input_schema_bytes": 68624,
+                "total_tool_definition_bytes": 74100,
                 "visible_tool_count": 11,
                 "visible_tools": [
                     "peer_query",
@@ -410,8 +410,8 @@
                 ]
             },
             "operate": {
-                "total_input_schema_bytes": 122776,
-                "total_tool_definition_bytes": 141873,
+                "total_input_schema_bytes": 122288,
+                "total_tool_definition_bytes": 141385,
                 "visible_tool_count": 50,
                 "visible_tools": [
                     "archive_memory",

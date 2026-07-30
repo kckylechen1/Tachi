@@ -124,25 +124,12 @@ pub struct WikiLintParams {
     #[serde(default = "default_include_skill_quality")]
     pub include_skill_quality: bool,
 
-    /// #1072 fix-round (#1215): when true AND the `stale` check is running,
-    /// entries the semantic-staleness pass flags (targeted by a
-    /// `contradicts`/`supersedes` edge) get `metadata.lifecycle = "stale"`
-    /// persisted back to the store — not just reported as a diagnostic row.
-    /// Canon doc §7's required behavior is retrieval EXCLUSION, not a lint
-    /// finding a human has to act on separately; the cross-vendor review
-    /// flagged this gap explicitly ("lint appends a diagnostic row only;
-    /// persisted lifecycle stays active and retrievable"). Defaults to
-    /// `false` — `wiki_hygiene_counts` (called on every
-    /// `tachi_memory(briefing)`/`alerts` request) explicitly keeps this off
-    /// so a hot, high-frequency read path never becomes a surprise writer;
-    /// only an explicit `tachi_wiki(action='lint', persist_stale=true)` call
-    /// opts in.
+    /// Persist semantic-staleness findings as `lifecycle=stale`. Defaults off;
+    /// only an explicit lint call may turn this read path into a writer.
     #[serde(default)]
     pub persist_stale: bool,
 
-    /// Optional named Wiki store. When supplied, lint targets only that store.
-    /// Omitted runs a migration/health census over bound, shared, and legacy
-    /// global Wiki-shaped stores; this does not make legacy global retrievable.
+    /// Named-only lint target; omitted audits bound, shared, and legacy stores.
     #[serde(default)]
     pub project: Option<String>,
 }
@@ -292,8 +279,7 @@ pub struct WikiBrowseParams {
     #[serde(default = "default_wiki_browse_limit")]
     pub limit: usize,
 
-    /// Optional named project DB. When supplied, browse reads only that store.
-    /// Omitted reads the bound project plus logical shared Wiki federation.
+    // Named-only store when set; omitted federates bound and shared Wiki.
     #[serde(default)]
     pub project: Option<String>,
 
