@@ -245,16 +245,7 @@ pub(crate) async fn search_wiki_rows_for_plan(
                 StoreRef::BoundProject | StoreRef::NamedProject { .. } => DbScope::Project,
             };
             let mut row = slim_search_result(&candidate.result, db_scope, include_metadata);
-            let lifecycle = derive_wiki_lifecycle(
-                &candidate.result.entry.metadata,
-                &candidate.result.entry.path,
-            );
-            attach_wiki_provenance(
-                &mut row,
-                &candidate.result.entry,
-                &candidate.store,
-                lifecycle,
-            );
+            attach_wiki_provenance(&mut row, &candidate.result.entry, &candidate.store);
             if let Some(recall_quality) = &candidate.recall_quality {
                 if let Some(object) = row.as_object_mut() {
                     object.insert("recall_quality".to_string(), recall_quality.clone());
@@ -421,8 +412,8 @@ pub(crate) fn collect_wiki_browse_value(
                 if !wiki_entry_matches_lifecycle_scope(&entry, requested_lifecycle)? {
                     continue;
                 }
-                let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
-                let authority = derive_wiki_authority(&entry.metadata);
+                let effective =
+                    derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
                 // #1072 fix-round (#1215 BUG 6): browse-category provenance
                 // was overclaimed — the PR description said read/search
                 // "expose ... revision, source refs, ... review receipt" but
@@ -442,8 +433,9 @@ pub(crate) fn collect_wiki_browse_value(
                     "summary": entry.summary,
                     "importance": entry.importance,
                     "revision": entry.revision,
-                    "lifecycle": lifecycle.as_str(),
-                    "authority": authority.as_str(),
+                    "lifecycle": effective.lifecycle.as_str(),
+                    "authority": effective.authority.as_str(),
+                    "effective_artifact": effective,
                     "references": preferred_wiki_references(&entry.metadata),
                     "review_receipt": review_receipt,
                     "store": stored.store,
@@ -617,8 +609,8 @@ pub(crate) fn collect_wiki_read_value_for_plan(
             // still show the caller it is not reviewed truth, even though
             // reading by an exact known path (unlike default search) is not
             // itself gated.
-            let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
-            let authority = derive_wiki_authority(&entry.metadata);
+            let effective =
+                derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
             let review_receipt = derive_wiki_review_receipt(&entry.metadata)
                 .and_then(|receipt| serde_json::to_value(receipt).ok())
                 .unwrap_or(Value::Null);
@@ -637,8 +629,9 @@ pub(crate) fn collect_wiki_read_value_for_plan(
                     "topic": entry.topic,
                     "timestamp": entry.timestamp,
                     "revision": entry.revision,
-                    "authority": authority.as_str(),
-                    "lifecycle": lifecycle.as_str(),
+                    "authority": effective.authority.as_str(),
+                    "lifecycle": effective.lifecycle.as_str(),
+                    "effective_artifact": effective,
                     "source_refs": entry.metadata.get("source_refs").cloned().unwrap_or_else(|| json!([])),
                     "evidence_refs_v1": entry.metadata.get("evidence_refs_v1").cloned().unwrap_or_else(|| json!([])),
                     "references": preferred_wiki_references(&entry.metadata),
@@ -659,6 +652,8 @@ pub(crate) fn collect_wiki_read_value_for_plan(
 
 fn wiki_read_candidate(entry: &StoredWikiEntry) -> Value {
     let stored = &entry.entry;
+    let effective =
+        derive_effective_knowledge_artifact(&stored.metadata, &stored.path, &stored.scope);
     json!({
         "id": stored.id,
         "path": stored.path,
@@ -669,5 +664,6 @@ fn wiki_read_candidate(entry: &StoredWikiEntry) -> Value {
         "topic": stored.topic,
         "timestamp": stored.timestamp,
         "store": entry.store,
+        "effective_artifact": effective,
     })
 }

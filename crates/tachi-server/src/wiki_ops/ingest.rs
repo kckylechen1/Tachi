@@ -487,9 +487,11 @@ pub(crate) async fn handle_wiki_ingest(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let metadata = crate::provenance::inject_provenance(
-        server,
-        json!({
+    let mut artifact_metadata =
+        build_candidate_knowledge_artifact_fields(&path, "unspecified", &json!({}));
+    if let Some(object) = artifact_metadata.as_object_mut() {
+        object.extend(
+            json!({
             "wiki": true,
             "wiki_title": title,
             "ingest_source": params.source.clone(),
@@ -505,10 +507,15 @@ pub(crate) async fn handle_wiki_ingest(
             // step exists here); stamp it `pending_review` honestly, same
             // vocabulary `wiki_layer_metadata` stamps for the MCP write
             // path, with the ingest source recorded as its typed evidence ref.
-            "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
-            "authority": WikiAuthorityV1::Advisory.as_str(),
-            "artifact_kind": WikiArtifactKindV1::Wiki.as_str(),
-        }),
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
+    }
+    let metadata = crate::provenance::inject_provenance(
+        server,
+        artifact_metadata,
         "wiki_ingest",
         "wiki_ingest",
         Some("global"),

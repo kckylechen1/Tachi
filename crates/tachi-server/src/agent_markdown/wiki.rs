@@ -1,5 +1,35 @@
 use super::*;
 
+fn effective_artifact_badge(row: &Value) -> String {
+    let Some(artifact) = row.get("effective_artifact") else {
+        return String::new();
+    };
+    let scope = artifact
+        .get("knowledge_scope")
+        .and_then(Value::as_str)
+        .unwrap_or("unspecified");
+    let applicability = artifact
+        .get("applicability_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unspecified");
+    let origins = artifact
+        .get("origin_projects")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    if origins.is_empty() {
+        format!(" [{scope}; applicability={applicability}]")
+    } else {
+        format!(" [{scope}; origin={origins}; applicability={applicability}]")
+    }
+}
+
 pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> String {
     let mut out = vec![
         format!("## Wiki search: \"{query}\""),
@@ -31,8 +61,9 @@ pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> 
                 _ => String::new(),
             };
             let store_badge = wiki_store_badge(row);
+            let artifact_badge = effective_artifact_badge(row);
             out.push(format!(
-                "{}. {relevance} `{path}`{lifecycle_badge}{store_badge} - {}",
+                "{}. {relevance} `{path}`{lifecycle_badge}{store_badge}{artifact_badge} - {}",
                 idx + 1,
                 md_escape(&compact_text_line(summary, 120)),
             ));
@@ -84,8 +115,9 @@ pub(crate) fn format_wiki_browse_category(path: &str, entries: &[Value]) -> Stri
             _ => String::new(),
         };
         let store_badge = wiki_store_badge(entry);
+        let artifact_badge = effective_artifact_badge(entry);
         out.push(format!(
-            "{}. **`{entry_path}`**{lifecycle_badge}{store_badge} (importance {importance})\n   {}",
+            "{}. **`{entry_path}`**{lifecycle_badge}{store_badge}{artifact_badge} (importance {importance})\n   {}",
             idx + 1,
             md_escape(summary),
         ));
@@ -156,6 +188,10 @@ pub(crate) fn format_wiki_read(entry: &Value) -> String {
     ));
     if !entities.is_empty() {
         out.push(format!("**entities:** {entities}"));
+    }
+    let artifact_badge = effective_artifact_badge(entry);
+    if !artifact_badge.is_empty() {
+        out.push(format!("**artifact:**{}", artifact_badge));
     }
     out.push("\n---\n".to_string());
     out.push(text.to_string());

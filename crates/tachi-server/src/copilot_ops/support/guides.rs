@@ -46,15 +46,7 @@ pub(in crate::copilot_ops) fn feature_guide_hits(
 }
 
 fn feature_guide_lifecycle(entry: &MemoryEntry) -> WikiLifecycleV1 {
-    if entry.metadata.get("lifecycle").is_some() {
-        return derive_wiki_lifecycle(&entry.metadata, &entry.path);
-    }
-    entry
-        .metadata
-        .get("status")
-        .and_then(Value::as_str)
-        .and_then(|status| status.parse::<WikiLifecycleV1>().ok())
-        .unwrap_or(WikiLifecycleV1::PendingReview)
+    derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope).lifecycle
 }
 
 pub(in crate::copilot_ops) fn load_feature_guide_candidates(
@@ -86,7 +78,14 @@ pub(in crate::copilot_ops) fn guide_applies_to(
     stage: Option<&str>,
     query_tokens: &HashSet<String>,
 ) -> bool {
-    let applies = entry.metadata.get("applies_to").unwrap_or(&Value::Null);
+    let effective = derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
+    if effective.applicability_status == WikiApplicabilityStatusV1::Malformed
+        || (effective.knowledge_scope == WikiKnowledgeScopeV1::Shared
+            && effective.applicability_status != WikiApplicabilityStatusV1::Bounded)
+    {
+        return false;
+    }
+    let applies = serde_json::to_value(&effective.applies_to).unwrap_or(Value::Null);
     guide_filter_matches(applies.get("task_type"), task_type, query_tokens)
         && guide_filter_matches(applies.get("profiles"), profile, query_tokens)
         && guide_filter_matches(applies.get("stage"), stage, query_tokens)
@@ -201,7 +200,7 @@ pub(in crate::copilot_ops) fn guide_hit_row(
     score: usize,
 ) -> Value {
     let metadata = &entry.metadata;
-    let lifecycle = feature_guide_lifecycle(entry);
+    let effective = derive_effective_knowledge_artifact(metadata, &entry.path, &entry.scope);
     let db_scope = match store {
         StoreRef::LegacyGlobal => DbScope::Global,
         StoreRef::BoundProject | StoreRef::NamedProject { .. } => DbScope::Project,
@@ -216,10 +215,11 @@ pub(in crate::copilot_ops) fn guide_hit_row(
         "score": score,
         "layer": metadata.get("layer").and_then(Value::as_str).unwrap_or("guide"),
         "scope": metadata.get("scope").and_then(Value::as_str).unwrap_or(entry.scope.as_str()),
-        "authority": metadata.get("authority").and_then(Value::as_str).unwrap_or("playbook"),
-        "status": lifecycle.as_str(),
-        "lifecycle": lifecycle.as_str(),
-        "applies_to": metadata.get("applies_to").cloned().unwrap_or(Value::Null),
+        "authority": effective.authority.as_str(),
+        "status": effective.lifecycle.as_str(),
+        "lifecycle": effective.lifecycle.as_str(),
+        "applies_to": effective.applies_to,
+        "effective_artifact": effective,
     })
 }
 
@@ -419,5 +419,43 @@ mod tests {
             hits.iter().all(|hit| hit["store"]["project"] == "quant"),
             "every explicit-project guide hit must carry the selected named store: {hits:?}"
         );
+    }
+
+    #[test]
+    fn malformed_or_unbounded_shared_applicability_fails_closed() {
+        let mut malformed = crate::tests::make_entry("malformed-applicability-guide");
+        malformed.path = "/guide/malformed-applicability".to_string();
+        malformed.metadata = json!({
+            "artifact_kind": "guide",
+            "knowledge_scope": "project",
+            "lifecycle": "active",
+            "authority": "playbook",
+            "applies_to": {"task_type": ["review", 42]},
+        });
+        assert!(!guide_applies_to(
+            &malformed,
+            Some("review"),
+            None,
+            None,
+            &HashSet::new(),
+        ));
+
+        let mut unbounded_shared = crate::tests::make_entry("unbounded-shared-guide");
+        unbounded_shared.path = "/guide/unbounded-shared".to_string();
+        unbounded_shared.metadata = json!({
+            "artifact_kind": "guide",
+            "knowledge_scope": "shared",
+            "lifecycle": "active",
+            "authority": "playbook",
+            "origin_projects": ["Sigil"],
+            "applies_to": {},
+        });
+        assert!(!guide_applies_to(
+            &unbounded_shared,
+            None,
+            None,
+            None,
+            &HashSet::new(),
+        ));
     }
 }

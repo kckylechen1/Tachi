@@ -13,6 +13,28 @@ use tachi_foundry::{
     select_memory_distill_bucket,
 };
 
+fn candidate_guide_artifact_metadata(
+    path: &str,
+    target_db: DbScope,
+    named_project: Option<&str>,
+) -> serde_json::Value {
+    let origin_projects = named_project.into_iter().collect::<Vec<_>>();
+    let proposal_metadata = json!({
+        "origin_projects": origin_projects,
+        "applies_to": {"projects": origin_projects},
+    });
+    let requested_scope = if target_db == DbScope::Project {
+        "project"
+    } else {
+        "shared"
+    };
+    crate::tool_params::build_candidate_knowledge_artifact_fields(
+        path,
+        requested_scope,
+        &proposal_metadata,
+    )
+}
+
 pub(super) async fn process_memory_distill_job(
     server: &MemoryServer,
     item: &FoundryMaintenanceItem,
@@ -104,23 +126,36 @@ pub(super) async fn process_memory_distill_job(
     let timestamp_segment = now.format("%Y%m%dT%H%M%S").to_string();
     let memory_id = uuid::Uuid::new_v4().to_string();
     let plan = plan_guide_distill_memory(agent_id, &bucket, &distill_text, &timestamp_segment);
+    let mut artifact_metadata = candidate_guide_artifact_metadata(
+        &plan.path,
+        item.target_db,
+        item.named_project.as_deref(),
+    );
+    if let Some(object) = artifact_metadata.as_object_mut() {
+        object.extend(
+            json!({
+                "guide": true,
+                "guide_type": plan.guide_type,
+                "guide_layer": "guide",
+                "file_patterns": plan.file_patterns,
+                "error_patterns": plan.error_patterns,
+                "source_memory_ids": plan.source_memory_ids,
+                "source_path_prefix": plan.source_path_prefix,
+                "namespace_key": plan.namespace_key,
+                "coherence_key": plan.coherence_key,
+                "bucket_key": plan.bucket_key,
+                "quality_flags": plan.quality_flags,
+                "job_id": item.job.id,
+                "legacy_distill_root": plan.legacy_distill_root,
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
+    }
     let mut metadata = crate::provenance::inject_provenance(
         server,
-        json!({
-            "guide": true,
-            "guide_type": plan.guide_type,
-            "guide_layer": "guide",
-            "file_patterns": plan.file_patterns,
-            "error_patterns": plan.error_patterns,
-            "source_memory_ids": plan.source_memory_ids,
-            "source_path_prefix": plan.source_path_prefix,
-            "namespace_key": plan.namespace_key,
-            "coherence_key": plan.coherence_key,
-            "bucket_key": plan.bucket_key,
-            "quality_flags": plan.quality_flags,
-            "job_id": item.job.id,
-            "legacy_distill_root": plan.legacy_distill_root,
-        }),
+        artifact_metadata,
         "foundry_worker",
         "memory_distill",
         Some(if item.target_db == DbScope::Project {
@@ -211,4 +246,37 @@ pub(super) async fn process_memory_distill_job(
     );
 
     Ok(DistillOutcome::Wrote)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_distill_guide_uses_candidate_artifact_contract() {
+        let project = candidate_guide_artifact_metadata(
+            "/guide/foundry/project-review",
+            DbScope::Project,
+            Some("Sigil"),
+        );
+        assert_eq!(project["artifact_kind"], "guide");
+        assert_eq!(project["knowledge_scope"], "project");
+        assert_eq!(project["origin_projects"], json!(["Sigil"]));
+        assert_eq!(project["applies_to"]["projects"], json!(["Sigil"]));
+        assert_eq!(project["lifecycle"], "pending_review");
+        assert_eq!(project["authority"], "playbook");
+
+        let shared = candidate_guide_artifact_metadata(
+            "/guide/foundry/shared-review",
+            DbScope::Global,
+            None,
+        );
+        assert_eq!(shared["knowledge_scope"], "shared");
+        assert_eq!(shared["origin_projects"], json!([]));
+        assert!(shared["artifact_metadata_warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|value| value == "shared_scope_not_bounded")));
+    }
 }

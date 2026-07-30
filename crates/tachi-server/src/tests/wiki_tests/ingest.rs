@@ -712,6 +712,15 @@ async fn tachi_wiki_ingest_stamps_pending_review_lifecycle_not_active() {
         json!("pending_review"),
         "ingested content must never be default-retrievable as reviewed truth: {entry:?}"
     );
+    assert_eq!(entry["metadata"]["artifact_kind"], json!("wiki"));
+    assert_eq!(
+        entry["metadata"]["knowledge_scope"],
+        json!("unspecified"),
+        "physical storage in project=wiki must not invent semantic applicability"
+    );
+    assert_eq!(entry["metadata"]["origin_projects"], json!([]));
+    assert_eq!(entry["metadata"]["applies_to"], json!({}));
+    assert_eq!(entry["metadata"]["known_exceptions"], json!([]));
     assert!(
         entry["metadata"].get("source_refs").is_none(),
         "new ingest writes must not emit legacy source_refs: {entry:#}"

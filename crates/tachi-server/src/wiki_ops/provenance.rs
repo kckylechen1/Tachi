@@ -98,7 +98,9 @@ pub(crate) fn apply_wiki_lifecycle_gate_for_plan(
             return is_all_scope;
         };
         let entry = &resolved.entry;
-        let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
+        let lifecycle =
+            derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope)
+                .lifecycle;
         let keep = if let Some(wanted) = requested {
             lifecycle == wanted
         } else if default_to_active_only {
@@ -107,7 +109,7 @@ pub(crate) fn apply_wiki_lifecycle_gate_for_plan(
             true
         };
         if keep {
-            attach_wiki_provenance(row, entry, &resolved.store, lifecycle);
+            attach_wiki_provenance(row, entry, &resolved.store);
         }
         keep
     });
@@ -121,7 +123,8 @@ pub(super) fn wiki_entry_matches_lifecycle_scope(
     entry: &MemoryEntry,
     requested_lifecycle: Option<&str>,
 ) -> Result<bool, String> {
-    let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
+    let lifecycle =
+        derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope).lifecycle;
     match requested_lifecycle {
         None => Ok(lifecycle.is_default_retrievable()),
         Some(value) if value.eq_ignore_ascii_case("all") => Ok(true),
@@ -166,19 +169,18 @@ pub(super) fn preferred_wiki_references(metadata: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(super) fn attach_wiki_provenance(
-    row: &mut Value,
-    entry: &MemoryEntry,
-    store_ref: &StoreRef,
-    lifecycle: WikiLifecycleV1,
-) {
+pub(super) fn attach_wiki_provenance(row: &mut Value, entry: &MemoryEntry, store_ref: &StoreRef) {
     let Some(obj) = row.as_object_mut() else {
         return;
     };
-    let authority = derive_wiki_authority(&entry.metadata);
+    let effective = derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
     obj.insert("store".to_string(), json!(store_ref));
-    obj.insert("lifecycle".to_string(), json!(lifecycle.as_str()));
-    obj.insert("authority".to_string(), json!(authority.as_str()));
+    obj.insert("lifecycle".to_string(), json!(effective.lifecycle.as_str()));
+    obj.insert("authority".to_string(), json!(effective.authority.as_str()));
+    obj.insert(
+        "effective_artifact".to_string(),
+        serde_json::to_value(effective).unwrap_or(Value::Null),
+    );
     obj.insert("revision".to_string(), json!(entry.revision));
     obj.insert(
         "source_refs".to_string(),

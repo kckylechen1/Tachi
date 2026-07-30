@@ -1,6 +1,8 @@
 use super::*;
 
-use crate::wiki_ops::{collect_wiki_read_value, collect_wiki_search_value, handle_wiki_read};
+use crate::wiki_ops::{
+    collect_wiki_browse_value, collect_wiki_read_value, collect_wiki_search_value, handle_wiki_read,
+};
 
 fn active_wiki_entry() -> memcore::MemoryEntry {
     let mut entry = make_entry("wiki-lifecycle-active");
@@ -154,6 +156,55 @@ async fn wiki_search_exposes_lifecycle_authority_revision_provenance_fields() {
     assert_eq!(
         row["evidence_refs_v1"][0]["ref"],
         json!("kckylechen1/tachi#1072")
+    );
+}
+
+#[tokio::test]
+async fn search_read_and_browse_expose_the_same_effective_artifact() {
+    let mut entry = active_wiki_entry();
+    entry.metadata = json!({
+        "artifact_kind": "wiki",
+        "knowledge_scope": "shared",
+        "origin_projects": ["Sigil"],
+        "applies_to": {"repos": ["Sigil", "Quant_Analyzer_2026"]},
+        "known_exceptions": ["Quant uses a separate persistence adapter"],
+        "lifecycle": "active",
+        "authority": "advisory",
+        "source_bundle_hash": "reviewed-source-bundle",
+        "review_receipt": {
+            "approver": "owner",
+            "decision": "approved",
+            "decided_at": "2026-07-31T00:00:00Z"
+        },
+    });
+    let path = entry.path.clone();
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let search = collect_wiki_search_value(&server, search_params("LifecycleGateNeedle", None))
+        .await
+        .expect("search");
+    let search_artifact = search["results"][0]["effective_artifact"].clone();
+    let read = collect_wiki_read_value(&server, &path, "wiki").expect("read");
+    let read_artifact = read["entry"]["effective_artifact"].clone();
+    let browse = collect_wiki_browse_value(
+        &server,
+        WikiBrowseParams {
+            category: Some("/wiki/engineering/lifecycle".to_string()),
+            limit: 10,
+            project: Some("wiki".to_string()),
+            lifecycle: None,
+        },
+    )
+    .expect("browse");
+    let browse_artifact = browse["entries"][0]["effective_artifact"].clone();
+
+    assert_eq!(search_artifact, read_artifact);
+    assert_eq!(search_artifact, browse_artifact);
+    assert_eq!(search_artifact["knowledge_scope"], json!("shared"));
+    assert_eq!(search_artifact["applicability_status"], json!("bounded"));
+    assert_eq!(
+        search_artifact["applies_to"]["repos"],
+        json!(["Quant_Analyzer_2026", "Sigil"])
     );
 }
 

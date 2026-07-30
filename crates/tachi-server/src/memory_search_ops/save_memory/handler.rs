@@ -250,7 +250,13 @@ fn is_wiki_classified(entry: &memcore::MemoryEntry) -> bool {
             .unwrap_or(false)
 }
 
-fn constrain_public_wiki_metadata(metadata: &mut serde_json::Value) -> Result<(), String> {
+fn constrain_public_wiki_metadata(
+    metadata: &mut serde_json::Value,
+    path: &str,
+    scope: &str,
+) -> Result<(), String> {
+    let candidate =
+        crate::tool_params::build_candidate_knowledge_artifact_fields(path, scope, metadata);
     let object = metadata
         .as_object_mut()
         .ok_or_else(|| "metadata must be a JSON object for wiki-classified saves".to_string())?;
@@ -261,6 +267,15 @@ fn constrain_public_wiki_metadata(metadata: &mut serde_json::Value) -> Result<()
     object.insert("lifecycle".to_string(), json!("pending_review"));
     object.insert("status".to_string(), json!("pending_review"));
     object.insert("review_status".to_string(), json!("pending"));
+    object.insert("authority".to_string(), json!("advisory"));
+    if let Some(candidate) = candidate.as_object() {
+        for (key, value) in candidate {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    // Generic public saves never establish playbook authority. The dedicated
+    // Wiki/guide facade may create a pending playbook candidate, but this
+    // lower-level public seam remains advisory-only.
     object.insert("authority".to_string(), json!("advisory"));
     Ok(())
 }
@@ -602,7 +617,7 @@ async fn handle_save_memory_impl(
     let metadata_removals = if metadata_authority == SaveMetadataAuthority::Public
         && (is_wiki_classified(&entry) || existing_entry.as_ref().is_some_and(is_wiki_classified))
     {
-        constrain_public_wiki_metadata(&mut entry.metadata)?;
+        constrain_public_wiki_metadata(&mut entry.metadata, &entry.path, &entry.scope)?;
         PUBLIC_WIKI_AUTHORITY_KEYS.to_vec()
     } else {
         Vec::new()

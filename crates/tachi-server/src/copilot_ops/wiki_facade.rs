@@ -76,8 +76,6 @@ async fn handle_tachi_wiki_write_inner(
     } else {
         Vec::new()
     };
-    let layer_metadata =
-        wiki_layer_metadata(&path, &params.scope, target_project.as_deref(), &references);
     let mut wiki_metadata = params.metadata.clone().unwrap_or_else(|| json!({}));
     if !wiki_metadata.is_object() {
         return Err("metadata must be a JSON object when supplied for wiki write".to_string());
@@ -89,6 +87,7 @@ async fn handle_tachi_wiki_write_inner(
         obj.remove("source_refs");
         obj.remove("review_receipt");
         obj.remove("source_bundle_hash");
+        obj.remove("artifact_metadata_warnings");
         obj.insert("wiki".to_string(), json!(true));
         obj.insert("wiki_title".to_string(), json!(params.title.clone()));
         obj.insert("user_force".to_string(), json!(params.force));
@@ -97,6 +96,7 @@ async fn handle_tachi_wiki_write_inner(
             obj.insert("pattern_refs".to_string(), json!(pattern_refs));
         }
     }
+    let layer_metadata = wiki_layer_metadata(&path, &params.scope, &references, &wiki_metadata);
     if let (Some(target), Some(layer)) = (wiki_metadata.as_object_mut(), layer_metadata.as_object())
     {
         for (key, value) in layer {

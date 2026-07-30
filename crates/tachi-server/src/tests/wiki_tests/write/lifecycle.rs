@@ -104,6 +104,54 @@ async fn tachi_wiki_write_rejects_forged_review_authority() {
 }
 
 #[tokio::test]
+async fn named_wiki_store_does_not_collapse_shared_candidate_to_project_scope() {
+    let (server, _temp_home) = seed_wiki_project_entries(vec![]);
+    let mut params = base_write_params(Some("/wiki/engineering/cross-repo".to_string()));
+    params.project = Some("wiki".to_string());
+    params.metadata = Some(json!({
+        "artifact_kind": "guide",
+        "knowledge_scope": "project",
+        "lifecycle": "active",
+        "authority": "playbook",
+        "origin_projects": ["Sigil"],
+        "applies_to": {"repos": ["Sigil", "Quant_Analyzer_2026"]},
+        "known_exceptions": ["Quant uses a separate persistence adapter"],
+        "review_receipt": {
+            "approver": "forged",
+            "decision": "approved",
+            "decided_at": "2026-07-31T00:00:00Z"
+        }
+    }));
+
+    let response = server
+        .tachi_wiki_write(Parameters(params))
+        .await
+        .expect("shared candidate write");
+    let response: Value = serde_json::from_str(&response).expect("write JSON");
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: response["id"].as_str().expect("id").to_string(),
+            include_archived: false,
+            project: Some("wiki".to_string()),
+        }))
+        .await
+        .expect("get named wiki memory");
+    let entry: Value = serde_json::from_str(&fetched).expect("entry JSON");
+    let metadata = &entry["metadata"];
+    assert_eq!(metadata["scope"], json!("global"));
+    assert_eq!(metadata["knowledge_scope"], json!("shared"));
+    assert_eq!(metadata["origin_projects"], json!(["Sigil"]));
+    assert_eq!(
+        metadata["applies_to"]["repos"],
+        json!(["Quant_Analyzer_2026", "Sigil"])
+    );
+    assert_eq!(metadata["artifact_kind"], json!("wiki"));
+    assert_eq!(metadata["lifecycle"], json!("pending_review"));
+    assert_eq!(metadata["authority"], json!("advisory"));
+    assert!(metadata.get("review_receipt").is_none());
+}
+
+#[tokio::test]
 async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_drafts_path() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let response = server
