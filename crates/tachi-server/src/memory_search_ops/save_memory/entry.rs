@@ -182,15 +182,7 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
 }
 
 fn trusted_existing_model_invocation(existing: Option<&MemoryEntry>) -> Option<serde_json::Value> {
-    existing?
-        .metadata
-        .pointer("/provenance/model_invocation")
-        .filter(|value| {
-            value.is_object()
-                && value.get("schema").and_then(serde_json::Value::as_str)
-                    == Some(tachi_llm::MODEL_INVOCATION_SCHEMA_V1)
-        })
-        .cloned()
+    existing.and_then(|entry| crate::provenance::trusted_existing_model_invocation(&entry.metadata))
 }
 
 fn attach_trusted_existing_model_invocation(

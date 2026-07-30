@@ -350,11 +350,7 @@ impl TrustedExistingModelInvocationReceipt {
     /// from the replacement transaction. Caller/model metadata never reaches
     /// this preservation seam.
     fn from_existing_row(entry: &MemoryEntry) -> Option<Self> {
-        entry
-            .metadata
-            .pointer("/provenance/model_invocation")
-            .cloned()
-            .map(Self)
+        crate::provenance::trusted_existing_model_invocation(&entry.metadata).map(Self)
     }
 
     fn attach_exactly(&self, mut metadata: Value) -> Result<Value, memcore::MemoryError> {

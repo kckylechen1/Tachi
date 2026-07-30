@@ -118,6 +118,22 @@ pub(super) fn attach_model_invocation(
     Ok(metadata)
 }
 
+/// Read back only the reserved receipt shape this server knows how to
+/// preserve. Legacy or malformed rows must not turn arbitrary metadata into a
+/// trusted receipt merely because it occupies the reserved JSON pointer.
+pub(super) fn trusted_existing_model_invocation(
+    metadata: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    metadata
+        .pointer("/provenance/model_invocation")
+        .filter(|value| {
+            value.is_object()
+                && value.get("schema").and_then(serde_json::Value::as_str)
+                    == Some(tachi_llm::MODEL_INVOCATION_SCHEMA_V1)
+        })
+        .cloned()
+}
+
 /// Attach a closed `model-invocation-v1` receipt to an event ledger
 /// provenance object. Event rows persist `TachiEventRecord::provenance`
 /// directly, not under `metadata.provenance`, so this is intentionally a

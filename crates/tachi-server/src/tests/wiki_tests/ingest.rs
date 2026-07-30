@@ -304,6 +304,76 @@ async fn tachi_wiki_ingest_update_preserves_trusted_first_receipt_exactly() {
 }
 
 #[tokio::test]
+async fn tachi_wiki_ingest_does_not_preserve_an_invalid_existing_receipt() {
+    let provider_a = MockWikiIngestProvider::start_with_model(
+        r#"{"title":"Legacy Wiki","topic":"invalid-existing-receipt","summary":"first summary","keywords":["first"],"entities":["Tachi"]}"#,
+        "stop",
+        "wiki-invalid-old",
+    )
+    .await;
+    let (mut server, home) = seed_wiki_project_entries(vec![]);
+    server.llm = Arc::new(provider_a.llm.clone());
+    let first_source = write_wiki_ingest_source(&home, "ingest-invalid-old-receipt.md");
+    let first_response = server
+        .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
+            source: first_source,
+            topic: None,
+            update_related: false,
+        }))
+        .await
+        .expect("first wiki write");
+    let first_response: Value = serde_json::from_str(&first_response).expect("first response");
+    let first_id = first_response["id"].as_str().expect("first wiki id");
+
+    server
+        .with_named_project_store("wiki", |store| {
+            let mut existing = store
+                .get(first_id)
+                .map_err(|error| error.to_string())?
+                .expect("first wiki row exists");
+            existing.metadata["provenance"]["model_invocation"]["schema"] =
+                json!("legacy-invalid-receipt");
+            store
+                .upsert(&existing)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("simulate a legacy row with an invalid reserved receipt");
+
+    let provider_b = MockWikiIngestProvider::start_with_model(
+        r#"{"title":"Replacement Wiki","topic":"invalid-existing-receipt","summary":"replacement summary","keywords":["replacement"],"entities":["Tachi"]}"#,
+        "stop",
+        "wiki-valid-current",
+    )
+    .await;
+    server.llm = Arc::new(provider_b.llm.clone());
+    let second_source = write_wiki_ingest_source(&home, "ingest-valid-current-receipt.md");
+    let second_response = server
+        .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
+            source: second_source,
+            topic: None,
+            update_related: false,
+        }))
+        .await
+        .expect("replacement wiki write");
+    let second_response: Value =
+        serde_json::from_str(&second_response).expect("replacement response");
+    let second_id = second_response["id"].as_str().expect("replacement wiki id");
+    let replacement = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(second_id).map_err(|error| error.to_string())
+        })
+        .expect("read replacement wiki row")
+        .expect("replacement wiki row exists");
+    let receipt = replacement
+        .metadata
+        .pointer("/provenance/model_invocation")
+        .expect("replacement typed receipt");
+    assert_eq!(receipt["schema"], "model-invocation-v1");
+    assert_eq!(receipt["effective_model"], "wiki-valid-current");
+}
+
+#[tokio::test]
 async fn model_derived_wiki_facade_update_preserves_trusted_first_receipt_exactly() {
     let provider_a = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-facade-a").await;
     let provider_b = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-facade-b").await;
