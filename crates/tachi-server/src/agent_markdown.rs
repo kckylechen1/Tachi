@@ -10,7 +10,7 @@ mod search;
 mod shared;
 mod wiki;
 
-use shared::{format_section_rows, md_escape};
+use shared::{format_section_rows, md_escape, wiki_store_badge};
 
 pub(crate) use alerts::format_alerts;
 pub(crate) use briefing::{format_briefing, render_issue_freshness_section};

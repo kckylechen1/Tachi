@@ -11,9 +11,9 @@
         "profiles": {
             "standard": {
                 "max_visible_tools": 16,
-                "max_total_input_schema_bytes": 64526,
-                "max_total_tool_definition_bytes": 73813,
-                "rationale": "Post-#1314 daily-agent ceiling; any regrowth requires explicit adjudication."
+                "max_total_input_schema_bytes": 64522,
+                "max_total_tool_definition_bytes": 73809,
+                "rationale": "Post-#1540 daily-agent ceiling; any regrowth requires explicit adjudication."
             },
             "delegate": {
                 "max_visible_tools": 11,
@@ -23,20 +23,20 @@
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 134510,
-                "max_total_tool_definition_bytes": 153689,
+                "max_total_input_schema_bytes": 134444,
+                "max_total_tool_definition_bytes": 153623,
                 "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
             },
             "operate": {
                 "max_visible_tools": 50,
-                "max_total_input_schema_bytes": 122284,
-                "max_total_tool_definition_bytes": 141381,
+                "max_total_input_schema_bytes": 122218,
+                "max_total_tool_definition_bytes": 141315,
                 "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice."
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 199081,
-                "max_total_tool_definition_bytes": 237572,
+                "max_total_input_schema_bytes": 199015,
+                "max_total_tool_definition_bytes": 237506,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
@@ -235,8 +235,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 199081,
-                "total_tool_definition_bytes": 237572,
+                "total_input_schema_bytes": 199015,
+                "total_tool_definition_bytes": 237506,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -345,8 +345,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 134510,
-                "total_tool_definition_bytes": 153689,
+                "total_input_schema_bytes": 134444,
+                "total_tool_definition_bytes": 153623,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -410,8 +410,8 @@
                 ]
             },
             "operate": {
-                "total_input_schema_bytes": 122284,
-                "total_tool_definition_bytes": 141381,
+                "total_input_schema_bytes": 122218,
+                "total_tool_definition_bytes": 141315,
                 "visible_tool_count": 50,
                 "visible_tools": [
                     "archive_memory",
@@ -467,8 +467,8 @@
                 ]
             },
             "standard": {
-                "total_input_schema_bytes": 64526,
-                "total_tool_definition_bytes": 73813,
+                "total_input_schema_bytes": 64522,
+                "total_tool_definition_bytes": 73809,
                 "visible_tool_count": 16,
                 "visible_tools": [
                     "peer_query",
@@ -1329,7 +1329,7 @@
                     ]
                 },
                 "tachi_wiki": {
-                    "input_schema_bytes": 2877,
+                    "input_schema_bytes": 2873,
                     "property_count": 24,
                     "property_names": [
                         "action",

@@ -35,6 +35,7 @@ async fn tachi_search_wiki_scope_honors_explicit_project() {
         response.contains("UniqueDefaultWikiNeedle") || response.contains("search-default"),
         "expected explicit project=wiki to search the named wiki DB, got: {response}"
     );
+    assert!(response.contains("[store: named wiki]"), "{response}");
 }
 
 /// Cross-vendor review (#1215 BUG 4): "generic search... bypass the new

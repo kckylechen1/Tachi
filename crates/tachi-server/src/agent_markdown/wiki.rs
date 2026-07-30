@@ -1,29 +1,5 @@
 use super::*;
 
-fn wiki_store_label(store: Option<&Value>) -> Option<String> {
-    let store = store?;
-    let kind = store.get("kind").and_then(Value::as_str)?;
-    let label = match kind {
-        "bound_project" => "bound project".to_string(),
-        "named_project" => {
-            let project = store
-                .get("project")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            format!("named {}", compact_text_line(project, 60))
-        }
-        "legacy_global" => "legacy global".to_string(),
-        other => compact_text_line(other, 60),
-    };
-    Some(md_escape(&label))
-}
-
-fn wiki_store_badge(row: &Value) -> String {
-    wiki_store_label(row.get("store"))
-        .map(|label| format!(" [store: {label}]"))
-        .unwrap_or_default()
-}
-
 pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> String {
     let mut out = vec![
         format!("## Wiki search: \"{query}\""),

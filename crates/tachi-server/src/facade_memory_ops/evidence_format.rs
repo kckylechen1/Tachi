@@ -533,14 +533,18 @@ pub(crate) fn slim_memory_rows(value: Value) -> Value {
         rows.into_iter()
             .take(12)
             .map(|row| {
-                json!({
+                let mut slim = json!({
                     "id": row.get("id"),
                     "db": row.get("db"),
                     "path": row.get("path"),
                     "summary": row.get("summary"),
                     "topic": row.get("topic"),
                     "relevance": row.get("relevance"),
-                })
+                });
+                if let Some(store) = row.get("store").filter(|value| !value.is_null()) {
+                    slim["store"] = store.clone();
+                }
+                slim
             })
             .collect(),
     )
@@ -757,4 +761,15 @@ mod tests {
             .iter()
             .any(|gap| gap == "No evidence rows were retrieved."));
     }
+}
+#[test]
+fn slim_memory_rows_preserves_typed_wiki_store_identity() {
+    let store = json!({"kind": "named_project", "project": "wiki"});
+    let rows = slim_memory_rows(json!([{
+        "id": "wiki-row",
+        "path": "/wiki/example",
+        "store": store,
+    }]));
+
+    assert_eq!(rows[0]["store"], store);
 }

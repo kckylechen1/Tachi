@@ -7,6 +7,28 @@ pub(super) fn md_escape(s: &str) -> String {
         .replace('_', "\\_")
 }
 
+pub(super) fn wiki_store_badge(row: &Value) -> String {
+    let Some(store) = row.get("store") else {
+        return String::new();
+    };
+    let Some(kind) = store.get("kind").and_then(Value::as_str) else {
+        return String::new();
+    };
+    let label = match kind {
+        "bound_project" => "bound project".to_string(),
+        "named_project" => {
+            let project = store
+                .get("project")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!("named {}", compact_text_line(project, 60))
+        }
+        "legacy_global" => "legacy global".to_string(),
+        other => compact_text_line(other, 60),
+    };
+    format!(" [store: {}]", md_escape(&label))
+}
+
 pub(super) fn format_section_rows(rows: &Value, limit: usize) -> String {
     let Some(items) = rows.as_array() else {
         return "_No results._".to_string();
@@ -29,9 +51,10 @@ pub(super) fn format_section_rows(rows: &Value, limit: usize) -> String {
             .filter(|v| !v.is_null())
             .map(|v| v.to_string())
             .unwrap_or_else(|| "?".to_string());
+        let store_badge = wiki_store_badge(row);
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();
         out.push(format!(
-            "{}. **{}**{id_suffix} {relevance} `{path}` - {}",
+            "{}. **{}**{id_suffix} {relevance} `{path}`{store_badge} - {}",
             idx + 1,
             md_escape(topic),
             md_escape(&compact_text_line(summary, 120)),
