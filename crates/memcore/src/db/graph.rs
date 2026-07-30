@@ -195,6 +195,10 @@ fn validate_confirmed_contradiction(
                 "confirmed contradiction metadata requires provenance.model_invocation".to_string(),
             )
         })?;
+    // This is validation-only: the transaction persists the caller's original
+    // metadata after this function returns. The typed shadow rejects unknown
+    // or unsafe receipt shapes, while canonical serialization remains the
+    // producer boundary's responsibility.
     let receipt: ContradictionModelInvocationReceiptV1 =
         serde_json::from_value(receipt_value.clone()).map_err(|error| {
             MemoryError::InvalidArg(format!(
