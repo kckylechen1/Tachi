@@ -1,4 +1,5 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
+use serde::Deserialize;
 use std::collections::HashSet;
 
 use crate::error::MemoryError;
@@ -7,6 +8,24 @@ use crate::types::{GraphExpandResult, MemoryEdge};
 
 use super::common::{normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::fetch_by_ids;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContradictionModelInvocationReceiptV1 {
+    schema: String,
+    lane: String,
+    engine_kind: String,
+    effective_provider: Option<String>,
+    effective_model: Option<String>,
+    effective_version: Option<String>,
+    fallback_chain: Vec<String>,
+    degraded: bool,
+    completion_status: String,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    latency_ms: Option<u64>,
+}
 
 /// Append-only provenance context recorded alongside every edge write (#774).
 ///
@@ -69,6 +88,175 @@ pub fn add_edge_with_provenance(
 ) -> Result<(), MemoryError> {
     crate::relation_ontology::validate_relation_for_write(&edge.relation)?;
     write_edge_row(conn, edge, &edge.relation, provenance)
+}
+
+/// Persist one model-confirmed contradiction inside the caller's transaction.
+///
+/// This is deliberately narrower than a generic transaction surface: the two
+/// graph projections must describe the same directed pair, carry the same
+/// model-invocation provenance, and use the fixed `contradicts`/`supersedes`
+/// relations. The lifecycle update must win its unsuperseded-row CAS or the
+/// caller rolls the whole transaction back.
+pub(crate) fn persist_confirmed_contradiction_within_tx(
+    tx: &Transaction<'_>,
+    contradicts_edge: &MemoryEdge,
+    supersedes_edge: &MemoryEdge,
+    superseded_at: &str,
+) -> Result<(), MemoryError> {
+    validate_confirmed_contradiction(contradicts_edge, supersedes_edge, superseded_at)?;
+
+    write_edge_row(
+        tx,
+        contradicts_edge,
+        "contradicts",
+        &EdgeProvenance::default(),
+    )?;
+    write_edge_row(
+        tx,
+        supersedes_edge,
+        "supersedes",
+        &EdgeProvenance::default(),
+    )?;
+
+    let superseded_at = super::normalize_utc_iso(superseded_at)?;
+    let affected = tx.execute(
+        "UPDATE memories SET superseded_by = ?1, updated_at = ?2, \
+         valid_until = COALESCE(valid_until, ?2) \
+         WHERE id = ?3 AND superseded_by IS NULL",
+        params![
+            contradicts_edge.source_id,
+            superseded_at,
+            contradicts_edge.target_id
+        ],
+    )?;
+    if affected != 1 {
+        return Err(MemoryError::InvalidArg(format!(
+            "confirmed contradiction lifecycle CAS refused for {} -> {}",
+            contradicts_edge.target_id, contradicts_edge.source_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_confirmed_contradiction(
+    contradicts_edge: &MemoryEdge,
+    supersedes_edge: &MemoryEdge,
+    superseded_at: &str,
+) -> Result<(), MemoryError> {
+    if contradicts_edge.relation != "contradicts" || supersedes_edge.relation != "supersedes" {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction requires contradicts and supersedes edges".to_string(),
+        ));
+    }
+    crate::relation_ontology::validate_relation_for_write(&contradicts_edge.relation)?;
+    crate::relation_ontology::validate_relation_for_write(&supersedes_edge.relation)?;
+
+    let source_id = contradicts_edge.source_id.trim();
+    let target_id = contradicts_edge.target_id.trim();
+    if source_id.is_empty() || target_id.is_empty() || source_id == target_id {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction endpoints must be non-empty and distinct".to_string(),
+        ));
+    }
+    if supersedes_edge.source_id != contradicts_edge.source_id
+        || supersedes_edge.target_id != contradicts_edge.target_id
+    {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction edges must share identical endpoints".to_string(),
+        ));
+    }
+    if !contradicts_edge.weight.is_finite()
+        || !(0.0..=1.0).contains(&contradicts_edge.weight)
+        || supersedes_edge.weight != contradicts_edge.weight
+    {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction edges require one finite confidence in [0,1]".to_string(),
+        ));
+    }
+    if contradicts_edge.metadata != supersedes_edge.metadata {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction edges must carry identical metadata".to_string(),
+        ));
+    }
+    if contradicts_edge.metadata.get("auto_contradiction") != Some(&serde_json::Value::Bool(true))
+        || contradicts_edge.metadata.get("llm_verified") != Some(&serde_json::Value::Bool(true))
+    {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction metadata must identify an LLM-verified auto contradiction"
+                .to_string(),
+        ));
+    }
+
+    let receipt_value = contradicts_edge
+        .metadata
+        .pointer("/provenance/model_invocation")
+        .ok_or_else(|| {
+            MemoryError::InvalidArg(
+                "confirmed contradiction metadata requires provenance.model_invocation".to_string(),
+            )
+        })?;
+    // This is validation-only: the transaction persists the caller's original
+    // metadata after this function returns. The typed shadow rejects unknown
+    // or unsafe receipt shapes, while canonical serialization remains the
+    // producer boundary's responsibility.
+    let receipt: ContradictionModelInvocationReceiptV1 =
+        serde_json::from_value(receipt_value.clone()).map_err(|error| {
+            MemoryError::InvalidArg(format!(
+                "confirmed contradiction model-invocation receipt is malformed: {error}"
+            ))
+        })?;
+    if receipt.schema != "model-invocation-v1"
+        || receipt.lane != "extract"
+        || receipt.engine_kind != "provider_http"
+    {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction requires an extract-lane model-invocation-v1 receipt"
+                .to_string(),
+        ));
+    }
+    if !matches!(receipt.completion_status.as_str(), "complete" | "unknown") {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction receipt must not be truncated or malformed".to_string(),
+        ));
+    }
+    if receipt.fallback_chain.len() > 4
+        || receipt.fallback_chain.iter().any(|step| {
+            !matches!(
+                step.as_str(),
+                "provider_http_fallback" | "claude_cli_to_provider_http"
+            )
+        })
+        || [
+            &receipt.effective_provider,
+            &receipt.effective_model,
+            &receipt.effective_version,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction receipt contains invalid persisted provenance".to_string(),
+        ));
+    }
+    let _typed_receipt_metrics = (
+        receipt.degraded,
+        receipt.prompt_tokens,
+        receipt.completion_tokens,
+        receipt.total_tokens,
+        receipt.latency_ms,
+    );
+
+    let superseded_at = super::normalize_utc_iso(superseded_at)?;
+    if super::normalize_utc_iso(&contradicts_edge.created_at)? != superseded_at
+        || super::normalize_utc_iso(&supersedes_edge.created_at)? != superseded_at
+    {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction edges and lifecycle transition must share one timestamp"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Typed, caller-scoped write door for the #772 component-governance
