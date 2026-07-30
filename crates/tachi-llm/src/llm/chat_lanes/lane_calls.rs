@@ -7,8 +7,9 @@ use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
 use super::super::provider_health::{
-    ChatLane, ChatLaneConfig, ProviderInvocationFailure, ProviderInvocationFailureClass,
-    ProviderInvocationOutcome, ProviderInvocationReceipt, SelectedProviderSecret,
+    ChatLane, ChatLaneConfig, CompletionStatusV1, Generated, ModelInvocationLaneV1,
+    ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
+    ProviderInvocationReceipt, SelectedProviderSecret,
 };
 
 #[derive(Clone, Copy)]
@@ -73,6 +74,22 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        self.call_extract_llm_with_receipt(system, user, model, temperature, max_tokens)
+            .await
+            .map(|generated| generated.value)
+    }
+
+    /// Extract-lane completion paired with its explicit, persisted-safe model
+    /// invocation receipt. The text-only sibling above remains a compatibility
+    /// adapter for callers that do not own durable provenance.
+    pub async fn call_extract_llm_with_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<Generated<String>, String> {
         self.call_lane_llm(
             ChatLane::Extract,
             system,
@@ -82,7 +99,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|outcome| outcome.text)
+        .map(|outcome| outcome.into_generated(ModelInvocationLaneV1::Extract))
     }
 
     /// Foundry batch distill and single-group fallback when
@@ -95,6 +112,21 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        self.call_distill_llm_with_receipt(system, user, model, temperature, max_tokens)
+            .await
+            .map(|generated| generated.value)
+    }
+
+    /// Distill-lane completion paired with its persisted-safe invocation
+    /// receipt. This does not change lane/model selection.
+    pub async fn call_distill_llm_with_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<Generated<String>, String> {
         self.call_lane_llm(
             ChatLane::Distill,
             system,
@@ -104,7 +136,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|outcome| outcome.text)
+        .map(|outcome| outcome.into_generated(ModelInvocationLaneV1::Distill))
     }
 
     /// Reasoning-lane HTTP call with **no** Claude-CLI-first behavior — a
@@ -197,6 +229,21 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        self.call_summary_llm_with_receipt(system, user, model, temperature, max_tokens)
+            .await
+            .map(|generated| generated.value)
+    }
+
+    /// Summary-lane completion paired with its persisted-safe invocation
+    /// receipt. Text/error compatibility remains in `call_summary_llm`.
+    pub async fn call_summary_llm_with_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<Generated<String>, String> {
         self.call_lane_llm(
             ChatLane::Summary,
             system,
@@ -206,7 +253,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
-        .map(|outcome| outcome.text)
+        .map(|outcome| outcome.into_generated(ModelInvocationLaneV1::Summary))
     }
 
     /// Returns `(text, truncated)` — `truncated` is `true` when the
@@ -566,10 +613,9 @@ impl super::super::LlmClient {
             // of whether content came back, so a non-empty-but-cut-off
             // response (`finish_reason == "length"`) is distinguishable from
             // a clean stop, not just used as empty-content diagnostics.
-            let finish_reason = json["choices"][0]["finish_reason"]
-                .as_str()
-                .unwrap_or("null")
-                .to_string();
+            let finish_reason = json["choices"][0]["finish_reason"].as_str();
+            let completion_status = completion_status_from_finish_reason(finish_reason);
+            let finish_reason_label = finish_reason.unwrap_or("null");
 
             // Extract content from first choice
             let content = json["choices"].as_array().and_then(|choices| {
@@ -599,7 +645,8 @@ impl super::super::LlmClient {
                 );
                 return Ok(ProviderInvocationOutcome {
                     text,
-                    truncated: finish_reason == "length",
+                    truncated: completion_status == CompletionStatusV1::Truncated,
+                    completion_status,
                     receipt: ProviderInvocationReceipt {
                         effective_provider: provider_host(&cfg.base_url),
                         effective_model: json
@@ -631,7 +678,7 @@ impl super::super::LlmClient {
                 .unwrap_or_else(|| "unknown".to_string());
 
             last_err = format!(
-                "Empty assistant content (finish_reason={finish_reason}, usage={usage}, model={model})"
+                "Empty assistant content (finish_reason={finish_reason_label}, usage={usage}, model={model})"
             );
             last_class = ProviderInvocationFailureClass::LaneOutage;
 
@@ -722,6 +769,38 @@ fn parse_usage_tokens(usage: Option<&Value>) -> ChatUsageTokens {
         prompt_tokens: token("prompt_tokens"),
         completion_tokens: token("completion_tokens"),
         total_tokens: token("total_tokens"),
+    }
+}
+
+fn completion_status_from_finish_reason(finish_reason: Option<&str>) -> CompletionStatusV1 {
+    match finish_reason {
+        Some("stop") => CompletionStatusV1::Complete,
+        Some("length") => CompletionStatusV1::Truncated,
+        _ => CompletionStatusV1::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_stop_is_complete_and_only_length_is_truncated() {
+        assert_eq!(
+            completion_status_from_finish_reason(Some("stop")),
+            CompletionStatusV1::Complete
+        );
+        assert_eq!(
+            completion_status_from_finish_reason(Some("length")),
+            CompletionStatusV1::Truncated
+        );
+        for unknown in [None, Some(""), Some("null"), Some("content_filter")] {
+            assert_eq!(
+                completion_status_from_finish_reason(unknown),
+                CompletionStatusV1::Unknown,
+                "non-authoritative finish reason {unknown:?} must stay unknown"
+            );
+        }
     }
 }
 

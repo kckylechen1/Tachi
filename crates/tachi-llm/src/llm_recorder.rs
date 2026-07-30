@@ -37,6 +37,8 @@ use chrono::Utc;
 use serde_json::json;
 use tokio::sync::Semaphore;
 
+use crate::{Generated, PersistedModelInvocationReceiptV1};
+
 mod cleanup;
 mod files;
 
@@ -55,6 +57,15 @@ pub const DEFAULT_MAX_CONCURRENT: usize = 2;
 #[derive(Debug)]
 pub struct RecordedCallOutcome {
     pub text: String,
+}
+
+/// Text plus the closed, persisted-safe receipt for the engine that produced
+/// it. The recorder's filesystem elapsed time stays in `status.json` and must
+/// never replace `invocation.latency_ms()`, which belongs to the serving engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedCallWithReceipt {
+    pub text: String,
+    pub invocation: PersistedModelInvocationReceiptV1,
 }
 
 /// Bounded recorder for LLM calls, writing the `prompt.md` /
@@ -207,6 +218,111 @@ impl LlmCallRecorder {
         }
     }
 
+    /// Receipt-preserving sibling to [`Self::record_call`]. It retains the
+    /// recorder's status/result artifacts while returning the original
+    /// provider/CLI invocation receipt unchanged for a durable producer to
+    /// attach at its own primary write boundary.
+    pub async fn record_call_with_receipt<F, Fut, O>(
+        &self,
+        label: &str,
+        prompt: &str,
+        executor: F,
+    ) -> Result<RecordedCallWithReceipt, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<O, String>>,
+        O: Into<Generated<String>>,
+    {
+        let permit = self
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| format!("llm recorder semaphore closed: {e}"))?;
+
+        let ts = Utc::now().format("%Y%m%dT%H%M%S%.3f").to_string();
+        let safe_label = files::sanitize_label(label);
+        let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}"));
+        if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
+            return Err(format!(
+                "llm recorder create run dir {}: {e}",
+                run_dir.display()
+            ));
+        }
+
+        let prompt_path = run_dir.join("prompt.md");
+        if let Err(e) =
+            files::write_owner_only_file_blocking(prompt_path.clone(), prompt.as_bytes().to_vec())
+                .await
+        {
+            return Err(format!("llm recorder write {}: {e}", prompt_path.display()));
+        }
+
+        let started_at = Utc::now().to_rfc3339();
+        let started = Instant::now();
+        let result = executor().await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let finished_at = Utc::now().to_rfc3339();
+
+        // Drop permit before filesystem writes — file I/O shouldn't hold a
+        // provider call slot.
+        drop(permit);
+
+        match result {
+            Ok(result) => {
+                let Generated { value, invocation } = result.into();
+                if let Err(err) =
+                    files::write_run_file_blocking(run_dir.join("result.md"), value.clone()).await
+                {
+                    tracing::warn!("llm recorder failed to write result.md: {err}");
+                }
+                if let Err(err) = files::write_run_status_file_blocking(
+                    run_dir.clone(),
+                    json!({
+                        "status": "success",
+                        "started_at": started_at,
+                        "finished_at": finished_at,
+                        "elapsed_ms": elapsed_ms,
+                        "label": label,
+                        "bytes": value.len(),
+                        "model_invocation": invocation,
+                    }),
+                )
+                .await
+                {
+                    tracing::warn!("llm recorder failed to write status.json: {err}");
+                }
+                Ok(RecordedCallWithReceipt {
+                    text: value,
+                    invocation,
+                })
+            }
+            Err(err) => {
+                if let Err(write_err) =
+                    files::write_run_file_blocking(run_dir.join("result.md"), err.clone()).await
+                {
+                    tracing::warn!("llm recorder failed to write error result.md: {write_err}");
+                }
+                if let Err(write_err) = files::write_run_status_file_blocking(
+                    run_dir.clone(),
+                    json!({
+                        "status": "failed",
+                        "started_at": started_at,
+                        "finished_at": finished_at,
+                        "elapsed_ms": elapsed_ms,
+                        "label": label,
+                        "error": err,
+                    }),
+                )
+                .await
+                {
+                    tracing::warn!("llm recorder failed to write failed status.json: {write_err}");
+                }
+                Err(err)
+            }
+        }
+    }
+
     /// Walk `runs_dir` and remove directories older than the retention
     /// policy (7d success / 30d failed). Returns `(removed, scanned)`.
     pub fn cleanup_expired(&self) -> (usize, usize) {
@@ -288,5 +404,73 @@ mod tests {
         assert_eq!(removed, 1, "only the success dir should be over its 7d cap");
         assert!(!fresh2.exists());
         assert!(failed2.exists());
+    }
+
+    #[tokio::test]
+    async fn record_call_with_receipt_preserves_provider_latency_not_filesystem_elapsed() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let recorder = LlmCallRecorder::new_in_app_home(1, app_home.path());
+        let invocation = PersistedModelInvocationReceiptV1::claude_cli_reasoning(1);
+
+        let recorded = recorder
+            .record_call_with_receipt("receipt-latency", "safe prompt", move || {
+                let invocation = invocation.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    Ok::<_, String>(Generated {
+                        value: "provider result".to_string(),
+                        invocation,
+                    })
+                }
+            })
+            .await
+            .expect("recorded invocation");
+
+        assert_eq!(recorded.text, "provider result");
+        assert_eq!(recorded.invocation.latency_ms(), Some(1));
+        let run_dir = std::fs::read_dir(recorder.runs_dir())
+            .expect("runs directory")
+            .next()
+            .expect("one recorded run")
+            .expect("run entry")
+            .path();
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("read status"),
+        )
+        .expect("parse status");
+        assert!(
+            status["elapsed_ms"].as_u64().expect("elapsed ms") >= 10,
+            "filesystem/run elapsed evidence must remain distinct from provider latency"
+        );
+        assert_eq!(status["model_invocation"]["latency_ms"], 1);
+        assert_eq!(status["model_invocation"]["schema"], "model-invocation-v1");
+    }
+
+    #[tokio::test]
+    async fn legacy_record_call_remains_text_only_compatible() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let recorder = LlmCallRecorder::new_in_app_home(1, app_home.path());
+
+        let recorded = recorder
+            .record_call("legacy-text", "legacy prompt", || async {
+                Ok::<_, String>("legacy result".to_string())
+            })
+            .await
+            .expect("legacy record call");
+        assert_eq!(recorded.text, "legacy result");
+        let run_dir = std::fs::read_dir(recorder.runs_dir())
+            .expect("runs directory")
+            .next()
+            .expect("one recorded run")
+            .expect("run entry")
+            .path();
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("read status"),
+        )
+        .expect("parse status");
+        assert!(
+            status.get("model_invocation").is_none(),
+            "text-only adapter must preserve its legacy status shape"
+        );
     }
 }

@@ -11,9 +11,11 @@ mod runtime_files;
 mod test_support;
 
 pub use llm::{
-    LlmClient, ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult,
-    ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
-    ProviderInvocationReceipt, ProviderSecret, ReasoningOutcome, RerankConfig, RerankProviderKind,
+    CompletionStatusV1, Generated, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
+    PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
+    ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
+    ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderSecret, ReasoningOutcome,
+    RerankConfig, RerankProviderKind, LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
     PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE, PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE,
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };

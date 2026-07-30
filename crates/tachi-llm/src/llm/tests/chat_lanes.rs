@@ -1,5 +1,6 @@
 use super::super::{
-    ChatLaneConfig, LaneFallbackConfig, ProviderInvocationFailureClass, ProviderRuntimeConfig,
+    ChatLaneConfig, CompletionStatusV1, LaneFallbackConfig, ModelEngineKindV1,
+    ModelInvocationLaneV1, ProviderInvocationFailureClass, ProviderRuntimeConfig,
 };
 use super::*;
 
@@ -436,7 +437,9 @@ async fn call_reasoning_llm_with_receipt_flags_truncation_and_fallback_honestly(
                     "prompt_tokens": 5,
                     "completion_tokens": 5,
                     "total_tokens": 10
-                }
+                },
+                "model": "http-after-cli-failure-model",
+                "system_fingerprint": "http-after-cli-failure-version"
             }))
         }),
     );
@@ -503,6 +506,29 @@ async fn call_reasoning_llm_with_receipt_flags_truncation_and_fallback_honestly(
     assert!(
         outcome.used_fallback,
         "the lane path (not claude-cli) served this request — must report fallback: true"
+    );
+    assert_eq!(
+        outcome.invocation.engine_kind(),
+        ModelEngineKindV1::ProviderHttp
+    );
+    assert_eq!(
+        outcome.invocation.effective_model(),
+        Some("http-after-cli-failure-model"),
+        "the HTTP fallback must retain the actual provider identity"
+    );
+    assert_eq!(
+        outcome.invocation.effective_version(),
+        Some("http-after-cli-failure-version")
+    );
+    assert!(outcome.invocation.degraded());
+    assert_eq!(
+        outcome.invocation.fallback_chain(),
+        &["claude_cli_to_provider_http".to_string()],
+        "the durable fallback marker must be fixed and must not carry the CLI error"
+    );
+    assert_eq!(
+        outcome.invocation.completion_status(),
+        CompletionStatusV1::Truncated
     );
 
     server_task.abort();
@@ -1327,6 +1353,292 @@ fn config_with_extract(extract: ChatLaneConfig) -> ProviderRuntimeConfig {
             local_endpoint: None,
         },
     }
+}
+
+/// The receipt must reflect provider-returned identity, not configured lane
+/// defaults. A mutant that copies `configured-extract-model` into provenance
+/// fails this discriminator.
+#[tokio::test]
+async fn extract_receipt_maps_actual_primary_provider_identity() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "actual primary text"},
+                    "finish_reason": "stop"
+                }],
+                "model": "provider-returned-primary-model",
+                "system_fingerprint": "provider-returned-primary-version",
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+    let client = LlmClient::new_with_config(
+        config_with_extract(ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "configured-extract-model".to_string(),
+            api_key_envs: vec!["__1521_PRIMARY_RECEIPT_KEY"],
+        }),
+        None,
+    )
+    .expect("client");
+    client.set_provider_secret_pool(
+        "__1521_PRIMARY_RECEIPT_KEY",
+        vec![ProviderSecret {
+            key_id: "__1521_PRIMARY_RECEIPT_KEY".to_string(),
+            value: "fixture-primary-secret".to_string(),
+        }],
+    );
+
+    let generated = client
+        .call_extract_llm_with_receipt("system", "user", None, 0.0, 16)
+        .await
+        .expect("primary response");
+    assert_eq!(generated.value, "actual primary text");
+    assert_eq!(generated.invocation.lane(), ModelInvocationLaneV1::Extract);
+    assert_eq!(
+        generated.invocation.engine_kind(),
+        ModelEngineKindV1::ProviderHttp
+    );
+    assert_eq!(
+        generated.invocation.effective_model(),
+        Some("provider-returned-primary-model")
+    );
+    assert_eq!(
+        generated.invocation.effective_version(),
+        Some("provider-returned-primary-version")
+    );
+    assert_eq!(generated.invocation.prompt_tokens(), Some(11));
+    assert_eq!(generated.invocation.completion_tokens(), Some(7));
+    assert_eq!(generated.invocation.total_tokens(), Some(18));
+    assert_eq!(
+        generated.invocation.completion_status(),
+        CompletionStatusV1::Complete
+    );
+    assert!(!generated.invocation.degraded());
+    assert!(generated.invocation.fallback_chain().is_empty());
+
+    let legacy_text = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect("legacy adapter response");
+    assert_eq!(
+        legacy_text, generated.value,
+        "the legacy text-only wrapper must return the receipt sibling's text unchanged"
+    );
+
+    server_task.abort();
+}
+
+/// A configured primary that cannot select a key must not be reported as the
+/// serving provider/model when the fallback HTTP tier returns the completion.
+#[tokio::test]
+async fn extract_receipt_maps_effective_provider_fallback_not_configured_primary() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "fallback text"},
+                    "finish_reason": "stop"
+                }],
+                "model": "actual-fallback-model",
+                "system_fingerprint": "actual-fallback-version",
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fallback provider");
+    let port = listener
+        .local_addr()
+        .expect("fallback provider addr")
+        .port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("fallback provider");
+    });
+
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(ChatLaneConfig {
+            base_url: "https://configured-primary.invalid/chat/completions".to_string(),
+            model: "configured-primary-model".to_string(),
+            api_key_envs: vec!["__1521_MISSING_PRIMARY_KEY"],
+        }),
+        LaneFallbackConfig {
+            extract: Some(ChatLaneConfig {
+                base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+                model: "configured-fallback-model".to_string(),
+                api_key_envs: vec!["__1521_FALLBACK_RECEIPT_KEY"],
+            }),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("client");
+    client.set_provider_secret_pool(
+        "__1521_FALLBACK_RECEIPT_KEY",
+        vec![ProviderSecret {
+            key_id: "__1521_FALLBACK_RECEIPT_KEY".to_string(),
+            value: "fixture-fallback-secret".to_string(),
+        }],
+    );
+
+    let generated = client
+        .call_extract_llm_with_receipt("system", "user", None, 0.0, 16)
+        .await
+        .expect("fallback response");
+    assert_eq!(generated.value, "fallback text");
+    assert!(generated.invocation.degraded());
+    assert_eq!(
+        generated.invocation.fallback_chain(),
+        &["provider_http_fallback".to_string()]
+    );
+    assert_eq!(
+        generated.invocation.effective_model(),
+        Some("actual-fallback-model"),
+        "configured primary/fallback model IDs must not replace the actual serving model"
+    );
+    assert_eq!(
+        generated.invocation.effective_version(),
+        Some("actual-fallback-version")
+    );
+
+    server_task.abort();
+}
+
+/// The mock body is valid fact JSON. It would parse successfully if a
+/// `finish_reason=length` response reached the parser, so this proves the
+/// typed generator rejects it before parsing.
+#[tokio::test]
+async fn extract_facts_with_receipt_rejects_truncated_output_before_parsing() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "[{\"fact\":\"would parse\"}]"},
+                    "finish_reason": "length"
+                }],
+                "model": "truncated-model",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+    let client = LlmClient::new_with_config(
+        config_with_extract(ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "configured-extract-model".to_string(),
+            api_key_envs: vec!["__1521_TRUNCATED_KEY"],
+        }),
+        None,
+    )
+    .expect("client");
+    client.set_provider_secret_pool(
+        "__1521_TRUNCATED_KEY",
+        vec![ProviderSecret {
+            key_id: "__1521_TRUNCATED_KEY".to_string(),
+            value: "fixture-truncated-secret".to_string(),
+        }],
+    );
+
+    let err = client
+        .extract_facts_with_receipt("input that must not be parsed")
+        .await
+        .expect_err("truncated output must not become parsed facts");
+    assert_eq!(err, crate::LLM_OUTPUT_TRUNCATED);
+
+    server_task.abort();
+}
+
+/// Missing finish status is not authoritative evidence of completion. It
+/// remains parseable for legacy compatibility, while the receipt stays
+/// `Unknown`; malformed negative usage values are dropped at the persisted
+/// boundary instead of becoming durable counters.
+#[tokio::test]
+async fn unknown_finish_reason_stays_unknown_and_negative_tokens_are_dropped() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "[]"}
+                }],
+                "model": "malformed-usage-model",
+                "usage": {
+                    "prompt_tokens": -7,
+                    "completion_tokens": 3,
+                    "total_tokens": -4
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind malformed usage provider");
+    let port = listener
+        .local_addr()
+        .expect("malformed usage provider addr")
+        .port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("malformed usage provider");
+    });
+    let client = LlmClient::new_with_config(
+        config_with_extract(ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "configured-extract-model".to_string(),
+            api_key_envs: vec!["__1521_MALFORMED_USAGE_KEY"],
+        }),
+        None,
+    )
+    .expect("client");
+    client.set_provider_secret_pool(
+        "__1521_MALFORMED_USAGE_KEY",
+        vec![ProviderSecret {
+            key_id: "__1521_MALFORMED_USAGE_KEY".to_string(),
+            value: "fixture-malformed-usage-secret".to_string(),
+        }],
+    );
+
+    let generated = client
+        .extract_facts_with_receipt("valid empty fact set")
+        .await
+        .expect("Unknown is parseable but must remain labeled Unknown");
+    assert!(generated.value.is_empty());
+    assert_eq!(
+        generated.invocation.completion_status(),
+        CompletionStatusV1::Unknown
+    );
+    assert_eq!(generated.invocation.prompt_tokens(), None);
+    assert_eq!(generated.invocation.completion_tokens(), Some(3));
+    assert_eq!(generated.invocation.total_tokens(), None);
+
+    server_task.abort();
 }
 
 /// #1197 BUG-1 (codex review, must-fix): a single bad key in the primary

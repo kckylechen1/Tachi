@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
 use super::super::provider_health::{
-    ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, CLAUDE_CLI_FAILURE_COOLDOWN,
+    ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, ModelInvocationLaneV1,
+    PersistedModelInvocationReceiptV1, CLAUDE_CLI_FAILURE_COOLDOWN,
 };
 
 /// #1071 fix-round (checkpoints 5/6): honest engine-receipt signal for
@@ -19,6 +20,11 @@ pub struct ReasoningOutcome {
     pub text: String,
     pub used_fallback: bool,
     pub truncated: bool,
+    /// The closed, persisted-safe receipt for the engine that actually served
+    /// this reasoning call. Claude CLI intentionally reports unknown model,
+    /// token, and completion fields; an HTTP fallback carries the HTTP
+    /// provider's actual receipt plus a fixed fallback marker.
+    pub invocation: PersistedModelInvocationReceiptV1,
 }
 
 impl super::super::LlmClient {
@@ -102,6 +108,7 @@ impl super::super::LlmClient {
             );
         } else {
             // Try Claude Code CLI first for higher-quality reasoning.
+            let cli_started = Instant::now();
             match Self::call_claude_cli(system, user).await {
                 Ok(response) => {
                     self.record_claude_cli_success();
@@ -113,6 +120,9 @@ impl super::super::LlmClient {
                         text: response,
                         used_fallback: false,
                         truncated: false,
+                        invocation: PersistedModelInvocationReceiptV1::claude_cli_reasoning(
+                            cli_started.elapsed().as_millis(),
+                        ),
                     });
                 }
                 Err(e) => {
@@ -130,11 +140,18 @@ impl super::super::LlmClient {
                 temperature,
                 max_tokens,
             )
-            .await?;
+            .await?
+            .into_generated(ModelInvocationLaneV1::Reasoning);
+        let mut invocation = outcome.invocation;
+        invocation.mark_claude_cli_to_provider_http_fallback();
         Ok(ReasoningOutcome {
-            text: outcome.text,
+            text: outcome.value,
             used_fallback: true,
-            truncated: outcome.truncated,
+            truncated: matches!(
+                invocation.completion_status(),
+                super::super::provider_health::CompletionStatusV1::Truncated
+            ),
+            invocation,
         })
     }
 
