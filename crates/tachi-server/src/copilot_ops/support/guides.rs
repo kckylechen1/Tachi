@@ -19,7 +19,9 @@ pub(in crate::copilot_ops) fn feature_guide_hits(
     let mut candidates = load_feature_guide_candidates(server, params, limit.max(20));
 
     candidates.retain(|(entry, _, _)| {
-        entry.is_guide() && guide_applies_to(entry, task_type, profile, Some(stage), &query_tokens)
+        derive_wiki_lifecycle(&entry.metadata, &entry.path).is_default_retrievable()
+            && entry.is_guide()
+            && guide_applies_to(entry, task_type, profile, Some(stage), &query_tokens)
     });
 
     let mut scored = candidates
@@ -240,6 +242,7 @@ pub(in crate::copilot_ops) fn guide_hit_row(
     score: usize,
 ) -> Value {
     let metadata = &entry.metadata;
+    let lifecycle = derive_wiki_lifecycle(metadata, &entry.path);
     json!({
         "id": entry.id,
         "db": db_scope.as_str(),
@@ -251,7 +254,8 @@ pub(in crate::copilot_ops) fn guide_hit_row(
         "layer": metadata.get("layer").and_then(Value::as_str).unwrap_or("guide"),
         "scope": metadata.get("scope").and_then(Value::as_str).unwrap_or(entry.scope.as_str()),
         "authority": metadata.get("authority").and_then(Value::as_str).unwrap_or("playbook"),
-        "status": metadata.get("status").and_then(Value::as_str).unwrap_or("active"),
+        "status": lifecycle.as_str(),
+        "lifecycle": lifecycle.as_str(),
         "applies_to": metadata.get("applies_to").cloned().unwrap_or(Value::Null),
     })
 }
@@ -328,5 +332,53 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ids.contains(&"fixture-guide-after-env-drift"));
         assert!(!ids.contains(&"ambient-guide-after-env-drift"));
+    }
+
+    #[test]
+    fn feature_guide_hits_never_treat_pending_or_malformed_lifecycle_as_active() {
+        let server = crate::tests::make_server();
+        seed_wiki_guide(
+            &server.tachi_home_dir(),
+            "guide-lifecycle-fixture-store",
+            "fixture store registration",
+        );
+        let mut pending = crate::tests::make_entry("pending-feature-guide");
+        pending.path = "/guide/pending-feature-guide".to_string();
+        pending.text = "PendingGuideLifecycleNeedle must stay out of active guide hits.".to_string();
+        pending.summary = pending.text.clone();
+        pending.metadata = json!({"lifecycle": "pending_review"});
+        let mut malformed = crate::tests::make_entry("malformed-feature-guide");
+        malformed.path = "/guide/malformed-feature-guide".to_string();
+        malformed.text = "PendingGuideLifecycleNeedle malformed lifecycle must stay out too.".to_string();
+        malformed.summary = malformed.text.clone();
+        malformed.metadata = json!({"lifecycle": "not-a-real-lifecycle"});
+        server
+            .with_named_project_store("wiki", |store| {
+                store.upsert(&pending).map_err(|error| error.to_string())?;
+                store.upsert(&malformed).map_err(|error| error.to_string())
+            })
+            .expect("seed guide lifecycle fixtures");
+
+        let params: TachiTaskParams = serde_json::from_value(json!({
+            "action": "briefing",
+            "project": "wiki"
+        }))
+        .expect("feature briefing params");
+        let hits = feature_guide_hits(
+            &server,
+            &params,
+            "PendingGuideLifecycleNeedle",
+            "implementation",
+            &json!({}),
+            10,
+        );
+        let ids = hits
+            .iter()
+            .filter_map(|hit| hit["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !ids.contains(&"pending-feature-guide") && !ids.contains(&"malformed-feature-guide"),
+            "RED: pending/malformed guide lifecycle leaked as active: {hits:?}"
+        );
     }
 }

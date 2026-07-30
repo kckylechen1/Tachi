@@ -384,12 +384,16 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
         } else {
-            let inferred_project = infer_search_project(
-                &server.tachi_home_dir(),
-                &params.query,
-                params.domain.as_deref(),
-                &routing_config,
-            );
+            let inferred_project = if wiki_path_prefix {
+                None
+            } else {
+                infer_search_project(
+                    &server.tachi_home_dir(),
+                    &params.query,
+                    params.domain.as_deref(),
+                    &routing_config,
+                )
+            };
             let inferred_db_path = inferred_project
                 .as_deref()
                 .and_then(|name| server.resolve_server_named_project_db_path(name).ok());

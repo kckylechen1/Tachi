@@ -351,6 +351,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
             contradiction_threshold: 0.6,
             include_skill_quality: true,
             persist_stale: false,
+            project: None,
         }))
         .await
         .expect("wiki_lint should succeed");
@@ -467,6 +468,7 @@ async fn wiki_lint_ignores_operation_log_rows() {
             contradiction_threshold: 0.6,
             include_skill_quality: false,
             persist_stale: false,
+            project: None,
         }))
         .await
         .expect("wiki_lint should succeed");
@@ -549,6 +551,7 @@ async fn wiki_lint_stale_check_ignores_retention_policy_for_contradicted_permane
             contradiction_threshold: 0.6,
             include_skill_quality: false,
             persist_stale: false,
+            project: None,
         }))
         .await
         .expect("wiki_lint should succeed");
@@ -654,6 +657,7 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
             contradiction_threshold: 0.6,
             include_skill_quality: false,
             persist_stale: true,
+            project: None,
         }))
         .await
         .expect("wiki_lint with persist_stale should succeed");

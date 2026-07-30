@@ -1,6 +1,6 @@
 use super::{default_limit, default_true, HybridWeightsParam};
 use rmcp::schemars::{self, JsonSchema};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 fn default_wiki_path_prefix() -> String {
     "/wiki".to_string()
@@ -42,16 +42,48 @@ fn default_contradiction_threshold() -> f64 {
     0.85
 }
 
-fn default_wiki_project() -> String {
-    "wiki".to_string()
-}
-
 fn default_wiki_search_top_k() -> usize {
     10
 }
 
 fn default_wiki_browse_limit() -> usize {
     50
+}
+
+pub const LOGICAL_SHARED_WIKI_PROJECT: &str = "wiki";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoreRef {
+    BoundProject,
+    NamedProject { project: String },
+    LegacyGlobal,
+}
+
+impl StoreRef {
+    pub fn named(project: impl Into<String>) -> Self {
+        Self::NamedProject {
+            project: project.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WikiReadPlan {
+    NamedOnly(StoreRef),
+    Federated,
+    ProjectOnly,
+    SharedOnly,
+}
+
+impl WikiReadPlan {
+    pub fn from_project(project: Option<&str>) -> Result<Self, String> {
+        match project.map(str::trim) {
+            Some("") => Err("wiki project cannot be empty".to_string()),
+            Some(project) => Ok(Self::NamedOnly(StoreRef::named(project))),
+            None => Ok(Self::Federated),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -99,6 +131,11 @@ pub struct WikiLintParams {
     /// opts in.
     #[serde(default)]
     pub persist_stale: bool,
+
+    /// Optional named Wiki store. When supplied, lint targets only that store.
+    /// Omitted uses the bound project + logical shared Wiki federation.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
@@ -246,9 +283,10 @@ pub struct WikiBrowseParams {
     #[serde(default = "default_wiki_browse_limit")]
     pub limit: usize,
 
-    /// Named project DB containing wiki memories (default: "wiki")
-    #[serde(default = "default_wiki_project")]
-    pub project: String,
+    /// Optional named project DB. When supplied, browse reads only that store.
+    /// Omitted reads the bound project plus logical shared Wiki federation.
+    #[serde(default)]
+    pub project: Option<String>,
 
     /// #1072 explicit lifecycle scope. Omitted (default): only `active`
     /// wiki/guide entries are returned (the truthful-retrieval gate). Pass

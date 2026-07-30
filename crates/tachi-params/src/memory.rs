@@ -14,8 +14,8 @@ pub use search::{
     MAX_SEARCH_CANDIDATES_PER_CHANNEL, MAX_SEARCH_TOP_K,
 };
 pub use wiki::{
-    TachiWikiIngestParams, TachiWikiOrganizeParams, WikiBrowseParams, WikiLintParams,
-    WikiSearchParams, WikiWriteParams,
+    StoreRef, TachiWikiIngestParams, TachiWikiOrganizeParams, WikiBrowseParams, WikiLintParams,
+    WikiReadPlan, WikiSearchParams, WikiWriteParams, LOGICAL_SHARED_WIKI_PROJECT,
 };
 
 fn default_path() -> String {

@@ -167,7 +167,7 @@ fn known_reds_section(server: &MemoryServer) -> Value {
     let params = WikiBrowseParams {
         category: Some("/wiki/known-reds".to_string()),
         limit: 20,
-        project: "wiki".to_string(),
+        project: Some("wiki".to_string()),
         lifecycle: None,
     };
     match crate::wiki_ops::collect_wiki_browse_value(server, params) {

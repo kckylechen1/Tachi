@@ -42,6 +42,16 @@ pub(crate) fn apply_wiki_lifecycle_gate(
     rows: &mut Vec<Value>,
     requested_lifecycle: Option<&str>,
 ) -> Result<(), String> {
+    let plan = WikiReadPlan::from_project(project)?;
+    apply_wiki_lifecycle_gate_for_plan(server, &plan, rows, requested_lifecycle)
+}
+
+pub(crate) fn apply_wiki_lifecycle_gate_for_plan(
+    server: &MemoryServer,
+    plan: &WikiReadPlan,
+    rows: &mut Vec<Value>,
+    requested_lifecycle: Option<&str>,
+) -> Result<(), String> {
     let is_all_scope = requested_lifecycle.is_some_and(|value| value.eq_ignore_ascii_case("all"));
     let requested: Option<WikiLifecycleV1> = match requested_lifecycle {
         None => None,
@@ -54,23 +64,35 @@ pub(crate) fn apply_wiki_lifecycle_gate(
     };
     let default_to_active_only = requested_lifecycle.is_none();
 
-    let lookup_project = project.unwrap_or("wiki");
-    let entries = list_related_candidates(server, lookup_project, 5000)
+    let entries = list_wiki_entries_for_plan(server, plan, "/wiki", 5000)
         .map_err(|e| format!("wiki lifecycle gate candidate lookup failed: {e}"))?;
-    let by_id: HashMap<&str, &MemoryEntry> = entries
-        .iter()
-        .map(|entry| (entry.id.as_str(), entry))
-        .collect();
+    let mut by_id: HashMap<&str, Vec<&StoredWikiEntry>> = HashMap::new();
+    for entry in &entries {
+        by_id.entry(entry.entry.id.as_str()).or_default().push(entry);
+    }
 
     rows.retain_mut(|row| {
         let Some(id) = row.get("id").and_then(Value::as_str).map(str::to_string) else {
             return is_all_scope;
         };
-        let Some(&entry) = by_id.get(id.as_str()) else {
+        let Some(candidates) = by_id.get(id.as_str()) else {
             // Unresolved row: fail closed (see doc comment above) — kept
             // only under the explicit "all" opt-out.
             return is_all_scope;
         };
+        let requested_store = row
+            .get("store")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<StoreRef>(value).ok());
+        let resolved = requested_store
+            .as_ref()
+            .and_then(|store_ref| candidates.iter().find(|entry| &entry.store == store_ref))
+            .copied()
+            .or_else(|| (candidates.len() == 1).then_some(candidates[0]));
+        let Some(resolved) = resolved else {
+            return is_all_scope;
+        };
+        let entry = &resolved.entry;
         let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
         let keep = if let Some(wanted) = requested {
             lifecycle == wanted
@@ -80,7 +102,7 @@ pub(crate) fn apply_wiki_lifecycle_gate(
             true
         };
         if keep {
-            attach_wiki_provenance(row, entry, lifecycle);
+            attach_wiki_provenance(row, entry, &resolved.store, lifecycle);
         }
         keep
     });
@@ -139,11 +161,17 @@ pub(super) fn preferred_wiki_references(metadata: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn attach_wiki_provenance(row: &mut Value, entry: &MemoryEntry, lifecycle: WikiLifecycleV1) {
+fn attach_wiki_provenance(
+    row: &mut Value,
+    entry: &MemoryEntry,
+    store_ref: &StoreRef,
+    lifecycle: WikiLifecycleV1,
+) {
     let Some(obj) = row.as_object_mut() else {
         return;
     };
     let authority = derive_wiki_authority(&entry.metadata);
+    obj.insert("store".to_string(), json!(store_ref));
     obj.insert("lifecycle".to_string(), json!(lifecycle.as_str()));
     obj.insert("authority".to_string(), json!(authority.as_str()));
     obj.insert("revision".to_string(), json!(entry.revision));

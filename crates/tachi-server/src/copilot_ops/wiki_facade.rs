@@ -353,6 +353,12 @@ pub(crate) async fn handle_tachi_wiki_search(
     let top_k = crate::clamp_facade_top_k(params.top_k);
     let project = params.project.clone();
     let lifecycle_scope = params.lifecycle.clone();
+    let plan = WikiReadPlan::from_project(project.as_deref())?;
+    if let WikiReadPlan::NamedOnly(StoreRef::NamedProject { project }) = &plan {
+        if !crate::memory_search_ops::named_project_db_exists(server, project) {
+            return Err(format!("Wiki project '{project}' not found"));
+        }
+    }
     let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -384,7 +390,7 @@ pub(crate) async fn handle_tachi_wiki_search(
             include_metadata: false,
             format: None,
         },
-        false,
+        matches!(plan, WikiReadPlan::NamedOnly(_)),
     )
     .await?;
     crate::wiki_ops::filter_user_facing_wiki_rows(&mut rows);
@@ -392,9 +398,9 @@ pub(crate) async fn handle_tachi_wiki_search(
     // (`tachi_wiki(action='search')`'s non-JSON branch and `tachi_wiki_search`)
     // from `wiki_ops::search::collect_wiki_search_value` — both must gate
     // pending/candidate drafts out of the default result set.
-    crate::wiki_ops::apply_wiki_lifecycle_gate(
+    crate::wiki_ops::apply_wiki_lifecycle_gate_for_plan(
         server,
-        project.as_deref(),
+        &plan,
         &mut rows,
         lifecycle_scope.as_deref(),
     )?;

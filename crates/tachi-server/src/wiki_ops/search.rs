@@ -82,6 +82,12 @@ pub(crate) async fn collect_wiki_search_value(
     }
 
     let query = params.query.clone();
+    let plan = WikiReadPlan::from_project(params.project.as_deref())?;
+    if let WikiReadPlan::NamedOnly(StoreRef::NamedProject { project }) = &plan {
+        if !crate::memory_search_ops::named_project_db_exists(server, project) {
+            return Err(format!("Wiki project '{project}' not found"));
+        }
+    }
     let path_prefix = params
         .category
         .as_deref()
@@ -119,15 +125,15 @@ pub(crate) async fn collect_wiki_search_value(
             include_metadata: false,
             format: None,
         },
-        false,
+        matches!(plan, WikiReadPlan::NamedOnly(_)),
     )
     .await?;
     filter_user_facing_wiki_rows(&mut rows);
     let unfiltered_count = rows.len();
     rows.retain(wiki_row_has_direct_match_signal);
-    apply_wiki_lifecycle_gate(
+    apply_wiki_lifecycle_gate_for_plan(
         server,
-        params.project.as_deref(),
+        &plan,
         &mut rows,
         params.lifecycle.as_deref(),
     )?;
@@ -143,6 +149,7 @@ pub(crate) async fn collect_wiki_search_value(
         "query": query,
         "path_prefix": path_prefix,
         "project": params.project,
+        "stores": stores_for_wiki_plan(server, &plan),
         "domain": params.domain,
         "unfiltered_count": unfiltered_count,
         "count": rows.len(),
@@ -223,16 +230,17 @@ pub(crate) fn collect_wiki_browse_value(
     params: WikiBrowseParams,
 ) -> Result<Value, String> {
     let project_name = params.project;
+    let plan = WikiReadPlan::from_project(project_name.as_deref())?;
     let requested_lifecycle = params.lifecycle.as_deref();
 
     match params.category.as_deref() {
         None | Some("") => {
             let mut counts: BTreeMap<String, usize> = BTreeMap::new();
             let mut total = 0usize;
-            let all_entries =
-                list_related_candidates(server, &project_name, 5000).unwrap_or_default();
+            let all_entries = list_wiki_entries_for_plan(server, &plan, "/wiki", 5000)?;
 
-            for entry in &all_entries {
+            for stored in &all_entries {
+                let entry = &stored.entry;
                 if !wiki_entry_matches_lifecycle_scope(entry, requested_lifecycle)? {
                     continue;
                 }
@@ -255,6 +263,7 @@ pub(crate) fn collect_wiki_browse_value(
                 "status": "completed",
                 "kind": "stats",
                 "project": project_name,
+                "stores": stores_for_wiki_plan(server, &plan),
                 "total": total,
                 "categories": categories,
             }))
@@ -263,10 +272,11 @@ pub(crate) fn collect_wiki_browse_value(
             let resolved_path = resolve_wiki_category(category);
             let limit = params.limit.max(1).min(500);
 
-            let (entries, _) = list_wiki_entries(server, &project_name, 5000)?;
+            let entries = list_wiki_entries_for_plan(server, &plan, "/wiki", 5000)?;
             let resolved_prefix = format!("{resolved_path}/");
             let mut slim_entries: Vec<Value> = Vec::new();
-            for entry in entries {
+            for stored in entries {
+                let entry = stored.entry;
                 if !(entry.path == resolved_path || entry.path.starts_with(&resolved_prefix)) {
                     continue;
                 }
@@ -297,6 +307,7 @@ pub(crate) fn collect_wiki_browse_value(
                     "authority": authority.as_str(),
                     "references": preferred_wiki_references(&entry.metadata),
                     "review_receipt": review_receipt,
+                    "store": stored.store,
                 }));
             }
 
@@ -310,6 +321,7 @@ pub(crate) fn collect_wiki_browse_value(
                 "status": "completed",
                 "kind": "category",
                 "project": project_name,
+                "stores": stores_for_wiki_plan(server, &plan),
                 "path": resolved_path,
                 "count": slim_entries.len(),
                 "entries": slim_entries,
@@ -325,7 +337,16 @@ pub(crate) fn handle_wiki_read(
     path: &str,
     project: &str,
 ) -> Result<String, String> {
-    let value = collect_wiki_read_value(server, path, project)?;
+    let plan = legacy_wiki_read_plan(project);
+    handle_wiki_read_for_plan(server, path, &plan)
+}
+
+pub(crate) fn handle_wiki_read_for_plan(
+    server: &MemoryServer,
+    path: &str,
+    plan: &WikiReadPlan,
+) -> Result<String, String> {
+    let value = collect_wiki_read_value_for_plan(server, path, plan)?;
     if value
         .get("status")
         .and_then(Value::as_str)
@@ -364,6 +385,23 @@ pub(crate) fn collect_wiki_read_value(
     path: &str,
     project: &str,
 ) -> Result<Value, String> {
+    let plan = legacy_wiki_read_plan(project);
+    collect_wiki_read_value_for_plan(server, path, &plan)
+}
+
+fn legacy_wiki_read_plan(project: &str) -> WikiReadPlan {
+    if project == LOGICAL_SHARED_WIKI_PROJECT {
+        WikiReadPlan::Federated
+    } else {
+        WikiReadPlan::NamedOnly(StoreRef::named(project))
+    }
+}
+
+pub(crate) fn collect_wiki_read_value_for_plan(
+    server: &MemoryServer,
+    path: &str,
+    plan: &WikiReadPlan,
+) -> Result<Value, String> {
     let resolved = if path.trim().starts_with('/') {
         let trimmed = path.trim().trim_end_matches('/');
         if trimmed.is_empty() {
@@ -377,15 +415,15 @@ pub(crate) fn collect_wiki_read_value(
         resolve_wiki_category(path)
     };
 
-    let (entries, _) = list_wiki_entries(server, project, 5000)?;
+    let entries = list_wiki_entries_for_plan(server, plan, "/wiki", 5000)?;
     let exact_matches = entries
         .iter()
-        .filter(|entry| entry.path == resolved)
+        .filter(|entry| entry.entry.path == resolved)
         .collect::<Vec<_>>();
     if exact_matches.len() > 1 {
         return Ok(json!({
             "status": "ambiguous",
-            "project": project,
+            "stores": stores_for_wiki_plan(server, plan),
             "path": resolved,
             "entry": null,
             "candidate_count": exact_matches.len(),
@@ -398,11 +436,14 @@ pub(crate) fn collect_wiki_read_value(
     }
     let entry = exact_matches.into_iter().next().or_else(|| {
         let prefix = format!("{resolved}/");
-        entries.iter().find(|e| e.path.starts_with(&prefix))
+        entries
+            .iter()
+            .find(|entry| entry.entry.path.starts_with(&prefix))
     });
 
     match entry {
-        Some(entry) => {
+        Some(stored) => {
+            let entry = &stored.entry;
             append_wiki_log(server, "read", &resolved);
             // #1072 RED case 3: expose id/revision/authority/lifecycle/
             // source refs/typed evidence refs/review receipt on read, not
@@ -417,7 +458,7 @@ pub(crate) fn collect_wiki_read_value(
                 .unwrap_or(Value::Null);
             Ok(json!({
                 "status": "found",
-                "project": project,
+                "stores": stores_for_wiki_plan(server, plan),
                 "path": resolved,
                 "entry": {
                     "id": entry.id,
@@ -436,12 +477,13 @@ pub(crate) fn collect_wiki_read_value(
                     "evidence_refs_v1": entry.metadata.get("evidence_refs_v1").cloned().unwrap_or_else(|| json!([])),
                     "references": preferred_wiki_references(&entry.metadata),
                     "review_receipt": review_receipt,
+                    "store": stored.store,
                 }
             }))
         }
         None => Ok(json!({
             "status": "not_found",
-            "project": project,
+            "stores": stores_for_wiki_plan(server, plan),
             "path": resolved,
             "entry": null,
             "next_action": "Use tachi_wiki(action=\"search\") or tachi_wiki(action=\"browse\") to find entries.",
@@ -449,15 +491,17 @@ pub(crate) fn collect_wiki_read_value(
     }
 }
 
-fn wiki_read_candidate(entry: &memcore::MemoryEntry) -> Value {
+fn wiki_read_candidate(entry: &StoredWikiEntry) -> Value {
+    let stored = &entry.entry;
     json!({
-        "id": entry.id,
-        "path": entry.path,
-        "summary": entry.summary,
-        "importance": entry.importance,
-        "keywords": entry.keywords,
-        "entities": entry.entities,
-        "topic": entry.topic,
-        "timestamp": entry.timestamp,
+        "id": stored.id,
+        "path": stored.path,
+        "summary": stored.summary,
+        "importance": stored.importance,
+        "keywords": stored.keywords,
+        "entities": stored.entities,
+        "topic": stored.topic,
+        "timestamp": stored.timestamp,
+        "store": entry.store,
     })
 }

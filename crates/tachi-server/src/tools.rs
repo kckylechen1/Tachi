@@ -27,8 +27,9 @@ use crate::kanban::{
 use crate::tool_params::*;
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
-    collect_wiki_browse_value, collect_wiki_read_value, collect_wiki_search_value,
-    handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_read, handle_wiki_search,
+    collect_wiki_browse_value, collect_wiki_read_value, collect_wiki_read_value_for_plan,
+    collect_wiki_search_value, handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint,
+    handle_wiki_read, handle_wiki_read_for_plan, handle_wiki_search,
 };
 use crate::MemoryServer;
 

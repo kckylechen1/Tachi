@@ -1,0 +1,155 @@
+use super::*;
+
+use crate::wiki_ops::{collect_wiki_read_value, collect_wiki_search_value};
+
+fn planned_wiki_search(query: &str, project: Option<&str>, top_k: usize) -> WikiSearchParams {
+    WikiSearchParams {
+        query: query.to_string(),
+        path_prefix: Some("/wiki".to_string()),
+        category: None,
+        top_k,
+        include_archived: false,
+        agent_role: None,
+        project: project.map(str::to_string),
+        domain: None,
+        file_context: None,
+        error_context: None,
+        weights: None,
+        lifecycle: None,
+    }
+}
+
+fn wiki_entry(id: &str, path: &str, text: &str) -> MemoryEntry {
+    let mut entry = make_entry(id);
+    entry.path = path.to_string();
+    entry.summary = text.to_string();
+    entry.text = text.to_string();
+    entry.metadata = json!({"lifecycle": "active"});
+    entry
+}
+
+fn register_named_project(server: &MemoryServer, name: &str) {
+    let db_path = server
+        .tachi_home_dir()
+        .join("projects")
+        .join(name)
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(db_path.parent().expect("named project parent"))
+        .expect("create named project parent");
+    drop(
+        MemoryStore::open(db_path.to_str().expect("utf8 named project DB"))
+            .expect("create named project DB"),
+    );
+
+    let manifest_path = server.tachi_home_dir().join("manifest.json");
+    let mut manifest = crate::manifest::Manifest::load_or_empty(&manifest_path);
+    manifest.dbs.push(crate::manifest::DbEntry {
+        path: db_path.display().to_string(),
+        role: crate::manifest::DbRole::Project,
+        owner: "test".to_string(),
+        schema_kind: "tachi".to_string(),
+        vec_enabled: true,
+        allow_write: true,
+        last_doctor_at: Utc::now().to_rfc3339(),
+        last_classification: "healthy".to_string(),
+        scope_hint: format!("project:{name}"),
+        notes: String::new(),
+    });
+    manifest.save(&manifest_path).expect("register named project");
+}
+
+#[tokio::test]
+async fn explicit_named_wiki_search_never_falls_back_to_bound_or_legacy_global() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
+    let query = "WikiReadPlanNamedOnlyNeedle";
+    let named = wiki_entry(
+        "wiki-read-plan-named",
+        "/wiki/read-plan/named",
+        &format!("{query} named-store sentinel"),
+    );
+    let bound = wiki_entry(
+        "wiki-read-plan-bound",
+        "/wiki/read-plan/bound",
+        &format!("{query} bound-store sentinel"),
+    );
+    let legacy_global = wiki_entry(
+        "wiki-read-plan-legacy-global",
+        "/wiki/read-plan/legacy-global",
+        &format!("{query} legacy-global sentinel"),
+    );
+
+    register_named_project(&server, "named-only");
+    server
+        .with_named_project_store("named-only", |store| {
+            store.upsert(&named).map_err(|error| error.to_string())
+        })
+        .expect("seed named wiki store");
+    server
+        .with_project_store(|store| store.upsert(&bound).map_err(|error| error.to_string()))
+        .expect("seed bound project wiki store");
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&legacy_global)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed legacy global wiki store");
+
+    let result = collect_wiki_search_value(
+        &server,
+        planned_wiki_search(query, Some("named-only"), 10),
+    )
+    .await
+    .expect("named wiki search");
+    let ids = result["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect::<Vec<_>>();
+
+    assert!(ids.contains(&"wiki-read-plan-named"), "named hit missing: {ids:?}");
+    assert!(
+        !ids.contains(&"wiki-read-plan-bound"),
+        "RED: explicit project=named-only must not fall back to the bound project: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"wiki-read-plan-legacy-global"),
+        "RED: explicit project=named-only must not fall back to legacy global /wiki: {ids:?}"
+    );
+}
+
+#[test]
+fn federated_same_path_read_returns_store_qualified_candidates() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
+    let path = "/wiki/read-plan/collision";
+    let shared = wiki_entry(
+        "wiki-read-plan-shared-collision",
+        path,
+        "shared collision sentinel",
+    );
+    let bound = wiki_entry(
+        "wiki-read-plan-bound-collision",
+        path,
+        "bound collision sentinel",
+    );
+
+    register_named_project(&server, "wiki");
+    server
+        .with_named_project_store("wiki", |store| {
+            store.upsert(&shared).map_err(|error| error.to_string())
+        })
+        .expect("seed logical shared wiki");
+    server
+        .with_project_store(|store| store.upsert(&bound).map_err(|error| error.to_string()))
+        .expect("seed bound project wiki");
+
+    let read = collect_wiki_read_value(&server, path, "wiki").expect("federated read");
+    assert_eq!(read["status"], json!("ambiguous"));
+    let candidates = read["candidates"].as_array().expect("candidate array");
+    assert_eq!(candidates.len(), 2, "expected one candidate per store");
+    assert!(
+        candidates.iter().all(|candidate| !candidate["store"].is_null()),
+        "RED: cross-store ambiguity must carry store-qualified candidates: {candidates:?}"
+    );
+}

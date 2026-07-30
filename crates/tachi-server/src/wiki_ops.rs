@@ -4,8 +4,8 @@ use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{
     build_evidence_refs_v1, derive_wiki_authority, derive_wiki_lifecycle,
     derive_wiki_review_receipt, HybridWeightsParam, SearchMemoryParams, TachiWikiIngestParams,
-    WikiArtifactKindV1, WikiAuthorityV1, WikiBrowseParams, WikiLifecycleV1, WikiLintParams,
-    WikiSearchParams,
+    StoreRef, WikiArtifactKindV1, WikiAuthorityV1, WikiBrowseParams, WikiLifecycleV1,
+    WikiLintParams, WikiReadPlan, WikiSearchParams, LOGICAL_SHARED_WIKI_PROJECT,
 };
 use crate::utils::sanitize_safe_path_name;
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
@@ -46,6 +46,8 @@ use self::similarity::{
 };
 use self::store::{
     find_related_by_entities, is_user_facing_wiki_entry, list_related_candidates, list_wiki_entries,
+    list_wiki_entries_for_plan, stores_for_wiki_plan, with_wiki_store, with_wiki_store_read,
+    StoredWikiEntry,
 };
 
 pub(crate) use self::export::export_wiki_obsidian;
@@ -53,11 +55,14 @@ pub(crate) use self::handoff_lookup::list_handoff_mirrors_for_repo;
 pub(crate) use self::ingest::handle_wiki_ingest;
 pub(crate) use self::lint::{handle_wiki_lint, wiki_hygiene_counts};
 pub(crate) use self::log::append_wiki_log;
-pub(crate) use self::provenance::apply_wiki_lifecycle_gate;
+pub(crate) use self::provenance::{
+    apply_wiki_lifecycle_gate, apply_wiki_lifecycle_gate_for_plan,
+};
 pub(crate) use self::references::validate_references;
 pub(crate) use self::search::{
-    collect_wiki_browse_value, collect_wiki_read_value, collect_wiki_search_value,
-    handle_wiki_browse, handle_wiki_read, handle_wiki_search,
+    collect_wiki_browse_value, collect_wiki_read_value, collect_wiki_read_value_for_plan,
+    collect_wiki_search_value, handle_wiki_browse, handle_wiki_read, handle_wiki_read_for_plan,
+    handle_wiki_search,
 };
 pub(crate) use self::skill_quality::refresh_skill_quality_guards;
 pub(crate) use self::store::filter_user_facing_wiki_rows;
