@@ -4,6 +4,7 @@ use crate::vector_backfill::{
     VectorSweepStateUpdate,
 };
 use futures::{stream, StreamExt};
+use memcore::store::enrichment::EnrichmentInvocationReceipts;
 use memcore::store::open::ReadOnlyBackfillOperation;
 use memcore::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, VectorBackfillScope};
 use std::error::Error;
@@ -282,8 +283,8 @@ pub(super) async fn run_backfill_summaries(
 
     while let Some((id, revision, result)) = tasks.next().await {
         attempted += 1;
-        let summary = match result {
-            Ok(summary) => summary,
+        let generated = match result {
+            Ok(generated) => generated,
             Err(error) => {
                 failed += 1;
                 eprintln!("  WARN: summary failed for {id}: {error}");
@@ -291,8 +292,34 @@ pub(super) async fn run_backfill_summaries(
                 continue;
             }
         };
+        let summary = generated.value;
+        if summary.trim().is_empty() {
+            eprintln!("  WARN: summary produced no accepted field for {id}, skipped");
+            continue;
+        }
+        let receipt = match serde_json::to_value(&generated.invocation) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                failed += 1;
+                let error = format!("serialize summary invocation receipt: {error}");
+                eprintln!("  WARN: summary receipt failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "summary", &error);
+                continue;
+            }
+        };
 
-        match store.update_enrichment_fields(&id, Some(&summary), None, None, None, revision) {
+        match store.update_enrichment_fields_with_receipts(
+            &id,
+            Some(&summary),
+            None,
+            None,
+            None,
+            revision,
+            EnrichmentInvocationReceipts {
+                summary: Some(&receipt),
+                ..Default::default()
+            },
+        ) {
             Ok(true) => {
                 processed += 1;
                 println!("  [{attempted}/{missing}] ✓ {id}");
@@ -393,8 +420,8 @@ pub(super) async fn run_backfill_metadata(
 
     while let Some((id, revision, result)) = tasks.next().await {
         attempted += 1;
-        let (keywords, entities) = match result {
-            Ok(metadata) => metadata,
+        let generated = match result {
+            Ok(generated) => generated,
             Err(error) => {
                 failed += 1;
                 eprintln!("  WARN: metadata failed for {id}: {error}");
@@ -402,10 +429,25 @@ pub(super) async fn run_backfill_metadata(
                 continue;
             }
         };
+        let (keywords, entities) = generated.value;
         // Domain-specific deterministic tagging was removed from the generic
         // engine; use the LLM-extracted keywords/entities directly.
+        if keywords.is_empty() && entities.is_empty() {
+            eprintln!("  WARN: metadata produced no accepted field for {id}, skipped");
+            continue;
+        }
+        let receipt = match serde_json::to_value(&generated.invocation) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                failed += 1;
+                let error = format!("serialize metadata invocation receipt: {error}");
+                eprintln!("  WARN: metadata receipt failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "metadata", &error);
+                continue;
+            }
+        };
 
-        match store.update_enrichment_fields(
+        match store.update_enrichment_fields_with_receipts(
             &id,
             None,
             None,
@@ -420,6 +462,10 @@ pub(super) async fn run_backfill_metadata(
                 Some(&entities)
             },
             revision,
+            EnrichmentInvocationReceipts {
+                metadata: Some(&receipt),
+                ..Default::default()
+            },
         ) {
             Ok(true) => {
                 processed += 1;
@@ -453,15 +499,18 @@ fn backfill_llm_concurrency() -> usize {
         .clamp(1, MAX_BACKFILL_LLM_CONCURRENCY)
 }
 
-async fn generate_summary_with_retry(llm: &LlmClient, input: &str) -> Result<String, String> {
-    retry_llm_call("summary", || llm.generate_summary(input)).await
+async fn generate_summary_with_retry(
+    llm: &LlmClient,
+    input: &str,
+) -> Result<tachi_llm::Generated<String>, String> {
+    retry_llm_call("summary", || llm.generate_summary_with_receipt(input)).await
 }
 
 async fn extract_metadata_with_retry(
     llm: &LlmClient,
     input: &str,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    retry_llm_call("metadata", || llm.extract_metadata(input)).await
+) -> Result<tachi_llm::Generated<(Vec<String>, Vec<String>)>, String> {
+    retry_llm_call("metadata", || llm.extract_metadata_with_receipt(input)).await
 }
 
 async fn retry_llm_call<F, Fut, T>(stage: &str, mut call: F) -> Result<T, String>

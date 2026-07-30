@@ -784,6 +784,24 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  message shape; read 2026-07-26.",
     },
     Exemption {
+        path: "crates/memcore/src/db/tests/write_ops.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex 5.5 local agent, body read 2026-07-30",
+        },
+        sites: &[Site {
+            symbol: "enrichment_sql_failure_rolls_back_field_and_receipt_together",
+            trigger: "FAIL_ENRICHMENT_FIELD_RECEIPT_CAS",
+            ddl: "b134e245f67c7163",
+            occurrences: 1,
+        }],
+        reason: "enrichment_sql_failure_rolls_back_field_and_receipt_together \
+                 installs its trigger on the direct rusqlite Connection \
+                 returned by make_conn, then drives update_enrichment_fields \
+                 on that same unguarded connection. Body read 2026-07-30. \
+                 This file also contains unrelated MemoryStore doorway tests, \
+                 so NoStoreDoorwayInFile cannot prove the exemption.",
+    },
+    Exemption {
         path: "crates/memcore/src/store/memory_lifecycle.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), body NOT read 2026-07-26",

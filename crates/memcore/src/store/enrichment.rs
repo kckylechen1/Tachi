@@ -6,6 +6,20 @@ use rusqlite::params;
 
 pub const ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS: i64 = 3;
 
+/// Persisted model-invocation receipts paired with the generated enrichment
+/// fields that they produced.
+///
+/// The values are serialized forms of tachi-llm's
+/// `PersistedModelInvocationReceiptV1`; MemCore deliberately does not mirror
+/// that schema. A receipt is accepted only alongside the generated field for
+/// its stage, inside the same revision-checked transaction.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EnrichmentInvocationReceipts<'a> {
+    pub summary: Option<&'a serde_json::Value>,
+    pub metadata: Option<&'a serde_json::Value>,
+    pub keywords: Option<&'a serde_json::Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrichmentRetryCandidate {
     pub id: String,
@@ -84,11 +98,42 @@ impl MemoryStore {
         new_entities: Option<&[String]>,
         expected_revision: i64,
     ) -> Result<bool, MemoryError> {
+        self.update_enrichment_fields_with_receipts(
+            id,
+            new_summary,
+            new_vec,
+            new_keywords,
+            new_entities,
+            expected_revision,
+            EnrichmentInvocationReceipts::default(),
+        )
+    }
+
+    /// Update enrichment fields and their successful model invocation receipts
+    /// under one revision-checked SQLite transaction.
+    ///
+    /// A receipt without its corresponding generated field is rejected. This
+    /// prevents a skipped or empty model stage from becoming a receipt-only
+    /// success record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_enrichment_fields_with_receipts(
+        &mut self,
+        id: &str,
+        new_summary: Option<&str>,
+        new_vec: Option<&[f32]>,
+        new_keywords: Option<&[String]>,
+        new_entities: Option<&[String]>,
+        expected_revision: i64,
+        receipts: EnrichmentInvocationReceipts<'_>,
+    ) -> Result<bool, MemoryError> {
         let vec_blob = if self.vec_available {
             new_vec.map(db::serialize_f32)
         } else {
             None
         };
+        let summary_receipt = receipts.summary.map(serde_json::to_string).transpose()?;
+        let metadata_receipt = receipts.metadata.map(serde_json::to_string).transpose()?;
+        let keywords_receipt = receipts.keywords.map(serde_json::to_string).transpose()?;
         let db_label = self.db_label.clone();
         let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("update_enrichment_fields", &db_label, || {
@@ -101,6 +146,9 @@ impl MemoryStore {
                 new_keywords,
                 new_entities,
                 expected_revision,
+                summary_receipt.as_deref(),
+                metadata_receipt.as_deref(),
+                keywords_receipt.as_deref(),
             )
         })
     }
