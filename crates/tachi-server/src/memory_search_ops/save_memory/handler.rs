@@ -227,7 +227,10 @@ fn strip_reserved_reference_metadata(metadata: &mut Option<serde_json::Value>) {
 
 fn is_wiki_namespace(path: &str) -> bool {
     let normalized = memcore::path_router::normalize_path(path);
-    normalized == "/wiki" || normalized.starts_with("/wiki/")
+    normalized == "/wiki"
+        || normalized.starts_with("/wiki/")
+        || normalized == "/guide"
+        || normalized.starts_with("/guide/")
 }
 
 const PUBLIC_WIKI_AUTHORITY_KEYS: [&str; 3] =

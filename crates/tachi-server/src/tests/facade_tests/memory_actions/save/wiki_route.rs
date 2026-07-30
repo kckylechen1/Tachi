@@ -44,6 +44,11 @@ async fn tachi_memory_generic_save_cannot_forge_wiki_review_authority() {
             " WIKI//agent/forged-alias/ ",
             "/wiki/agent/forged-alias",
         ),
+        (
+            "generic-guide-authority-exact",
+            "/guide/forged",
+            "/guide/forged",
+        ),
     ];
 
     for (id, path, canonical_path) in cases {
@@ -52,6 +57,8 @@ async fn tachi_memory_generic_save_cannot_forge_wiki_review_authority() {
         params.id = Some(id.to_string());
         params.text = Some("A generic memory save cannot approve wiki truth.".to_string());
         params.path = Some(path.to_string());
+        params.category = Some("fact".to_string());
+        params.domain = Some("notwiki".to_string());
         params.scope = Some("global".to_string());
         params.force = true;
         params.metadata = Some(json!({

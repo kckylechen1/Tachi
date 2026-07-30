@@ -2,9 +2,10 @@ use crate::memory_search_ops::search_memory_rows;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{
     build_candidate_knowledge_artifact_fields, build_evidence_refs_v1,
-    derive_effective_knowledge_artifact, ProgressCheckParams, SaveMemoryParams, SearchMemoryParams,
-    StoreRef, TachiBoardParams, TachiTaskParams, TaskBriefParams, WikiApplicabilityStatusV1,
-    WikiKnowledgeScopeV1, WikiLifecycleV1, WikiReadPlan, WikiSearchParams, WikiWriteParams,
+    derive_effective_knowledge_artifact, EffectiveKnowledgeArtifactV1, ProgressCheckParams,
+    SaveMemoryParams, SearchMemoryParams, StoreRef, TachiBoardParams, TachiTaskParams,
+    TaskBriefParams, WikiApplicabilityStatusV1, WikiKnowledgeScopeV1, WikiLifecycleV1,
+    WikiReadPlan, WikiSearchParams, WikiWriteParams,
 };
 use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};

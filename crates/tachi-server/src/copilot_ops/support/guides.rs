@@ -26,10 +26,10 @@ pub(in crate::copilot_ops) fn feature_guide_hits(
     let query_tokens = tokenize_skill_text(query);
     let mut candidates = load_feature_guide_candidates(server, params, limit.max(20));
 
-    candidates.retain(|(entry, _)| {
+    candidates.retain(|(entry, store)| {
         feature_guide_lifecycle(entry).is_default_retrievable()
             && entry.is_guide()
-            && guide_applies_to(entry, &applicability_context)
+            && guide_applies_to(entry, store, &applicability_context)
     });
 
     let mut scored = candidates
@@ -79,12 +79,13 @@ pub(in crate::copilot_ops) fn load_feature_guide_candidates(
         .collect()
 }
 
-fn guide_applies_to(entry: &MemoryEntry, context: &GuideApplicabilityContext<'_>) -> bool {
+fn guide_applies_to(
+    entry: &MemoryEntry,
+    store: &StoreRef,
+    context: &GuideApplicabilityContext<'_>,
+) -> bool {
     let effective = derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
-    if effective.applicability_status == WikiApplicabilityStatusV1::Malformed
-        || (effective.knowledge_scope == WikiKnowledgeScopeV1::Shared
-            && effective.applicability_status != WikiApplicabilityStatusV1::Bounded)
-    {
+    if !guide_scope_matches(&effective, store, context) {
         return false;
     }
     guide_context_filter_matches(&effective.applies_to.projects, context.project)
@@ -93,6 +94,40 @@ fn guide_applies_to(entry: &MemoryEntry, context: &GuideApplicabilityContext<'_>
         && guide_context_filter_matches(&effective.applies_to.task_type, context.task_type)
         && guide_context_filter_matches(&effective.applies_to.profiles, context.profile)
         && guide_context_filter_matches(&effective.applies_to.stage, context.stage)
+}
+
+fn guide_scope_matches(
+    effective: &EffectiveKnowledgeArtifactV1,
+    store: &StoreRef,
+    context: &GuideApplicabilityContext<'_>,
+) -> bool {
+    if effective.applicability_status == WikiApplicabilityStatusV1::Malformed {
+        return false;
+    }
+    match effective.knowledge_scope {
+        WikiKnowledgeScopeV1::Unspecified => false,
+        WikiKnowledgeScopeV1::Shared => {
+            effective.applicability_status == WikiApplicabilityStatusV1::Bounded
+        }
+        WikiKnowledgeScopeV1::Project => {
+            if !effective.applies_to.projects.is_empty() {
+                return guide_context_filter_matches(
+                    &effective.applies_to.projects,
+                    context.project,
+                );
+            }
+            if !effective.origin_projects.is_empty() {
+                return guide_context_filter_matches(&effective.origin_projects, context.project);
+            }
+            match (store, context.project) {
+                (StoreRef::BoundProject, _) => true,
+                (StoreRef::NamedProject { project }, Some(actual)) => {
+                    project.eq_ignore_ascii_case(actual.trim())
+                }
+                (StoreRef::NamedProject { .. } | StoreRef::LegacyGlobal, _) => false,
+            }
+        }
+    }
 }
 
 struct GuideApplicabilityContext<'a> {
@@ -257,6 +292,7 @@ mod tests {
             MemoryStore::open(db_path.to_str().expect("utf8 wiki DB")).expect("open wiki DB");
         let mut entry = crate::tests::make_entry(id);
         entry.path = format!("/guide/{id}");
+        entry.scope = "project".to_string();
         entry.summary = text.to_string();
         entry.text = text.to_string();
         entry.metadata = lifecycle
@@ -425,6 +461,10 @@ mod tests {
             10,
         );
         assert!(
+            hits.iter().any(|hit| hit["id"] == "quant-guide"),
+            "the explicitly selected project's own guide must remain usable: {hits:?}"
+        );
+        assert!(
             hits.iter().all(|hit| hit["id"] != "shared-guide-decoy"),
             "RED: explicit project guide lookup fell back to shared Wiki: {hits:?}"
         );
@@ -447,6 +487,7 @@ mod tests {
         });
         assert!(!guide_applies_to(
             &malformed,
+            &StoreRef::BoundProject,
             &GuideApplicabilityContext {
                 project: None,
                 repo: None,
@@ -469,6 +510,7 @@ mod tests {
         });
         assert!(!guide_applies_to(
             &unbounded_shared,
+            &StoreRef::named("wiki"),
             &GuideApplicabilityContext {
                 project: None,
                 repo: None,
@@ -490,6 +532,7 @@ mod tests {
         });
         assert!(!guide_applies_to(
             &task_bounded,
+            &StoreRef::BoundProject,
             &GuideApplicabilityContext {
                 project: None,
                 repo: None,
@@ -551,6 +594,43 @@ mod tests {
             hits.iter()
                 .all(|hit| hit["id"] != "quant-only-shared-guide"),
             "a federated read must not widen a project-bounded guide: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn federated_guide_does_not_promote_legacy_global_scope_to_universal() {
+        let server = crate::tests::make_server();
+        let mut guide = crate::tests::make_entry("legacy-global-guide");
+        guide.path = "/guide/global/old-playbook".to_string();
+        guide.category = "guide".to_string();
+        guide.scope = "global".to_string();
+        guide.summary = "LegacyGlobalGuideNeedle".to_string();
+        guide.text = guide.summary.clone();
+        guide.metadata = json!({
+            "status": "active",
+            "authority": "playbook"
+        });
+        server
+            .with_global_store(|store| store.upsert(&guide).map_err(|error| error.to_string()))
+            .expect("seed legacy global guide");
+
+        let params: TachiTaskParams = serde_json::from_value(json!({
+            "action": "briefing",
+            "repo": "kckylechen1/tachi",
+            "domain": "memory"
+        }))
+        .expect("feature briefing params");
+        let hits = feature_guide_hits(
+            &server,
+            &params,
+            "LegacyGlobalGuideNeedle",
+            "implementation",
+            &json!({}),
+            10,
+        );
+        assert!(
+            hits.iter().all(|hit| hit["id"] != "legacy-global-guide"),
+            "legacy global placement must not imply universal applicability: {hits:?}"
         );
     }
 }
