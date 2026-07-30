@@ -94,18 +94,16 @@ pub(crate) async fn collect_wiki_search_value(
         .map(resolve_wiki_category)
         .or_else(|| params.path_prefix.clone())
         .or_else(|| Some("/wiki".to_string()));
-    let final_top_k = params.top_k.max(1).min(50);
-    let per_store_candidate_budget = final_top_k.max(20);
-    let mut candidates = search_wiki_store_candidates(
+    let search_result = search_wiki_rows_for_plan(
         server,
         SearchMemoryParams {
             query: query.clone(),
             query_vec: None,
-            top_k: per_store_candidate_budget,
+            top_k: params.top_k.max(1).min(50),
             path_prefix: path_prefix.clone(),
             include_training: false,
             include_archived: params.include_archived,
-            candidates_per_channel: per_store_candidate_budget,
+            candidates_per_channel: params.top_k.max(20),
             mmr_threshold: Some(0.85),
             graph_expand_hops: 1,
             graph_relation_filter: None,
@@ -127,17 +125,82 @@ pub(crate) async fn collect_wiki_search_value(
             include_metadata: false,
             format: None,
         },
-        &stores_for_wiki_plan(server, &plan),
+        &plan,
+        params.lifecycle.as_deref(),
+        false,
     )
     .await?;
-    candidates.retain(|candidate| is_user_facing_wiki_entry(&candidate.result.entry));
+
+    append_wiki_log(
+        server,
+        "search",
+        &format!("{} | {} result(s)", query, search_result.rows.len()),
+    );
+
+    Ok(json!({
+        "status": "completed",
+        "query": query,
+        "path_prefix": path_prefix,
+        "project": params.project,
+        "stores": stores_for_wiki_plan(server, &plan),
+        "domain": params.domain,
+        "unfiltered_count": search_result.unfiltered_count,
+        "candidate_counts": search_result.candidate_counts,
+        "count": search_result.rows.len(),
+        "results": search_result.rows,
+    }))
+}
+
+#[derive(Debug)]
+pub(crate) struct WikiSearchRowsResult {
+    pub(crate) rows: Vec<Value>,
+    pub(crate) unfiltered_count: usize,
+    pub(crate) candidate_counts: Vec<Value>,
+}
+
+pub(crate) async fn search_wiki_rows_for_plan(
+    server: &MemoryServer,
+    mut params: SearchMemoryParams,
+    plan: &WikiReadPlan,
+    requested_lifecycle: Option<&str>,
+    record_access: bool,
+) -> Result<WikiSearchRowsResult, String> {
+    if let WikiReadPlan::NamedOnly(StoreRef::NamedProject { project }) = plan {
+        if !crate::memory_search_ops::named_project_db_exists(server, project) {
+            return Err(format!("Wiki project '{project}' not found"));
+        }
+    }
+    let final_top_k = params.top_k.max(1).min(50);
+    let per_store_candidate_budget = final_top_k.max(20);
+    params.top_k = per_store_candidate_budget;
+    params.candidates_per_channel = params
+        .candidates_per_channel
+        .max(per_store_candidate_budget);
+    let stores = stores_for_wiki_plan(server, plan);
+    let path_prefix = params.path_prefix.clone();
+    let query = params.query.clone();
+    let include_metadata = params.include_metadata;
+    let mut candidates =
+        search_wiki_store_candidates(server, params, &stores, record_access).await?;
+    candidates.retain(|candidate| {
+        is_user_facing_wiki_entry(&candidate.result.entry)
+            && path_prefix.as_deref().is_none_or(|prefix| {
+                candidate.result.entry.path == prefix
+                    || candidate
+                        .result
+                        .entry
+                        .path
+                        .strip_prefix(prefix)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+    });
     let unfiltered_count = candidates.len();
-    let candidate_counts = stores_for_wiki_plan(server, &plan)
-        .into_iter()
+    let candidate_counts = stores
+        .iter()
         .map(|store| {
             let count = candidates
                 .iter()
-                .filter(|candidate| candidate.store == store)
+                .filter(|candidate| &candidate.store == store)
                 .count();
             json!({"store": store, "count": count})
         })
@@ -146,8 +209,7 @@ pub(crate) async fn collect_wiki_search_value(
 
     let mut eligible = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        if wiki_entry_matches_lifecycle_scope(&candidate.result.entry, params.lifecycle.as_deref())?
-        {
+        if wiki_entry_matches_lifecycle_scope(&candidate.result.entry, requested_lifecycle)? {
             eligible.push(candidate);
         }
     }
@@ -182,7 +244,7 @@ pub(crate) async fn collect_wiki_search_value(
                 StoreRef::LegacyGlobal => DbScope::Global,
                 StoreRef::BoundProject | StoreRef::NamedProject { .. } => DbScope::Project,
             };
-            let mut row = slim_search_result(&candidate.result, db_scope, false);
+            let mut row = slim_search_result(&candidate.result, db_scope, include_metadata);
             let lifecycle = derive_wiki_lifecycle(
                 &candidate.result.entry.metadata,
                 &candidate.result.entry.path,
@@ -203,28 +265,17 @@ pub(crate) async fn collect_wiki_search_value(
         .collect::<Vec<_>>();
     annotate_wiki_exact_token_matches(&mut rows, &query);
 
-    append_wiki_log(
-        server,
-        "search",
-        &format!("{} | {} result(s)", query, rows.len()),
-    );
-
-    Ok(json!({
-        "status": "completed",
-        "query": query,
-        "path_prefix": path_prefix,
-        "project": params.project,
-        "stores": stores_for_wiki_plan(server, &plan),
-        "domain": params.domain,
-        "unfiltered_count": unfiltered_count,
-        "candidate_counts": candidate_counts,
-        "count": rows.len(),
-        "results": rows,
-    }))
+    Ok(WikiSearchRowsResult {
+        rows,
+        unfiltered_count,
+        candidate_counts,
+    })
 }
 
 fn wiki_candidate_has_direct_match_signal(candidate: &WikiStoreSearchCandidate) -> bool {
-    candidate.result.score.fts > 0.0 || candidate.result.score.symbolic > 0.0
+    let rounded_fts = (candidate.result.score.fts * 1000.0).round() / 1000.0;
+    let rounded_symbolic = (candidate.result.score.symbolic * 1000.0).round() / 1000.0;
+    rounded_fts > 0.0 || rounded_symbolic > 0.0
 }
 
 fn normalize_wiki_candidate_relevance(candidates: &mut [WikiStoreSearchCandidate]) {
@@ -360,7 +411,8 @@ pub(crate) fn collect_wiki_browse_value(
 
             let entries = list_wiki_entries_for_plan(server, &plan, "/wiki", 5000)?;
             let resolved_prefix = format!("{resolved_path}/");
-            let mut slim_entries: Vec<Value> = Vec::new();
+            let store_order = stores_for_wiki_plan(server, &plan);
+            let mut per_store_entries = vec![Vec::<Value>::new(); store_order.len()];
             for stored in entries {
                 let entry = stored.entry;
                 if !(entry.path == resolved_path || entry.path.starts_with(&resolved_prefix)) {
@@ -368,9 +420,6 @@ pub(crate) fn collect_wiki_browse_value(
                 }
                 if !wiki_entry_matches_lifecycle_scope(&entry, requested_lifecycle)? {
                     continue;
-                }
-                if slim_entries.len() >= limit {
-                    break;
                 }
                 let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
                 let authority = derive_wiki_authority(&entry.metadata);
@@ -383,7 +432,11 @@ pub(crate) fn collect_wiki_browse_value(
                 let review_receipt = derive_wiki_review_receipt(&entry.metadata)
                     .and_then(|receipt| serde_json::to_value(receipt).ok())
                     .unwrap_or(Value::Null);
-                slim_entries.push(json!({
+                let Some(store_index) = store_order.iter().position(|store| store == &stored.store)
+                else {
+                    continue;
+                };
+                per_store_entries[store_index].push(json!({
                     "id": entry.id,
                     "path": entry.path,
                     "summary": entry.summary,
@@ -395,6 +448,25 @@ pub(crate) fn collect_wiki_browse_value(
                     "review_receipt": review_receipt,
                     "store": stored.store,
                 }));
+            }
+            let mut slim_entries = Vec::with_capacity(limit);
+            let mut indexes = vec![0usize; per_store_entries.len()];
+            while slim_entries.len() < limit {
+                let mut made_progress = false;
+                for (store_index, entries) in per_store_entries.iter().enumerate() {
+                    if slim_entries.len() >= limit {
+                        break;
+                    }
+                    let index = indexes[store_index];
+                    if let Some(entry) = entries.get(index) {
+                        slim_entries.push(entry.clone());
+                        indexes[store_index] += 1;
+                        made_progress = true;
+                    }
+                }
+                if !made_progress {
+                    break;
+                }
             }
 
             append_wiki_log(

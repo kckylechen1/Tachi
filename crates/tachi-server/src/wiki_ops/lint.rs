@@ -11,6 +11,15 @@ fn default_checks() -> Vec<String> {
     ]
 }
 
+const VALID_CHECKS: [&str; 6] = [
+    "orphans",
+    "contradictions",
+    "stale",
+    "missing_edges",
+    "dirty_data",
+    "duplicates",
+];
+
 fn store_db_label(store_ref: &StoreRef) -> &'static str {
     match store_ref {
         StoreRef::LegacyGlobal => "global",
@@ -62,6 +71,15 @@ pub(crate) async fn handle_wiki_lint(
     } else {
         params.checks.clone()
     };
+    if let Some(unknown) = checks
+        .iter()
+        .find(|check| !VALID_CHECKS.contains(&check.as_str()))
+    {
+        return Err(format!(
+            "invalid wiki_lint check '{unknown}'; expected one of {}",
+            VALID_CHECKS.join(", ")
+        ));
+    }
     let path_prefix = params.path_prefix.as_deref().unwrap_or("/wiki");
     let limit = params.limit.max(1).min(500);
     let stale_cutoff = Utc::now() - ChronoDuration::days(params.stale_days as i64);
@@ -77,8 +95,9 @@ pub(crate) async fn handle_wiki_lint(
     let mut missing_edge_hints = Vec::new();
     let mut dirty_data = Vec::new();
     let mut duplicates = Vec::new();
+    let mut stale_keys = HashSet::<(StoreRef, String)>::new();
 
-    let mut all_edges = Vec::<memcore::MemoryEdge>::new();
+    let mut all_edges = Vec::<(StoreRef, memcore::MemoryEdge)>::new();
     for node in &nodes {
         let entry = &node.entry;
         let store_ref = &node.store;
@@ -95,7 +114,7 @@ pub(crate) async fn handle_wiki_lint(
                 "store": store_ref,
             }));
         }
-        all_edges.extend(edges);
+        all_edges.extend(edges.into_iter().map(|edge| (store_ref.clone(), edge)));
         if checks.iter().any(|check| check == "stale") {
             if let Some(ts) = parse_rfc3339_utc(&entry.timestamp) {
                 if ts < stale_cutoff
@@ -112,6 +131,7 @@ pub(crate) async fn handle_wiki_lint(
                         "store": store_ref,
                         "reason": "retention_age",
                     }));
+                    stale_keys.insert((store_ref.clone(), entry.id.clone()));
                 }
             }
         }
@@ -147,19 +167,15 @@ pub(crate) async fn handle_wiki_lint(
     // `CanonicalDocRefV1` resolver wired into wiki writes).
     let mut semantic_stale_to_persist: Vec<(MemoryEntry, StoreRef)> = Vec::new();
     if checks.iter().any(|check| check == "stale") {
-        let already_stale: HashSet<String> = stale_nodes
-            .iter()
-            .filter_map(|node| node.get("id").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect();
         for node in &nodes {
             let entry = &node.entry;
             let store_ref = &node.store;
-            if already_stale.contains(entry.id.as_str()) {
+            if stale_keys.contains(&(store_ref.clone(), entry.id.clone())) {
                 continue;
             }
-            let contradicted_or_superseded = all_edges.iter().any(|edge| {
-                edge.target_id == entry.id
+            let contradicted_or_superseded = all_edges.iter().any(|(edge_store, edge)| {
+                edge_store == store_ref
+                    && edge.target_id == entry.id
                     && matches!(edge.relation.as_str(), "contradicts" | "supersedes")
             });
             if contradicted_or_superseded {
@@ -237,7 +253,11 @@ pub(crate) async fn handle_wiki_lint(
                 let similarity = token_cosine_similarity(&left.text, &right.text);
                 if checks.iter().any(|check| check == "missing_edges")
                     && similarity > params.missing_edge_threshold
-                    && !relation_exists(&all_edges, &left.id, &right.id, None)
+                    && !all_edges.iter().any(|(edge_store, edge)| {
+                        edge_store == store_ref
+                            && ((edge.source_id == left.id && edge.target_id == right.id)
+                                || (edge.source_id == right.id && edge.target_id == left.id))
+                    })
                 {
                     missing_edge_hints.push(json!({
                         "left_id": left.id,

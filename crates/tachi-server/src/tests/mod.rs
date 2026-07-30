@@ -276,6 +276,36 @@ pub(crate) fn make_server() -> TestServer {
     make_test_server(None).0
 }
 
+pub(crate) fn register_logical_shared_wiki(server: &MemoryServer) {
+    let db_path = server
+        .tachi_home_dir()
+        .join("projects")
+        .join("wiki")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(db_path.parent().expect("shared wiki parent"))
+        .expect("create shared wiki parent");
+    drop(
+        MemoryStore::open(db_path.to_str().expect("utf8 shared wiki DB"))
+            .expect("create shared wiki DB"),
+    );
+
+    let manifest_path = server.tachi_home_dir().join("manifest.json");
+    let mut manifest = crate::manifest::Manifest::load_or_empty(&manifest_path);
+    manifest.dbs.push(crate::manifest::DbEntry {
+        path: db_path.display().to_string(),
+        role: crate::manifest::DbRole::Project,
+        owner: "test".to_string(),
+        schema_kind: "tachi".to_string(),
+        vec_enabled: true,
+        allow_write: true,
+        last_doctor_at: Utc::now().to_rfc3339(),
+        last_classification: "healthy".to_string(),
+        scope_hint: "project:wiki".to_string(),
+        notes: String::new(),
+    });
+    manifest.save(&manifest_path).expect("register shared wiki");
+}
+
 pub(crate) fn make_server_with_project_fixture(
     project_name: &str,
 ) -> (TestServer, std::path::PathBuf) {

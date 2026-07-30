@@ -125,11 +125,9 @@ pub(crate) async fn search_wiki_store_candidates(
     server: &MemoryServer,
     mut params: SearchMemoryParams,
     stores: &[StoreRef],
+    record_access: bool,
 ) -> Result<Vec<WikiStoreSearchCandidate>, String> {
     params.query = query_with_context_symbols(&params.query, &params.context_symbols);
-    if memcore::should_skip_query(&params.query) {
-        return Ok(Vec::new());
-    }
     let per_store_budget = params.normalized_top_k();
     params.top_k = per_store_budget;
     params.candidates_per_channel = params.normalized_candidates_per_channel();
@@ -169,7 +167,7 @@ pub(crate) async fn search_wiki_store_candidates(
             StoreRef::BoundProject => with_project_search(
                 server,
                 &params,
-                false,
+                record_access,
                 None,
                 "Wiki search failed in bound project DB",
             )?,
@@ -178,14 +176,14 @@ pub(crate) async fn search_wiki_store_candidates(
                 project,
                 None,
                 &params,
-                false,
+                record_access,
                 None,
                 format!("Wiki search failed in named project DB '{project}'"),
             )?,
             StoreRef::LegacyGlobal => with_global_search(
                 server,
                 &params,
-                false,
+                record_access,
                 None,
                 "Wiki search failed in legacy global DB",
             )?,

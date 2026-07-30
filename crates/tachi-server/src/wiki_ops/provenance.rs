@@ -36,6 +36,7 @@ use super::*;
 /// never distinguishable from an unresolved draft anyway; excluding both is
 /// the safe default). The candidate lookup failure itself is now propagated
 /// as an error instead of silently degrading to an empty candidate set.
+#[cfg(test)]
 pub(crate) fn apply_wiki_lifecycle_gate(
     server: &MemoryServer,
     project: Option<&str>,
@@ -46,6 +47,7 @@ pub(crate) fn apply_wiki_lifecycle_gate(
     apply_wiki_lifecycle_gate_for_plan(server, &plan, rows, requested_lifecycle)
 }
 
+#[cfg(test)]
 pub(crate) fn apply_wiki_lifecycle_gate_for_plan(
     server: &MemoryServer,
     plan: &WikiReadPlan,

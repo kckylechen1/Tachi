@@ -3,9 +3,10 @@ use super::*;
 #[tokio::test]
 async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
     let server = make_server();
+    crate::tests::register_logical_shared_wiki(&server);
 
     server
-        .with_global_store(|store| {
+        .with_named_project_store("wiki", |store| {
             store
                 .upsert(&MemoryEntry {
                     id: "wiki-debug-mcp-args".to_string(),
@@ -23,7 +24,7 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
                     entities: vec![],
                     location: String::new(),
                     source: "test".to_string(),
-                    scope: "global".to_string(),
+                    scope: "shared".to_string(),
                     archived: false,
                     access_count: 0,
                     scored_count: 0,

@@ -5,7 +5,7 @@ use super::super::recall::{
 };
 use crate::memory_search_ops::{rerank_rows_with_outcome, search_memory_rows, RerankOutcome};
 use crate::server_state::MemoryServer;
-use crate::tool_params::{RecallContextParams, SearchMemoryParams};
+use crate::tool_params::{RecallContextParams, SearchMemoryParams, WikiReadPlan};
 use crate::utils::stable_hash;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -117,7 +117,8 @@ pub(crate) async fn handle_recall_context(
     // ── Wiki auto-search: enrich recall with wiki knowledge ─────────────
     let (wiki_rows, wiki_context) = if params.include_wiki && !params.query.trim().is_empty() {
         let wiki_top_k = params.wiki_top_k.max(1).min(10);
-        match search_memory_rows(
+        let wiki_plan = WikiReadPlan::from_project(Some(params.wiki_project.as_str()))?;
+        match crate::wiki_ops::search_wiki_rows_for_plan(
             server,
             SearchMemoryParams {
                 query: params.query.clone(),
@@ -142,40 +143,15 @@ pub(crate) async fn handle_recall_context(
                 include_metadata: false,
                 format: None,
             },
+            &wiki_plan,
+            None,
             false,
         )
         .await
         {
-            Ok(mut rows) if !rows.is_empty() => {
-                // #1072 fix-round (#1215 BUG 4): `recall_context` used to feed
-                // raw, ungated `/wiki` search rows straight into
-                // `<wiki-knowledge>` synthesis context and the `wiki_results`
-                // response field — the exact "unreviewed drafts served as
-                // reasoning/prompt-context truth" bypass the cross-vendor
-                // review named. `recall_context` has no explicit lifecycle
-                // scope param (and should not grow one — this is a reasoning
-                // surface, not an authoring one), so the gate always runs in
-                // its default (active-only) scope here; a lookup failure now
-                // fails this arm closed (skip wiki, keep the rest of recall)
-                // rather than silently serving unfiltered drafts.
-                match crate::wiki_ops::apply_wiki_lifecycle_gate(
-                    server,
-                    Some(params.wiki_project.as_str()),
-                    &mut rows,
-                    None,
-                ) {
-                    Ok(()) if !rows.is_empty() => {
-                        let ctx = build_wiki_context(&rows);
-                        (rows, ctx)
-                    }
-                    Ok(()) => (vec![], String::new()),
-                    Err(err) => {
-                        tracing::warn!(
-                            "[recall_context] wiki lifecycle gate failed, skipping wiki: {err}"
-                        );
-                        (vec![], String::new())
-                    }
-                }
+            Ok(result) if !result.rows.is_empty() => {
+                let ctx = build_wiki_context(&result.rows);
+                (result.rows, ctx)
             }
             Ok(_) => (vec![], String::new()),
             Err(err) => {

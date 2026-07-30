@@ -16,7 +16,6 @@ use super::evidence_format::{
 use crate::agent_markdown;
 use crate::memory_search_ops::{
     handle_search_memory, list_available_named_projects, resolve_effective_named_project,
-    search_memory_rows,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -225,8 +224,8 @@ pub(crate) async fn handle_memory_briefing(
             enable_rerank: false,
             as_of: params.as_of.clone(),
             include_metadata: false,
-            // Goes through search_memory_rows (Vec<Value>, no string
-            // round trip) below, so format is compile-only here.
+            // Goes through the typed Wiki row planner below, so format is
+            // compile-only here.
             format: None,
         })
     } else {
@@ -238,7 +237,10 @@ pub(crate) async fn handle_memory_briefing(
         handle_search_memory(server, mem_params, true),
         async {
             if let Some(wp) = wiki_params {
-                search_memory_rows(server, wp, true).await
+                let plan = WikiReadPlan::from_project(wp.project.as_deref())?;
+                crate::wiki_ops::search_wiki_rows_for_plan(server, wp, &plan, None, false)
+                    .await
+                    .map(|result| result.rows)
             } else {
                 Ok(vec![])
             }
@@ -273,22 +275,7 @@ pub(crate) async fn handle_memory_briefing(
         memory_rows
     });
     let wiki = if include_wiki {
-        let mut rows = wiki_result?;
-        crate::wiki_ops::filter_user_facing_wiki_rows(&mut rows);
-        // #1072 fix-round (#1215 BUG 4): `tachi_memory(briefing)` used to
-        // serve raw `/wiki` search rows — including unreviewed
-        // `pending_review` drafts — straight into the briefing response with
-        // no lifecycle filtering, another reasoning-context bypass the
-        // cross-vendor review named explicitly. Briefing has no explicit
-        // lifecycle-scope param and should not grow one (it is a read
-        // surface, not an authoring one) — always gate to the default
-        // (active-only) scope.
-        crate::wiki_ops::apply_wiki_lifecycle_gate(
-            server,
-            params.project.as_deref(),
-            &mut rows,
-            None,
-        )?;
+        let rows = wiki_result?;
         let wiki_rows = Value::Array(rows);
         slim_memory_rows(if compact {
             apply_compact_relevance_floor(wiki_rows)

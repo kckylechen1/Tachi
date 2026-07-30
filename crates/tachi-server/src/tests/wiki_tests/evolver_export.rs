@@ -202,6 +202,44 @@ async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     let _ = std::fs::remove_dir_all(out_dir);
 }
 
+#[test]
+fn wiki_export_obsidian_explicit_project_never_falls_back_to_legacy_global() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("export-target");
+    let mut target = make_entry("wiki-export-store-identity");
+    target.path = "/wiki/export/store-identity".to_string();
+    target.topic = "named-store".to_string();
+    target.text = "Named project export sentinel.".to_string();
+    target.metadata = json!({"lifecycle": "active"});
+    let mut legacy = target.clone();
+    legacy.topic = "legacy-global".to_string();
+    legacy.text = "Legacy global export sentinel.".to_string();
+
+    server
+        .with_named_project_store("export-target", |store| {
+            store.upsert(&target).map_err(|error| error.to_string())
+        })
+        .expect("seed named export target");
+    server
+        .with_global_store(|store| store.upsert(&legacy).map_err(|error| error.to_string()))
+        .expect("seed legacy global export decoy");
+
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-store-identity-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let result = crate::wiki_ops::export_wiki_obsidian(&server, "export-target", &out_dir)
+        .expect("strict named export");
+    assert_eq!(result["count"], json!(1));
+    let markdown = std::fs::read_to_string(out_dir.join("export/store-identity/named-store.md"))
+        .expect("read named export");
+    assert!(markdown.contains("Named project export sentinel."));
+    assert!(!markdown.contains("Legacy global export sentinel."));
+    assert!(!out_dir
+        .join("export/store-identity/legacy-global.md")
+        .exists());
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
 #[tokio::test]
 async fn wiki_export_obsidian_prefers_typed_refs_when_both_channels_exist() {
     let mut entry = make_entry("wiki-export-dual-refs");

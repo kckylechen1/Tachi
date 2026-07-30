@@ -78,6 +78,10 @@ pub enum WikiReadPlan {
     /// This is never a normal retrieval plan: legacy global remains an input
     /// to migration, not an implicit source of reviewed shared knowledge.
     MigrationAudit,
+    /// Feature-guide federation retains the established global playbook
+    /// authority in addition to bound + shared stores. It is not a `/wiki`
+    /// retrieval plan and must never be selected by Wiki search/read/browse.
+    GuideFederated,
 }
 
 impl WikiReadPlan {

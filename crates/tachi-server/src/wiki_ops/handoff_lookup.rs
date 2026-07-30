@@ -32,11 +32,12 @@ pub(crate) fn list_handoff_mirrors_for_repo(
     server: &MemoryServer,
     repo: &str,
 ) -> Result<Vec<HandoffMirrorRef>, String> {
-    let (entries, _source) = list_wiki_entries(server, "wiki", 5000)?;
+    let entries = list_wiki_entries_for_plan(server, &WikiReadPlan::Federated, "/wiki", 5000)?;
     let mut mirrors: Vec<HandoffMirrorRef> = entries
         .into_iter()
-        .filter(|entry| entry.path.starts_with("/wiki/handoffs/"))
-        .filter_map(|entry| {
+        .filter(|stored| stored.entry.path.starts_with("/wiki/handoffs/"))
+        .filter_map(|stored| {
+            let entry = stored.entry;
             let meta_repo = entry.metadata.get("repo").and_then(Value::as_str)?;
             if meta_repo != repo {
                 return None;
@@ -117,5 +118,26 @@ mod tests {
         };
         assert_eq!(matches("owner/repo"), vec![1]);
         assert_eq!(matches("owner/repo-fork"), vec![2]);
+    }
+
+    #[test]
+    fn handoff_lookup_never_uses_legacy_global_as_default_wiki_authority() {
+        let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
+        let legacy = entry(
+            "/wiki/handoffs/legacy-global",
+            "owner/repo",
+            9,
+            "2026-07-09T00:00:00Z",
+        );
+        server
+            .with_global_store(|store| store.upsert(&legacy).map_err(|error| error.to_string()))
+            .expect("seed legacy global handoff");
+
+        let mirrors = list_handoff_mirrors_for_repo(&server, "owner/repo")
+            .expect("list federated handoff mirrors");
+        assert!(
+            mirrors.is_empty(),
+            "RED: legacy global handoff leaked into default project+shared lookup"
+        );
     }
 }

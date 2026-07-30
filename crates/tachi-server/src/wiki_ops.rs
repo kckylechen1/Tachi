@@ -46,13 +46,10 @@ mod tests;
 use self::provenance::{
     attach_wiki_provenance, preferred_wiki_references, wiki_entry_matches_lifecycle_scope,
 };
-use self::similarity::{
-    contradiction_score, parse_rfc3339_utc, relation_exists, token_cosine_similarity,
-};
+use self::similarity::{contradiction_score, parse_rfc3339_utc, token_cosine_similarity};
 use self::store::{
-    find_related_by_entities, is_user_facing_wiki_entry, list_wiki_entries,
-    list_wiki_entries_for_plan, stores_for_wiki_plan, with_wiki_store, with_wiki_store_read,
-    StoredWikiEntry,
+    find_related_by_entities, is_user_facing_wiki_entry, stores_for_wiki_plan, with_wiki_store,
+    with_wiki_store_read, StoredWikiEntry,
 };
 
 pub(crate) use self::export::export_wiki_obsidian;
@@ -60,13 +57,14 @@ pub(crate) use self::handoff_lookup::list_handoff_mirrors_for_repo;
 pub(crate) use self::ingest::handle_wiki_ingest;
 pub(crate) use self::lint::{handle_wiki_lint, wiki_hygiene_counts};
 pub(crate) use self::log::append_wiki_log;
+#[cfg(test)]
 pub(crate) use self::provenance::apply_wiki_lifecycle_gate;
 pub(crate) use self::references::validate_references;
 pub(crate) use self::search::{
     collect_wiki_browse_value, collect_wiki_read_value_for_plan, collect_wiki_search_value,
-    handle_wiki_browse, handle_wiki_read_for_plan, handle_wiki_search,
+    handle_wiki_browse, handle_wiki_read_for_plan, handle_wiki_search, search_wiki_rows_for_plan,
 };
 #[cfg(test)]
 pub(crate) use self::search::{collect_wiki_read_value, handle_wiki_read};
 pub(crate) use self::skill_quality::refresh_skill_quality_guards;
-pub(crate) use self::store::filter_user_facing_wiki_rows;
+pub(crate) use self::store::list_wiki_entries_for_plan;

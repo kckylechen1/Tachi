@@ -90,3 +90,49 @@ async fn tachi_search_wiki_scope_excludes_pending_review_drafts_by_default() {
         "an active entry must still surface: {response}"
     );
 }
+
+#[tokio::test]
+async fn tachi_search_explicit_project_cannot_relabel_same_id_global_row() {
+    let mut named = make_entry("wiki-same-id-boundary");
+    named.path = "/wiki/strict/named".to_string();
+    named.summary = "Named authority row".to_string();
+    named.text = "NamedAuthorityOnlyToken".to_string();
+    named.metadata = json!({"lifecycle": "active"});
+    let (server, _home) = seed_wiki_project_entries(vec![named]);
+
+    let mut global = make_entry("wiki-same-id-boundary");
+    global.path = "/wiki/strict/global-decoy".to_string();
+    global.summary = "Global authority decoy".to_string();
+    global.text = "WrongStoreSameIdNeedle".to_string();
+    global.metadata = json!({"lifecycle": "active"});
+    server
+        .with_global_store(|store| store.upsert(&global).map_err(|error| error.to_string()))
+        .expect("seed global same-id decoy");
+
+    let response = server
+        .tachi_search(Parameters(TachiSearchParams {
+            query: "WrongStoreSameIdNeedle".to_string(),
+            scope: "wiki".to_string(),
+            top_k: 5,
+            path_prefix: None,
+            project: Some("wiki".to_string()),
+            domain: None,
+            file_context: None,
+            error_context: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            category: None,
+            include_archived: false,
+            include_training: false,
+            enable_rerank: false,
+            as_of: None,
+        }))
+        .await
+        .expect("strict tachi_search");
+
+    assert!(
+        !response.contains("/wiki/strict/global-decoy")
+            && !response.contains("Global authority decoy"),
+        "RED: explicit named Wiki search relabeled a same-id global row: {response}"
+    );
+}

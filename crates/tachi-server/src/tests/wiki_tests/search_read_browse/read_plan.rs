@@ -200,6 +200,70 @@ async fn omitted_project_federates_bound_and_shared_but_not_legacy_global() {
     );
 }
 
+#[tokio::test]
+async fn wiki_search_does_not_apply_generic_noise_skip_to_explicit_lookup() {
+    let entry = wiki_entry(
+        "wiki-short-explicit-query",
+        "/wiki/read-plan/short-query",
+        "kdb is an intentional Wiki lookup token",
+    );
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let result = collect_wiki_search_value(&server, planned_wiki_search("kdb", Some("wiki"), 10))
+        .await
+        .expect("short explicit Wiki lookup");
+    assert!(
+        result["results"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == "wiki-short-explicit-query")),
+        "RED: dedicated Wiki lookup must not inherit generic conversational-noise skipping: {result:?}"
+    );
+}
+
+#[test]
+fn federated_browse_round_robins_store_budgets() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
+    register_named_project(&server, "wiki");
+    for index in 0..3 {
+        let entry = wiki_entry(
+            &format!("wiki-browse-bound-{index}"),
+            &format!("/wiki/read-plan/browse/bound-{index}"),
+            "bound browse row",
+        );
+        server
+            .with_project_store(|store| store.upsert(&entry).map_err(|error| error.to_string()))
+            .expect("seed bound browse row");
+    }
+    let shared = wiki_entry(
+        "wiki-browse-shared",
+        "/wiki/read-plan/browse/shared",
+        "shared browse row",
+    );
+    server
+        .with_named_project_store("wiki", |store| {
+            store.upsert(&shared).map_err(|error| error.to_string())
+        })
+        .expect("seed shared browse row");
+
+    let value = crate::wiki_ops::collect_wiki_browse_value(
+        &server,
+        WikiBrowseParams {
+            category: Some("/wiki/read-plan/browse".to_string()),
+            limit: 2,
+            project: None,
+            lifecycle: None,
+        },
+    )
+    .expect("federated browse");
+    let entries = value["entries"].as_array().expect("browse entries");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["id"] == "wiki-browse-shared"),
+        "RED: bound rows consumed the whole browse limit before shared was considered: {entries:?}"
+    );
+}
+
 #[test]
 fn federated_same_path_read_returns_store_qualified_candidates() {
     let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
