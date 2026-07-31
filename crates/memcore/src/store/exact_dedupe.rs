@@ -150,6 +150,8 @@ impl ExactDedupeReceipt {
             if !ids.insert(row.loser_id.as_str())
                 || row.loser_id.is_empty()
                 || row.winner_id.is_empty()
+                || row.loser_id.starts_with("wiki-rem:")
+                || row.winner_id.starts_with("wiki-rem:")
                 || row.loser_id == row.winner_id
                 || row.before_revision < 1
                 || row.archived_revision != row.before_revision + 1
@@ -619,7 +621,7 @@ impl MemoryStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for row in &receipt.rows {
             let changed = tx.execute(
-                "UPDATE memories SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1 WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4 AND path=?5",
+                "UPDATE memories SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1 WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4 AND path=?5 AND id NOT LIKE 'wiki-rem:%'",
                 params![
                     row.loser_valid_until_before,
                     row.loser_id,
@@ -821,6 +823,58 @@ mod tests {
             )
             .unwrap();
         assert!(superseded_by.is_none());
+    }
+
+    #[test]
+    fn exact_dedupe_restore_rejects_a_forged_rem_receipt_before_mutation() {
+        let (_dir, identity, mut store) = disk_store();
+        insert(&store, "winner", "/same", "same text");
+        insert(&store, "loser", "/same", "same text");
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET retention_policy = 'pinned' WHERE id = 'winner'",
+                    [],
+                )
+                .unwrap();
+        });
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+        let mut receipt = store.apply_exact_dedupe(&plan).unwrap().receipt;
+        let row = receipt.rows.first_mut().expect("one archived loser");
+        row.loser_id = "wiki-rem:protected".to_string();
+        insert(
+            &store,
+            &row.loser_id,
+            &row.loser_path,
+            "protected REM operation",
+        );
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET archived = 1, superseded_by = ?1, revision = ?2 WHERE id = ?3",
+                    params![row.winner_id, row.archived_revision, row.loser_id],
+                )
+                .unwrap();
+        });
+        receipt.receipt_digest = receipt.compute_digest().unwrap();
+
+        let error = store
+            .restore_exact_dedupe(&receipt)
+            .expect_err("restore must not own the REM operation namespace");
+        assert!(error
+            .to_string()
+            .contains("invalid exact-dedupe receipt row"));
+        let archived: bool = store
+            .conn
+            .query_row(
+                "SELECT archived FROM memories WHERE id = 'wiki-rem:protected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(archived);
     }
 
     #[test]

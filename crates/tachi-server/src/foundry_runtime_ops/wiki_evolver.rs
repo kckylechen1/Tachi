@@ -261,6 +261,31 @@ fn runtime_rem_source_stores(server: &MemoryServer) -> Result<RuntimeRemSourceSt
     Ok(runtime_stores)
 }
 
+fn runtime_rem_wiki_store_identity(server: &MemoryServer) -> Result<String, String> {
+    let wiki_path = server.resolve_server_named_project_db_path("wiki")?;
+    crate::physical_db_identity::physical_db_bindings_for_paths(&[wiki_path])?
+        .into_iter()
+        .next()
+        .map(|binding| binding.physical_id)
+        .ok_or_else(|| "REM Wiki store has no physical identity".to_string())
+}
+
+fn verify_opened_rem_wiki_store(
+    store: &mut memcore::MemoryStore,
+    expected_identity: &str,
+    role: &str,
+) -> Result<(), String> {
+    let opened = store
+        .opened_physical_db_identity()
+        .ok_or_else(|| format!("REM Wiki {role} store has no opened physical identity"))?;
+    if opened != expected_identity {
+        return Err(format!(
+            "REM Wiki store path identity changed after open for {role}: opened={opened}, current={expected_identity}"
+        ));
+    }
+    Ok(())
+}
+
 fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, String> {
     let collect = |store: &mut memcore::MemoryStore| -> Result<Vec<MemoryEntry>, String> {
         store
@@ -629,7 +654,9 @@ fn ensure_rem_draft_winner(
     draft_id: &str,
     sources: &[RemSourceRef],
 ) -> Result<(), String> {
+    let wiki_identity = runtime_rem_wiki_store_identity(server)?;
     server.with_named_project_store("wiki", |store| {
+        verify_opened_rem_wiki_store(store, &wiki_identity, "write")?;
         store
             .with_immutable_supersession_transaction(|operation| {
                 let existing = operation
@@ -653,7 +680,9 @@ fn persist_rem_draft_operation(
     entry: &MemoryEntry,
     sources: &[RemSourceRef],
 ) -> Result<InsertMemoryResult, String> {
+    let wiki_identity = runtime_rem_wiki_store_identity(server)?;
     server.with_named_project_store("wiki", |store| {
+        verify_opened_rem_wiki_store(store, &wiki_identity, "write")?;
         store
             .with_immutable_supersession_transaction(|operation| {
                 let claimed_at = Utc::now().to_rfc3339();
@@ -737,7 +766,9 @@ fn complete_rem_operation(
             );
         }
     }
+    let wiki_identity = runtime_rem_wiki_store_identity(server)?;
     if let Err(error) = server.with_named_project_store("wiki", |store| {
+        verify_opened_rem_wiki_store(store, &wiki_identity, "write")?;
         store
             .complete_rem_wiki_operation(draft_id, &now)
             .map_err(|error| format!("complete REM draft receipt: {error}"))
@@ -836,6 +867,43 @@ fn route_rem_sources(
     Ok((global_sources, project_sources))
 }
 
+fn rem_source_revisions_are_current(
+    server: &MemoryServer,
+    global_sources: &[RemSourceRevision],
+    project_sources: &[RemSourceRevision],
+) -> Result<bool, String> {
+    let group_is_current = |store: &mut memcore::MemoryStore,
+                            sources: &[RemSourceRevision],
+                            role: &str|
+     -> Result<bool, String> {
+        for (id, expected_revision) in sources {
+            let Some(source) = store
+                .get(id)
+                .map_err(|error| format!("read {role} REM source {id}: {error}"))?
+            else {
+                return Ok(false);
+            };
+            if source.archived || source.revision != *expected_revision {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    if !global_sources.is_empty()
+        && !server
+            .with_global_store_read(|store| group_is_current(store, global_sources, "global"))?
+    {
+        return Ok(false);
+    }
+    if !project_sources.is_empty()
+        && !server
+            .with_project_store_read(|store| group_is_current(store, project_sources, "project"))?
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
     let wiki_path = MemoryServer::resolve_existing_named_project_db_path_in_home(
         "wiki",
@@ -849,7 +917,9 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
     loop {
+        let wiki_read_identity = runtime_rem_wiki_store_identity(server)?;
         let pending = server.with_named_project_store_read("wiki", |store| {
+            verify_opened_rem_wiki_store(store, &wiki_read_identity, "read-pool")?;
             store
                 .pending_rem_wiki_operations_after(
                     after
@@ -883,6 +953,25 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
             }
             validate_existing_rem_draft(&entry, &entry.id, &sources)
                 .map_err(|error| format!("recover REM draft {}: {error}", entry.id))?;
+            let (global_sources, project_sources) =
+                route_rem_sources(&sources, &runtime_stores, &entry.id)?;
+            if !rem_source_revisions_are_current(server, &global_sources, &project_sources)? {
+                let aborted_at = Utc::now().to_rfc3339();
+                let wiki_write_identity = runtime_rem_wiki_store_identity(server)?;
+                server.with_named_project_store("wiki", |store| {
+                    verify_opened_rem_wiki_store(store, &wiki_write_identity, "write")?;
+                    store
+                        .abort_stale_rem_wiki_operation(&entry.id, &aborted_at)
+                        .map_err(|error| {
+                            format!("abort stale REM draft operation {}: {error}", entry.id)
+                        })
+                })?;
+                eprintln!(
+                    "[wiki_evolver] warn: archived stale pending REM operation {} and released its source claims",
+                    entry.id
+                );
+                continue;
+            }
             complete_rem_operation(server, &entry.id, &sources)?;
         }
         if page_len < PAGE_SIZE {
@@ -1228,6 +1317,42 @@ mod rem_identity_tests {
         assert!(error.contains("identity changed after open"), "{error}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rem_persistence_rejects_a_named_wiki_path_replaced_after_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(
+            memcore::MemoryStore::open(wiki_db.to_str().unwrap())
+                .expect("initialize named Wiki store"),
+        );
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+        server
+            .with_named_project_store("wiki", |_| Ok(()))
+            .expect("cache named Wiki store");
+
+        let replacement = dir.path().join("replacement.db");
+        std::fs::write(&replacement, b"replacement Wiki database identity")
+            .expect("create replacement inode");
+        std::fs::rename(&replacement, &wiki_db).expect("replace named Wiki database path");
+        let sources = vec![RemSourceRef {
+            store: test_store("source-store"),
+            id: "source".to_string(),
+            revision: 1,
+        }];
+        let draft_id = stable_rem_draft_id(&sources);
+        let error =
+            persist_rem_draft_operation(&server, &occupied_entry(&draft_id, &sources), &sources)
+                .expect_err("REM must not write claims into a detached Wiki connection");
+        assert!(
+            error.contains("Wiki store path identity changed after open"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn project_marker_failure_compensates_the_committed_global_marker() {
         let dir = tempfile::tempdir().unwrap();
@@ -1331,6 +1456,59 @@ mod rem_identity_tests {
                 Ok(())
             })
             .expect("verify pending operation");
+
+        recover_pending_rem_operations(&server)
+            .expect("second-run recovery must retire the stale operation");
+        server
+            .with_named_project_store("wiki", |store| {
+                let aborted = store
+                    .get_with_options(&draft_id, true)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "aborted REM operation missing".to_string())?;
+                assert!(aborted.archived);
+                assert_eq!(
+                    aborted.metadata["rem"]["operation_status"],
+                    "aborted_stale_sources"
+                );
+                Ok(())
+            })
+            .expect("verify stale operation retirement");
+
+        let next_project_revision = server
+            .with_project_store_read(|store| {
+                store
+                    .get("project-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "project source missing".to_string())
+            })
+            .expect("read revised project source");
+        let mut next_sources = vec![
+            sources
+                .iter()
+                .find(|source| source.id == "global-source")
+                .expect("global source identity")
+                .clone(),
+            RemSourceRef {
+                store: sources
+                    .iter()
+                    .find(|source| source.id == "project-source")
+                    .expect("project source identity")
+                    .store
+                    .clone(),
+                id: "project-source".to_string(),
+                revision: next_project_revision,
+            },
+        ];
+        next_sources.sort();
+        let next_draft_id = stable_rem_draft_id(&next_sources);
+        assert_ne!(next_draft_id, draft_id);
+        persist_rem_draft_operation(
+            &server,
+            &occupied_entry(&next_draft_id, &next_sources),
+            &next_sources,
+        )
+        .expect("released claims must admit the revised source-set operation");
     }
 
     #[test]
