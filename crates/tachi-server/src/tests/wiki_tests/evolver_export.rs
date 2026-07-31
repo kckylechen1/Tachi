@@ -163,6 +163,18 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         source_count, 3,
         "same memory ID in two stores stays distinct"
     );
+    let operation_log = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get("wiki-operation-log")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Wiki operation log missing".to_string())
+        })
+        .expect("read REM Wiki operation log");
+    assert!(
+        operation_log.text.contains("weekly REM draft completed"),
+        "successful REM draft persistence must remain visible in the Wiki operation log"
+    );
     for read_marker in [
         server.with_global_store_read(|store| {
             store.get("pattern-a").map_err(|error| error.to_string())

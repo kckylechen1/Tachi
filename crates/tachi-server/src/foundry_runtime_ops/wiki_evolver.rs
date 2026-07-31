@@ -1077,7 +1077,8 @@ fn rem_source_markers_exist(
 ) -> Result<bool, String> {
     if with_rem_global_store_read(server, &runtime_stores.global, |store| {
         store
-            .has_rem_processed_source_markers()
+            .rem_processed_source_markers()
+            .map(|markers| !markers.is_empty())
             .map_err(|error| format!("scan global REM source markers: {error}"))
     })? {
         return Ok(true);
@@ -1089,13 +1090,81 @@ fn rem_source_markers_exist(
             .ok_or_else(|| "REM project source identity is unavailable".to_string())?;
         if with_rem_project_store_read(server, project_store, |store| {
             store
-                .has_rem_processed_source_markers()
+                .rem_processed_source_markers()
+                .map(|markers| !markers.is_empty())
                 .map_err(|error| format!("scan project REM source markers: {error}"))
         })? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn rem_source_markers(
+    server: &MemoryServer,
+    runtime_stores: &RuntimeRemSourceStores,
+) -> Result<Vec<(RemSourceStore, String, String)>, String> {
+    let global_markers = with_rem_global_store_read(server, &runtime_stores.global, |store| {
+        store
+            .rem_processed_source_markers()
+            .map_err(|error| format!("scan global REM source markers: {error}"))
+    })?;
+    let mut markers = global_markers
+        .into_iter()
+        .map(|(source_id, draft_id)| (runtime_stores.global.clone(), source_id, draft_id))
+        .collect::<Vec<_>>();
+    if server.has_project_db() && runtime_stores.project.as_ref() != Some(&runtime_stores.global) {
+        let project_store = runtime_stores
+            .project
+            .as_ref()
+            .ok_or_else(|| "REM project source identity is unavailable".to_string())?;
+        let project_markers = with_rem_project_store_read(server, project_store, |store| {
+            store
+                .rem_processed_source_markers()
+                .map_err(|error| format!("scan project REM source markers: {error}"))
+        })?;
+        markers.extend(
+            project_markers
+                .into_iter()
+                .map(|(source_id, draft_id)| (project_store.clone(), source_id, draft_id)),
+        );
+    }
+    Ok(markers)
+}
+
+fn validate_rem_source_marker_ledgers(
+    server: &MemoryServer,
+    runtime_stores: &RuntimeRemSourceStores,
+) -> Result<(), String> {
+    let markers = rem_source_markers(server, runtime_stores)?;
+    if markers.is_empty() {
+        return Ok(());
+    }
+    server.with_named_project_store_read_identity_checked("wiki", |wiki_store| {
+        for (source_store, source_id, draft_id) in &markers {
+            let operation = wiki_store
+                .get_with_options(draft_id, true)
+                .map_err(|error| format!("read REM source-marker ledger {draft_id}: {error}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "REM source marker {source_id} names missing Wiki operation ledger {draft_id}"
+                    )
+                })?;
+            let sources = stored_rem_sources(&operation)
+                .map_err(|error| format!("validate REM source-marker ledger {draft_id}: {error}"))?;
+            validate_existing_rem_draft(&operation, draft_id, &sources)
+                .map_err(|error| format!("validate REM source-marker ledger {draft_id}: {error}"))?;
+            if !sources
+                .iter()
+                .any(|source| source.store == *source_store && source.id == *source_id)
+            {
+                return Err(format!(
+                    "REM source marker {source_id} is absent from Wiki operation ledger {draft_id}"
+                ));
+            }
+        }
+        Ok(())
+    })
 }
 
 fn recover_pending_rem_operations(server: &MemoryServer) -> Result<RemRecoveryReport, String> {
@@ -1114,6 +1183,7 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<RemRecoveryRe
         }
         return Ok(RemRecoveryReport::default());
     }
+    validate_rem_source_marker_ledgers(server, &runtime_stores)?;
     let mut report = RemRecoveryReport::default();
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
@@ -1326,6 +1396,17 @@ fn save_wiki_draft(
 
     let result = persist_rem_draft_operation(server, &entry, &sources)?;
     complete_rem_operation(server, &draft_id, &sources)?;
+    if result == InsertMemoryResult::Inserted {
+        crate::wiki_ops::append_wiki_log(
+            server,
+            "write",
+            &format!(
+                "{} | weekly REM draft completed from {} source(s)",
+                entry.path,
+                sources.len()
+            ),
+        );
+    }
     Ok(result)
 }
 
@@ -1642,6 +1723,53 @@ mod rem_identity_tests {
             "{error}"
         );
         assert!(error.contains("source markers"), "{error}");
+    }
+
+    #[test]
+    fn recovery_fails_loudly_when_valid_wiki_db_lost_the_marker_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(
+            memcore::MemoryStore::open(wiki_db.to_str().unwrap())
+                .expect("initialize replacement Wiki store"),
+        );
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&source_entry("orphaned-source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed source");
+        let revision = server
+            .with_global_store_read(|store| {
+                store
+                    .get("orphaned-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "source missing".to_string())
+            })
+            .expect("read source revision");
+        server
+            .with_global_store(|store| {
+                store
+                    .mark_rem_processed_for_draft_at_revisions(
+                        &[("orphaned-source".to_string(), revision)],
+                        "2026-07-31T00:00:01Z",
+                        "wiki-rem:missing-ledger",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("simulate source marker with replaced Wiki ledger");
+
+        let error = recover_pending_rem_operations(&server)
+            .expect_err("valid but replaced Wiki DB must not hide orphaned markers");
+        assert!(error.contains("source marker orphaned-source"), "{error}");
+        assert!(error.contains("wiki-rem:missing-ledger"), "{error}");
+        assert!(error.contains("missing Wiki operation ledger"), "{error}");
     }
 
     #[test]

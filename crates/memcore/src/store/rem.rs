@@ -212,6 +212,29 @@ impl MemoryStore {
         Ok(found != 0)
     }
 
+    /// Source-row ids and operation ids for durable REM markers that still
+    /// suppress the current source revision. Stale revision-bound and changed
+    /// legacy markers are already reprocessable and need no live ledger.
+    pub fn rem_processed_source_markers(&self) -> Result<Vec<(String, String)>, MemoryError> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT id, json_extract(metadata, '$.rem.processed_by')
+               FROM memories
+               WHERE json_valid(metadata)
+                 AND json_extract(metadata, '$.rem.processed') = 1
+                 AND json_extract(metadata, '$.rem.processed_by') LIKE 'wiki-rem:%'
+                 AND NOT (
+                   (json_extract(metadata, '$.rem.processed_revision') IS NOT NULL
+                    AND json_extract(metadata, '$.rem.processed_revision') != revision)
+                   OR (json_extract(metadata, '$.rem.processed_revision') IS NULL
+                       AND json_extract(metadata, '$.rem.processed_at') IS NOT NULL
+                       AND updated_at > json_extract(metadata, '$.rem.processed_at'))
+                 )
+               ORDER BY id"#,
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     fn mark_rem_processed_sources(
         &mut self,
         sources: &[(String, Option<i64>)],
@@ -1400,6 +1423,21 @@ mod tests {
         assert!(upsert
             .to_string()
             .contains("reserved 'wiki-rem:' namespace"));
+
+        let revision_update = store
+            .update_with_revision(
+                &draft.id,
+                "hostile revision update",
+                "hostile summary",
+                "mcp",
+                &draft.metadata,
+                None,
+                draft.revision,
+            )
+            .expect_err("pending REM winner must reject generic revision update");
+        assert!(revision_update
+            .to_string()
+            .contains("reserved REM operation"));
 
         let archive = store
             .archive_memory(&draft.id)

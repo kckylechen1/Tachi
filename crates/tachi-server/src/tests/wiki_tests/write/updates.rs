@@ -533,9 +533,9 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
     let second = server
         .tachi_wiki_write(Parameters(WikiWriteParams {
             title: "TrendLock Rule".to_string(),
-            text: "TrendLock should protect a live trend until the trend invalidation rule actually breaks.".to_string(),
-            path: Some("/wiki/agent/tachi/trendlock".to_string()),
-            topic: Some("trendlock".to_string()),
+            text: "The revised canonical policy uses deliberately different wording.".to_string(),
+            path: Some("/wiki//agent/tachi/trendlock/".to_string()),
+            topic: Some("trendlock revised".to_string()),
             summary: None,
             category: "experience".to_string(),
             keywords: vec!["trendlock".to_string()],

@@ -9,7 +9,7 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
     } else {
         format!("/{raw}")
     };
-    if with_slash == "/wiki"
+    let namespaced = if with_slash == "/wiki"
         || with_slash.starts_with("/wiki/")
         || with_slash == "/guide"
         || with_slash.starts_with("/guide/")
@@ -17,7 +17,8 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
         with_slash
     } else {
         format!("/wiki{}", with_slash)
-    }
+    };
+    memcore::path_router::normalize_path(&namespaced)
 }
 
 /// Builds the canonical candidate artifact metadata stamped onto every

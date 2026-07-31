@@ -63,6 +63,11 @@ impl MemoryStore {
         new_vec: Option<&[f32]>,
         expected_revision: i64,
     ) -> Result<bool, MemoryError> {
+        if crate::namespace::is_reserved_wiki_rem_id(id) {
+            return Err(MemoryError::InvalidArg(format!(
+                "invariant: reserved REM operation {id} cannot be revision-updated through a generic enrichment seam"
+            )));
+        }
         let metadata_json = serde_json::to_string(new_metadata)?;
         let vec_blob = if self.vec_available {
             new_vec.map(db::serialize_f32)
