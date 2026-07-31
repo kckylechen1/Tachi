@@ -803,8 +803,9 @@ impl MemoryStore {
                 tx.execute(
                     "INSERT INTO exact_dedupe_apply_lineage (
                          loser_id,apply_id,plan_digest,winner_id,
-                         before_revision,archived_revision,applied_at
-                     ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                         before_revision,archived_revision,
+                         loser_valid_until_before,applied_at
+                     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                     params![
                         f.id,
                         apply_id,
@@ -812,6 +813,7 @@ impl MemoryStore {
                         g.winner.id,
                         f.revision,
                         f.revision + 1,
+                        valid_until_before,
                         now
                     ],
                 )?;
@@ -896,6 +898,7 @@ impl MemoryStore {
                    AND lineage.winner_id=?4
                    AND lineage.before_revision=?8
                    AND lineage.archived_revision=?3
+                   AND lineage.loser_valid_until_before IS ?1
                )"
             .to_string()
         } else {
@@ -933,14 +936,16 @@ impl MemoryStore {
                 let removed = tx.execute(
                     "DELETE FROM exact_dedupe_apply_lineage
                      WHERE loser_id=?1 AND apply_id=?2 AND plan_digest=?3
-                       AND winner_id=?4 AND before_revision=?5 AND archived_revision=?6",
+                       AND winner_id=?4 AND before_revision=?5 AND archived_revision=?6
+                       AND loser_valid_until_before IS ?7",
                     params![
                         row.loser_id,
                         apply_id,
                         view.plan_digest,
                         row.winner_id,
                         row.before_revision,
-                        row.archived_revision
+                        row.archived_revision,
+                        row.loser_valid_until_before
                     ],
                 )?;
                 if removed != 1 {
@@ -1950,6 +1955,13 @@ mod tests {
                     [],
                 )
                 .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET valid_until='2027-01-01T00:00:00Z' WHERE id='loser'",
+                    [],
+                )
+                .unwrap();
         });
         let plan = store
             .plan_exact_dedupe(identity, None, None)
@@ -1966,6 +1978,10 @@ mod tests {
         assert_eq!(receipt.rows[0].loser_id, "loser");
         assert_eq!(receipt.rows[0].winner_id, "winner");
         assert_eq!(receipt.rows[0].archived_revision, 2);
+        assert_eq!(
+            receipt.rows[0].loser_valid_until_before.as_deref(),
+            Some("2027-01-01T00:00:00Z")
+        );
 
         let archived: i64 = store
             .conn
@@ -2001,6 +2017,29 @@ mod tests {
             })
             .unwrap();
         assert_eq!(still_archived, 1, "failed CAS must not mutate");
+
+        // The caller can recompute a receipt digest, so the durable apply
+        // lineage must also bind the exact valid_until value restore writes.
+        let mut forged_valid_until = receipt.clone();
+        forged_valid_until.rows[0].loser_valid_until_before =
+            Some("2099-12-31T23:59:59Z".to_string());
+        forged_valid_until.receipt_digest.clear();
+        forged_valid_until.receipt_digest = forged_valid_until.compute_digest().unwrap();
+        assert!(store.restore_exact_dedupe(&forged_valid_until).is_err());
+        let (still_archived, valid_until): (i64, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT archived,valid_until FROM memories WHERE id='loser'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(still_archived, 1, "forged restore must not unarchive");
+        assert_eq!(
+            valid_until.as_deref(),
+            Some("2027-01-01T00:00:00Z"),
+            "forged restore must not rewrite valid_until"
+        );
 
         let restored = store
             .restore_exact_dedupe(&receipt)

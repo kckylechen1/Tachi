@@ -16,6 +16,7 @@ use std::cell::Cell;
 std::thread_local! {
     static FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION: Cell<bool> = const { Cell::new(false) };
     static FAULT_DURING_PREPARED_STAGE_WRITE: Cell<bool> = const { Cell::new(false) };
+    static FAULT_BEFORE_PREPARED_PARENT_SYNC: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -26,6 +27,11 @@ fn inject_fault_after_db_commit_before_finalization_for_test(enabled: bool) {
 #[cfg(test)]
 fn inject_fault_during_prepared_stage_write_for_test(enabled: bool) {
     FAULT_DURING_PREPARED_STAGE_WRITE.with(|fault| fault.set(enabled));
+}
+
+#[cfg(test)]
+fn inject_fault_before_prepared_parent_sync_for_test(enabled: bool) {
+    FAULT_BEFORE_PREPARED_PARENT_SYNC.with(|fault| fault.set(enabled));
 }
 
 fn fault_after_db_commit_before_finalization() -> Result<(), &'static str> {
@@ -42,6 +48,16 @@ fn sync_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     File::open(parent)?.sync_all()
+}
+
+fn sync_prepared_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
+    #[cfg(test)]
+    if FAULT_BEFORE_PREPARED_PARENT_SYNC.with(|fault| fault.replace(false)) {
+        return Err(std::io::Error::other(
+            "injected prepared-receipt parent sync failure",
+        ));
+    }
+    sync_receipt_parent(receipt_out)
 }
 
 fn write_staged_receipt(
@@ -119,9 +135,24 @@ fn persist_prepared_receipt_before_commit(
             receipt_out.display()
         )));
     }
-    sync_receipt_parent(receipt_out)?;
-    fs::remove_file(&staged)?;
-    sync_receipt_parent(receipt_out)?;
+    if let Err(error) = sync_prepared_receipt_parent(receipt_out) {
+        // The public hard link is not considered durable until its directory
+        // entry is synced. Remove both names before returning an error so the
+        // caller can safely roll back the still-open database transaction.
+        let _ = fs::remove_file(receipt_out);
+        let _ = fs::remove_file(&staged);
+        let _ = sync_receipt_parent(receipt_out);
+        return Err(memcore::MemoryError::InvalidArg(format!(
+            "exact-dedupe prepared receipt could not be synced durably before commit at {}: {error}",
+            receipt_out.display()
+        )));
+    }
+    // Once the public name and parent directory are durable, staging-name
+    // removal is cleanup only. A cleanup failure must not make the caller roll
+    // back the database while leaving an authoritative prepared receipt.
+    if fs::remove_file(&staged).is_ok() {
+        let _ = sync_receipt_parent(receipt_out);
+    }
     Ok(())
 }
 
@@ -1070,6 +1101,48 @@ mod tests {
             .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(archived, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_parent_sync_failure_removes_public_and_staged_receipts_before_rollback() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_before_prepared_parent_sync_for_test(true);
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect_err("unsynced public receipt must abort before DB commit");
+        assert!(
+            error
+                .to_string()
+                .contains("injected prepared-receipt parent sync failure"),
+            "unexpected refusal: {error}"
+        );
+        assert!(
+            !receipt_path.exists(),
+            "an unsynced prepared receipt must not remain public"
+        );
+        let leaked_stage = std::fs::read_dir(receipt_path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("exact-dedupe-prepared")
+            });
+        assert!(!leaked_stage, "prepared staging name must be removed");
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0, "DB mutation must roll back with publication");
     }
 
     #[cfg(unix)]

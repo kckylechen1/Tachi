@@ -551,6 +551,75 @@ pub(crate) fn validate_wiki_recovery_ledgers_schema(conn: &Connection) -> Result
             )));
         }
     }
+
+    const REM_SOURCE_CLAIMS_COLUMNS: &[(&str, &str, bool, i64)] = &[
+        ("source_key", "TEXT", true, 1),
+        ("source_identity", "TEXT", true, 0),
+        ("draft_id", "TEXT", true, 0),
+        ("claimed_at", "TEXT", true, 0),
+    ];
+    const EXACT_DEDUPE_LINEAGE_COLUMNS: &[(&str, &str, bool, i64)] = &[
+        ("loser_id", "TEXT", true, 1),
+        ("apply_id", "TEXT", true, 0),
+        ("plan_digest", "TEXT", true, 0),
+        ("winner_id", "TEXT", true, 0),
+        ("before_revision", "INTEGER", true, 0),
+        ("archived_revision", "INTEGER", true, 0),
+        ("loser_valid_until_before", "TEXT", false, 0),
+        ("applied_at", "TEXT", true, 0),
+    ];
+    let validate_columns = |table: &str,
+                            expected: &[(&str, &str, bool, i64)]|
+     -> Result<(), MemoryError> {
+        let mut stmt = conn.prepare(
+            "SELECT name, upper(type), [notnull] != 0, pk
+                 FROM pragma_table_info(?1) ORDER BY cid",
+        )?;
+        let actual = stmt
+            .query_map([table], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = expected
+            .iter()
+            .map(|(name, ty, not_null, pk)| {
+                ((*name).to_string(), (*ty).to_string(), *not_null, *pk)
+            })
+            .collect::<Vec<_>>();
+        if actual != expected {
+            return Err(MemoryError::InvalidArg(format!(
+                    "incomplete v28 Wiki recovery ledgers: table '{table}' has non-canonical column shape"
+                )));
+        }
+        Ok(())
+    };
+    validate_columns("rem_source_claims", REM_SOURCE_CLAIMS_COLUMNS)?;
+    validate_columns("exact_dedupe_apply_lineage", EXACT_DEDUPE_LINEAGE_COLUMNS)?;
+
+    let (unique, partial): (bool, bool) = conn.query_row(
+        "SELECT [unique] != 0, partial != 0
+         FROM pragma_index_list('rem_source_claims')
+         WHERE name = 'idx_rem_source_claims_draft'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let index_columns = conn
+        .prepare(
+            "SELECT name FROM pragma_index_info('idx_rem_source_claims_draft') ORDER BY seqno",
+        )?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if unique || partial || index_columns != ["draft_id"] {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v28 Wiki recovery ledgers: index 'idx_rem_source_claims_draft' has non-canonical shape"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 

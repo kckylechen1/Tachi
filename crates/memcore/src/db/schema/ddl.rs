@@ -986,7 +986,7 @@ pub(super) const WIKI_RECOVERY_LEDGERS_V28_SQL: &str = r#"
         -- than in one caller's global/project source store. Claims are
         -- insert-once and retained after completion as replay evidence.
         CREATE TABLE IF NOT EXISTS rem_source_claims (
-            source_key      TEXT PRIMARY KEY,
+            source_key      TEXT PRIMARY KEY NOT NULL,
             source_identity TEXT NOT NULL,
             draft_id        TEXT NOT NULL,
             claimed_at      TEXT NOT NULL
@@ -999,12 +999,13 @@ pub(super) const WIKI_RECOVERY_LEDGERS_V28_SQL: &str = r#"
         -- arbitrary valid JSON while preventing a legacy receipt downgrade
         -- from claiming a v2-applied row.
         CREATE TABLE IF NOT EXISTS exact_dedupe_apply_lineage (
-            loser_id          TEXT PRIMARY KEY,
+            loser_id          TEXT PRIMARY KEY NOT NULL,
             apply_id          TEXT NOT NULL,
             plan_digest       TEXT NOT NULL,
             winner_id         TEXT NOT NULL,
             before_revision   INTEGER NOT NULL,
             archived_revision INTEGER NOT NULL,
+            loser_valid_until_before TEXT,
             applied_at        TEXT NOT NULL
         );
 "#;

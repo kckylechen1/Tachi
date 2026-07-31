@@ -817,6 +817,7 @@ mod immutable_supersession_tests {
         let mut legacy = wiki_entry("legacy-topic-path");
         legacy.path = "/wiki/general/trendlock-legacy".to_string();
         legacy.topic = "trendlock".to_string();
+        legacy.domain = None;
         let mut replacement = wiki_entry("current-topic-path");
         replacement.path = "/wiki/general/trendlock".to_string();
         replacement.topic = legacy.topic.clone();
@@ -824,7 +825,9 @@ mod immutable_supersession_tests {
         guide.path = "/guide/global/trendlock".to_string();
         guide.topic = legacy.topic.clone();
         guide.category = "guide".to_string();
-        store.upsert(&legacy).expect("seed legacy Wiki predecessor");
+        store
+            .upsert(&legacy)
+            .expect("seed legacy Wiki predecessor without a domain tag");
         store.upsert(&guide).expect("seed same-topic Guide");
 
         persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &[])

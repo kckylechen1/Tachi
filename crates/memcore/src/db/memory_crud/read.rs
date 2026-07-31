@@ -421,7 +421,10 @@ pub fn find_active_wiki_entry_by_path(
 }
 
 /// Find every active predecessor that Wiki ingest treats as the same page:
-/// an exact path match, or a Wiki-domain row with the same topic. Exact-path
+/// an exact path match, or a user-facing `/wiki` row with the same topic.
+/// Legacy/imported Wiki rows are classified by path and may have no `domain`;
+/// the predecessor scan must use the same corpus boundary as Wiki reads.
+/// Exact-path
 /// rows sort first so receipt preservation remains deterministic.
 pub fn list_active_wiki_ingest_predecessors(
     conn: &Connection,
@@ -437,7 +440,6 @@ pub fn list_active_wiki_ingest_predecessors(
              AND ({wiki_predicate})
              AND (path = ?1 OR (
                  (path = '/wiki' OR path LIKE '/wiki/%')
-                 AND lower(COALESCE(domain, '')) = 'wiki'
                  AND topic = ?2
              ))
            ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END,

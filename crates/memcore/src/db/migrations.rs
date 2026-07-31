@@ -2489,6 +2489,40 @@ mod tests {
     }
 
     #[test]
+    fn stamped_current_v28_malformed_wiki_recovery_shapes_are_refused_without_repair() {
+        assert_current_v28_corruption_is_not_repaired(
+            "DROP TABLE rem_source_claims;
+             CREATE TABLE rem_source_claims (
+                 source_key TEXT PRIMARY KEY NOT NULL,
+                 draft_id TEXT NOT NULL,
+                 claimed_at TEXT NOT NULL
+             );
+             CREATE INDEX idx_rem_source_claims_draft
+                 ON rem_source_claims(draft_id);",
+            "rem_source_claims' has non-canonical column shape",
+        );
+        assert_current_v28_corruption_is_not_repaired(
+            "DROP TABLE exact_dedupe_apply_lineage;
+             CREATE TABLE exact_dedupe_apply_lineage (
+                 loser_id TEXT NOT NULL,
+                 apply_id TEXT NOT NULL,
+                 plan_digest TEXT NOT NULL,
+                 winner_id TEXT NOT NULL,
+                 before_revision INTEGER NOT NULL,
+                 archived_revision INTEGER NOT NULL,
+                 applied_at TEXT NOT NULL
+             );",
+            "exact_dedupe_apply_lineage' has non-canonical column shape",
+        );
+        assert_current_v28_corruption_is_not_repaired(
+            "DROP INDEX idx_rem_source_claims_draft;
+             CREATE INDEX idx_rem_source_claims_draft
+                 ON rem_source_claims(source_identity);",
+            "idx_rem_source_claims_draft' has non-canonical shape",
+        );
+    }
+
+    #[test]
     fn stamped_current_v28_missing_v28_sentinel_is_refused_without_repair() {
         assert_current_v28_corruption_is_not_repaired(
             "DELETE FROM hard_state
@@ -2730,6 +2764,81 @@ mod tests {
             "table",
             "exact_dedupe_apply_lineage"
         ));
+    }
+
+    #[test]
+    fn v27_to_v28_refuses_same_named_malformed_ledgers_without_stamping() {
+        use crate::db::DbOpenContext;
+
+        const V28_SENTINEL: &str = "v28_wiki_recovery_ledgers";
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision current fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open fixture");
+            conn.execute_batch(
+                "DROP TABLE rem_source_claims;
+                 CREATE TABLE rem_source_claims (
+                     source_key TEXT PRIMARY KEY NOT NULL,
+                     draft_id TEXT NOT NULL,
+                     claimed_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_rem_source_claims_draft
+                     ON rem_source_claims(draft_id);
+                 DROP TABLE exact_dedupe_apply_lineage;
+                 CREATE TABLE exact_dedupe_apply_lineage (
+                     loser_id TEXT PRIMARY KEY NOT NULL,
+                     apply_id TEXT NOT NULL
+                 );
+                 DELETE FROM hard_state
+                  WHERE namespace = 'migrations' AND key = 'v28_wiki_recovery_ledgers';
+                 PRAGMA user_version = 27;",
+            )
+            .expect("simulate malformed stamped v27 database");
+        }
+
+        let error = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_allow("test:1542-v28-malformed"),
+        ) {
+            Ok(_) => panic!("Allow must not stamp malformed same-named v28 ledgers"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("non-canonical column shape"),
+            "unexpected malformed-ledger error: {error}"
+        );
+
+        let verify = Connection::open(&path).expect("verify refused malformed v27 database");
+        assert_eq!(read_schema_version(&verify).unwrap(), 27);
+        assert!(!was_run(&verify, V28_SENTINEL).unwrap());
+        let rem_columns: i64 = verify
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('rem_source_claims')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let lineage_columns: i64 = verify
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('exact_dedupe_apply_lineage')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rem_columns, 3,
+            "failed migration must not rebuild caller table"
+        );
+        assert_eq!(
+            lineage_columns, 2,
+            "failed migration must not rebuild caller table"
+        );
     }
 
     #[test]
