@@ -609,15 +609,16 @@ pub(crate) async fn handle_wiki_ingest(
         }
     }
 
-    let committed_related_ids = server.with_named_project_store("wiki", |store| {
-        persist_wiki_ingest_entry(
-            store,
-            &entry,
-            &reference_appends,
-            model_invocation.as_ref(),
-            &related_edges,
-        )
-    })?;
+    let committed_related_ids =
+        server.with_named_project_store_identity_checked("wiki", |store| {
+            persist_wiki_ingest_entry(
+                store,
+                &entry,
+                &reference_appends,
+                model_invocation.as_ref(),
+                &related_edges,
+            )
+        })?;
     let committed_related_ids = committed_related_ids
         .into_iter()
         .collect::<std::collections::HashSet<_>>();

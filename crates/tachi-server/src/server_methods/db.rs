@@ -2,6 +2,30 @@ use crate::server_state::{DbScope, MemoryServer};
 use memcore::MemoryStore;
 use std::path::{Path, PathBuf};
 
+fn run_identity_checked_store_action<T>(
+    store: &mut MemoryStore,
+    db_path: &Path,
+    store_label: &str,
+    operation: &str,
+    action: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let verify = |store: &MemoryStore, phase: &str| {
+        store
+            .verify_opened_physical_db_identity(db_path)
+            .map_err(|error| {
+                format!("{store_label} physical identity check failed {phase} {operation}: {error}")
+            })
+    };
+    verify(store, "before")?;
+    let result = action(store);
+    let post = verify(store, "after");
+    match (result, post) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), _) => Err(error),
+    }
+}
+
 impl MemoryServer {
     /// Check if a project DB is available (static startup or hot-swapped).
     pub(crate) fn has_project_db(&self) -> bool {
@@ -37,11 +61,31 @@ impl MemoryServer {
         self.db.with_global_store(f)
     }
 
+    pub(crate) fn with_global_store_identity_checked<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = self.global_db_path_buf();
+        self.db.with_global_store(|store| {
+            run_identity_checked_store_action(store, &db_path, "global", "write", f)
+        })
+    }
+
     pub(crate) fn with_global_store_read<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         self.db.with_global_store_read(f)
+    }
+
+    pub(crate) fn with_global_store_read_identity_checked<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = self.global_db_path_buf();
+        self.db.with_global_store_read(|store| {
+            run_identity_checked_store_action(store, &db_path, "global", "read", f)
+        })
     }
 
     /// Recording twin of [`Self::with_global_store_read`]: identical
@@ -66,11 +110,35 @@ impl MemoryServer {
         self.db.with_project_store(f)
     }
 
+    pub(crate) fn with_project_store_identity_checked<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = self
+            .project_db_path_buf()
+            .ok_or_else(|| "project database is unavailable".to_string())?;
+        self.db.with_project_store(|store| {
+            run_identity_checked_store_action(store, &db_path, "project", "write", f)
+        })
+    }
+
     pub(crate) fn with_project_store_read<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         self.db.with_project_store_read(f)
+    }
+
+    pub(crate) fn with_project_store_read_identity_checked<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = self
+            .project_db_path_buf()
+            .ok_or_else(|| "project database is unavailable".to_string())?;
+        self.db.with_project_store_read(|store| {
+            run_identity_checked_store_action(store, &db_path, "project", "read", f)
+        })
     }
 
     pub(crate) fn with_store_for_scope<T>(
@@ -496,6 +564,30 @@ impl MemoryServer {
         )
     }
 
+    /// Read a named project through its cached runtime handle while proving
+    /// that the checked-out handle still addresses the current path both
+    /// before and after the operation.
+    pub(crate) fn with_named_project_store_read_identity_checked<T>(
+        &self,
+        project_name: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = self.resolve_named_project_db_open_path(project_name)?;
+        self.db.with_path_store_read_with_label(
+            &db_path,
+            &format!("named-project:{project_name}"),
+            |store| {
+                run_identity_checked_store_action(
+                    store,
+                    &db_path,
+                    &format!("named project '{project_name}'"),
+                    "read",
+                    f,
+                )
+            },
+        )
+    }
+
     /// Open a named project's DB for a write operation.
     pub(crate) fn with_named_project_store<T>(
         &self,
@@ -507,6 +599,26 @@ impl MemoryServer {
             .with_path_store_with_label(&db_path, project_name, f)
     }
 
+    /// Write a named project without allowing a path-keyed cached connection
+    /// to report success after its database file has been replaced.
+    pub(crate) fn with_named_project_store_identity_checked<T>(
+        &self,
+        project_name: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = self.resolve_named_project_db_open_path(project_name)?;
+        self.db
+            .with_path_store_with_label(&db_path, project_name, |store| {
+                run_identity_checked_store_action(
+                    store,
+                    &db_path,
+                    &format!("named project '{project_name}'"),
+                    "write",
+                    f,
+                )
+            })
+    }
+
     /// Establish the write-capable named-project state before a write facade
     /// performs any read-before-write lookup. This is the only route that may
     /// consume the runtime's exact v22-to-v23 guard migration authority.
@@ -514,7 +626,7 @@ impl MemoryServer {
         &self,
         project_name: &str,
     ) -> Result<(), String> {
-        self.with_named_project_store(project_name, |_| Ok(()))
+        self.with_named_project_store_identity_checked(project_name, |_| Ok(()))
     }
 
     fn resolve_named_project_db_open_path(&self, project_name: &str) -> Result<PathBuf, String> {

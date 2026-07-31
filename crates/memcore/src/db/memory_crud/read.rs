@@ -270,6 +270,34 @@ pub fn list_by_path_recent(
     Ok(out)
 }
 
+const USER_FACING_WIKI_SQL_PREDICATE: &str = r#"
+           AND path != '/wiki/_log'
+           AND instr(path, '/recall-cache/') = 0
+           AND source != 'foundry_recall_rerank_cache'
+           AND COALESCE(
+                 json_extract(
+                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                   '$.wiki_log'
+                 ),
+                 0
+               ) != 1"#;
+
+/// One typed ownership predicate for rows ordinary Wiki reads and projection
+/// deduplication may expose or retire.
+pub fn is_reserved_wiki_internal_path(path: &str) -> bool {
+    path == "/wiki/_log" || path.contains("/recall-cache/")
+}
+
+pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
+    !is_reserved_wiki_internal_path(&entry.path)
+        && entry.source != "foundry_recall_rerank_cache"
+        && !entry
+            .metadata
+            .get("wiki_log")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
 pub fn list_wiki_duplicate_candidates(
     conn: &Connection,
     path: &str,
@@ -285,6 +313,7 @@ pub fn list_wiki_duplicate_candidates(
            AND superseded_by IS NULL
            AND id NOT LIKE 'wiki-rem:%'
            AND path LIKE '/wiki/%'
+           {USER_FACING_WIKI_SQL_PREDICATE}
            AND (
                ((?1 = '/wiki/drafts' OR ?1 LIKE '/wiki/drafts/%')
                 AND (path = '/wiki/drafts' OR path LIKE '/wiki/drafts/%'))
@@ -329,6 +358,7 @@ pub fn find_active_wiki_entry_by_path(
            WHERE archived = 0
              AND superseded_by IS NULL
              AND id NOT LIKE 'wiki-rem:%'
+             {USER_FACING_WIKI_SQL_PREDICATE}
              AND path = ?1
            ORDER BY timestamp DESC
            LIMIT 1"#

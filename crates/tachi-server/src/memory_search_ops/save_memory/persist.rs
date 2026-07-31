@@ -232,6 +232,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                 let mut changed = 0usize;
                 for candidate in candidates {
                     if candidate.id == entry.id
+                        || !memcore::db::is_user_facing_wiki_entry(&candidate)
                         || !crate::copilot_ops::is_wiki_projection_duplicate(
                             &candidate,
                             &entry.path,
@@ -261,9 +262,18 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
         })
     };
     if let Some(project_name) = named_project {
-        server.with_named_project_store(project_name, |store| persist(store, Some(project_name)))
+        server.with_named_project_store_identity_checked(project_name, |store| {
+            persist(store, Some(project_name))
+        })
     } else {
-        server.with_store_for_scope(target_db, |store| persist(store, None))
+        match target_db {
+            DbScope::Global => {
+                server.with_global_store_identity_checked(|store| persist(store, None))
+            }
+            DbScope::Project => {
+                server.with_project_store_identity_checked(|store| persist(store, None))
+            }
+        }
     }
 }
 

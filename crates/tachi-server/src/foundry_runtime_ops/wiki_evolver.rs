@@ -32,6 +32,23 @@ use memcore::types::MemoryEntry;
 use memcore::{InsertMemoryResult, MemoryError};
 use tachi_llm::{CompletionStatusV1, Generated, LlmClient, PersistedModelInvocationReceiptV1};
 
+#[cfg(test)]
+static FAIL_REM_WIKI_COMPLETION_ONCE: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn take_rem_wiki_completion_failure(draft_id: &str) -> bool {
+    let mut target = FAIL_REM_WIKI_COMPLETION_ONCE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if target.as_deref() == Some(draft_id) {
+        target.take();
+        true
+    } else {
+        false
+    }
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Minimum cluster size to attempt LLM synthesis.
@@ -261,29 +278,83 @@ fn runtime_rem_source_stores(server: &MemoryServer) -> Result<RuntimeRemSourceSt
     Ok(runtime_stores)
 }
 
-fn runtime_rem_wiki_store_identity(server: &MemoryServer) -> Result<String, String> {
-    let wiki_path = server.resolve_server_named_project_db_path("wiki")?;
-    crate::physical_db_identity::physical_db_bindings_for_paths(&[wiki_path])?
-        .into_iter()
-        .next()
-        .map(|binding| binding.physical_id)
-        .ok_or_else(|| "REM Wiki store has no physical identity".to_string())
+fn run_checked_rem_source_action<T>(
+    store: &mut memcore::MemoryStore,
+    path: &std::path::Path,
+    expected: &RemSourceStore,
+    role: &str,
+    action: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let verify = |store: &memcore::MemoryStore, phase: &str| {
+        store
+            .verify_opened_physical_db_identity(path)
+            .map_err(|error| format!("REM {role} store identity check failed {phase}: {error}"))?;
+        let opened = store
+            .opened_physical_db_identity()
+            .ok_or_else(|| format!("REM {role} store has no opened physical identity"))?;
+        if opened != expected.identity {
+            return Err(format!(
+                "REM {role} store does not match the operation source identity {phase}"
+            ));
+        }
+        Ok(())
+    };
+    verify(store, "before operation")?;
+    let result = action(store);
+    let post = verify(store, "after operation");
+    match (result, post) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), _) => Err(error),
+    }
 }
 
-fn verify_opened_rem_wiki_store(
-    store: &mut memcore::MemoryStore,
-    expected_identity: &str,
-    role: &str,
-) -> Result<(), String> {
-    let opened = store
-        .opened_physical_db_identity()
-        .ok_or_else(|| format!("REM Wiki {role} store has no opened physical identity"))?;
-    if opened != expected_identity {
-        return Err(format!(
-            "REM Wiki store path identity changed after open for {role}: opened={opened}, current={expected_identity}"
-        ));
-    }
-    Ok(())
+fn with_rem_global_store<T>(
+    server: &MemoryServer,
+    expected: &RemSourceStore,
+    action: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let path = server.global_db_path_buf();
+    server.with_global_store(|store| {
+        run_checked_rem_source_action(store, &path, expected, "global", action)
+    })
+}
+
+fn with_rem_global_store_read<T>(
+    server: &MemoryServer,
+    expected: &RemSourceStore,
+    action: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let path = server.global_db_path_buf();
+    server.with_global_store_read(|store| {
+        run_checked_rem_source_action(store, &path, expected, "global read", action)
+    })
+}
+
+fn with_rem_project_store<T>(
+    server: &MemoryServer,
+    expected: &RemSourceStore,
+    action: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let path = server
+        .project_db_path_buf()
+        .ok_or_else(|| "REM project store is unavailable".to_string())?;
+    server.with_project_store(|store| {
+        run_checked_rem_source_action(store, &path, expected, "project", action)
+    })
+}
+
+fn with_rem_project_store_read<T>(
+    server: &MemoryServer,
+    expected: &RemSourceStore,
+    action: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let path = server
+        .project_db_path_buf()
+        .ok_or_else(|| "REM project store is unavailable".to_string())?;
+    server.with_project_store_read(|store| {
+        run_checked_rem_source_action(store, &path, expected, "project read", action)
+    })
 }
 
 fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, String> {
@@ -299,8 +370,7 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
     let collect_global =
         !shared_physical_store || runtime_stores.shared_route == RemSourceRole::Global;
     let mut entries = if collect_global {
-        server
-            .with_global_store_read(collect)
+        with_rem_global_store_read(server, &runtime_stores.global, collect)
             .map_err(|e| format!("REM global candidate collection: {e}"))?
             .into_iter()
             .map(|entry| RemCandidate {
@@ -316,8 +386,7 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
             "REM project candidate collection: project store identity is missing".to_string()
         })?;
         if !shared_physical_store || runtime_stores.shared_route == RemSourceRole::Project {
-            let project = server
-                .with_project_store_read(collect)
+            let project = with_rem_project_store_read(server, &project_store, collect)
                 .map_err(|e| format!("REM project candidate collection: {e}"))?;
             entries.extend(project.into_iter().map(|entry| RemCandidate {
                 store: project_store.clone(),
@@ -561,14 +630,18 @@ fn rem_identity_conflict(draft_id: &str, reason: &str) -> MemoryError {
 }
 
 fn stored_rem_sources(entry: &MemoryEntry) -> Result<Vec<RemSourceRef>, MemoryError> {
-    serde_json::from_value(
+    let sources: Vec<RemSourceRef> = serde_json::from_value(
         entry
             .metadata
             .pointer("/rem/sources")
             .cloned()
             .ok_or_else(|| rem_identity_conflict(&entry.id, "sources are missing"))?,
     )
-    .map_err(|_| rem_identity_conflict(&entry.id, "sources are malformed"))
+    .map_err(|_| rem_identity_conflict(&entry.id, "sources are malformed"))?;
+    if sources.is_empty() {
+        return Err(rem_identity_conflict(&entry.id, "source set is empty"));
+    }
+    Ok(sources)
 }
 
 fn validate_existing_rem_draft(
@@ -654,9 +727,7 @@ fn ensure_rem_draft_winner(
     draft_id: &str,
     sources: &[RemSourceRef],
 ) -> Result<(), String> {
-    let wiki_identity = runtime_rem_wiki_store_identity(server)?;
-    server.with_named_project_store("wiki", |store| {
-        verify_opened_rem_wiki_store(store, &wiki_identity, "write")?;
+    server.with_named_project_store_identity_checked("wiki", |store| {
         store
             .with_immutable_supersession_transaction(|operation| {
                 let existing = operation
@@ -680,9 +751,7 @@ fn persist_rem_draft_operation(
     entry: &MemoryEntry,
     sources: &[RemSourceRef],
 ) -> Result<InsertMemoryResult, String> {
-    let wiki_identity = runtime_rem_wiki_store_identity(server)?;
-    server.with_named_project_store("wiki", |store| {
-        verify_opened_rem_wiki_store(store, &wiki_identity, "write")?;
+    server.with_named_project_store_identity_checked("wiki", |store| {
         store
             .with_immutable_supersession_transaction(|operation| {
                 let claimed_at = Utc::now().to_rfc3339();
@@ -731,16 +800,16 @@ fn complete_rem_operation(
     }
 
     if !global_sources.is_empty() {
-        if let Err(error) = server
-            .with_global_store(|store| {
-                store
-                    .mark_rem_processed_for_draft_at_revisions(&global_sources, &now, draft_id)
-                    .map_err(|error| format!("mark global REM sources: {error}"))
-            })
-            .map_err(|error| format!("complete REM global source group: {error}"))
+        if let Err(error) = with_rem_global_store(server, &runtime_stores.global, |store| {
+            store
+                .mark_rem_processed_for_draft_at_revisions(&global_sources, &now, draft_id)
+                .map_err(|error| format!("mark global REM sources: {error}"))
+        })
+        .map_err(|error| format!("complete REM global source group: {error}"))
         {
             return fail_after_rem_source_completion(
                 server,
+                &runtime_stores,
                 draft_id,
                 &global_sources,
                 &project_sources,
@@ -749,16 +818,19 @@ fn complete_rem_operation(
         }
     }
     if !project_sources.is_empty() {
-        if let Err(error) = server
-            .with_project_store(|store| {
-                store
-                    .mark_rem_processed_for_draft_at_revisions(&project_sources, &now, draft_id)
-                    .map_err(|error| format!("mark project REM sources: {error}"))
-            })
-            .map_err(|error| format!("complete REM project source group: {error}"))
+        let project_store = runtime_stores.project.as_ref().ok_or_else(|| {
+            format!("complete REM project source group: project identity missing for {draft_id}")
+        })?;
+        if let Err(error) = with_rem_project_store(server, project_store, |store| {
+            store
+                .mark_rem_processed_for_draft_at_revisions(&project_sources, &now, draft_id)
+                .map_err(|error| format!("mark project REM sources: {error}"))
+        })
+        .map_err(|error| format!("complete REM project source group: {error}"))
         {
             return fail_after_rem_source_completion(
                 server,
+                &runtime_stores,
                 draft_id,
                 &global_sources,
                 &project_sources,
@@ -766,15 +838,25 @@ fn complete_rem_operation(
             );
         }
     }
-    let wiki_identity = runtime_rem_wiki_store_identity(server)?;
-    if let Err(error) = server.with_named_project_store("wiki", |store| {
-        verify_opened_rem_wiki_store(store, &wiki_identity, "write")?;
+    #[cfg(test)]
+    if take_rem_wiki_completion_failure(draft_id) {
+        return fail_after_rem_source_completion(
+            server,
+            &runtime_stores,
+            draft_id,
+            &global_sources,
+            &project_sources,
+            "injected REM Wiki completion failure".to_string(),
+        );
+    }
+    if let Err(error) = server.with_named_project_store_identity_checked("wiki", |store| {
         store
             .complete_rem_wiki_operation(draft_id, &now)
             .map_err(|error| format!("complete REM draft receipt: {error}"))
     }) {
         return fail_after_rem_source_completion(
             server,
+            &runtime_stores,
             draft_id,
             &global_sources,
             &project_sources,
@@ -786,6 +868,7 @@ fn complete_rem_operation(
 
 fn fail_after_rem_source_completion(
     server: &MemoryServer,
+    runtime_stores: &RuntimeRemSourceStores,
     draft_id: &str,
     global_sources: &[RemSourceRevision],
     project_sources: &[RemSourceRevision],
@@ -793,25 +876,29 @@ fn fail_after_rem_source_completion(
 ) -> Result<(), String> {
     let mut rollback_errors = Vec::new();
     if !project_sources.is_empty() {
-        if let Err(error) = server
-            .with_project_store(|store| {
-                store
-                    .rollback_rem_processed_for_draft_at_revisions(project_sources, draft_id)
-                    .map_err(|error| format!("rollback project REM sources: {error}"))
+        let rollback = runtime_stores
+            .project
+            .as_ref()
+            .ok_or_else(|| "REM project identity is unavailable during compensation".to_string())
+            .and_then(|project_store| {
+                with_rem_project_store(server, project_store, |store| {
+                    store
+                        .rollback_rem_processed_for_draft_at_revisions(project_sources, draft_id)
+                        .map_err(|error| format!("rollback project REM sources: {error}"))
+                })
             })
-            .map_err(|error| format!("compensate REM project source group: {error}"))
-        {
+            .map_err(|error| format!("compensate REM project source group: {error}"));
+        if let Err(error) = rollback {
             rollback_errors.push(error);
         }
     }
     if !global_sources.is_empty() {
-        if let Err(error) = server
-            .with_global_store(|store| {
-                store
-                    .rollback_rem_processed_for_draft_at_revisions(global_sources, draft_id)
-                    .map_err(|error| format!("rollback global REM sources: {error}"))
-            })
-            .map_err(|error| format!("compensate REM global source group: {error}"))
+        if let Err(error) = with_rem_global_store(server, &runtime_stores.global, |store| {
+            store
+                .rollback_rem_processed_for_draft_at_revisions(global_sources, draft_id)
+                .map_err(|error| format!("rollback global REM sources: {error}"))
+        })
+        .map_err(|error| format!("compensate REM global source group: {error}"))
         {
             rollback_errors.push(error);
         }
@@ -869,6 +956,7 @@ fn route_rem_sources(
 
 fn rem_source_revisions_are_current(
     server: &MemoryServer,
+    runtime_stores: &RuntimeRemSourceStores,
     global_sources: &[RemSourceRevision],
     project_sources: &[RemSourceRevision],
 ) -> Result<bool, String> {
@@ -890,16 +978,22 @@ fn rem_source_revisions_are_current(
         Ok(true)
     };
     if !global_sources.is_empty()
-        && !server
-            .with_global_store_read(|store| group_is_current(store, global_sources, "global"))?
+        && !with_rem_global_store_read(server, &runtime_stores.global, |store| {
+            group_is_current(store, global_sources, "global")
+        })?
     {
         return Ok(false);
     }
-    if !project_sources.is_empty()
-        && !server
-            .with_project_store_read(|store| group_is_current(store, project_sources, "project"))?
-    {
-        return Ok(false);
+    if !project_sources.is_empty() {
+        let project_store = runtime_stores
+            .project
+            .as_ref()
+            .ok_or_else(|| "REM project source identity is unavailable".to_string())?;
+        if !with_rem_project_store_read(server, project_store, |store| {
+            group_is_current(store, project_sources, "project")
+        })? {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
@@ -917,9 +1011,7 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
     loop {
-        let wiki_read_identity = runtime_rem_wiki_store_identity(server)?;
-        let pending = server.with_named_project_store_read("wiki", |store| {
-            verify_opened_rem_wiki_store(store, &wiki_read_identity, "read-pool")?;
+        let pending = server.with_named_project_store_read_identity_checked("wiki", |store| {
             store
                 .pending_rem_wiki_operations_after(
                     after
@@ -938,16 +1030,8 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
             .map(|entry| (entry.timestamp.clone(), entry.id.clone()))
             .expect("a non-empty REM operation page has a final row");
         for entry in pending {
-            let sources = match stored_rem_sources(&entry) {
-                Ok(sources) => sources,
-                Err(error) => {
-                    eprintln!(
-                        "[wiki_evolver] warn: pending REM operation {} has no routable source set: {error}",
-                        entry.id
-                    );
-                    continue;
-                }
-            };
+            let sources = stored_rem_sources(&entry)
+                .map_err(|error| format!("recover REM draft {} source set: {error}", entry.id))?;
             if !rem_sources_belong_to_runtime_stores(&sources, &runtime_stores) {
                 continue;
             }
@@ -955,11 +1039,14 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
                 .map_err(|error| format!("recover REM draft {}: {error}", entry.id))?;
             let (global_sources, project_sources) =
                 route_rem_sources(&sources, &runtime_stores, &entry.id)?;
-            if !rem_source_revisions_are_current(server, &global_sources, &project_sources)? {
+            if !rem_source_revisions_are_current(
+                server,
+                &runtime_stores,
+                &global_sources,
+                &project_sources,
+            )? {
                 let aborted_at = Utc::now().to_rfc3339();
-                let wiki_write_identity = runtime_rem_wiki_store_identity(server)?;
-                server.with_named_project_store("wiki", |store| {
-                    verify_opened_rem_wiki_store(store, &wiki_write_identity, "write")?;
+                server.with_named_project_store_identity_checked("wiki", |store| {
                     store
                         .abort_stale_rem_wiki_operation(&entry.id, &aborted_at)
                         .map_err(|error| {
@@ -1347,9 +1434,100 @@ mod rem_identity_tests {
         let error =
             persist_rem_draft_operation(&server, &occupied_entry(&draft_id, &sources), &sources)
                 .expect_err("REM must not write claims into a detached Wiki connection");
+        assert!(error.contains("physical identity check failed"), "{error}");
+    }
+
+    #[test]
+    fn recovery_fails_loudly_for_a_pending_operation_without_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(
+            memcore::MemoryStore::open(wiki_db.to_str().unwrap())
+                .expect("initialize named Wiki store"),
+        );
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+        let draft_id = stable_rem_draft_id(&[]);
+        persist_rem_draft_operation(&server, &occupied_entry(&draft_id, &[]), &[])
+            .expect("seed malformed legacy pending operation");
+
+        let error = recover_pending_rem_operations(&server)
+            .expect_err("missing REM sources must not look recovered");
+        assert!(error.contains(&draft_id), "{error}");
+        assert!(error.contains("source set"), "{error}");
+    }
+
+    #[test]
+    fn wiki_completion_failure_compensates_source_markers_and_keeps_pending_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(
+            memcore::MemoryStore::open(wiki_db.to_str().unwrap())
+                .expect("initialize named Wiki store"),
+        );
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&source_entry("global-source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed global source");
+        let runtime = runtime_rem_source_stores(&server).expect("bind runtime source stores");
+        let revision = server
+            .with_global_store_read(|store| {
+                store
+                    .get("global-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "global source missing".to_string())
+            })
+            .expect("read global source revision");
+        let sources = vec![RemSourceRef {
+            store: runtime.global,
+            id: "global-source".to_string(),
+            revision,
+        }];
+        let draft_id = stable_rem_draft_id(&sources);
+        persist_rem_draft_operation(&server, &occupied_entry(&draft_id, &sources), &sources)
+            .expect("persist pending REM operation");
+
+        *FAIL_REM_WIKI_COMPLETION_ONCE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(draft_id.clone());
+        let error = complete_rem_operation(&server, &draft_id, &sources)
+            .expect_err("Wiki completion failure must compensate source markers");
         assert!(
-            error.contains("Wiki store path identity changed after open"),
+            error.contains("injected REM Wiki completion failure"),
             "{error}"
+        );
+        assert!(error.contains("markers were compensated"), "{error}");
+
+        let source = server
+            .with_global_store_read(|store| {
+                store
+                    .get("global-source")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "global source missing".to_string())
+            })
+            .expect("read compensated source");
+        assert!(source.metadata["rem"]["processed"].is_null());
+        let pending = server
+            .with_named_project_store_read("wiki", |store| {
+                store
+                    .get(&draft_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "REM operation missing".to_string())
+            })
+            .expect("read pending operation");
+        assert_eq!(
+            pending.metadata["rem"]["operation_status"],
+            "pending_sources"
         );
     }
 

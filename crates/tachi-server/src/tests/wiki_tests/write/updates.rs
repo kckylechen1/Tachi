@@ -141,6 +141,7 @@ async fn public_wiki_write_cannot_persist_internal_rem_coordination_metadata() {
             project: None,
             metadata: Some(json!({
                 "caller_marker": "preserved",
+                "wiki_log": true,
                 "rem": {
                     "producer": "weekly_wiki_evolver",
                     "operation_status": "pending_sources"
@@ -166,7 +167,154 @@ async fn public_wiki_write_cannot_persist_internal_rem_coordination_metadata() {
         .expect("read ordinary Wiki row");
 
     assert_eq!(entry.metadata["caller_marker"], json!("preserved"));
+    assert_eq!(entry.metadata["wiki_log"], Value::Null);
     assert_eq!(entry.metadata["rem"], Value::Null);
+}
+
+#[tokio::test]
+async fn public_wiki_write_rejects_the_internal_operation_log_path() {
+    let mut log = make_entry("wiki-operation-log");
+    log.path = "/wiki/_log".to_string();
+    log.text = "trusted internal operation log".to_string();
+    log.topic = "wiki_log".to_string();
+    log.source = "mcp".to_string();
+    log.metadata = json!({"wiki_log": true});
+    log.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![log]);
+
+    let error = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Forged operation log".to_string(),
+            text: "ordinary content must never overwrite runtime audit state".to_string(),
+            path: Some("/wiki/_log".to_string()),
+            topic: Some("wiki_log".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.8,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect_err("the internal Wiki log path is reserved");
+    assert!(
+        error.contains("reserved for internal runtime state"),
+        "{error}"
+    );
+
+    let preserved = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get("wiki-operation-log")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Wiki operation log disappeared".to_string())
+        })
+        .expect("read preserved Wiki operation log");
+    assert_eq!(preserved.text, "trusted internal operation log");
+}
+
+#[tokio::test]
+async fn ordinary_wiki_projection_never_supersedes_internal_recall_cache_rows() {
+    let shared_text = "Internal recall rerank material must not enter Wiki supersession.";
+    let mut cache = make_entry("wiki-internal-recall-cache");
+    cache.path = "/wiki/recall-cache/shared-topic".to_string();
+    cache.topic = "shared-topic".to_string();
+    cache.text = shared_text.to_string();
+    cache.source = "foundry_recall_rerank_cache".to_string();
+    cache.metadata = json!({"recall_cache": true});
+    cache.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![cache]);
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Shared topic".to_string(),
+            text: shared_text.to_string(),
+            path: Some("/wiki/general/shared-topic".to_string()),
+            topic: Some("shared-topic".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.8,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("write ordinary Wiki row beside internal recall cache");
+    let response: Value = serde_json::from_str(&response).expect("Wiki response JSON");
+    assert_eq!(response["wiki_write_mode"], "created");
+    assert_eq!(response["wiki_duplicates_superseded"], 0);
+
+    let superseded_by: Option<String> = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT superseded_by FROM memories WHERE id = 'wiki-internal-recall-cache'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("read recall-cache supersession state");
+    assert_eq!(superseded_by, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ordinary_wiki_write_rejects_a_cached_store_after_its_path_is_replaced() {
+    let (server, home) = seed_wiki_project_entries(Vec::new());
+    let wiki_db = home.temp_home.join(".tachi/projects/wiki/memory.db");
+    let replacement = home.temp_home.join("replacement-wiki.db");
+    drop(
+        MemoryStore::open(replacement.to_str().expect("UTF-8 replacement path"))
+            .expect("initialize replacement Wiki DB"),
+    );
+    std::fs::rename(&replacement, &wiki_db).expect("replace cached Wiki DB path");
+
+    let error = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Detached store".to_string(),
+            text: "A detached cached connection must never report this write as durable."
+                .to_string(),
+            path: Some("/wiki/general/detached-store".to_string()),
+            topic: Some("detached-store".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.8,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect_err("cached detached Wiki handle must fail closed");
+    assert!(error.contains("physical identity check failed"), "{error}");
 }
 
 #[tokio::test]

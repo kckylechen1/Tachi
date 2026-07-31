@@ -1,12 +1,12 @@
 //! Opening, construction, and write-path entry points for [`MemoryStore`].
 
 use rusqlite::Connection;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::{db, db::DbOpenContext, error::MemoryError, path_router, MemoryEntry, MemoryStore};
 
-fn physical_db_identity_at_open(db_path: &str) -> Option<String> {
-    let path = std::path::Path::new(db_path);
+fn physical_db_identity_at_path(path: &Path) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
     #[cfg(unix)]
     {
@@ -19,6 +19,10 @@ fn physical_db_identity_at_open(db_path: &str) -> Option<String> {
         "path:{}",
         std::fs::canonicalize(path).ok()?.display()
     ))
+}
+
+fn physical_db_identity_at_open(db_path: &str) -> Option<String> {
+    physical_db_identity_at_path(Path::new(db_path))
 }
 
 fn validate_physical_db_identity_across_open(
@@ -668,6 +672,34 @@ impl MemoryStore {
 
     pub fn opened_physical_db_identity(&self) -> Option<&str> {
         self.opened_physical_db_identity.as_deref()
+    }
+
+    /// Verify that this already-open connection still addresses the physical
+    /// database currently present at `db_path`.
+    ///
+    /// Long-lived runtime caches are keyed by path, but replacing that path
+    /// does not retarget SQLite's existing file descriptor. Callers that must
+    /// never report success against a detached database check this immediately
+    /// before and after their operation.
+    pub fn verify_opened_physical_db_identity(&self, db_path: &Path) -> Result<(), MemoryError> {
+        let opened = self.opened_physical_db_identity.as_deref().ok_or_else(|| {
+            MemoryError::InvalidArg(
+                "opened store has no file-backed physical database identity".to_string(),
+            )
+        })?;
+        let current = physical_db_identity_at_path(db_path).ok_or_else(|| {
+            MemoryError::InvalidArg(format!(
+                "database path has no current physical identity: {}",
+                db_path.display()
+            ))
+        })?;
+        if opened != current {
+            return Err(MemoryError::InvalidArg(format!(
+                "database path identity changed after open: {}",
+                db_path.display()
+            )));
+        }
+        Ok(())
     }
 
     fn validate_write_path(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {

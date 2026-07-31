@@ -84,14 +84,7 @@ pub(super) fn list_related_candidates(
 }
 
 pub(super) fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
-    entry.path != "/wiki/_log"
-        && !entry.path.contains("/recall-cache/")
-        && entry.source != "foundry_recall_rerank_cache"
-        && !entry
-            .metadata
-            .get("wiki_log")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    memcore::db::is_user_facing_wiki_entry(entry)
 }
 
 #[derive(Debug, Clone)]
@@ -164,9 +157,11 @@ pub(super) fn with_wiki_store_read<T>(
     action: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     match store_ref {
-        StoreRef::BoundProject => server.with_project_store_read(action),
-        StoreRef::NamedProject { project } => server.with_named_project_store_read(project, action),
-        StoreRef::LegacyGlobal => server.with_global_store_read(action),
+        StoreRef::BoundProject => server.with_project_store_read_identity_checked(action),
+        StoreRef::NamedProject { project } => {
+            server.with_named_project_store_read_identity_checked(project, action)
+        }
+        StoreRef::LegacyGlobal => server.with_global_store_read_identity_checked(action),
     }
 }
 
@@ -176,9 +171,11 @@ pub(super) fn with_wiki_store<T>(
     action: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     match store_ref {
-        StoreRef::BoundProject => server.with_project_store(action),
-        StoreRef::NamedProject { project } => server.with_named_project_store(project, action),
-        StoreRef::LegacyGlobal => server.with_global_store(action),
+        StoreRef::BoundProject => server.with_project_store_identity_checked(action),
+        StoreRef::NamedProject { project } => {
+            server.with_named_project_store_identity_checked(project, action)
+        }
+        StoreRef::LegacyGlobal => server.with_global_store_identity_checked(action),
     }
 }
 

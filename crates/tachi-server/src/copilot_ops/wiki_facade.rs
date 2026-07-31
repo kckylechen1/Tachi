@@ -42,6 +42,11 @@ async fn handle_tachi_wiki_write_inner(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| wiki_slug(&params.title));
     let path = normalize_wiki_path(params.path.clone(), &topic);
+    if memcore::db::is_reserved_wiki_internal_path(&path) {
+        return Err(format!(
+            "wiki path {path} is reserved for internal runtime state"
+        ));
+    }
     let requested_project = params.project.clone();
     let project_name = requested_project
         .clone()
@@ -88,6 +93,7 @@ async fn handle_tachi_wiki_write_inner(
         obj.remove("review_receipt");
         obj.remove("source_bundle_hash");
         obj.remove("artifact_metadata_warnings");
+        obj.remove("wiki_log");
         // `rem` is an internal coordination receipt owned by the weekly Wiki
         // evolver. Accepting it from an ordinary facade caller would let a
         // user row impersonate or obstruct replay recovery.

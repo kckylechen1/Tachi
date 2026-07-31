@@ -200,6 +200,35 @@ fn ordinary_wiki_projection_does_not_select_rem_or_draft_rows() {
 }
 
 #[test]
+fn ordinary_wiki_projection_excludes_internal_log_and_recall_cache_rows() {
+    let mut conn = make_conn();
+    let mut log = make_entry("wiki-operation-log", "same internal text");
+    log.path = "/wiki/_log".to_string();
+    log.topic = "shared-topic".to_string();
+    log.metadata = json!({"wiki_log": true});
+    upsert(&mut conn, &log, false).unwrap();
+
+    let mut cache = make_entry("wiki-recall-cache", "same internal text");
+    cache.path = "/wiki/recall-cache/shared-topic".to_string();
+    cache.topic = "shared-topic".to_string();
+    cache.source = "foundry_recall_rerank_cache".to_string();
+    upsert(&mut conn, &cache, false).unwrap();
+
+    assert!(find_active_wiki_entry_by_path(&conn, "/wiki/_log")
+        .unwrap()
+        .is_none());
+    assert!(list_wiki_duplicate_candidates(
+        &conn,
+        "/wiki/general/shared-topic",
+        "shared-topic",
+        "/wiki/general",
+        None,
+    )
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
 fn ordinary_draft_projection_can_update_non_rem_drafts_only() {
     let mut conn = make_conn();
     let mut rem = make_entry("wiki-rem:reserved", "reserved rem draft");

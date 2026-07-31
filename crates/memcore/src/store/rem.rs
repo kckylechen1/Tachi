@@ -1,6 +1,6 @@
 //! REM wiki-evolver persistence helpers on [`MemoryStore`].
 
-use rusqlite::TransactionBehavior;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
@@ -62,6 +62,46 @@ impl MemoryStore {
         after: Option<(&str, &str)>,
         limit: usize,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        // A reserved operation row is audit/coordination state, not an
+        // ordinary candidate. Silently hiding a malformed owner can make a
+        // recovery pass report success while its source claims remain pinned.
+        let invalid_owner = self
+            .conn
+            .query_row(
+                r#"SELECT m.id
+                   FROM memories AS m
+                   WHERE m.path LIKE '/wiki/drafts/%'
+                     AND m.id LIKE 'wiki-rem:%'
+                     AND (m.archived = 0 OR EXISTS(
+                           SELECT 1 FROM rem_source_claims AS c
+                           WHERE c.draft_id = m.id
+                         ))
+                     AND (
+                       NOT json_valid(m.metadata)
+                       OR json_extract(
+                            CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END,
+                            '$.rem.producer'
+                          ) IS NOT 'weekly_wiki_evolver'
+                       OR json_extract(
+                            CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END,
+                            '$.rem.operation_status'
+                          ) NOT IN ('pending_sources', 'complete')
+                       OR json_extract(
+                            CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END,
+                            '$.rem.operation_status'
+                          ) IS NULL
+                     )
+                   ORDER BY m.id
+                   LIMIT 1"#,
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(id) = invalid_owner {
+            return Err(MemoryError::InvalidArg(format!(
+                "invariant: REM operation occupant {id} has invalid coordination metadata"
+            )));
+        }
         let (after_timestamp, after_id) = after
             .map(|(timestamp, id)| (Some(timestamp), Some(id)))
             .unwrap_or((None, None));
@@ -587,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_metadata_rows_do_not_starve_rem_scans() {
+    fn malformed_pattern_rows_are_skipped_but_malformed_rem_owners_fail_closed() {
         let dir = tempfile::tempdir().expect("create test directory");
         let db_path = dir.path().join("memory.db");
         let mut store =
@@ -658,14 +698,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["valid-pattern"]
         );
-        assert_eq!(
-            store
-                .pending_rem_wiki_operations(10)
-                .expect("scan valid pending operations around malformed rows")
-                .into_iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec!["wiki-rem:valid-pending"]
+        let error = store
+            .pending_rem_wiki_operations(10)
+            .expect_err("malformed REM coordination state must not look recovered");
+        assert!(
+            error.to_string().contains("wiki-rem:invalid-pending"),
+            "{error}"
         );
     }
 
@@ -1145,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_rem_winner_refuses_generic_archive_and_supersession_until_complete() {
+    fn reserved_rem_operation_refuses_generic_lifecycle_even_after_completion() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         let mut draft = test_entry(
             "wiki-rem:protected",
@@ -1180,23 +1218,30 @@ mod tests {
         let archive = store
             .archive_memory(&draft.id)
             .expect_err("pending REM winner must reject generic archive");
-        assert!(archive.to_string().contains("pending REM operation winner"));
+        assert!(archive.to_string().contains("reserved REM operation"));
         let supersede = store
             .supersede_memory(&draft.id, "replacement")
             .expect_err("pending REM winner must reject generic supersession");
-        assert!(supersede
-            .to_string()
-            .contains("pending REM operation winner"));
+        assert!(supersede.to_string().contains("reserved REM operation"));
         let delete = store
             .delete(&draft.id)
             .expect_err("pending REM winner must reject generic deletion");
-        assert!(delete.to_string().contains("pending REM operation winner"));
+        assert!(delete.to_string().contains("reserved REM operation"));
 
         store
             .complete_rem_wiki_operation(&draft.id, "2026-07-05T02:00:00Z")
             .expect("complete REM operation");
-        assert!(store
+        let completed_archive = store
             .archive_memory(&draft.id)
-            .expect("completed REM draft may be archived"));
+            .expect_err("completed REM audit row remains namespace-protected");
+        assert!(completed_archive
+            .to_string()
+            .contains("reserved REM operation"));
+        let completed_delete = store
+            .delete(&draft.id)
+            .expect_err("completed REM audit row cannot be deleted generically");
+        assert!(completed_delete
+            .to_string()
+            .contains("reserved REM operation"));
     }
 }

@@ -280,6 +280,9 @@ fn strip_reserved_public_metadata(metadata: &mut Option<serde_json::Value>) {
         // Public/system save metadata must neither mint a pending operation
         // nor reset a source's processed marker.
         object.remove("rem");
+        // Wiki operation-log ownership is established only by the internal
+        // log writer, never by caller metadata on an ordinary memory row.
+        object.remove("wiki_log");
     }
 }
 

@@ -115,9 +115,9 @@ pub(in crate::copilot_ops) fn with_existing_wiki_store<T>(
     f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     if use_named_project {
-        server.with_named_project_store(project_name, f)
+        server.with_named_project_store_identity_checked(project_name, f)
     } else {
-        server.with_global_store(f)
+        server.with_global_store_identity_checked(f)
     }
 }
 

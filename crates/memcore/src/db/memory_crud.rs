@@ -23,8 +23,9 @@ pub use access::{
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{
-    fetch_by_ids, find_active_wiki_entry_by_path, find_exact_path_text_id, get_all, list_by_path,
-    list_by_path_recent, list_wiki_duplicate_candidates,
+    fetch_by_ids, find_active_wiki_entry_by_path, find_exact_path_text_id, get_all,
+    is_reserved_wiki_internal_path, is_user_facing_wiki_entry, list_by_path, list_by_path_recent,
+    list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
@@ -3199,7 +3200,7 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
     if trimmed.is_empty() {
         return Err(MemoryError::InvalidArg("empty ID".to_string()));
     }
-    refuse_pending_rem_winner_mutation(conn, trimmed, "deleted")?;
+    refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
 
     let tx = conn.transaction()?;
 
@@ -3239,35 +3240,17 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
     Ok(deleted)
 }
 
-fn refuse_pending_rem_winner_mutation(
-    conn: &Connection,
-    id: &str,
-    action: &str,
-) -> Result<(), MemoryError> {
-    let protected = conn.query_row(
-        r#"SELECT EXISTS(
-             SELECT 1 FROM memories
-             WHERE id = ?1
-               AND id LIKE 'wiki-rem:%'
-               AND path LIKE '/wiki/drafts/%'
-               AND archived = 0
-               AND superseded_by IS NULL
-               AND json_extract(metadata, '$.rem.producer') = 'weekly_wiki_evolver'
-               AND json_extract(metadata, '$.rem.operation_status') = 'pending_sources'
-           )"#,
-        [id],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if protected {
+fn refuse_reserved_rem_operation_mutation(id: &str, action: &str) -> Result<(), MemoryError> {
+    if id.starts_with("wiki-rem:") {
         return Err(MemoryError::InvalidArg(format!(
-            "invariant: pending REM operation winner {id} cannot be {action} before source completion"
+            "invariant: reserved REM operation {id} cannot be {action} through a generic lifecycle seam"
         )));
     }
     Ok(())
 }
 
 pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
-    refuse_pending_rem_winner_mutation(conn, id, "archived")?;
+    refuse_reserved_rem_operation_mutation(id, "archived")?;
     let now = now_utc_iso();
     conn.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0",
@@ -3281,7 +3264,7 @@ pub fn archive_memory_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
-    refuse_pending_rem_winner_mutation(conn, id, "archived")?;
+    refuse_reserved_rem_operation_mutation(id, "archived")?;
     let now = now_utc_iso();
     conn.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0 AND revision = ?3",
@@ -3295,6 +3278,7 @@ pub fn restore_archived_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
+    refuse_reserved_rem_operation_mutation(id, "restored")?;
     let now = now_utc_iso();
     conn.execute(
         "UPDATE memories SET archived = 0, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 1 AND revision = ?3",
@@ -3313,7 +3297,7 @@ pub fn supersede_memory(
     if id == superseded_by {
         return Ok(false);
     }
-    refuse_pending_rem_winner_mutation(conn, id, "superseded")?;
+    refuse_reserved_rem_operation_mutation(id, "superseded")?;
     let now = now_utc_iso();
     // Closing valid_until at supersession time turns the superseded row into a
     // point-in-time-recoverable version: `as_of` before `now` still returns it,

@@ -113,17 +113,17 @@ pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
 pub use memory_crud::{
     access_event_density, archive_memory, archive_memory_if_revision, delete,
     delete_memories_symbolic_fts, fetch_by_ids, find_active_wiki_entry_by_path,
-    find_exact_path_text_id, get_access_times, get_all, get_use_access_times, list_by_path,
-    list_by_path_recent, list_wiki_duplicate_candidates, normalize_for_write,
-    record_enrichment_failure, record_memory_use, release_event_claim,
-    restore_archived_if_revision, search_fts, search_symbolic_candidates, search_vec,
-    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
-    symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
-    update_enrichment_fields, update_with_revision, AccessEventDensity, AccessEventKind,
-    IdlessUpsertResult, InsertMemoryResult, ValidatedReferenceMutation, MAX_REFERENCE_BYTES,
-    MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES,
-    MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
-    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    find_exact_path_text_id, get_access_times, get_all, get_use_access_times,
+    is_reserved_wiki_internal_path, is_user_facing_wiki_entry, list_by_path, list_by_path_recent,
+    list_wiki_duplicate_candidates, normalize_for_write, record_enrichment_failure,
+    record_memory_use, release_event_claim, restore_archived_if_revision, search_fts,
+    search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
+    set_keyword_enrichment_status, supersede_memory, symbolic_trigram_select_sql,
+    sync_memories_symbolic_fts, try_claim_event, update_enrichment_fields, update_with_revision,
+    AccessEventDensity, AccessEventKind, IdlessUpsertResult, InsertMemoryResult,
+    ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
+    MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES,
+    MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
 /// function's own doc for when a hand-built fixture is legitimate.
