@@ -905,6 +905,29 @@ fn fail_after_rem_source_completion(
     project_sources: &[RemSourceRevision],
     primary_error: String,
 ) -> Result<(), String> {
+    match compensate_rem_source_markers(
+        server,
+        runtime_stores,
+        draft_id,
+        global_sources,
+        project_sources,
+    ) {
+        Ok(()) => Err(format!(
+            "{primary_error}; REM source markers were compensated for pending operation {draft_id}"
+        )),
+        Err(error) => Err(format!(
+            "{primary_error}; REM source marker compensation failed for pending operation {draft_id}: {error}"
+        )),
+    }
+}
+
+fn compensate_rem_source_markers(
+    server: &MemoryServer,
+    runtime_stores: &RuntimeRemSourceStores,
+    draft_id: &str,
+    global_sources: &[RemSourceRevision],
+    project_sources: &[RemSourceRevision],
+) -> Result<(), String> {
     let mut rollback_errors = Vec::new();
     if !project_sources.is_empty() {
         let rollback = runtime_stores
@@ -935,14 +958,9 @@ fn fail_after_rem_source_completion(
         }
     }
     if rollback_errors.is_empty() {
-        Err(format!(
-            "{primary_error}; REM source markers were compensated for pending operation {draft_id}"
-        ))
+        Ok(())
     } else {
-        Err(format!(
-            "{primary_error}; REM source marker compensation failed for pending operation {draft_id}: {}",
-            rollback_errors.join("; ")
-        ))
+        Err(rollback_errors.join("; "))
     }
 }
 
@@ -1098,6 +1116,19 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<RemRecoveryRe
                 &global_sources,
                 &project_sources,
             )? {
+                compensate_rem_source_markers(
+                    server,
+                    &runtime_stores,
+                    &entry.id,
+                    &global_sources,
+                    &project_sources,
+                )
+                .map_err(|error| {
+                    format!(
+                        "recover REM draft {}: stale source marker compensation failed; keeping operation and source claims pending: {error}",
+                        entry.id
+                    )
+                })?;
                 let aborted_at = Utc::now().to_rfc3339();
                 server.with_named_project_store_identity_checked("wiki", |store| {
                     store
@@ -1811,6 +1842,280 @@ mod rem_identity_tests {
             &next_sources,
         )
         .expect("released claims must admit the revised source-set operation");
+    }
+
+    #[test]
+    fn stale_recovery_compensates_crash_left_partial_marker_before_releasing_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(memcore::MemoryStore::open(wiki_db.to_str().unwrap()).expect("initialize Wiki store"));
+        let global_db = home.join("global.db");
+        let project_db = home.join("project.db");
+        let server =
+            MemoryServer::new_with_home_for_test(global_db, Some(project_db), home.clone())
+                .expect("open runtime server");
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&source_entry("global-source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed global source");
+        server
+            .with_project_store(|store| {
+                store
+                    .upsert(&source_entry("project-source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed project source");
+
+        let runtime = runtime_rem_source_stores(&server).expect("bind runtime source stores");
+        let global_revision = server
+            .with_global_store_read(|store| {
+                store
+                    .get("global-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "global source missing".to_string())
+            })
+            .expect("read global revision");
+        let project_revision = server
+            .with_project_store_read(|store| {
+                store
+                    .get("project-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "project source missing".to_string())
+            })
+            .expect("read project revision");
+        let mut sources = vec![
+            RemSourceRef {
+                store: runtime.global,
+                id: "global-source".to_string(),
+                revision: global_revision,
+            },
+            RemSourceRef {
+                store: runtime.project.expect("project store identity"),
+                id: "project-source".to_string(),
+                revision: project_revision,
+            },
+        ];
+        sources.sort();
+        let draft_id = stable_rem_draft_id(&sources);
+        persist_rem_draft_operation(&server, &occupied_entry(&draft_id, &sources), &sources)
+            .expect("persist REM operation");
+        server
+            .with_global_store(|store| {
+                store
+                    .mark_rem_processed_for_draft_at_revisions(
+                        &[("global-source".to_string(), global_revision)],
+                        "2026-07-31T00:00:01Z",
+                        &draft_id,
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("simulate crash after global marker commit");
+        server
+            .with_project_store(|store| {
+                let mut changed = store
+                    .get("project-source")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "project source missing".to_string())?;
+                changed.text = "project source changed after crash".to_string();
+                store.upsert(&changed).map_err(|error| error.to_string())
+            })
+            .expect("change unmarked project source revision");
+
+        let recovery = recover_pending_rem_operations(&server)
+            .expect("stale recovery must compensate markers before aborting");
+        assert_eq!(recovery.completed, 0);
+        assert_eq!(recovery.aborted_stale, 1);
+        assert_eq!(recovery.foreign_pending_skipped, 0);
+        let global = server
+            .with_global_store_read(|store| {
+                store
+                    .get("global-source")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "global source missing".to_string())
+            })
+            .expect("read compensated global source");
+        assert!(global.metadata["rem"]["processed"].is_null());
+        server
+            .with_named_project_store("wiki", |store| {
+                let aborted = store
+                    .get_with_options(&draft_id, true)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "aborted REM operation missing".to_string())?;
+                assert!(aborted.archived);
+                assert_eq!(
+                    aborted.metadata["rem"]["operation_status"],
+                    "aborted_stale_sources"
+                );
+                Ok(())
+            })
+            .expect("verify stale operation retirement");
+
+        let next_project_revision = server
+            .with_project_store_read(|store| {
+                store
+                    .get("project-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "project source missing".to_string())
+            })
+            .expect("read revised project source");
+        let mut next_sources = vec![
+            sources
+                .iter()
+                .find(|source| source.id == "global-source")
+                .expect("global source identity")
+                .clone(),
+            RemSourceRef {
+                store: sources
+                    .iter()
+                    .find(|source| source.id == "project-source")
+                    .expect("project source identity")
+                    .store
+                    .clone(),
+                id: "project-source".to_string(),
+                revision: next_project_revision,
+            },
+        ];
+        next_sources.sort();
+        let next_draft_id = stable_rem_draft_id(&next_sources);
+        assert_ne!(next_draft_id, draft_id);
+        persist_rem_draft_operation(
+            &server,
+            &occupied_entry(&next_draft_id, &next_sources),
+            &next_sources,
+        )
+        .expect("compensated marker and released claims must admit revised source-set operation");
+    }
+
+    #[test]
+    fn stale_recovery_keeps_operation_pending_when_marker_compensation_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(memcore::MemoryStore::open(wiki_db.to_str().unwrap()).expect("initialize Wiki store"));
+        let global_db = home.join("global.db");
+        let project_db = home.join("project.db");
+        let server =
+            MemoryServer::new_with_home_for_test(global_db, Some(project_db), home.clone())
+                .expect("open runtime server");
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&source_entry("global-source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed global source");
+        server
+            .with_project_store(|store| {
+                store
+                    .upsert(&source_entry("project-source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed project source");
+
+        let runtime = runtime_rem_source_stores(&server).expect("bind runtime source stores");
+        let global_revision = server
+            .with_global_store_read(|store| {
+                store
+                    .get("global-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "global source missing".to_string())
+            })
+            .expect("read global revision");
+        let project_revision = server
+            .with_project_store_read(|store| {
+                store
+                    .get("project-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "project source missing".to_string())
+            })
+            .expect("read project revision");
+        let mut sources = vec![
+            RemSourceRef {
+                store: runtime.global,
+                id: "global-source".to_string(),
+                revision: global_revision,
+            },
+            RemSourceRef {
+                store: runtime.project.expect("project store identity"),
+                id: "project-source".to_string(),
+                revision: project_revision,
+            },
+        ];
+        sources.sort();
+        let draft_id = stable_rem_draft_id(&sources);
+        persist_rem_draft_operation(&server, &occupied_entry(&draft_id, &sources), &sources)
+            .expect("persist REM operation");
+        server
+            .with_global_store(|store| {
+                store
+                    .mark_rem_processed_for_draft_at_revisions(
+                        &[("global-source".to_string(), global_revision)],
+                        "2026-07-31T00:00:01Z",
+                        &draft_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+                store
+                    .delete("global-source")
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("simulate uncompensatable disappeared source");
+        server
+            .with_project_store(|store| {
+                let mut changed = store
+                    .get("project-source")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "project source missing".to_string())?;
+                changed.text = "project source changed after crash".to_string();
+                store.upsert(&changed).map_err(|error| error.to_string())
+            })
+            .expect("change project source revision");
+
+        let error = recover_pending_rem_operations(&server)
+            .expect_err("compensation failure must fail closed before stale abort");
+        assert!(
+            error.contains("stale source marker compensation failed"),
+            "{error}"
+        );
+        assert!(error.contains("keeping operation and source claims pending"));
+        assert!(error.contains("disappeared"), "{error}");
+        let global = server
+            .with_global_store_read(|store| {
+                store
+                    .get("global-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.id)
+                    .ok_or_else(|| "global source missing".to_string())
+            })
+            .expect_err("global source must still be missing");
+        assert_eq!(global, "global source missing");
+        server
+            .with_named_project_store("wiki", |store| {
+                let pending = store
+                    .get(&draft_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "REM operation missing".to_string())?;
+                assert!(!pending.archived);
+                assert_eq!(
+                    pending.metadata["rem"]["operation_status"],
+                    "pending_sources"
+                );
+                Ok(())
+            })
+            .expect("verify stale operation remained pending");
+        ensure_rem_draft_winner(&server, &draft_id, &sources)
+            .expect("source claims must remain owned by the pending draft");
     }
 
     #[test]

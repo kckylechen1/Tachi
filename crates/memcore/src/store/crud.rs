@@ -66,6 +66,15 @@ impl MemoryStore {
         Ok(map.remove(id))
     }
 
+    pub fn list_user_facing_wiki_entries(
+        &self,
+        path_prefix: &str,
+        limit: usize,
+        include_superseded: bool,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_user_facing_wiki_entries(&self.conn, path_prefix, limit, include_superseded)
+    }
+
     /// Compatibility access for diagnostics and typed helpers that operate on
     /// non-memory tables. `rusqlite::Connection` is inherently write-capable
     /// even through `&Connection`, so a connection authorizer

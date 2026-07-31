@@ -525,12 +525,14 @@ async fn wiki_lint_ignores_operation_log_rows() {
     let server = make_server();
     server
         .with_global_store(|store| {
-            let mut log = make_entry("wiki-log-noise");
+            let mut log = make_entry("wiki-operation-log");
             log.path = "/wiki/_log".to_string();
             log.topic = "wiki_log".to_string();
             log.domain = Some("wiki".to_string());
             log.metadata = json!({"wiki_log": true});
-            store.upsert(&log).map_err(|e| e.to_string())?;
+            store
+                .upsert_wiki_operation_log(&log)
+                .map_err(|e| e.to_string())?;
 
             let mut orphan = make_entry("wiki-real-orphan");
             orphan.path = "/wiki/test/real-orphan".to_string();

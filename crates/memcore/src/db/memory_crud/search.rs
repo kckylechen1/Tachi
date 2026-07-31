@@ -12,6 +12,20 @@ use super::{
     MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
+fn wiki_corpus_sql_clause(wiki_scoped: bool, qualified: bool) -> String {
+    if !wiki_scoped {
+        String::new()
+    } else if qualified {
+        format!(" AND ({})", crate::namespace::USER_FACING_WIKI_SQL_WHERE_M)
+    } else {
+        format!(" AND ({})", crate::namespace::USER_FACING_WIKI_SQL_WHERE)
+    }
+}
+
+fn path_prefix_is_wiki_scope(path_prefix: Option<&str>) -> bool {
+    path_prefix.is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"))
+}
+
 /// sqlite-vec's vec0 virtual table picks its nearest-`k` window FIRST, from
 /// `MATCH ?1 AND k = ?3` alone; every `m.*` predicate below (archived,
 /// superseded, path, as_of, anchor) is an ordinary post-JOIN filter that
@@ -61,6 +75,7 @@ pub fn search_vec(
     surface: Option<Surface>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
+    let wiki_scoped = path_prefix_is_wiki_scope(path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
 
@@ -74,6 +89,7 @@ pub fn search_vec(
         path_like.as_deref(),
         as_of_utc.as_deref(),
         surface,
+        wiki_scoped,
     )?;
 
     // Widen unconditionally whenever the current pass came up short --
@@ -106,6 +122,7 @@ pub fn search_vec(
                 path_like.as_deref(),
                 as_of_utc.as_deref(),
                 surface,
+                wiki_scoped,
             )?;
         }
     }
@@ -140,12 +157,14 @@ fn run_search_vec_query(
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
+    wiki_scoped: bool,
 ) -> Result<Vec<(String, f64)>, MemoryError> {
     // `surface` gates an extra `AND (...)` predicate mirroring [`Surface`]'s
     // Rust classifier (`surface_sql_splice`). `None` produces an empty
     // string -- the query text is byte-identical to before this parameter
     // existed, preserving the fused-pool behavior exactly.
     let surface_clause = surface_sql_splice(surface, true);
+    let wiki_clause = wiki_corpus_sql_clause(wiki_scoped, true);
     let mut stmt = conn.prepare(&format!(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
@@ -156,7 +175,7 @@ fn run_search_vec_query(
                AND (?4 = 1 OR m.superseded_by IS NULL)
                AND (?5 IS NULL OR m.path LIKE ?5)
                AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
-               AND m.id NOT LIKE 'anchor:%'{surface_clause}
+               AND m.id NOT LIKE 'anchor:%'{surface_clause}{wiki_clause}
              ORDER BY v.distance"#,
     ))?;
 
@@ -266,6 +285,7 @@ fn search_fts_match(
     // string -- the query text is byte-identical to before this parameter
     // existed, preserving the fused-pool behavior exactly.
     let surface_clause = surface_sql_splice(surface, true);
+    let wiki_clause = wiki_corpus_sql_clause(path_prefix_is_wiki_scope(path_prefix), true);
     // The ordinary path uses simple_query() for automatic CJK segmentation.
     // Raw match mode is only for internally constructed, sanitized FTS expressions.
     let mut stmt = conn.prepare(&format!(
@@ -277,7 +297,7 @@ fn search_fts_match(
               AND (?4 = 1 OR m.superseded_by IS NULL)
               AND (?5 IS NULL OR m.path LIKE ?5)
               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
-              AND m.id NOT LIKE 'anchor:%'{surface_clause}
+              AND m.id NOT LIKE 'anchor:%'{surface_clause}{wiki_clause}
              ORDER BY bm25(memories_fts)
             LIMIT ?3"#,
     ))?;
@@ -378,6 +398,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     register_symbolic_score_function(conn)?;
 
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
+    let wiki_scoped = path_prefix_is_wiki_scope(path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
 
     // Prefer the trigram index when every term is trigram-eligible (#1331).
@@ -402,6 +423,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
             path_like.as_deref(),
             as_of_utc.as_deref(),
             surface,
+            wiki_scoped,
         );
     }
 
@@ -415,6 +437,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         path_like.as_deref(),
         as_of_utc.as_deref(),
         surface,
+        wiki_scoped,
     )
 }
 
@@ -444,16 +467,25 @@ pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
            AND (?3 IS NULL OR m.path LIKE ?3)
            AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
            AND m.id NOT LIKE 'anchor:%'
-           AND memories_symbolic_fts MATCH ?5{surface_clause}
+           AND memories_symbolic_fts MATCH ?5{surface_clause}{wiki_clause}
          ORDER BY tachi_symbolic_score(?6, m.id, m.path, m.topic, m.summary, m.text, m.keywords, m.entities) DESC, julianday(m.timestamp) DESC, m.id ASC
          LIMIT ?7";
 
 /// Build the production trigram SELECT statement for the given column list
 /// and surface scope. `surface = None` reproduces the pre-surface query text.
 pub fn symbolic_trigram_select_sql(columns: &str, surface: Option<Surface>) -> String {
+    symbolic_trigram_select_sql_with_wiki_scope(columns, surface, false)
+}
+
+fn symbolic_trigram_select_sql_with_wiki_scope(
+    columns: &str,
+    surface: Option<Surface>,
+    wiki_scoped: bool,
+) -> String {
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE
         .replace("{columns}", columns)
         .replace("{surface_clause}", &surface_sql_splice(surface, true))
+        .replace("{wiki_clause}", &wiki_corpus_sql_clause(wiki_scoped, true))
 }
 
 /// Trigram-accelerated symbolic candidate retrieval (#1331).
@@ -476,9 +508,14 @@ fn search_symbolic_via_trigram(
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
+    wiki_scoped: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let match_query = symbolic_trigram_match_query(terms);
-    let sql = symbolic_trigram_select_sql(MEMORY_SELECT_COLUMNS_QUALIFIED, surface);
+    let sql = symbolic_trigram_select_sql_with_wiki_scope(
+        MEMORY_SELECT_COLUMNS_QUALIFIED,
+        surface,
+        wiki_scoped,
+    );
 
     let params: Vec<Value> = vec![
         (include_archived as i64).into(),
@@ -523,17 +560,19 @@ fn search_symbolic_via_table_scan(
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
+    wiki_scoped: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     // Unqualified (`qualified = false`): this path SELECTs from bare
     // `memories`, no `m.` join alias.
     let surface_clause = surface_sql_splice(surface, false);
+    let wiki_clause = wiki_corpus_sql_clause(wiki_scoped, false);
     let mut sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS} FROM memories
          WHERE (?1 = 1 OR archived = 0)
            AND (?2 = 1 OR superseded_by IS NULL)
            AND (?3 IS NULL OR path LIKE ?3)
            AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))
-           AND id NOT LIKE 'anchor:%'{surface_clause}"
+           AND id NOT LIKE 'anchor:%'{surface_clause}{wiki_clause}"
     );
 
     let mut params: Vec<Value> = vec![

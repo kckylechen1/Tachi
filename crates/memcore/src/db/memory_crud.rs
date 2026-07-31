@@ -25,7 +25,8 @@ pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{
     fetch_by_ids, find_active_wiki_entry_by_path, find_exact_path_text_id, get_all,
     is_reserved_wiki_internal_path, is_user_facing_wiki_entry, list_by_path,
-    list_by_path_active_unsuperseded, list_by_path_recent, list_wiki_duplicate_candidates,
+    list_by_path_active_unsuperseded, list_by_path_recent, list_user_facing_wiki_entries,
+    list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
@@ -753,6 +754,7 @@ pub(crate) fn upsert(
 
 const RESERVED_REFERENCE_KEYS: [&str; 2] = ["evidence_refs_v1", "source_refs"];
 const RESERVED_REM_KEY: &str = "rem";
+const RESERVED_WIKI_LOG_KEY: &str = "wiki_log";
 
 fn strip_untrusted_reference_metadata(metadata: &Value) -> Value {
     let Some(mut object) = metadata.as_object().cloned() else {
@@ -768,6 +770,7 @@ fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
     let mut sanitized = strip_untrusted_reference_metadata(metadata);
     if let Some(object) = sanitized.as_object_mut() {
         object.remove(RESERVED_REM_KEY);
+        object.remove(RESERVED_WIKI_LOG_KEY);
     }
     sanitized
 }
@@ -804,7 +807,7 @@ fn merge_ordinary_reserved_metadata(
     };
     let reserved = RESERVED_REFERENCE_KEYS
         .into_iter()
-        .chain(std::iter::once(RESERVED_REM_KEY))
+        .chain([RESERVED_REM_KEY, RESERVED_WIKI_LOG_KEY])
         .filter_map(|key| existing_object.get(key).cloned().map(|value| (key, value)))
         .collect::<Vec<_>>();
     if reserved.is_empty() {
@@ -930,6 +933,37 @@ impl crate::MemoryStore {
             },
         )
     }
+
+    /// Dedicated internal writer for the reserved Wiki operation-log row.
+    /// Ordinary/public upsert cannot mint this identity or visibility marker.
+    pub fn upsert_wiki_operation_log(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        if entry.id != "wiki-operation-log"
+            || entry.path != "/wiki/_log"
+            || !entry.topic.eq_ignore_ascii_case("wiki_log")
+        {
+            return Err(MemoryError::InvalidArg(
+                "trusted Wiki log write requires the reserved operation-log identity".to_string(),
+            ));
+        }
+        let db_label = self.db_label.clone();
+        let vec_available = self.vec_available;
+        let authorization = self.reserved_reference_write.clone();
+        crate::db::retry_memory_locked("upsert_wiki_operation_log", &db_label, || {
+            let _authorization = crate::db::authorize_reserved_reference_write(&authorization)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut trusted = entry.clone();
+            trusted.metadata = merge_ordinary_reserved_metadata(&tx, &entry.id, &entry.metadata)?;
+            let object = trusted.metadata.as_object_mut().ok_or_else(|| {
+                MemoryError::InvalidArg("Wiki operation-log metadata must be an object".to_string())
+            })?;
+            object.insert(RESERVED_WIKI_LOG_KEY.to_string(), Value::Bool(true));
+            upsert_prepared_within_tx(&tx, &trusted, vec_available, None, false, true)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
 }
 
 fn normalized_append_key(target: ReservedReferenceTarget, value: &Value) -> Option<String> {
@@ -979,7 +1013,11 @@ fn merge_validated_reference_metadata(
         .cloned()
         .unwrap_or_default();
     for (key, value) in metadata_patch {
-        if key != "evidence_refs_v1" && key != "source_refs" && key != RESERVED_REM_KEY {
+        if key != "evidence_refs_v1"
+            && key != "source_refs"
+            && key != RESERVED_REM_KEY
+            && key != RESERVED_WIKI_LOG_KEY
+        {
             merged.insert(key.clone(), value.clone());
         }
     }
@@ -992,6 +1030,11 @@ fn merge_validated_reference_metadata(
         if *key == RESERVED_REM_KEY {
             return Err(MemoryError::InvalidArg(
                 "trusted metadata removal cannot delete reserved REM state".to_string(),
+            ));
+        }
+        if *key == RESERVED_WIKI_LOG_KEY {
+            return Err(MemoryError::InvalidArg(
+                "trusted metadata removal cannot delete reserved Wiki log state".to_string(),
             ));
         }
         merged.remove(*key);
@@ -1082,6 +1125,7 @@ pub(crate) fn upsert_with_validated_reference_mutations_within_tx_and_metadata_r
         vec_available,
         idless_identity,
         allow_near_duplicate_merge,
+        false,
     )?;
     Ok((result, merged_entry.metadata))
 }
@@ -1157,7 +1201,8 @@ mod reserved_reference_tests {
                     "ref": "#999",
                     "captured_at": "2026-07-25T00:00:00Z"
                 }],
-                "source_refs": [{ "target_ref": "#998" }]
+                "source_refs": [{ "target_ref": "#998" }],
+                "wiki_log": true
             }),
         );
         store.upsert(&hostile).expect("ordinary create");
@@ -1166,6 +1211,31 @@ mod reserved_reference_tests {
         assert_eq!(stored.metadata["kept"], json!(true));
         assert!(stored.metadata.get("evidence_refs_v1").is_none());
         assert!(stored.metadata.get("source_refs").is_none());
+        assert!(stored.metadata.get("wiki_log").is_none());
+    }
+
+    #[test]
+    fn only_trusted_wiki_log_seam_can_mint_log_authority() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("wiki.db");
+        let mut store = crate::MemoryStore::open_with_label(&path.to_string_lossy(), "wiki")
+            .expect("open Wiki store");
+        let mut log = entry("wiki-operation-log", json!({"caller": "internal"}));
+        log.path = "/wiki/_log".to_string();
+        log.topic = "wiki_log".to_string();
+        assert!(store.upsert(&log).is_err());
+        store
+            .upsert_wiki_operation_log(&log)
+            .expect("trusted Wiki log write");
+        let stored = store.get(&log.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["wiki_log"], json!(true));
+
+        let mut hostile_update = log.clone();
+        hostile_update.metadata = json!({"wiki_log": false, "caller": "public"});
+        assert!(store.upsert(&hostile_update).is_err());
+        let preserved = store.get(&log.id).unwrap().unwrap();
+        assert_eq!(preserved.metadata["wiki_log"], json!(true));
+        assert_eq!(preserved.metadata["caller"], json!("internal"));
     }
 
     #[test]
@@ -2307,6 +2377,15 @@ fn insert_if_absent_with_reference_mutations_within_tx(
             "entry.id must be non-empty and outside the reserved 'anchor:' namespace".to_string(),
         ));
     }
+    if entry.id == "wiki-operation-log"
+        || entry.path == "/wiki/_log"
+        || entry.path.starts_with("/wiki/_log/")
+        || entry.topic.eq_ignore_ascii_case("wiki_log")
+    {
+        return Err(MemoryError::InvalidArg(
+            "Wiki operation-log identity is reserved; use the trusted Wiki log seam".to_string(),
+        ));
+    }
     let path = crate::path_router::normalize_path(&entry.path);
     let source = MemorySource::parse_or_external(&entry.source);
     let category = MemoryCategory::normalize(&entry.category);
@@ -2484,7 +2563,7 @@ pub(crate) fn upsert_within_tx(
 ) -> Result<IdlessUpsertResult, MemoryError> {
     let mut sanitized = entry.clone();
     sanitized.metadata = merge_ordinary_reserved_metadata(tx, &entry.id, &entry.metadata)?;
-    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity, true)
+    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity, true, false)
 }
 
 fn upsert_prepared_within_tx(
@@ -2493,6 +2572,7 @@ fn upsert_prepared_within_tx(
     vec_available: bool,
     idless_identity: Option<&str>,
     allow_near_duplicate_merge: bool,
+    allow_wiki_operation_log: bool,
 ) -> Result<IdlessUpsertResult, MemoryError> {
     // `wiki-rem:` rows are deterministic insert-once operation records. They
     // are created only through the REM claim + insert_if_absent transaction;
@@ -2503,6 +2583,16 @@ fn upsert_prepared_within_tx(
             "id '{}' is in the reserved 'wiki-rem:' namespace; use the REM insert-once operation seam, not upsert",
             entry.id
         )));
+    }
+    if !allow_wiki_operation_log
+        && (entry.id == "wiki-operation-log"
+            || entry.path == "/wiki/_log"
+            || entry.path.starts_with("/wiki/_log/")
+            || entry.topic.eq_ignore_ascii_case("wiki_log"))
+    {
+        return Err(MemoryError::InvalidArg(
+            "Wiki operation-log identity is reserved; use the trusted Wiki log seam".to_string(),
+        ));
     }
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.

@@ -225,6 +225,40 @@ pub fn list_by_path_active_unsuperseded(
     Ok(out)
 }
 
+/// Fetch the Wiki corpus with its ownership predicate applied before LIMIT.
+/// Migration/audit callers may retain active superseded history; archived
+/// rows remain excluded.
+pub fn list_user_facing_wiki_entries(
+    conn: &Connection,
+    path_prefix: &str,
+    limit: usize,
+    include_superseded: bool,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
+    let lifecycle = if include_superseded {
+        "AND archived = 0"
+    } else {
+        "AND archived = 0 AND superseded_by IS NULL"
+    };
+    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM memories
+         WHERE (path = ?1 OR path LIKE ?2)
+           {lifecycle}
+           AND ({wiki_predicate})
+         ORDER BY path ASC, timestamp DESC
+         LIMIT ?3"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![normalized, like_prefix, limit as i64], row_to_entry)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Fetch entries under a path prefix, newest-first by `timestamp`.
 ///
 /// Unlike [`list_by_path`], which orders `path ASC, timestamp DESC` (so that
@@ -292,21 +326,6 @@ fn normalize_path_prefix(path_prefix: &str) -> (String, String) {
     (normalized, like_prefix)
 }
 
-const USER_FACING_WIKI_SQL_PREDICATE: &str = r#"
-           AND path != '/wiki/_log'
-           AND path NOT GLOB '/wiki/_log/*'
-           AND path NOT GLOB '*/recall-cache'
-           AND path NOT GLOB '*/recall-cache/*'
-           AND instr(path, 'foundry_recall_rerank_cache') = 0
-           AND source != 'foundry_recall_rerank_cache'
-           AND COALESCE(
-                 json_extract(
-                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                   '$.wiki_log'
-                 ),
-                 0
-               ) != 1"#;
-
 /// One typed ownership predicate for rows ordinary Wiki reads and projection
 /// deduplication may expose or retire.
 pub fn is_reserved_wiki_internal_path(path: &str) -> bool {
@@ -316,19 +335,7 @@ pub fn is_reserved_wiki_internal_path(path: &str) -> bool {
 }
 
 pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
-    !is_reserved_wiki_internal_path(&entry.path)
-        && entry.source != "foundry_recall_rerank_cache"
-        && !metadata_wiki_log_is_internal(&entry.metadata)
-}
-
-fn metadata_wiki_log_is_internal(metadata: &serde_json::Value) -> bool {
-    match metadata.get("wiki_log") {
-        Some(serde_json::Value::Bool(true)) => true,
-        Some(serde_json::Value::Number(number)) => {
-            number.as_i64() == Some(1) || number.as_u64() == Some(1) || number.as_f64() == Some(1.0)
-        }
-        _ => false,
-    }
+    crate::namespace::is_user_facing_wiki_entry(entry)
 }
 
 pub fn list_wiki_duplicate_candidates(
@@ -339,6 +346,7 @@ pub fn list_wiki_duplicate_candidates(
     limit: Option<usize>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let parent_like = format!("{}/%", parent_path.trim_end_matches('/'));
+    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
     let sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
@@ -346,7 +354,7 @@ pub fn list_wiki_duplicate_candidates(
            AND superseded_by IS NULL
            AND id NOT LIKE 'wiki-rem:%'
            AND path LIKE '/wiki/%'
-           {USER_FACING_WIKI_SQL_PREDICATE}
+           AND ({wiki_predicate})
            AND (
                ((?1 = '/wiki/drafts' OR ?1 LIKE '/wiki/drafts/%')
                 AND (path = '/wiki/drafts' OR path LIKE '/wiki/drafts/%'))
@@ -385,13 +393,14 @@ pub fn find_active_wiki_entry_by_path(
     conn: &Connection,
     path: &str,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
+    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
     let sql = format!(
         r#"SELECT {MEMORY_SELECT_COLUMNS}
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL
              AND id NOT LIKE 'wiki-rem:%'
-             {USER_FACING_WIKI_SQL_PREDICATE}
+             AND ({wiki_predicate})
              AND path = ?1
            ORDER BY timestamp DESC
            LIMIT 1"#

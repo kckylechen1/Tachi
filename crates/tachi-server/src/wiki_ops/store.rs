@@ -188,10 +188,11 @@ pub(crate) fn list_wiki_entries_for_plan(
     let mut entries = Vec::new();
     for store_ref in stores_for_wiki_plan(server, plan) {
         let listed = with_wiki_store_read(server, &store_ref, |store| {
-            let listed = match plan {
-                WikiReadPlan::MigrationAudit => store.list_by_path(path_prefix, limit, false),
-                _ => store.list_by_path_active_unsuperseded(path_prefix, limit),
-            };
+            let listed = store.list_user_facing_wiki_entries(
+                path_prefix,
+                limit,
+                matches!(plan, WikiReadPlan::MigrationAudit),
+            );
             listed.map_err(|error| format!("wiki list: {error}"))
         });
         let listed = listed?;

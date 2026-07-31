@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::{find_active_wiki_entry_by_path, insert_if_absent};
+use crate::db::{find_active_wiki_entry_by_path, insert_if_absent, list_user_facing_wiki_entries};
 
 #[test]
 fn fetch_by_ids_returns_entries() {
@@ -240,11 +240,16 @@ fn ordinary_wiki_projection_does_not_select_rem_or_draft_rows() {
 #[test]
 fn ordinary_wiki_projection_excludes_internal_log_and_recall_cache_rows() {
     let mut conn = make_conn();
-    let mut log = make_entry("wiki-operation-log", "same internal text");
-    log.path = "/wiki/_log".to_string();
+    let mut log = make_entry("wiki-internal-log", "same internal text");
+    log.path = "/wiki/general/internal-log".to_string();
     log.topic = "shared-topic".to_string();
     log.metadata = json!({"wiki_log": true});
     upsert(&mut conn, &log, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET metadata = json_set(metadata, '$.wiki_log', 1) WHERE id = 'wiki-internal-log'",
+        [],
+    )
+    .unwrap();
 
     let mut cache = make_entry("wiki-recall-cache", "same internal text");
     cache.path = "/wiki/recall-cache".to_string();
@@ -261,6 +266,11 @@ fn ordinary_wiki_projection_excludes_internal_log_and_recall_cache_rows() {
     metadata_log.topic = "shared-topic".to_string();
     metadata_log.metadata = json!({"wiki_log": 1});
     upsert(&mut conn, &metadata_log, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET metadata = json_set(metadata, '$.wiki_log', 1) WHERE id = 'wiki-metadata-log'",
+        [],
+    )
+    .unwrap();
 
     let mut source_cache = make_entry("wiki-source-cache", "same internal text");
     source_cache.path = "/wiki/general/source-cache".to_string();
@@ -301,6 +311,61 @@ fn ordinary_wiki_projection_excludes_internal_log_and_recall_cache_rows() {
     )
     .unwrap()
     .is_empty());
+}
+
+#[test]
+fn user_facing_wiki_list_filters_internal_rows_before_limit() {
+    let mut conn = make_conn();
+    for suffix in ["a", "b", "c"] {
+        let mut log = make_entry(&format!("wiki-log-{suffix}"), "internal Wiki log");
+        log.path = format!("/wiki/a-internal-{suffix}");
+        upsert(&mut conn, &log, false).unwrap();
+        conn.execute(
+            "UPDATE memories SET metadata = json_set(metadata, '$.wiki_log', 1) WHERE id = ?1",
+            [&log.id],
+        )
+        .unwrap();
+    }
+    let mut real = make_entry("wiki-real", "durable user-facing knowledge");
+    real.path = "/wiki/agent/real".to_string();
+    upsert(&mut conn, &real, false).unwrap();
+    let listed = list_user_facing_wiki_entries(&conn, "/wiki", 1, false).unwrap();
+    assert_eq!(listed[0].id, "wiki-real");
+}
+
+#[test]
+fn user_facing_wiki_predicate_matches_recall_cache_and_log_variants() {
+    let mut conn = make_conn();
+    let mut topic_cache = make_entry("topic-cache", "cache");
+    topic_cache.path = "/wiki/general/cache".to_string();
+    topic_cache.topic = "recall_rerank_cache".to_string();
+    assert!(!crate::db::is_user_facing_wiki_entry(&topic_cache));
+    upsert(&mut conn, &topic_cache, false).unwrap();
+
+    let mut id_cache = make_entry("foundry:recall-cache:query", "cache");
+    id_cache.path = "/wiki/general/cache-by-id".to_string();
+    assert!(!crate::db::is_user_facing_wiki_entry(&id_cache));
+    upsert(&mut conn, &id_cache, false).unwrap();
+
+    let mut topic_log = make_entry("topic-log", "log");
+    topic_log.path = "/wiki/general/log".to_string();
+    topic_log.topic = "WIKI_LOG".to_string();
+    assert!(!crate::db::is_user_facing_wiki_entry(&topic_log));
+    let mut stored_topic_log = topic_log.clone();
+    stored_topic_log.topic = "ordinary".to_string();
+    upsert(&mut conn, &stored_topic_log, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET topic = 'WIKI_LOG' WHERE id = 'topic-log'",
+        [],
+    )
+    .unwrap();
+
+    let ids = list_user_facing_wiki_entries(&conn, "/wiki", 10, false)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    assert!(ids.is_empty(), "SQL and Rust classifiers must agree");
 }
 
 #[test]

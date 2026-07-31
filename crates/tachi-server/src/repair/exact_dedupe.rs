@@ -127,16 +127,6 @@ pub fn apply(
     if !yes {
         return Err("exact-dedupe apply requires --yes".into());
     }
-    // Fail before any mutation if the receipt destination is unusable: an
-    // apply that mutates the DB with no durable receipt to show for it
-    // violates #1348's receipt convention just as surely as a bad plan does.
-    if receipt_out.exists() {
-        return Err(format!(
-            "exact-dedupe receipt output already exists: {}",
-            receipt_out.display()
-        )
-        .into());
-    }
     let (target, daemon_scope) = target_and_daemon_scope("exact-dedupe", db, app_home, true)?;
     if receipt_out == target || std::fs::canonicalize(receipt_out).is_ok_and(|path| path == target)
     {
@@ -175,48 +165,39 @@ pub fn apply(
             .into())
         }
     }
+    let mut receipt_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(receipt_out)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                return format!(
+                    "exact-dedupe receipt output already exists: {}",
+                    receipt_out.display()
+                );
+            }
+            format!(
+                "exact-dedupe receipt output could not be reserved before mutation at {}: {error}",
+                receipt_out.display()
+            )
+        })?;
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
     let (result, post_identity_error) =
         run_physical_identity_checked_exact_dedupe(&mut store, &target, "apply", |store| {
             store.apply_exact_dedupe(&plan)
         })?;
     let receipt_json = serde_json::to_string_pretty(&result.receipt)?;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(receipt_out)
+    if let Err(error) = receipt_file
+        .write_all(receipt_json.as_bytes())
+        .and_then(|()| receipt_file.write_all(b"\n"))
+        .and_then(|()| receipt_file.sync_all())
     {
-        Ok(mut file) => {
-            // A mid-write failure (e.g. disk full after create) is just as
-            // fatal as failing to open: the apply already committed, so a
-            // truncated receipt must be surfaced as loudly as a missing one,
-            // dumping the full JSON for a manual restore rather than dropping
-            // it behind a bare `?`.
-            if let Err(error) = file
-                .write_all(receipt_json.as_bytes())
-                .and_then(|()| file.write_all(b"\n"))
-            {
-                eprintln!(
-                    "CRITICAL: exact-dedupe apply committed {} archived loser(s) but the receipt could not be fully written to {}: {error}\nReceipt JSON (save for a manual `repair dedupe restore`):\n{receipt_json}",
-                    result.applied_losers,
-                    receipt_out.display(),
-                );
-                return Err(
-                    format!("exact-dedupe receipt write failed after commit: {error}").into(),
-                );
-            }
-        }
-        Err(error) => {
-            // The apply already committed. Losing the receipt file here
-            // would silently drop the only durable restore/audit trail, so
-            // this refusal must be loud rather than quietly swallowed.
-            eprintln!(
-                "CRITICAL: exact-dedupe apply committed {} archived loser(s) but the receipt could not be written to {}: {error}\nReceipt JSON (save for a manual `repair dedupe restore`):\n{receipt_json}",
-                result.applied_losers,
-                receipt_out.display(),
-            );
-            return Err(format!("exact-dedupe receipt write failed after commit: {error}").into());
-        }
+        eprintln!(
+            "CRITICAL: exact-dedupe apply committed {} archived loser(s) but the receipt could not be fully written and synced to {}: {error}\nReceipt JSON (save for a manual `repair dedupe restore`):\n{receipt_json}",
+            result.applied_losers,
+            receipt_out.display(),
+        );
+        return Err(format!("exact-dedupe receipt write failed after commit: {error}").into());
     }
     if let Some(identity_error) = post_identity_error {
         eprintln!(
@@ -787,6 +768,11 @@ mod tests {
         receipt.validate().expect("receipt is self-consistent");
         assert_eq!(receipt.rows.len(), 1);
         assert_eq!(receipt.rows[0].loser_id, "loser");
+        assert!(
+            receipt.target_db_physical_identity.starts_with("unix:"),
+            "receipt must bind the physical DB identity, got {}",
+            receipt.target_db_physical_identity
+        );
 
         let archived_before: i64 = rusqlite::Connection::open(&db_path)
             .unwrap()
@@ -832,6 +818,35 @@ mod tests {
             .unwrap();
         assert_eq!(archived, 0);
         assert_eq!(std::fs::read(&receipt_path).unwrap(), b"pre-existing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_refuses_missing_receipt_parent_before_mutation() {
+        let (dir, app_home, db_path, plan_path, _receipt_path) = fixture();
+        let receipt_path = dir.path().join("missing-parent").join("receipt.json");
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not be reserved before mutation"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+        assert!(!receipt_path.exists());
     }
 
     #[test]

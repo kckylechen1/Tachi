@@ -499,13 +499,21 @@ impl MemoryStore {
             // another process may have replaced the path in between. Close
             // that initializer and reopen the now-existing file with a
             // before/open/after identity bracket before returning a cacheable
-            // handle.
+            // handle. The reopen must match the exact identity sampled after
+            // initialization, not merely any valid database concurrently
+            // substituted at the same path.
+            let initialized_identity = opened_physical_db_identity.clone().ok_or_else(|| {
+                MemoryError::InvalidArg(format!(
+                    "fresh database has no initialized physical identity: {db_path}"
+                ))
+            })?;
             drop(reserved_reference_write);
             drop(conn);
             return Self::reopen_initialized_file_store(
                 db_path,
                 db_label,
                 path_validation,
+                initialized_identity,
                 busy_timeout,
             );
         }
@@ -523,6 +531,7 @@ impl MemoryStore {
         db_path: &str,
         db_label: &str,
         path_validation: bool,
+        initialized_identity: String,
         busy_timeout: Option<Duration>,
     ) -> Result<Self, MemoryError> {
         let before_reopen = physical_db_identity_at_open(db_path).ok_or_else(|| {
@@ -530,6 +539,11 @@ impl MemoryStore {
                 "fresh database path disappeared before identity-bound reopen: {db_path}"
             ))
         })?;
+        if before_reopen != initialized_identity {
+            return Err(MemoryError::InvalidArg(format!(
+                "fresh database path identity changed before identity-bound reopen: {db_path}"
+            )));
+        }
         let conn = match busy_timeout {
             Some(busy_timeout) => db::open_read_write_with_busy_timeout(db_path, busy_timeout)?,
             None => db::open_read_write(db_path)?,
@@ -896,6 +910,37 @@ mod exact_dedupe_open_tests {
         let error = validate_physical_db_identity_across_open(path.to_str().unwrap(), before)
             .expect_err("path replacement must not be recorded as the opened connection");
         assert!(error.to_string().contains("identity changed while opening"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_reopen_rejects_valid_database_substituted_after_initialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        drop(MemoryStore::open(path.to_str().unwrap()).unwrap());
+        let initialized_identity = physical_db_identity_at_open(path.to_str().unwrap())
+            .expect("initialized DB has physical identity");
+
+        let replacement = dir.path().join("replacement.db");
+        drop(MemoryStore::open(replacement.to_str().unwrap()).unwrap());
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let error = match MemoryStore::reopen_initialized_file_store(
+            path.to_str().unwrap(),
+            "unknown",
+            false,
+            initialized_identity,
+            None,
+        ) {
+            Ok(_) => panic!("fresh reopen accepted a valid substituted DB"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("identity changed before identity-bound reopen"),
+            "unexpected refusal: {error}"
+        );
     }
 
     #[test]

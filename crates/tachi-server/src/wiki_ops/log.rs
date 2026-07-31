@@ -50,7 +50,7 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
             entry.revision = existing.revision;
         }
         store
-            .upsert(&entry)
+            .upsert_wiki_operation_log(&entry)
             .map_err(|e| format!("wiki_log upsert: {e}"))
     });
 
@@ -66,7 +66,7 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
                 entry.revision = existing.revision;
             }
             store
-                .upsert(&entry)
+                .upsert_wiki_operation_log(&entry)
                 .map_err(|e| format!("wiki_log fallback upsert: {e}"))
         }) {
             tracing::warn!(

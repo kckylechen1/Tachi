@@ -11,8 +11,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const EXACT_DEDUPE_POLICY: &str = "exact-text-same-normalized-path-v1";
-pub const EXACT_DEDUPE_SCHEMA_VERSION: u32 = 1;
-pub const EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const EXACT_DEDUPE_SCHEMA_VERSION: u32 = 2;
+pub const EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION: u32 = 2;
+const EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY: &str = "exact-dedupe-in-memory-test-sentinel-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +59,7 @@ pub struct ExactDedupePlan {
     pub schema_version: u32,
     pub policy_version: String,
     pub target_db_identity: String,
+    pub target_db_physical_identity: String,
     pub generated_at: String,
     pub groups: Vec<ExactDedupeGroup>,
     pub planned_groups: usize,
@@ -111,6 +113,7 @@ pub struct ExactDedupeReceipt {
     pub schema_version: u32,
     pub policy_version: String,
     pub target_db_identity: String,
+    pub target_db_physical_identity: String,
     pub plan_digest: String,
     pub applied_at: String,
     pub rows: Vec<ExactDedupeReceiptRow>,
@@ -135,6 +138,8 @@ impl ExactDedupeReceipt {
     pub fn validate(&self) -> Result<(), MemoryError> {
         if self.schema_version != EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION
             || self.policy_version != EXACT_DEDUPE_POLICY
+            || self.target_db_identity.is_empty()
+            || self.target_db_physical_identity.is_empty()
         {
             return Err(MemoryError::InvalidArg(
                 "unsupported exact-dedupe receipt schema/policy".into(),
@@ -295,6 +300,8 @@ impl ExactDedupePlan {
     pub fn validate(&self) -> Result<(), MemoryError> {
         if self.schema_version != EXACT_DEDUPE_SCHEMA_VERSION
             || self.policy_version != EXACT_DEDUPE_POLICY
+            || self.target_db_identity.is_empty()
+            || self.target_db_physical_identity.is_empty()
         {
             return Err(MemoryError::InvalidArg(
                 "unsupported exact-dedupe schema/policy".into(),
@@ -380,17 +387,48 @@ impl ExactDedupePlan {
 }
 
 impl MemoryStore {
+    fn exact_dedupe_physical_identity(&self, target: &str) -> Result<String, MemoryError> {
+        match self.opened_physical_db_identity.clone() {
+            Some(identity) => Ok(identity),
+            None if target == ":memory:" => {
+                Ok(EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY.to_string())
+            }
+            None => Err(MemoryError::InvalidArg(
+                "exact-dedupe file-backed plan requires a stable physical DB identity".to_string(),
+            )),
+        }
+    }
+
+    fn validate_exact_dedupe_physical_identity(
+        &self,
+        artifact_kind: &str,
+        expected: &str,
+    ) -> Result<(), MemoryError> {
+        match self.opened_physical_db_identity.as_deref() {
+            Some(opened) if opened == expected => Ok(()),
+            Some(_) => Err(MemoryError::InvalidArg(format!(
+                "exact-dedupe {artifact_kind} physical DB identity mismatch"
+            ))),
+            None if expected == EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY => Ok(()),
+            None => Err(MemoryError::InvalidArg(format!(
+                "exact-dedupe {artifact_kind} requires a file-backed physical DB identity"
+            ))),
+        }
+    }
+
     pub fn plan_exact_dedupe(
         &self,
         target: String,
         limit: Option<usize>,
         prefix: Option<&str>,
     ) -> Result<ExactDedupePlan, MemoryError> {
+        let target_db_physical_identity = self.exact_dedupe_physical_identity(&target)?;
         if limit == Some(0) {
             let mut plan = ExactDedupePlan {
                 schema_version: EXACT_DEDUPE_SCHEMA_VERSION,
                 policy_version: EXACT_DEDUPE_POLICY.into(),
                 target_db_identity: target,
+                target_db_physical_identity,
                 generated_at: Utc::now().to_rfc3339(),
                 groups: Vec::new(),
                 planned_groups: 0,
@@ -459,6 +497,7 @@ impl MemoryStore {
             schema_version: EXACT_DEDUPE_SCHEMA_VERSION,
             policy_version: EXACT_DEDUPE_POLICY.into(),
             target_db_identity: target,
+            target_db_physical_identity,
             generated_at: Utc::now().to_rfc3339(),
             planned_groups: groups.len(),
             planned_losers: groups.iter().map(|g| g.losers.len()).sum(),
@@ -486,6 +525,7 @@ impl MemoryStore {
                 "exact-dedupe target DB mismatch".into(),
             ));
         }
+        self.validate_exact_dedupe_physical_identity("plan", &plan.target_db_physical_identity)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -577,6 +617,7 @@ impl MemoryStore {
             schema_version: EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION,
             policy_version: EXACT_DEDUPE_POLICY.into(),
             target_db_identity: plan.target_db_identity.clone(),
+            target_db_physical_identity: plan.target_db_physical_identity.clone(),
             plan_digest: plan.plan_digest.clone(),
             applied_at: now,
             applied_groups: plan.groups.len(),
@@ -616,6 +657,10 @@ impl MemoryStore {
                 "exact-dedupe receipt target DB mismatch".into(),
             ));
         }
+        self.validate_exact_dedupe_physical_identity(
+            "receipt",
+            &receipt.target_db_physical_identity,
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -749,6 +794,10 @@ mod tests {
         let plan = store
             .plan_exact_dedupe(":memory:".into(), None, Some("/wiki"))
             .unwrap();
+        assert_eq!(
+            plan.target_db_physical_identity,
+            EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY
+        );
         assert_eq!(plan.groups.len(), 2);
         assert_eq!(plan.groups[0].winner.id, "a");
         assert_eq!(plan.groups[0].ranked_candidates.len(), 2);
@@ -994,6 +1043,103 @@ mod tests {
         let identity = path.to_string_lossy().into_owned();
         let store = MemoryStore::open(&identity).unwrap();
         (dir, identity, store)
+    }
+
+    fn seed_winner_loser(store: &MemoryStore) {
+        insert(store, "winner", "/same", "same text");
+        insert(store, "loser", "/same", "same text");
+        fixture_sql(store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
+                    [],
+                )
+                .unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_rejects_replacement_database_even_when_path_and_rows_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let identity = path.to_string_lossy().into_owned();
+        let original = MemoryStore::open(&identity).unwrap();
+        seed_winner_loser(&original);
+        let plan = original
+            .plan_exact_dedupe(identity.clone(), None, None)
+            .unwrap();
+        assert_ne!(
+            plan.target_db_physical_identity,
+            EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY
+        );
+        drop(original);
+
+        let replacement_path = dir.path().join("replacement.db");
+        let replacement_identity = replacement_path.to_string_lossy().into_owned();
+        let replacement = MemoryStore::open(&replacement_identity).unwrap();
+        seed_winner_loser(&replacement);
+        drop(replacement);
+        std::fs::rename(&replacement_path, &path).unwrap();
+
+        let mut substituted = MemoryStore::open_existing_read_write(&identity).unwrap();
+        let error = substituted
+            .apply_exact_dedupe(&plan)
+            .expect_err("replacement DB with matching rows must not satisfy the plan");
+        assert!(
+            error.to_string().contains("physical DB identity mismatch"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = substituted
+            .conn
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_replacement_database_even_when_path_and_revisions_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let identity = path.to_string_lossy().into_owned();
+        let mut original = MemoryStore::open(&identity).unwrap();
+        seed_winner_loser(&original);
+        let plan = original
+            .plan_exact_dedupe(identity.clone(), None, None)
+            .unwrap();
+        let receipt = original.apply_exact_dedupe(&plan).unwrap().receipt;
+        drop(original);
+
+        let replacement_path = dir.path().join("replacement.db");
+        let replacement_identity = replacement_path.to_string_lossy().into_owned();
+        let mut replacement = MemoryStore::open(&replacement_identity).unwrap();
+        seed_winner_loser(&replacement);
+        let replacement_plan = replacement
+            .plan_exact_dedupe(replacement_identity, None, None)
+            .unwrap();
+        replacement.apply_exact_dedupe(&replacement_plan).unwrap();
+        drop(replacement);
+        std::fs::rename(&replacement_path, &path).unwrap();
+
+        let mut substituted = MemoryStore::open_existing_read_write(&identity).unwrap();
+        let error = substituted
+            .restore_exact_dedupe(&receipt)
+            .expect_err("replacement DB with matching restore CAS must not satisfy receipt");
+        assert!(
+            error.to_string().contains("physical DB identity mismatch"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = substituted
+            .conn
+            .query_row(
+                "SELECT archived FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1);
     }
 
     #[test]
