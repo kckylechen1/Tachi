@@ -142,6 +142,8 @@ async fn public_wiki_write_cannot_persist_internal_rem_coordination_metadata() {
             metadata: Some(json!({
                 "caller_marker": "preserved",
                 "wiki_log": true,
+                "wiki_update_of": "forged-predecessor",
+                "wiki_previous_revision": 999,
                 "rem": {
                     "producer": "weekly_wiki_evolver",
                     "operation_status": "pending_sources"
@@ -168,6 +170,8 @@ async fn public_wiki_write_cannot_persist_internal_rem_coordination_metadata() {
 
     assert_eq!(entry.metadata["caller_marker"], json!("preserved"));
     assert_eq!(entry.metadata["wiki_log"], Value::Null);
+    assert_eq!(entry.metadata["wiki_update_of"], Value::Null);
+    assert_eq!(entry.metadata["wiki_previous_revision"], Value::Null);
     assert_eq!(entry.metadata["rem"], Value::Null);
 }
 
@@ -1415,6 +1419,18 @@ async fn concurrent_distinct_guide_writes_leave_one_active_same_path_winner() {
         "the writes must exercise distinct identities"
     );
 
+    let responses = [&first, &second];
+    let replacement = responses
+        .iter()
+        .find(|response| response["wiki_previous_revision"] == json!(1))
+        .expect("serialized replacement reports its transaction predecessor");
+    let original = responses
+        .iter()
+        .find(|response| response.get("wiki_previous_revision").is_none())
+        .expect("first creation has no predecessor");
+    let replacement_id = replacement["id"].as_str().expect("replacement id");
+    let original_id = original["id"].as_str().expect("original id");
+
     server
         .with_named_project_store_read("wiki", |store| {
             let (active, superseded): (i64, i64) = store
@@ -1433,6 +1449,21 @@ async fn concurrent_distinct_guide_writes_leave_one_active_same_path_winner() {
                 "Guide path must have one active projection winner"
             );
             assert_eq!(superseded, 1, "the serialized loser must retain lineage");
+            let winner = store
+                .get(replacement_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "replacement Guide row disappeared".to_string())?;
+            assert_eq!(winner.metadata["wiki_update_of"], json!(original_id));
+            assert_eq!(winner.metadata["wiki_previous_revision"], json!(1));
+            let superseded_by: Option<String> = store
+                .connection()
+                .query_row(
+                    "SELECT superseded_by FROM memories WHERE id=?1",
+                    [original_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            assert_eq!(superseded_by.as_deref(), Some(replacement_id));
             Ok(())
         })
         .expect("verify Guide projection winner");

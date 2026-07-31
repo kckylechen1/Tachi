@@ -401,7 +401,10 @@ impl MemoryStore {
                 let state = tx.query_row(
                     "SELECT COALESCE(json_extract(metadata, '$.rem.processed'), 0), \
                             json_extract(metadata, '$.rem.processed_by'), \
-                            json_extract(metadata, '$.rem.processed_revision') \
+                            json_extract(metadata, '$.rem.processed_revision'), \
+                            CASE WHEN json_extract(metadata, '$.rem.processed_at') IS NOT NULL \
+                                      AND updated_at > json_extract(metadata, '$.rem.processed_at') \
+                                 THEN 1 ELSE 0 END \
                      FROM memories WHERE id = ?1",
                     [id],
                     |row| {
@@ -409,24 +412,35 @@ impl MemoryStore {
                             row.get::<_, i64>(0)?,
                             row.get::<_, Option<String>>(1)?,
                             row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, bool>(3)?,
                         ))
                     },
                 );
-                let (processed, processed_by, processed_revision) = match state {
-                    Ok(state) => state,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {
-                        return Err(MemoryError::InvalidArg(format!(
-                            "REM source disappeared before marker compensation: {id}"
-                        )))
-                    }
-                    Err(error) => return Err(error.into()),
-                };
+                let (processed, processed_by, processed_revision, changed_after_legacy_marker) =
+                    match state {
+                        Ok(state) => state,
+                        Err(rusqlite::Error::QueryReturnedNoRows) => {
+                            return Err(MemoryError::InvalidArg(format!(
+                                "REM source disappeared before marker compensation: {id}"
+                            )))
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
                 if processed == 0 {
                     continue;
                 }
                 let same_draft = processed_by.as_deref() == Some(draft_id);
                 let same_revision = processed_revision == Some(*expected_revision);
                 if !same_draft && !same_revision && processed_revision.is_some() {
+                    continue;
+                }
+                // A legacy marker has no revision binding. If its source was
+                // updated after that marker and another draft owns it, the
+                // marker predates this pending operation and is not ours to
+                // compensate. This is the same eligibility rule used by REM
+                // collection and marking; treating it as ownership drift
+                // would wedge stale-operation recovery forever.
+                if !same_draft && processed_revision.is_none() && changed_after_legacy_marker {
                     continue;
                 }
                 if !same_draft || !same_revision {
@@ -1131,6 +1145,76 @@ mod tests {
             "wiki-rem:older-complete"
         );
         assert_eq!(source.metadata["rem"]["processed_revision"], first_revision);
+    }
+
+    #[test]
+    fn rem_marker_compensation_ignores_changed_legacy_marker_from_older_draft() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let first_revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), first_revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:legacy-complete",
+            )
+            .expect("mark legacy completed operation");
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize legacy fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET metadata=json_remove(metadata, '$.rem.processed_revision') WHERE id='source'",
+                    [],
+                )
+                .expect("remove legacy revision marker");
+        }
+
+        let mut changed = store
+            .get("source")
+            .expect("read legacy source")
+            .expect("legacy source exists");
+        changed.text = "legacy source changed before pending REM synthesis".to_string();
+        store
+            .upsert(&changed)
+            .expect("advance source for pending draft");
+        let pending_revision = store
+            .get("source")
+            .expect("read pending source")
+            .expect("pending source exists")
+            .revision;
+        let mut changed_again = store
+            .get("source")
+            .expect("read pending source again")
+            .expect("pending source still exists");
+        changed_again.text = "legacy source changed again before recovery".to_string();
+        store
+            .upsert(&changed_again)
+            .expect("make pending source revision stale");
+
+        store
+            .rollback_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), pending_revision)],
+                "wiki-rem:stale-pending",
+            )
+            .expect("older changed legacy marker is not owned by pending draft");
+        let source = store
+            .get("source")
+            .expect("read source after compensation")
+            .expect("source exists after compensation");
+        assert_eq!(
+            source.metadata["rem"]["processed_by"],
+            "wiki-rem:legacy-complete"
+        );
+        assert!(source.metadata["rem"]["processed_revision"].is_null());
     }
 
     #[test]

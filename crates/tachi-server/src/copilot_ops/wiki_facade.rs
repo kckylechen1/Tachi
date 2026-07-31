@@ -98,6 +98,10 @@ async fn handle_tachi_wiki_write_inner(
         // evolver. Accepting it from an ordinary facade caller would let a
         // user row impersonate or obstruct replay recovery.
         obj.remove("rem");
+        // Projection lineage is stamped from the active winner inside the
+        // save transaction, never accepted from facade metadata.
+        obj.remove("wiki_update_of");
+        obj.remove("wiki_previous_revision");
         obj.insert("wiki".to_string(), json!(true));
         obj.insert("wiki_title".to_string(), json!(params.title.clone()));
         obj.insert("user_force".to_string(), json!(params.force));

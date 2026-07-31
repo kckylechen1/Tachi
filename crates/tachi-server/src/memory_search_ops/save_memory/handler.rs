@@ -333,6 +333,10 @@ fn strip_reserved_public_metadata(metadata: &mut Option<serde_json::Value>) {
         // Wiki operation-log ownership is established only by the internal
         // log writer, never by caller metadata on an ordinary memory row.
         object.remove("wiki_log");
+        // Wiki projection lineage is derived from the active row selected in
+        // the projection transaction. Public metadata cannot assert it.
+        object.remove("wiki_update_of");
+        object.remove("wiki_previous_revision");
     }
 }
 

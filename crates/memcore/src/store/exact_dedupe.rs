@@ -179,6 +179,7 @@ struct ExactDedupeRestoreView<'a> {
     reject_reserved_rem: bool,
     apply_id: Option<&'a str>,
     plan_digest: Option<&'a str>,
+    applied_at: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +341,7 @@ impl ExactDedupeRestoreReceipt {
                 reject_reserved_rem: true,
                 apply_id: Some(&receipt.apply_id),
                 plan_digest: Some(&receipt.plan_digest),
+                applied_at: Some(&receipt.applied_at),
             },
             Self::V1LegacyPathCas(receipt) => ExactDedupeRestoreView {
                 target_db_identity: &receipt.target_db_identity,
@@ -348,6 +350,7 @@ impl ExactDedupeRestoreReceipt {
                 reject_reserved_rem: false,
                 apply_id: None,
                 plan_digest: None,
+                applied_at: None,
             },
         }
     }
@@ -901,6 +904,7 @@ impl MemoryStore {
                                   AND lineage.before_revision=?5
                                   AND lineage.archived_revision=?6
                                   AND lineage.loser_valid_until_before IS ?7
+                                  AND lineage.applied_at=?8
                             ),
                             EXISTS (
                                 SELECT 1 FROM exact_dedupe_apply_lineage lineage
@@ -914,7 +918,8 @@ impl MemoryStore {
                         row.winner_id,
                         row.before_revision,
                         row.archived_revision,
-                        row.loser_valid_until_before
+                        row.loser_valid_until_before,
+                        receipt.applied_at
                     ],
                     |db_row| {
                         Ok((
@@ -1012,6 +1017,7 @@ impl MemoryStore {
                    AND lineage.before_revision=?8
                    AND lineage.archived_revision=?3
                    AND lineage.loser_valid_until_before IS ?1
+                   AND lineage.applied_at=?9
                )"
             .to_string()
         } else {
@@ -1019,6 +1025,7 @@ impl MemoryStore {
              SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1
              WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4
                AND path=?5 AND ?6 IS NULL AND ?7 IS NULL AND ?8 IS NULL
+               AND ?9 IS NULL
                AND NOT EXISTS (
                  SELECT 1 FROM exact_dedupe_apply_lineage lineage
                  WHERE lineage.loser_id=?2
@@ -1036,7 +1043,8 @@ impl MemoryStore {
                     row.loser_path,
                     view.apply_id,
                     view.plan_digest,
-                    view.apply_id.map(|_| row.before_revision)
+                    view.apply_id.map(|_| row.before_revision),
+                    view.applied_at
                 ],
             )?;
             if changed != 1 {
@@ -1050,7 +1058,7 @@ impl MemoryStore {
                     "DELETE FROM exact_dedupe_apply_lineage
                      WHERE loser_id=?1 AND apply_id=?2 AND plan_digest=?3
                        AND winner_id=?4 AND before_revision=?5 AND archived_revision=?6
-                       AND loser_valid_until_before IS ?7",
+                       AND loser_valid_until_before IS ?7 AND applied_at=?8",
                     params![
                         row.loser_id,
                         apply_id,
@@ -1058,7 +1066,8 @@ impl MemoryStore {
                         row.winner_id,
                         row.before_revision,
                         row.archived_revision,
-                        row.loser_valid_until_before
+                        row.loser_valid_until_before,
+                        view.applied_at
                     ],
                 )?;
                 if removed != 1 {
@@ -2163,6 +2172,37 @@ mod tests {
             valid_until.as_deref(),
             Some("2027-01-01T00:00:00Z"),
             "forged restore must not rewrite valid_until"
+        );
+
+        // The durable lineage timestamp is part of the receipt-bound apply
+        // record too. A row whose timestamp drifted must be neither
+        // classified as applied nor accepted for restore.
+        store
+            .conn
+            .execute(
+                "UPDATE exact_dedupe_apply_lineage SET applied_at='2099-12-31T23:59:59Z' WHERE loser_id='loser'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .classify_exact_dedupe_receipt_db_state(&receipt)
+                .expect("classify timestamp-drifted lineage"),
+            ExactDedupeReceiptDbState::Indeterminate
+        );
+        assert!(store.restore_exact_dedupe(&receipt).is_err());
+        store
+            .conn
+            .execute(
+                "UPDATE exact_dedupe_apply_lineage SET applied_at=?1 WHERE loser_id='loser'",
+                [&receipt.applied_at],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .classify_exact_dedupe_receipt_db_state(&receipt)
+                .expect("classify restored lineage timestamp"),
+            ExactDedupeReceiptDbState::Applied
         );
 
         let restored = store

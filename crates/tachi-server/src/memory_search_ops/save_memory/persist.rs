@@ -222,24 +222,37 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                 }
                 // Update lineage belongs to the same writer snapshot as the
                 // mutation. A facade pre-read can be stale by the time this
-                // BEGIN IMMEDIATE transaction runs, so derive and persist the
-                // immediate predecessor only here.
-                let previous_revision = if idless_identity.is_none() {
-                    let active = active.as_ref().expect("canonical check proved active row");
-                    let metadata = entry.metadata.as_object_mut().ok_or_else(|| {
-                        memcore::MemoryError::InvalidArg(
-                            "Wiki projection metadata must be an object".to_string(),
-                        )
-                    })?;
-                    metadata.insert("wiki_update_of".to_string(), serde_json::json!(active.id));
+                // BEGIN IMMEDIATE transaction runs, and an id-less writer can
+                // discover a predecessor created after that pre-read. Treat
+                // both fields as transaction-owned: erase caller/inherited
+                // values first, then stamp the immediate predecessor whenever
+                // this snapshot contains one.
+                let metadata = entry.metadata.as_object_mut().ok_or_else(|| {
+                    memcore::MemoryError::InvalidArg(
+                        "Wiki projection metadata must be an object".to_string(),
+                    )
+                })?;
+                metadata.remove("wiki_update_of");
+                metadata.remove("wiki_previous_revision");
+                let mut metadata_patch = evidence_write.metadata_patch.clone();
+                metadata_patch.remove("wiki_update_of");
+                metadata_patch.remove("wiki_previous_revision");
+                let predecessor = active
+                    .as_ref()
+                    .map(|active| (active.id.clone(), active.revision));
+                let previous_revision = predecessor.as_ref().map(|(id, revision)| {
+                    metadata.insert("wiki_update_of".to_string(), serde_json::json!(id));
                     metadata.insert(
                         "wiki_previous_revision".to_string(),
-                        serde_json::json!(active.revision),
+                        serde_json::json!(revision),
                     );
-                    Some(active.revision)
-                } else {
-                    None
-                };
+                    metadata_patch.insert("wiki_update_of".to_string(), serde_json::json!(id));
+                    metadata_patch.insert(
+                        "wiki_previous_revision".to_string(),
+                        serde_json::json!(revision),
+                    );
+                    *revision
+                });
                 // The candidate query is corpus-bound by the target path:
                 // Guide rows compete only with Guide rows, ordinary Wiki rows
                 // only with ordinary Wiki rows. Both use the same writer
@@ -264,15 +277,6 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                             )
                     })
                     .collect::<Vec<_>>();
-                let mut metadata_patch = evidence_write.metadata_patch.clone();
-                if let Some(previous_revision) = previous_revision {
-                    metadata_patch
-                        .insert("wiki_update_of".to_string(), serde_json::json!(entry.id));
-                    metadata_patch.insert(
-                        "wiki_previous_revision".to_string(),
-                        serde_json::json!(previous_revision),
-                    );
-                }
                 if active.as_ref().map(|winner| winner.id.as_str()) != Some(entry.id.as_str()) {
                     if let Some(invocation) = duplicates.iter().find_map(|candidate| {
                         crate::provenance::trusted_existing_model_invocation(&candidate.metadata)
