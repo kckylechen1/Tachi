@@ -306,7 +306,11 @@ pub fn list_wiki_duplicate_candidates(
     Ok(out)
 }
 
-/// Find the canonical active wiki row for a path/topic pair.
+/// Find the canonical active Wiki or Guide row for a path/topic pair.
+///
+/// Exact paths may address either corpus. Topic fallback is confined to the
+/// candidate path's corpus so a Guide write cannot rewrite a Wiki row (or the
+/// reverse) merely because they describe the same subject.
 pub fn find_active_wiki_entry_by_path_or_topic(
     conn: &Connection,
     path: &str,
@@ -317,7 +321,18 @@ pub fn find_active_wiki_entry_by_path_or_topic(
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL
-             AND (path = ?1 OR (topic = ?2 AND path LIKE '/wiki/%'))
+             AND (
+                 path = ?1
+                 OR (
+                     topic = ?2
+                     AND (
+                         ((?1 = '/wiki' OR ?1 LIKE '/wiki/%')
+                          AND (path = '/wiki' OR path LIKE '/wiki/%'))
+                         OR ((?1 = '/guide' OR ?1 LIKE '/guide/%')
+                             AND (path = '/guide' OR path LIKE '/guide/%'))
+                     )
+                 )
+             )
            ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END, timestamp DESC
            LIMIT 1"#
     );

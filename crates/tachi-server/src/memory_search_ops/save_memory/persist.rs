@@ -215,12 +215,20 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     return Ok((result, metadata, 0));
                 }
 
-                let parent_path = crate::copilot_ops::wiki_parent_path(&entry.path);
-                let candidates = projection.list_all_wiki_duplicate_candidates(
-                    &entry.path,
-                    &entry.topic,
-                    &parent_path,
-                )?;
+                // Ordinary Wiki projection may retire only other ordinary Wiki
+                // rows. Guide writes share this persistence seam for atomic
+                // updates, but they are a separate corpus and must not claim a
+                // Wiki row as their supersession predecessor.
+                let candidates = if entry.path == "/wiki" || entry.path.starts_with("/wiki/") {
+                    let parent_path = crate::copilot_ops::wiki_parent_path(&entry.path);
+                    projection.list_all_wiki_duplicate_candidates(
+                        &entry.path,
+                        &entry.topic,
+                        &parent_path,
+                    )?
+                } else {
+                    Vec::new()
+                };
                 let created_at = chrono::Utc::now().to_rfc3339();
                 let mut changed = 0usize;
                 for candidate in candidates {
