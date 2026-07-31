@@ -24,9 +24,9 @@ pub use access::{
 pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{
     fetch_by_ids, find_active_wiki_entry_by_path, find_exact_path_text_id, get_all,
-    is_reserved_wiki_internal_path, is_user_facing_wiki_entry, list_by_path,
-    list_by_path_active_unsuperseded, list_by_path_recent, list_user_facing_wiki_entries,
-    list_wiki_duplicate_candidates,
+    is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
+    list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
+    list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
@@ -2609,7 +2609,7 @@ fn upsert_prepared_within_tx(
     // are created only through the REM claim + insert_if_absent transaction;
     // allowing ordinary ON CONFLICT upsert would let any caller rewrite the
     // recovery identity, producer receipt, or active winner in place.
-    if entry.id.starts_with("wiki-rem:") {
+    if crate::namespace::is_reserved_wiki_rem_id(&entry.id) {
         return Err(MemoryError::InvalidArg(format!(
             "id '{}' is in the reserved 'wiki-rem:' namespace; use the REM insert-once operation seam, not upsert",
             entry.id
@@ -3362,7 +3362,7 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
 }
 
 fn refuse_reserved_rem_operation_mutation(id: &str, action: &str) -> Result<(), MemoryError> {
-    if id.starts_with("wiki-rem:") {
+    if crate::namespace::is_reserved_wiki_rem_id(id) {
         return Err(MemoryError::InvalidArg(format!(
             "invariant: reserved REM operation {id} cannot be {action} through a generic lifecycle seam"
         )));

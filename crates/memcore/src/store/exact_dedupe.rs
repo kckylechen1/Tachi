@@ -172,8 +172,8 @@ fn validate_receipt_rows(
             || row.loser_id.is_empty()
             || row.winner_id.is_empty()
             || (reject_reserved_rem
-                && (row.loser_id.starts_with("wiki-rem:")
-                    || row.winner_id.starts_with("wiki-rem:")))
+                && (crate::namespace::is_reserved_wiki_rem_id(&row.loser_id)
+                    || crate::namespace::is_reserved_wiki_rem_id(&row.winner_id)))
             || row.loser_id == row.winner_id
             || row.before_revision < 1
             || row.archived_revision != row.before_revision + 1
@@ -1028,7 +1028,7 @@ mod tests {
         assert!(plan.groups[0]
             .ranked_candidates
             .iter()
-            .all(|candidate| !candidate.row.id.starts_with("wiki-rem:")));
+            .all(|candidate| !crate::namespace::is_reserved_wiki_rem_id(&candidate.row.id)));
         store.apply_exact_dedupe(&plan).unwrap();
 
         let protected = store.get("wiki-rem:protected").unwrap().unwrap();

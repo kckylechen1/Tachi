@@ -334,7 +334,7 @@ async fn generic_save_cannot_mint_a_wiki_rem_operation_row() {
             location: String::new(),
             scope: "global".to_string(),
             vector: None,
-            id: Some("wiki-rem:generic-spoof".to_string()),
+            id: Some("Wiki-Rem:generic-spoof".to_string()),
             force: true,
             auto_link: false,
             project: Some("wiki".to_string()),

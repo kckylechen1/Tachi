@@ -382,12 +382,14 @@ fn persist_wiki_ingest_entry(
 ) -> Result<Vec<String>, String> {
     store
         .with_immutable_supersession_transaction(|replacement| {
-            let old_entry = replacement
-                .find_active_wiki_entry_by_path(&entry.path)?
-                .filter(|existing| existing.id != entry.id);
-            let trusted_existing_receipt = old_entry
-                .as_ref()
-                .and_then(TrustedExistingModelInvocationReceipt::from_existing_row);
+            let old_entries = replacement
+                .list_active_wiki_ingest_predecessors(&entry.path, &entry.topic)?
+                .into_iter()
+                .filter(|existing| existing.id != entry.id)
+                .collect::<Vec<_>>();
+            let trusted_existing_receipt = old_entries
+                .iter()
+                .find_map(TrustedExistingModelInvocationReceipt::from_existing_row);
             let mut replacement_entry = entry.clone();
             replacement_entry.metadata = match trusted_existing_receipt {
                 Some(receipt) => receipt.attach_exactly(replacement_entry.metadata)?,
@@ -405,7 +407,7 @@ fn persist_wiki_ingest_entry(
                 .as_object()
                 .cloned()
                 .unwrap_or_default();
-            if let Some(old_entry) = old_entry.as_ref() {
+            for old_entry in &old_entries {
                 replacement.claim_immutable_supersession(&old_entry.id, &replacement_entry.id)?;
             }
             replacement.upsert_with_validated_reference_mutations(
@@ -413,7 +415,7 @@ fn persist_wiki_ingest_entry(
                 &metadata_patch,
                 reference_appends,
             )?;
-            if let Some(old_entry) = old_entry.as_ref() {
+            for old_entry in &old_entries {
                 replacement.archive_claimed_source(&old_entry.id)?;
             }
             let mut committed_related_ids = Vec::new();
@@ -424,9 +426,9 @@ fn persist_wiki_ingest_entry(
                 .filter(|entity| !entity.is_empty())
                 .collect::<HashSet<_>>();
             for edge in related_edges {
-                if old_entry
-                    .as_ref()
-                    .is_some_and(|predecessor| predecessor.id == edge.target_id)
+                if old_entries
+                    .iter()
+                    .any(|predecessor| predecessor.id == edge.target_id)
                     || edge.target_id == replacement_entry.id
                 {
                     continue;
@@ -804,6 +806,41 @@ mod immutable_supersession_tests {
             "replacement must claim the winner observed in its transaction"
         );
         assert!(store.get(&candidate.id).expect("read candidate").is_some());
+    }
+
+    #[test]
+    fn replacement_supersedes_same_topic_wiki_predecessor_at_legacy_path() {
+        let temp = tempfile::tempdir().expect("wiki same-topic replacement tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+        let mut legacy = wiki_entry("legacy-topic-path");
+        legacy.path = "/wiki/general/trendlock-legacy".to_string();
+        legacy.topic = "trendlock".to_string();
+        let mut replacement = wiki_entry("current-topic-path");
+        replacement.path = "/wiki/general/trendlock".to_string();
+        replacement.topic = legacy.topic.clone();
+        store.upsert(&legacy).expect("seed legacy Wiki predecessor");
+
+        persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &[])
+            .expect("same-topic Wiki predecessor must be replaced atomically");
+
+        let legacy_after = store
+            .get_with_options(&legacy.id, true)
+            .expect("read legacy predecessor")
+            .expect("legacy predecessor remains auditable");
+        assert!(legacy_after.archived);
+        assert_eq!(
+            store
+                .supersession_target(&legacy.id)
+                .expect("read legacy predecessor supersession"),
+            Some(Some(replacement.id.clone())),
+            "legacy same-topic predecessor must not remain active"
+        );
+        assert!(store
+            .get(&replacement.id)
+            .expect("read replacement")
+            .is_some());
     }
 
     #[test]

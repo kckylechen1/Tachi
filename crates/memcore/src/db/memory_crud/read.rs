@@ -412,3 +412,28 @@ pub fn find_active_wiki_entry_by_path(
         None => Ok(None),
     }
 }
+
+/// Find every active predecessor that Wiki ingest treats as the same page:
+/// an exact path match, or a Wiki-domain row with the same topic. Exact-path
+/// rows sort first so receipt preservation remains deterministic.
+pub fn list_active_wiki_ingest_predecessors(
+    conn: &Connection,
+    path: &str,
+    topic: &str,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
+    let sql = format!(
+        r#"SELECT {MEMORY_SELECT_COLUMNS}
+           FROM memories
+           WHERE archived = 0
+             AND superseded_by IS NULL
+             AND ({wiki_predicate})
+             AND (path = ?1 OR (lower(COALESCE(domain, '')) = 'wiki' AND topic = ?2))
+           ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END,
+                    timestamp DESC,
+                    id ASC"#
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![path, topic], row_to_entry)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}

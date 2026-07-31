@@ -6,12 +6,17 @@ use std::time::Duration;
 
 use crate::{db, db::DbOpenContext, error::MemoryError, path_router, MemoryEntry, MemoryStore};
 
+#[cfg(unix)]
+fn has_stable_unix_file_identity(device: u64, inode: u64) -> bool {
+    device != 0 && inode != 0
+}
+
 fn physical_db_identity_at_path(path: &Path) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if metadata.dev() != 0 || metadata.ino() != 0 {
+        if has_stable_unix_file_identity(metadata.dev(), metadata.ino()) {
             return Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()));
         }
     }
@@ -862,7 +867,7 @@ impl MemoryStore {
         &mut self,
         entry: &MemoryEntry,
     ) -> Result<db::InsertMemoryResult, MemoryError> {
-        if entry.id.starts_with("wiki-rem:") {
+        if crate::namespace::is_reserved_wiki_rem_id(&entry.id) {
             return Err(MemoryError::InvalidArg(format!(
                 "id '{}' is in the reserved 'wiki-rem:' namespace; use the REM operation transaction",
                 entry.id
@@ -897,6 +902,15 @@ impl MemoryStore {
 #[cfg(test)]
 mod exact_dedupe_open_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_unix_file_identity_is_not_mutation_authority() {
+        assert!(!has_stable_unix_file_identity(7, 0));
+        assert!(!has_stable_unix_file_identity(0, 11));
+        assert!(!has_stable_unix_file_identity(0, 0));
+        assert!(has_stable_unix_file_identity(7, 11));
+    }
 
     #[cfg(unix)]
     #[test]

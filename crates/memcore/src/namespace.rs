@@ -6,6 +6,17 @@
 use crate::types::{MemoryEntry, ProjectionKind};
 
 pub const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
+pub const WIKI_REM_OPERATION_ID_PREFIX: &str = "wiki-rem:";
+
+/// Whether `id` occupies the internal Wiki REM operation namespace.
+///
+/// SQLite's REM recovery queries use ASCII-case-insensitive `LIKE`, so every
+/// generic Rust write/mutation guard must reserve the same case-folded prefix.
+/// Canonical producer-owned REM ids remain lowercase.
+pub fn is_reserved_wiki_rem_id(id: &str) -> bool {
+    id.get(..WIKI_REM_OPERATION_ID_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(WIKI_REM_OPERATION_ID_PREFIX))
+}
 
 /// SQL predicate for rows that belong to the non-durable recall-cache
 /// namespace. Keep this aligned with [`is_recall_cache_entry`].
@@ -151,7 +162,7 @@ pub fn is_wiki_log_entry(entry: &MemoryEntry) -> bool {
 }
 
 pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
-    !entry.id.to_ascii_lowercase().starts_with("wiki-rem:")
+    !is_reserved_wiki_rem_id(&entry.id)
         && !is_wiki_log_entry(entry)
         && !is_recall_cache_entry(entry)
 }
@@ -357,4 +368,18 @@ pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>)
         || (!path_prefix_opts_into_continuity_projection(&entry.path, path_prefix)
             && is_continuity_projection_entry(entry))
         || is_anchor_entry(entry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rem_operation_namespace_matches_sqlite_ascii_case_folding() {
+        assert!(is_reserved_wiki_rem_id("wiki-rem:canonical"));
+        assert!(is_reserved_wiki_rem_id("Wiki-Rem:spoof"));
+        assert!(is_reserved_wiki_rem_id("WIKI-REM:spoof"));
+        assert!(!is_reserved_wiki_rem_id("wiki-rem"));
+        assert!(!is_reserved_wiki_rem_id("wiki:ordinary"));
+    }
 }

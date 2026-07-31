@@ -279,7 +279,9 @@ fn identity_key(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if !force_canonical_identity && (metadata.dev() != 0 || metadata.ino() != 0) {
+        if !force_canonical_identity
+            && has_stable_unix_file_identity(metadata.dev(), metadata.ino())
+        {
             return IdentityKey::Unix {
                 device: metadata.dev(),
                 inode: metadata.ino(),
@@ -294,9 +296,14 @@ fn identity_key(
 }
 
 #[cfg(unix)]
+fn has_stable_unix_file_identity(device: u64, inode: u64) -> bool {
+    device != 0 && inode != 0
+}
+
+#[cfg(unix)]
 fn unix_file_identity(metadata: &std::fs::Metadata) -> Option<UnixFileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    (metadata.dev() != 0 || metadata.ino() != 0).then_some(UnixFileIdentity {
+    has_stable_unix_file_identity(metadata.dev(), metadata.ino()).then_some(UnixFileIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
     })
@@ -620,7 +627,7 @@ fn sqlite_sidecar_owner_key(path: &Path) -> String {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                if metadata.dev() != 0 || metadata.ino() != 0 {
+                if has_stable_unix_file_identity(metadata.dev(), metadata.ino()) {
                     return Some(format!("{suffix}:{}:{}", metadata.dev(), metadata.ino()));
                 }
             }
@@ -699,6 +706,15 @@ pub(crate) fn open_read_only_connection(path: &Path) -> rusqlite::Result<rusqlit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_unix_file_identity_never_authorizes_mutation() {
+        assert!(!has_stable_unix_file_identity(7, 0));
+        assert!(!has_stable_unix_file_identity(0, 11));
+        assert!(!has_stable_unix_file_identity(0, 0));
+        assert!(has_stable_unix_file_identity(7, 11));
+    }
 
     #[cfg(unix)]
     #[test]

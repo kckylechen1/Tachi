@@ -69,7 +69,7 @@ pub(super) fn is_ordinary_related_wiki_entry(entry: &MemoryEntry) -> Result<bool
     Ok(is_user_facing_wiki_entry(entry)
         && entry.path != "/wiki/drafts"
         && !entry.path.starts_with("/wiki/drafts/")
-        && !entry.id.starts_with("wiki-rem:")
+        && !memcore::is_reserved_wiki_rem_id(&entry.id)
         && wiki_entry_matches_lifecycle_scope(entry, None)?)
 }
 

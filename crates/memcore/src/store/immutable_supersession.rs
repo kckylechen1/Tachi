@@ -63,7 +63,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         &mut self,
         entry: &MemoryEntry,
     ) -> Result<db::InsertMemoryResult, MemoryError> {
-        if entry.id.starts_with("wiki-rem:") {
+        if crate::namespace::is_reserved_wiki_rem_id(&entry.id) {
             return Err(MemoryError::InvalidArg(format!(
                 "id '{}' is in the reserved 'wiki-rem:' namespace; use insert_rem_operation_if_absent",
                 entry.id
@@ -260,6 +260,16 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         path: &str,
     ) -> Result<Option<MemoryEntry>, MemoryError> {
         db::find_active_wiki_entry_by_path(&self.tx, path)
+    }
+
+    /// Read every active predecessor covered by Wiki ingest's legacy
+    /// replacement identity from the same writer snapshot as the mutation.
+    pub fn list_active_wiki_ingest_predecessors(
+        &self,
+        path: &str,
+        topic: &str,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_active_wiki_ingest_predecessors(&self.tx, path, topic)
     }
 
     /// Archive a source after its supersession claim has succeeded.
