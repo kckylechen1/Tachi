@@ -782,6 +782,90 @@ async fn tachi_wiki_write_supersedes_duplicate_topic_rows() {
 }
 
 #[tokio::test]
+async fn idless_projection_replay_reconciles_stale_active_duplicates() {
+    let (server, _home) = seed_wiki_project_entries(Vec::new());
+    let params = SaveMemoryParams {
+        text: "Replay-safe Wiki projection canonical body.".to_string(),
+        summary: "Replay-safe Wiki projection".to_string(),
+        path: "/wiki/agent/tachi/replay-safe-projection".to_string(),
+        importance: 0.9,
+        category: "experience".to_string(),
+        topic: "replay-safe projection".to_string(),
+        keywords: vec!["wiki".to_string()],
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: String::new(),
+        scope: "global".to_string(),
+        vector: None,
+        id: None,
+        force: true,
+        auto_link: false,
+        project: Some("wiki".to_string()),
+        project_explicit: true,
+        retention_policy: Some("permanent".to_string()),
+        domain: Some("wiki".to_string()),
+        timestamp: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: Some(json!({"wiki": true})),
+        emit_continuity: false,
+    };
+    let first: Value = serde_json::from_str(
+        &crate::memory_search_ops::handle_save_memory_with_wiki_projection(
+            &server,
+            params.clone(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("create idless projection winner"),
+    )
+    .expect("first projection response JSON");
+    let winner_id = first["id"].as_str().expect("winner id").to_string();
+
+    let mut stale = make_entry("stale-replay-duplicate");
+    stale.path = "/wiki/agent/tachi/replay-safe-projection-copy".to_string();
+    stale.topic = "replay-safe projection".to_string();
+    stale.text = "Older active Wiki projection duplicate.".to_string();
+    stale.metadata = json!({"wiki": true});
+    stale.domain = Some("wiki".to_string());
+    server
+        .with_named_project_store("wiki", |store| {
+            store.upsert(&stale).map_err(|error| error.to_string())
+        })
+        .expect("seed stale active duplicate after canonical creation");
+
+    let replay: Value = serde_json::from_str(
+        &crate::memory_search_ops::handle_save_memory_with_wiki_projection(
+            &server,
+            params,
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("replay idless projection"),
+    )
+    .expect("replay projection response JSON");
+    assert_eq!(replay["saved"], json!(false));
+    assert_eq!(replay["status"], json!("duplicate"));
+    assert_eq!(replay["id"], json!(winner_id));
+    assert_eq!(replay["wiki_duplicates_superseded"], json!(1));
+    let superseded_by: Option<String> = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT superseded_by FROM memories WHERE id=?1",
+                    [&stale.id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("read replay-reconciled duplicate");
+    assert_eq!(superseded_by, Some(winner_id));
+}
+
+#[tokio::test]
 async fn tachi_wiki_write_supersedes_multi_token_topic_and_preserves_receipt() {
     let receipt = json!({
         "schema": "model-invocation-v1",

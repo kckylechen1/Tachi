@@ -215,9 +215,9 @@ impl MemoryStore {
     /// Source-row ids and operation ids for durable REM markers that still
     /// suppress the current source revision. Stale revision-bound and changed
     /// legacy markers are already reprocessable and need no live ledger.
-    pub fn rem_processed_source_markers(&self) -> Result<Vec<(String, String)>, MemoryError> {
+    pub fn rem_processed_source_markers(&self) -> Result<Vec<(String, String, i64)>, MemoryError> {
         let mut stmt = self.conn.prepare(
-            r#"SELECT id, json_extract(metadata, '$.rem.processed_by')
+            r#"SELECT id, json_extract(metadata, '$.rem.processed_by'), revision
                FROM memories
                WHERE json_valid(metadata)
                  AND json_extract(metadata, '$.rem.processed') = 1
@@ -231,7 +231,7 @@ impl MemoryStore {
                  )
                ORDER BY id"#,
         )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 

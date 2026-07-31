@@ -293,16 +293,24 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                         &evidence_write.mutations,
                         false,
                     )?;
-                if matches!(result, IdlessUpsertResult::Duplicate { .. }) {
-                    return Ok((result, metadata, 0, None));
-                }
+                let (winner_id, committed_previous_revision) = match &result {
+                    IdlessUpsertResult::Saved => (entry.id.as_str(), previous_revision),
+                    // A replay can discover stale active duplicates even when
+                    // its path+text identity already has a winner. The
+                    // duplicate response means no canonical content write,
+                    // not that projection reconciliation may be skipped.
+                    IdlessUpsertResult::Duplicate { id } => (id.as_str(), None),
+                };
 
                 let created_at = chrono::Utc::now().to_rfc3339();
                 let mut changed = 0usize;
-                for candidate in duplicates {
-                    projection.claim_immutable_supersession(&candidate.id, &entry.id)?;
+                for candidate in duplicates
+                    .into_iter()
+                    .filter(|candidate| candidate.id != winner_id)
+                {
+                    projection.claim_immutable_supersession(&candidate.id, winner_id)?;
                     projection.add_edge(&crate::copilot_ops::wiki_projection_supersedes_edge(
-                        &entry.id,
+                        winner_id,
                         &candidate.id,
                         &entry.path,
                         &entry.topic,
@@ -310,7 +318,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     ))?;
                     changed += 1;
                 }
-                Ok((result, metadata, changed, previous_revision))
+                Ok((result, metadata, changed, committed_previous_revision))
             })
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
         entry.metadata = metadata;
