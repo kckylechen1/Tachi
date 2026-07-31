@@ -829,7 +829,7 @@ fn complete_rem_operation(
     server: &MemoryServer,
     draft_id: &str,
     sources: &[RemSourceRef],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     ensure_rem_draft_winner(server, draft_id, sources)?;
     let now = Utc::now().to_rfc3339();
     let runtime_stores = runtime_rem_source_stores(server)?;
@@ -856,7 +856,8 @@ fn complete_rem_operation(
                 &global_sources,
                 &project_sources,
                 error,
-            );
+            )
+            .map(|()| false);
         }
     }
     if !project_sources.is_empty() {
@@ -877,7 +878,8 @@ fn complete_rem_operation(
                 &global_sources,
                 &project_sources,
                 error,
-            );
+            )
+            .map(|()| false);
         }
     }
     #[cfg(test)]
@@ -889,23 +891,28 @@ fn complete_rem_operation(
             &global_sources,
             &project_sources,
             "injected REM Wiki completion failure".to_string(),
-        );
+        )
+        .map(|()| false);
     }
-    if let Err(error) = server.with_named_project_store_identity_checked("wiki", |store| {
+    let completed_now = match server.with_named_project_store_identity_checked("wiki", |store| {
         store
             .complete_rem_wiki_operation(draft_id, &now)
             .map_err(|error| format!("complete REM draft receipt: {error}"))
     }) {
-        return fail_after_rem_source_completion(
-            server,
-            &runtime_stores,
-            draft_id,
-            &global_sources,
-            &project_sources,
-            error,
-        );
-    }
-    Ok(())
+        Ok(completed_now) => completed_now,
+        Err(error) => {
+            return fail_after_rem_source_completion(
+                server,
+                &runtime_stores,
+                draft_id,
+                &global_sources,
+                &project_sources,
+                error,
+            )
+            .map(|()| false);
+        }
+    };
+    Ok(completed_now)
 }
 
 fn fail_after_rem_source_completion(
@@ -1258,7 +1265,18 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<RemRecoveryRe
                 report.aborted_stale += 1;
                 continue;
             }
-            complete_rem_operation(server, &entry.id, &sources)?;
+            let completed_now = complete_rem_operation(server, &entry.id, &sources)?;
+            if completed_now {
+                crate::wiki_ops::append_wiki_log(
+                    server,
+                    "write",
+                    &format!(
+                        "{} | recovered weekly REM draft completion from {} source(s)",
+                        entry.path,
+                        sources.len()
+                    ),
+                );
+            }
             report.completed += 1;
         }
         if page_len < PAGE_SIZE {
@@ -1395,8 +1413,8 @@ fn save_wiki_draft(
     };
 
     let result = persist_rem_draft_operation(server, &entry, &sources)?;
-    complete_rem_operation(server, &draft_id, &sources)?;
-    if result == InsertMemoryResult::Inserted {
+    let completed_now = complete_rem_operation(server, &draft_id, &sources)?;
+    if completed_now {
         crate::wiki_ops::append_wiki_log(
             server,
             "write",
@@ -1848,6 +1866,20 @@ mod rem_identity_tests {
         assert_eq!(recovery.completed, 1);
         assert_eq!(recovery.aborted_stale, 0);
         assert_eq!(recovery.foreign_pending_skipped, 0);
+        let operation_log = server
+            .with_named_project_store_read("wiki", |store| {
+                store
+                    .get("wiki-operation-log")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "Wiki operation log missing after recovery".to_string())
+            })
+            .expect("read recovered REM operation log");
+        assert!(
+            operation_log
+                .text
+                .contains("recovered weekly REM draft completion"),
+            "recovery completion must remain visible in the Wiki operation log"
+        );
     }
 
     #[test]

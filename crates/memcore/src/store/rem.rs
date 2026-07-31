@@ -298,6 +298,33 @@ impl MemoryStore {
                     if same_operation {
                         match *expected_revision {
                             Some(expected) if processed_revision == Some(expected) => continue,
+                            Some(expected)
+                                if processed_revision.is_none() && expected == actual_revision =>
+                            {
+                                // Legacy same-operation markers did not record the
+                                // source revision. Upgrade the marker in place after
+                                // proving this draft still owns it and the requested
+                                // revision is current, so recovery cannot wedge.
+                                let changed = tx.execute(
+                                    r#"UPDATE memories
+                                       SET metadata = json_set(
+                                             metadata,
+                                             '$.rem.processed_revision', ?1
+                                           )
+                                       WHERE id = ?2
+                                         AND revision = ?1
+                                         AND COALESCE(json_extract(metadata, '$.rem.processed'), 0) = 1
+                                         AND json_extract(metadata, '$.rem.processed_by') = ?3
+                                         AND json_extract(metadata, '$.rem.processed_revision') IS NULL"#,
+                                    rusqlite::params![expected, id, draft_id],
+                                )?;
+                                if changed != 1 {
+                                    return Err(MemoryError::InvalidArg(format!(
+                                        "REM legacy same-operation marker upgrade CAS failed: {id}"
+                                    )));
+                                }
+                                continue;
+                            }
                             None => continue,
                             Some(_) => {}
                         }
@@ -526,7 +553,7 @@ impl MemoryStore {
         &mut self,
         draft_id: &str,
         completed_at: &str,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<bool, MemoryError> {
         let db_label = self.db_label.clone();
         let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("complete_rem_wiki_operation", &db_label, || {
@@ -562,7 +589,7 @@ impl MemoryStore {
             }
             if status.as_deref() == Some("complete") {
                 tx.commit()?;
-                return Ok(());
+                return Ok(false);
             }
             if status.as_deref() != Some("pending_sources") {
                 return Err(MemoryError::InvalidArg(format!(
@@ -588,7 +615,7 @@ impl MemoryStore {
                 )));
             }
             tx.commit()?;
-            Ok(())
+            Ok(true)
         })
     }
 }
@@ -841,6 +868,56 @@ mod tests {
             assert_eq!(source.metadata["rem"]["processed"], 1);
             assert_eq!(source.metadata["rem"]["processed_by"], "wiki-rem:operation");
         }
+    }
+
+    #[test]
+    fn same_draft_recovery_upgrades_an_owned_legacy_marker_without_source_change() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        let authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize legacy marker fixture");
+        store
+            .conn
+            .execute(
+                r#"UPDATE memories
+                   SET metadata = json_set(
+                         metadata,
+                         '$.rem.processed', 1,
+                         '$.rem.processed_by', 'wiki-rem:legacy-owned',
+                         '$.rem.processed_at', '2099-01-01T00:00:00Z'
+                       )
+                   WHERE id = 'source'"#,
+                [],
+            )
+            .expect("seed legacy marker without processed_revision");
+        drop(authorization);
+
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:legacy-owned",
+            )
+            .expect("upgrade same-draft legacy marker");
+
+        let source = store
+            .get("source")
+            .expect("read upgraded source")
+            .expect("source exists");
+        assert_eq!(source.revision, revision);
+        assert_eq!(
+            source.metadata["rem"]["processed_by"],
+            "wiki-rem:legacy-owned"
+        );
+        assert_eq!(source.metadata["rem"]["processed_revision"], revision);
     }
 
     #[test]
@@ -1278,11 +1355,12 @@ mod tests {
             vec!["wiki-rem:pending"]
         );
 
-        for _ in 0..2 {
-            store
-                .complete_rem_wiki_operation("wiki-rem:pending", "2026-07-05T02:00:00Z")
-                .expect("completion replay");
-        }
+        assert!(store
+            .complete_rem_wiki_operation("wiki-rem:pending", "2026-07-05T02:00:00Z")
+            .expect("first completion transitions the operation"));
+        assert!(!store
+            .complete_rem_wiki_operation("wiki-rem:pending", "2026-07-05T02:00:00Z")
+            .expect("completion replay is a no-op"));
         assert!(store
             .pending_rem_wiki_operations(10)
             .expect("list after completion")
