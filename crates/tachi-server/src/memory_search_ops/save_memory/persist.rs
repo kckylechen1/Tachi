@@ -14,6 +14,24 @@ pub(super) struct AtomicReferenceWrite {
     pub mutations: Vec<memcore::db::ValidatedReferenceMutation>,
 }
 
+fn attach_trusted_model_invocation_to_patch(
+    metadata_patch: &mut serde_json::Map<String, serde_json::Value>,
+    invocation: serde_json::Value,
+) -> Result<(), memcore::MemoryError> {
+    let provenance = metadata_patch
+        .entry("provenance".to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            memcore::MemoryError::InvalidArg(
+                "Wiki projection provenance must be an object before receipt preservation"
+                    .to_string(),
+            )
+        })?;
+    provenance.insert("model_invocation".to_string(), invocation);
+    Ok(())
+}
+
 /// Return the id of an active row with the same normalized path and exact
 /// text. #1041 F6: this used to fetch `list_by_path(path, 64, false)` (exact
 /// path + descendants, capped at 64 rows) and filter for an exact path+text
@@ -192,8 +210,8 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
         let (result, metadata, duplicates_superseded) = store
             .with_immutable_supersession_transaction(|projection| {
+                let active = projection.find_active_wiki_entry_by_path(&entry.path)?;
                 if idless_identity.is_none() {
-                    let active = projection.find_active_wiki_entry_by_path(&entry.path)?;
                     if active.as_ref().map(|winner| winner.id.as_str()) != Some(entry.id.as_str()) {
                         return Err(memcore::MemoryError::InvalidArg(format!(
                             "wiki projection canonical changed before commit: expected {}",
@@ -201,19 +219,6 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                         )));
                     }
                 }
-                let (result, metadata) = projection
-                    .upsert_with_validated_reference_mutations_and_metadata_removals(
-                        entry,
-                        idless_identity,
-                        &evidence_write.metadata_patch,
-                        &evidence_write.metadata_removals,
-                        &evidence_write.mutations,
-                        false,
-                    )?;
-                if matches!(result, IdlessUpsertResult::Duplicate { .. }) {
-                    return Ok((result, metadata, 0));
-                }
-
                 // Ordinary Wiki projection may retire only other ordinary Wiki
                 // rows. Guide writes share this persistence seam for atomic
                 // updates, but they are a separate corpus and must not claim a
@@ -228,20 +233,43 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                 } else {
                     Vec::new()
                 };
+                let duplicates = candidates
+                    .into_iter()
+                    .filter(|candidate| {
+                        candidate.id != entry.id
+                            && memcore::db::is_user_facing_wiki_entry(candidate)
+                            && crate::copilot_ops::is_wiki_projection_duplicate(
+                                candidate,
+                                &entry.path,
+                                &entry.topic,
+                                &entry.text,
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                let mut metadata_patch = evidence_write.metadata_patch.clone();
+                if active.as_ref().map(|winner| winner.id.as_str()) != Some(entry.id.as_str()) {
+                    if let Some(invocation) = duplicates.iter().find_map(|candidate| {
+                        crate::provenance::trusted_existing_model_invocation(&candidate.metadata)
+                    }) {
+                        attach_trusted_model_invocation_to_patch(&mut metadata_patch, invocation)?;
+                    }
+                }
+                let (result, metadata) = projection
+                    .upsert_with_validated_reference_mutations_and_metadata_removals(
+                        entry,
+                        idless_identity,
+                        &metadata_patch,
+                        &evidence_write.metadata_removals,
+                        &evidence_write.mutations,
+                        false,
+                    )?;
+                if matches!(result, IdlessUpsertResult::Duplicate { .. }) {
+                    return Ok((result, metadata, 0));
+                }
+
                 let created_at = chrono::Utc::now().to_rfc3339();
                 let mut changed = 0usize;
-                for candidate in candidates {
-                    if candidate.id == entry.id
-                        || !memcore::db::is_user_facing_wiki_entry(&candidate)
-                        || !crate::copilot_ops::is_wiki_projection_duplicate(
-                            &candidate,
-                            &entry.path,
-                            &entry.topic,
-                            &entry.text,
-                        )
-                    {
-                        continue;
-                    }
+                for candidate in duplicates {
                     projection.claim_immutable_supersession(&candidate.id, &entry.id)?;
                     projection.add_edge(&crate::copilot_ops::wiki_projection_supersedes_edge(
                         &entry.id,

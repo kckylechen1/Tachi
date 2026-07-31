@@ -154,16 +154,19 @@ pub(crate) fn is_wiki_projection_duplicate(
     // Dedup criteria (OR-combined, but single-token topic match requires path
     // prefix overlap to avoid over-broad matching).
     let same_path = candidate.path == path;
-    let same_topic = target_subject.as_ref().is_some_and(|token| {
+    let same_parent = candidate.path.rsplit_once('/').map(|(parent, _)| parent)
+        == path.rsplit_once('/').map(|(parent, _)| parent);
+    let same_exact_topic = !topic.trim().is_empty()
+        && candidate.topic.trim().eq_ignore_ascii_case(topic.trim())
+        && same_parent;
+    let same_subject_token = target_subject.as_ref().is_some_and(|token| {
         let candidate_token = wiki_subject_token(&candidate.topic);
-        candidate_token.as_ref() == Some(token)
-            && candidate.path.rsplit_once('/').map(|(parent, _)| parent)
-                == path.rsplit_once('/').map(|(parent, _)| parent)
+        candidate_token.as_ref() == Some(token) && same_parent
     });
     let similar_text =
         wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
             >= WIKI_DUP_JACCARD_THRESHOLD;
-    same_path || same_topic || similar_text
+    same_path || same_exact_topic || same_subject_token || similar_text
 }
 
 pub(crate) fn wiki_projection_supersedes_edge(

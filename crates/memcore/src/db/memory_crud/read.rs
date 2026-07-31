@@ -428,7 +428,11 @@ pub fn list_active_wiki_ingest_predecessors(
            WHERE archived = 0
              AND superseded_by IS NULL
              AND ({wiki_predicate})
-             AND (path = ?1 OR (lower(COALESCE(domain, '')) = 'wiki' AND topic = ?2))
+             AND (path = ?1 OR (
+                 (path = '/wiki' OR path LIKE '/wiki/%')
+                 AND lower(COALESCE(domain, '')) = 'wiki'
+                 AND topic = ?2
+             ))
            ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END,
                     timestamp DESC,
                     id ASC"#

@@ -820,7 +820,12 @@ mod immutable_supersession_tests {
         let mut replacement = wiki_entry("current-topic-path");
         replacement.path = "/wiki/general/trendlock".to_string();
         replacement.topic = legacy.topic.clone();
+        let mut guide = wiki_entry("same-topic-guide");
+        guide.path = "/guide/global/trendlock".to_string();
+        guide.topic = legacy.topic.clone();
+        guide.category = "guide".to_string();
         store.upsert(&legacy).expect("seed legacy Wiki predecessor");
+        store.upsert(&guide).expect("seed same-topic Guide");
 
         persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &[])
             .expect("same-topic Wiki predecessor must be replaced atomically");
@@ -841,6 +846,18 @@ mod immutable_supersession_tests {
             .get(&replacement.id)
             .expect("read replacement")
             .is_some());
+        let guide_after = store
+            .get(&guide.id)
+            .expect("read same-topic Guide")
+            .expect("same-topic Guide remains");
+        assert!(!guide_after.archived);
+        assert_eq!(
+            store
+                .supersession_target(&guide.id)
+                .expect("read Guide supersession"),
+            Some(None),
+            "Wiki ingest must not classify a Guide as its predecessor"
+        );
     }
 
     #[test]

@@ -688,6 +688,71 @@ async fn tachi_wiki_write_supersedes_duplicate_topic_rows() {
 }
 
 #[tokio::test]
+async fn tachi_wiki_write_supersedes_multi_token_topic_and_preserves_receipt() {
+    let receipt = json!({
+        "schema": "model-invocation-v1",
+        "effective_model": "legacy-wiki-model"
+    });
+    let mut predecessor = make_entry("legacy-agent-review-row");
+    predecessor.path = "/wiki/general/old-agent-review".to_string();
+    predecessor.topic = "agent review".to_string();
+    predecessor.text = "Legacy content deliberately shares no body tokens.".to_string();
+    predecessor.metadata = json!({
+        "wiki": true,
+        "provenance": {"model_invocation": receipt.clone()}
+    });
+    predecessor.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![predecessor.clone()]);
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Current agent review".to_string(),
+            text: "Fresh canonical guidance uses entirely different wording.".to_string(),
+            path: Some("/wiki/general/new-agent-review".to_string()),
+            topic: Some("agent review".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["review".to_string()],
+            entities: vec!["AgentReview".to_string()],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("write multi-token same-topic Wiki replacement");
+    let response: Value = serde_json::from_str(&response).expect("wiki response JSON");
+    let replacement_id = response["id"].as_str().expect("replacement id");
+    assert_eq!(response["wiki_duplicates_superseded"], json!(1));
+
+    let (superseded_by, replacement) = server
+        .with_named_project_store_read("wiki", |store| {
+            let superseded_by = store
+                .supersession_target(&predecessor.id)
+                .map_err(|error| error.to_string())?;
+            let replacement = store
+                .get(replacement_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "replacement disappeared".to_string())?;
+            Ok((superseded_by, replacement))
+        })
+        .expect("read multi-token replacement state");
+    assert_eq!(superseded_by, Some(Some(replacement_id.to_string())));
+    assert_eq!(
+        replacement.metadata.pointer("/provenance/model_invocation"),
+        Some(&receipt),
+        "same-topic replacement must preserve the predecessor receipt"
+    );
+}
+
+#[tokio::test]
 async fn ordinary_wiki_write_never_rewrites_or_supersedes_a_guide() {
     let shared_text =
         "Agent review guidance requires exact evidence and an independent final verdict.";
