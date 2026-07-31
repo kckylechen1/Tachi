@@ -153,7 +153,7 @@ Return ONLY a single valid JSON object (no markdown, no wrapping):
 pub(crate) async fn run_weekly_wiki_evolution(
     server: &MemoryServer,
 ) -> Result<WikiEvolverReport, String> {
-    recover_pending_rem_operations(server)?;
+    let recovery = recover_pending_rem_operations(server)?;
     let candidates = collect_pattern_memories(server)?;
     if candidates.is_empty() {
         return Ok(WikiEvolverReport {
@@ -161,6 +161,9 @@ pub(crate) async fn run_weekly_wiki_evolution(
             drafts_written: 0,
             skipped: 0,
             errors: 0,
+            recovered_completed: recovery.completed,
+            recovered_aborted: recovery.aborted_stale,
+            foreign_pending_skipped: recovery.foreign_pending_skipped,
         });
     }
 
@@ -190,10 +193,20 @@ pub(crate) async fn run_weekly_wiki_evolution(
         drafts_written,
         skipped,
         errors,
+        recovered_completed: recovery.completed,
+        recovered_aborted: recovery.aborted_stale,
+        foreign_pending_skipped: recovery.foreign_pending_skipped,
     };
     eprintln!(
-        "[wiki_evolver] weekly run complete: clusters={} drafts={} skipped={} errors={}",
-        report.clusters_found, report.drafts_written, report.skipped, report.errors
+        "[wiki_evolver] weekly run {}: clusters={} drafts={} skipped={} errors={} recovered_completed={} recovered_aborted={} foreign_pending_skipped={}",
+        if report.errors == 0 { "completed" } else { "completed_with_errors" },
+        report.clusters_found,
+        report.drafts_written,
+        report.skipped,
+        report.errors,
+        report.recovered_completed,
+        report.recovered_aborted,
+        report.foreign_pending_skipped,
     );
     Ok(report)
 }
@@ -205,6 +218,16 @@ pub(crate) struct WikiEvolverReport {
     pub drafts_written: usize,
     pub skipped: usize,
     pub errors: usize,
+    pub recovered_completed: usize,
+    pub recovered_aborted: usize,
+    pub foreign_pending_skipped: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RemRecoveryReport {
+    completed: usize,
+    aborted_stale: usize,
+    foreign_pending_skipped: usize,
 }
 
 // ─── Candidate collection ─────────────────────────────────────────────────────
@@ -305,7 +328,10 @@ fn run_checked_rem_source_action<T>(
     match (result, post) {
         (Ok(value), Ok(())) => Ok(value),
         (Ok(_), Err(error)) => Err(error),
-        (Err(error), _) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(identity_error)) => Err(format!(
+            "{error}; additionally, the REM physical identity invariant failed after the operation: {identity_error}"
+        )),
     }
 }
 
@@ -727,6 +753,10 @@ fn ensure_rem_draft_winner(
     draft_id: &str,
     sources: &[RemSourceRef],
 ) -> Result<(), String> {
+    let expected_claims = sources
+        .iter()
+        .map(stable_rem_source_claim)
+        .collect::<Vec<_>>();
     server.with_named_project_store_identity_checked("wiki", |store| {
         store
             .with_immutable_supersession_transaction(|operation| {
@@ -734,6 +764,7 @@ fn ensure_rem_draft_winner(
                     .get_memory(draft_id)?
                     .ok_or_else(|| rem_identity_conflict(draft_id, "operation row is missing"))?;
                 validate_existing_rem_draft(&existing, draft_id, sources)?;
+                operation.validate_rem_source_claims_for_draft(draft_id, &expected_claims)?;
                 if !operation.memory_is_active_unsuperseded(draft_id)? {
                     return Err(rem_identity_conflict(
                         draft_id,
@@ -926,6 +957,19 @@ fn rem_sources_belong_to_runtime_stores(
         })
 }
 
+fn rem_sources_owned_by_runtime_count(
+    sources: &[RemSourceRef],
+    runtime_stores: &RuntimeRemSourceStores,
+) -> usize {
+    sources
+        .iter()
+        .filter(|source| {
+            source.store == runtime_stores.global
+                || runtime_stores.project.as_ref() == Some(&source.store)
+        })
+        .count()
+}
+
 fn route_rem_sources(
     sources: &[RemSourceRef],
     runtime_stores: &RuntimeRemSourceStores,
@@ -998,16 +1042,17 @@ fn rem_source_revisions_are_current(
     Ok(true)
 }
 
-fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
+fn recover_pending_rem_operations(server: &MemoryServer) -> Result<RemRecoveryReport, String> {
     let wiki_path = MemoryServer::resolve_existing_named_project_db_path_in_home(
         "wiki",
         &server.tachi_home_dir(),
     )
     .map_err(|error| format!("resolve REM Wiki operation store: {error}"))?;
     if wiki_path.is_none() {
-        return Ok(());
+        return Ok(RemRecoveryReport::default());
     }
     let runtime_stores = runtime_rem_source_stores(server)?;
+    let mut report = RemRecoveryReport::default();
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
     loop {
@@ -1022,7 +1067,7 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
                 .map_err(|error| format!("list pending REM draft operations: {error}"))
         })?;
         if pending.is_empty() {
-            return Ok(());
+            return Ok(report);
         }
         let page_len = pending.len();
         let last = pending
@@ -1033,7 +1078,15 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
             let sources = stored_rem_sources(&entry)
                 .map_err(|error| format!("recover REM draft {} source set: {error}", entry.id))?;
             if !rem_sources_belong_to_runtime_stores(&sources, &runtime_stores) {
-                continue;
+                let owned_sources = rem_sources_owned_by_runtime_count(&sources, &runtime_stores);
+                if owned_sources == 0 {
+                    report.foreign_pending_skipped += 1;
+                    continue;
+                }
+                return Err(format!(
+                    "recover REM draft {}: source set mixes current and foreign physical stores",
+                    entry.id
+                ));
             }
             validate_existing_rem_draft(&entry, &entry.id, &sources)
                 .map_err(|error| format!("recover REM draft {}: {error}", entry.id))?;
@@ -1057,12 +1110,14 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
                     "[wiki_evolver] warn: archived stale pending REM operation {} and released its source claims",
                     entry.id
                 );
+                report.aborted_stale += 1;
                 continue;
             }
             complete_rem_operation(server, &entry.id, &sources)?;
+            report.completed += 1;
         }
         if page_len < PAGE_SIZE {
-            return Ok(());
+            return Ok(report);
         }
         after = Some(last);
     }
@@ -1529,6 +1584,73 @@ mod rem_identity_tests {
             pending.metadata["rem"]["operation_status"],
             "pending_sources"
         );
+
+        let recovery = recover_pending_rem_operations(&server)
+            .expect("recovery must finish the compensated pending operation");
+        assert_eq!(recovery.completed, 1);
+        assert_eq!(recovery.aborted_stale, 0);
+        assert_eq!(recovery.foreign_pending_skipped, 0);
+    }
+
+    #[test]
+    fn rem_completion_refuses_a_missing_source_claim_before_marking_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(memcore::MemoryStore::open(wiki_db.to_str().unwrap()).expect("initialize Wiki store"));
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&source_entry("claimed-source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed source");
+        let runtime = runtime_rem_source_stores(&server).expect("bind runtime stores");
+        let revision = server
+            .with_global_store_read(|store| {
+                store
+                    .get("claimed-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "source missing".to_string())
+            })
+            .expect("read source revision");
+        let sources = vec![RemSourceRef {
+            store: runtime.global,
+            id: "claimed-source".to_string(),
+            revision,
+        }];
+        let draft_id = stable_rem_draft_id(&sources);
+        persist_rem_draft_operation(&server, &occupied_entry(&draft_id, &sources), &sources)
+            .expect("persist REM operation");
+        server
+            .with_named_project_store("wiki", |store| {
+                store
+                    .connection()
+                    .execute(
+                        "DELETE FROM rem_source_claims WHERE draft_id = ?1",
+                        [&draft_id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("simulate incomplete legacy claim ledger");
+
+        let error = complete_rem_operation(&server, &draft_id, &sources)
+            .expect_err("missing claim must fail before source marker writes");
+        assert!(error.contains("source claim ledger mismatch"), "{error}");
+        let source = server
+            .with_global_store_read(|store| {
+                store
+                    .get("claimed-source")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "source missing".to_string())
+            })
+            .expect("read unmarked source");
+        assert!(source.metadata["rem"]["processed"].is_null());
     }
 
     #[test]
@@ -1635,8 +1757,10 @@ mod rem_identity_tests {
             })
             .expect("verify pending operation");
 
-        recover_pending_rem_operations(&server)
+        let recovery = recover_pending_rem_operations(&server)
             .expect("second-run recovery must retire the stale operation");
+        assert_eq!(recovery.completed, 0);
+        assert_eq!(recovery.aborted_stale, 1);
         server
             .with_named_project_store("wiki", |store| {
                 let aborted = store
@@ -1743,6 +1867,59 @@ mod rem_identity_tests {
             shared_route: RemSourceRole::Global,
         };
         assert!(!rem_sources_belong_to_runtime_stores(&owned, &global_only));
+    }
+
+    #[test]
+    fn pending_recovery_reports_foreign_rows_and_rejects_mixed_store_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(memcore::MemoryStore::open(wiki_db.to_str().unwrap()).expect("initialize Wiki store"));
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+        let runtime = runtime_rem_source_stores(&server).expect("bind runtime stores");
+
+        let foreign_sources = vec![RemSourceRef {
+            store: test_store("foreign-physical-store"),
+            id: "foreign-source".to_string(),
+            revision: 1,
+        }];
+        let foreign_id = stable_rem_draft_id(&foreign_sources);
+        persist_rem_draft_operation(
+            &server,
+            &occupied_entry(&foreign_id, &foreign_sources),
+            &foreign_sources,
+        )
+        .expect("persist foreign pending operation");
+        let report = recover_pending_rem_operations(&server).expect("skip foreign operation");
+        assert_eq!(report.foreign_pending_skipped, 1);
+        assert_eq!(report.completed, 0);
+
+        let mut mixed_sources = vec![
+            RemSourceRef {
+                store: runtime.global,
+                id: "current-source".to_string(),
+                revision: 1,
+            },
+            RemSourceRef {
+                store: test_store("another-foreign-physical-store"),
+                id: "foreign-source-2".to_string(),
+                revision: 1,
+            },
+        ];
+        mixed_sources.sort();
+        let mixed_id = stable_rem_draft_id(&mixed_sources);
+        persist_rem_draft_operation(
+            &server,
+            &occupied_entry(&mixed_id, &mixed_sources),
+            &mixed_sources,
+        )
+        .expect("persist mixed pending operation");
+        let error =
+            recover_pending_rem_operations(&server).expect_err("mixed ownership must fail closed");
+        assert!(error.contains(&mixed_id), "{error}");
+        assert!(error.contains("mixes current and foreign"), "{error}");
     }
 
     #[test]

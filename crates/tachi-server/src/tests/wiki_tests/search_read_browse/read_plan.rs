@@ -1,6 +1,10 @@
 use super::*;
 
-use crate::wiki_ops::{collect_wiki_read_value, collect_wiki_search_value};
+use crate::tool_params::WikiReadPlan;
+use crate::wiki_ops::{
+    collect_wiki_read_value, collect_wiki_read_value_for_plan, collect_wiki_search_value,
+    list_wiki_entries_for_plan,
+};
 
 fn planned_wiki_search(query: &str, project: Option<&str>, top_k: usize) -> WikiSearchParams {
     WikiSearchParams {
@@ -334,5 +338,73 @@ fn federated_same_path_read_returns_store_qualified_candidates() {
             .iter()
             .all(|candidate| !candidate["store"].is_null()),
         "RED: cross-store ambiguity must carry store-qualified candidates: {candidates:?}"
+    );
+}
+
+#[test]
+fn default_wiki_read_excludes_superseded_duplicate_but_migration_audit_retains_it() {
+    let path = "/wiki/read-plan/superseded-duplicate";
+    let current = wiki_entry(
+        "wiki-read-plan-current",
+        path,
+        "current default Wiki plan entry",
+    );
+    let superseded = wiki_entry(
+        "wiki-read-plan-superseded",
+        path,
+        "superseded default Wiki plan entry",
+    );
+    let (server, _home) = seed_wiki_project_entries(vec![current, superseded]);
+
+    server
+        .with_named_project_store("wiki", |store| {
+            store
+                .mark_superseded_closing_validity(
+                    "wiki-read-plan-superseded",
+                    "wiki-read-plan-current",
+                    "2026-07-31T00:00:00Z",
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .expect("mark superseded fixture row");
+
+    let default_read = collect_wiki_read_value(&server, path, "wiki").expect("default read");
+    assert_eq!(default_read["status"], json!("found"));
+    assert_eq!(default_read["entry"]["id"], json!("wiki-read-plan-current"));
+
+    let audit_read = collect_wiki_read_value_for_plan(&server, path, &WikiReadPlan::MigrationAudit)
+        .expect("migration audit read");
+    assert_eq!(audit_read["status"], json!("ambiguous"));
+    let candidates = audit_read["candidates"]
+        .as_array()
+        .expect("audit candidate array");
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["id"] == "wiki-read-plan-superseded"),
+        "MigrationAudit must retain the superseded row for audit: {candidates:?}"
+    );
+
+    let audit_listing =
+        list_wiki_entries_for_plan(&server, &WikiReadPlan::MigrationAudit, path, 10)
+            .expect("migration audit listing");
+    assert!(
+        audit_listing
+            .iter()
+            .any(|stored| stored.entry.id == "wiki-read-plan-superseded"),
+        "MigrationAudit path listing must retain the superseded row"
+    );
+
+    let retained_by_get = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get_with_options("wiki-read-plan-superseded", true)
+                .map_err(|error| error.to_string())
+        })
+        .expect("read superseded row through get_with_options");
+    assert!(
+        retained_by_get.is_some(),
+        "get_with_options(include_archived=true) must still retain the superseded row"
     );
 }

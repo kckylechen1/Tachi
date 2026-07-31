@@ -181,6 +181,37 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         Ok(())
     }
 
+    /// Validate that a draft owns exactly the expected REM source claim ledger.
+    ///
+    /// The comparison is against `(source_key, source_identity)` rows sorted by
+    /// the database's canonical key order, so a missing source, extra source,
+    /// or identity drift fails before the caller treats the draft as complete.
+    pub fn validate_rem_source_claims_for_draft(
+        &self,
+        draft_id: &str,
+        expected_claims: &[(String, String)],
+    ) -> Result<(), MemoryError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT source_key, source_identity FROM rem_source_claims WHERE draft_id = ?1 \
+             ORDER BY source_key ASC, source_identity ASC",
+        )?;
+        let actual_claims = stmt
+            .query_map([draft_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut expected_claims = expected_claims.to_vec();
+        expected_claims.sort();
+        if actual_claims != expected_claims {
+            return Err(MemoryError::InvalidArg(format!(
+                "REM source claim ledger mismatch for {draft_id}: expected {} claims, found {}",
+                expected_claims.len(),
+                actual_claims.len()
+            )));
+        }
+        Ok(())
+    }
+
     /// Persist an entry while applying trusted metadata removals and validated
     /// reference mutations inside this transaction.
     ///
@@ -346,5 +377,77 @@ mod tests {
             )
             .expect("read claim occupant");
         assert_eq!(occupant, "draft-a");
+    }
+
+    #[test]
+    fn rem_source_claim_ledger_validation_is_exact_and_sorted() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_rem_source(
+                    "rem-source:b",
+                    r#"{"store":"physical","id":"b","revision":2}"#,
+                    "draft-a",
+                    "2026-07-31T00:00:00Z",
+                )?;
+                operation.claim_rem_source(
+                    "rem-source:a",
+                    r#"{"store":"physical","id":"a","revision":1}"#,
+                    "draft-a",
+                    "2026-07-31T00:00:00Z",
+                )?;
+                operation.claim_rem_source(
+                    "rem-source:c",
+                    r#"{"store":"physical","id":"c","revision":3}"#,
+                    "draft-b",
+                    "2026-07-31T00:00:00Z",
+                )?;
+                operation.validate_rem_source_claims_for_draft(
+                    "draft-a",
+                    &[
+                        (
+                            "rem-source:b".to_string(),
+                            r#"{"store":"physical","id":"b","revision":2}"#.to_string(),
+                        ),
+                        (
+                            "rem-source:a".to_string(),
+                            r#"{"store":"physical","id":"a","revision":1}"#.to_string(),
+                        ),
+                    ],
+                )
+            })
+            .expect("sorted exact ledger validates");
+
+        let wrong_identity = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.validate_rem_source_claims_for_draft(
+                    "draft-a",
+                    &[
+                        (
+                            "rem-source:a".to_string(),
+                            r#"{"store":"physical","id":"a","revision":999}"#.to_string(),
+                        ),
+                        (
+                            "rem-source:b".to_string(),
+                            r#"{"store":"physical","id":"b","revision":2}"#.to_string(),
+                        ),
+                    ],
+                )
+            })
+            .expect_err("identity drift must fail exact ledger validation");
+        assert!(wrong_identity.to_string().contains("ledger mismatch"));
+
+        let missing_claim = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.validate_rem_source_claims_for_draft(
+                    "draft-a",
+                    &[(
+                        "rem-source:a".to_string(),
+                        r#"{"store":"physical","id":"a","revision":1}"#.to_string(),
+                    )],
+                )
+            })
+            .expect_err("missing expected source must fail exact ledger validation");
+        assert!(missing_claim.to_string().contains("ledger mismatch"));
     }
 }

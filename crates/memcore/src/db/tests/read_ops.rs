@@ -130,6 +130,44 @@ fn list_by_path_empty_prefix_returns_all() {
 }
 
 #[test]
+fn list_by_path_active_unsuperseded_excludes_superseded_without_changing_generic_list() {
+    let mut conn = make_conn();
+    let mut active = make_entry("active-current", "current wiki row");
+    active.path = "/wiki/engineering/current".to_string();
+    upsert(&mut conn, &active, false).unwrap();
+
+    let mut superseded = make_entry("active-superseded", "historical wiki row");
+    superseded.path = "/wiki/engineering/superseded".to_string();
+    upsert(&mut conn, &superseded, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET superseded_by = 'active-current' WHERE id = 'active-superseded'",
+        [],
+    )
+    .unwrap();
+
+    let current = list_by_path_active_unsuperseded(&conn, "/wiki/engineering", 10).unwrap();
+    let current_ids = current
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(current_ids.contains("active-current"));
+    assert!(
+        !current_ids.contains("active-superseded"),
+        "active-unsuperseded path listing must not surface historical superseded rows"
+    );
+
+    let generic = list_by_path(&conn, "/wiki/engineering", 10, false).unwrap();
+    let generic_ids = generic
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        generic_ids.contains("active-superseded"),
+        "generic list_by_path remains an audit-capable archived-only listing"
+    );
+}
+
+#[test]
 fn list_wiki_duplicate_candidates_pushes_path_topic_and_parent_filter_to_sql() {
     let mut conn = make_conn();
     let mut same_path = make_entry("wiki-same-path", "same path");
@@ -209,14 +247,51 @@ fn ordinary_wiki_projection_excludes_internal_log_and_recall_cache_rows() {
     upsert(&mut conn, &log, false).unwrap();
 
     let mut cache = make_entry("wiki-recall-cache", "same internal text");
-    cache.path = "/wiki/recall-cache/shared-topic".to_string();
+    cache.path = "/wiki/recall-cache".to_string();
     cache.topic = "shared-topic".to_string();
-    cache.source = "foundry_recall_rerank_cache".to_string();
     upsert(&mut conn, &cache, false).unwrap();
 
+    let mut cache_descendant = make_entry("wiki-recall-cache-descendant", "same internal text");
+    cache_descendant.path = "/wiki/recall-cache/shared-topic".to_string();
+    cache_descendant.topic = "shared-topic".to_string();
+    upsert(&mut conn, &cache_descendant, false).unwrap();
+
+    let mut metadata_log = make_entry("wiki-metadata-log", "same internal text");
+    metadata_log.path = "/wiki/general/metadata-log".to_string();
+    metadata_log.topic = "shared-topic".to_string();
+    metadata_log.metadata = json!({"wiki_log": 1});
+    upsert(&mut conn, &metadata_log, false).unwrap();
+
+    let mut source_cache = make_entry("wiki-source-cache", "same internal text");
+    source_cache.path = "/wiki/general/source-cache".to_string();
+    source_cache.topic = "shared-topic".to_string();
+    source_cache.source = "foundry_recall_rerank_cache".to_string();
+    upsert(&mut conn, &source_cache, false).unwrap();
+
+    assert!(crate::db::is_reserved_wiki_internal_path(
+        "/wiki/recall-cache"
+    ));
+    assert!(crate::db::is_reserved_wiki_internal_path(
+        "/wiki/engineering/debugging/recall-cache/polluted"
+    ));
+    assert!(!crate::db::is_reserved_wiki_internal_path(
+        "/wiki/engineering/recall-cacheable"
+    ));
+    assert!(
+        !crate::db::is_user_facing_wiki_entry(&metadata_log),
+        "Rust predicate must treat JSON numeric wiki_log=1 as internal"
+    );
     assert!(find_active_wiki_entry_by_path(&conn, "/wiki/_log")
         .unwrap()
         .is_none());
+    assert!(find_active_wiki_entry_by_path(&conn, "/wiki/recall-cache")
+        .unwrap()
+        .is_none());
+    assert!(
+        find_active_wiki_entry_by_path(&conn, "/wiki/general/metadata-log")
+            .unwrap()
+            .is_none()
+    );
     assert!(list_wiki_duplicate_candidates(
         &conn,
         "/wiki/general/shared-topic",

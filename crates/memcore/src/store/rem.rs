@@ -241,6 +241,13 @@ impl MemoryStore {
                     }
                     Err(error) => return Err(error.into()),
                 };
+                if let Some(expected_revision) = *expected_revision {
+                    if expected_revision != actual_revision {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "REM source revision changed before processing: {id} expected {expected_revision}, found {actual_revision}"
+                        )));
+                    }
+                }
                 if processed != 0 {
                     let same_operation = (draft_id.is_some()
                         && processed_by.as_deref() == draft_id)
@@ -264,13 +271,6 @@ impl MemoryStore {
                     if !newer_revision_is_reprocessable && !changed_legacy_marker_is_reprocessable {
                         return Err(MemoryError::InvalidArg(format!(
                             "REM source already belongs to another completed operation: {id}"
-                        )));
-                    }
-                }
-                if let Some(expected_revision) = *expected_revision {
-                    if expected_revision != actual_revision {
-                        return Err(MemoryError::InvalidArg(format!(
-                            "REM source revision changed before processing: {id} expected {expected_revision}, found {actual_revision}"
                         )));
                     }
                 }
@@ -795,6 +795,60 @@ mod tests {
             assert_eq!(source.metadata["rem"]["processed"], 1);
             assert_eq!(source.metadata["rem"]["processed_by"], "wiki-rem:operation");
         }
+    }
+
+    #[test]
+    fn same_draft_replay_rechecks_actual_source_revision_before_accepting_marker() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let original_revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), original_revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:operation",
+            )
+            .expect("mark first revision");
+
+        let mut changed = store
+            .get("source")
+            .expect("read marked source")
+            .expect("marked source exists");
+        changed.text = "source changed after the draft marker was written".to_string();
+        store.upsert(&changed).expect("update source revision");
+        let changed = store
+            .get("source")
+            .expect("read changed source")
+            .expect("changed source exists");
+        assert_ne!(changed.revision, original_revision);
+
+        let error = store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), original_revision)],
+                "2026-07-06T01:00:00Z",
+                "wiki-rem:operation",
+            )
+            .expect_err("same-draft stale revision replay must fail");
+        assert!(error.to_string().contains("source revision changed"));
+        let marker = store
+            .get("source")
+            .expect("read rejected replay source")
+            .expect("source exists");
+        assert_eq!(marker.metadata["rem"]["processed_by"], "wiki-rem:operation");
+        assert_eq!(
+            marker.metadata["rem"]["processed_at"],
+            "2026-07-05T01:00:00Z"
+        );
+        assert_eq!(
+            marker.metadata["rem"]["processed_revision"],
+            original_revision
+        );
     }
 
     #[test]

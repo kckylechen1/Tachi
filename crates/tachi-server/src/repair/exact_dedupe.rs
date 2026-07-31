@@ -7,6 +7,38 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+fn run_physical_identity_checked_exact_dedupe<T>(
+    store: &mut MemoryStore,
+    target: &Path,
+    operation: &str,
+    action: impl FnOnce(&mut MemoryStore) -> Result<T, memcore::MemoryError>,
+) -> Result<(T, Option<String>), Box<dyn std::error::Error>> {
+    store
+        .verify_opened_physical_db_identity(target)
+        .map_err(|error| {
+            format!(
+                "exact-dedupe {operation} physical identity check failed before operation: {error}"
+            )
+        })?;
+    let result = action(store);
+    let post = store
+        .verify_opened_physical_db_identity(target)
+        .map_err(|error| {
+            format!(
+                "exact-dedupe {operation} physical identity check failed after operation: {error}"
+            )
+        });
+    match (result, post) {
+        (Ok(value), Ok(())) => Ok((value, None)),
+        (Ok(value), Err(identity_error)) => Ok((value, Some(identity_error))),
+        (Err(error), Ok(())) => Err(error.into()),
+        (Err(error), Err(identity_error)) => Err(format!(
+            "{error}; additionally, the physical identity invariant failed after exact-dedupe {operation}: {identity_error}"
+        )
+        .into()),
+    }
+}
+
 pub(super) fn target_and_daemon_scope(
     operation: &str,
     db: &str,
@@ -144,7 +176,10 @@ pub fn apply(
         }
     }
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
-    let result = store.apply_exact_dedupe(&plan)?;
+    let (result, post_identity_error) =
+        run_physical_identity_checked_exact_dedupe(&mut store, &target, "apply", |store| {
+            store.apply_exact_dedupe(&plan)
+        })?;
     let receipt_json = serde_json::to_string_pretty(&result.receipt)?;
     match OpenOptions::new()
         .write(true)
@@ -182,6 +217,14 @@ pub fn apply(
             );
             return Err(format!("exact-dedupe receipt write failed after commit: {error}").into());
         }
+    }
+    if let Some(identity_error) = post_identity_error {
+        eprintln!(
+            "CRITICAL: exact-dedupe apply committed {} archived loser(s) to a database handle whose target path identity changed; the detached-store receipt was written to {}: {identity_error}",
+            result.applied_losers,
+            receipt_out.display(),
+        );
+        return Err(identity_error.into());
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
@@ -231,10 +274,17 @@ pub fn restore(
         }
     }
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&store.restore_exact_dedupe(&receipt)?)?
-    );
+    let (result, post_identity_error) =
+        run_physical_identity_checked_exact_dedupe(&mut store, &target, "restore", |store| {
+            store.restore_exact_dedupe(&receipt)
+        })?;
+    if let Some(identity_error) = post_identity_error {
+        eprintln!(
+            "CRITICAL: exact-dedupe restore committed against a database handle whose target path identity changed: {identity_error}"
+        );
+        return Err(identity_error.into());
+    }
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
@@ -316,6 +366,50 @@ mod tests {
         manifest.save(&app_home.join("manifest.json")).unwrap();
         let receipt_path = dir.path().join("receipt.json");
         (dir, app_home, db_path, plan_path, receipt_path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_dedupe_identity_guard_rejects_replacement_before_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.db");
+        let replacement = dir.path().join("replacement.db");
+        let mut store = MemoryStore::open(target.to_str().unwrap()).unwrap();
+        drop(MemoryStore::open(replacement.to_str().unwrap()).unwrap());
+        std::fs::rename(&replacement, &target).unwrap();
+        let mut called = false;
+
+        let error =
+            run_physical_identity_checked_exact_dedupe(&mut store, &target, "apply", |_| {
+                called = true;
+                Ok(())
+            })
+            .expect_err("detached handle must fail before mutation");
+
+        assert!(!called);
+        assert!(error.to_string().contains("before operation"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_dedupe_identity_guard_reports_replacement_during_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.db");
+        let replacement = dir.path().join("replacement.db");
+        let mut store = MemoryStore::open(target.to_str().unwrap()).unwrap();
+        drop(MemoryStore::open(replacement.to_str().unwrap()).unwrap());
+
+        let ((), post_error) =
+            run_physical_identity_checked_exact_dedupe(&mut store, &target, "restore", |_| {
+                std::fs::rename(&replacement, &target)
+                    .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
+                Ok(())
+            })
+            .expect("post-operation identity drift must preserve the action result for recovery");
+
+        assert!(post_error
+            .expect("replacement must be reported")
+            .contains("after operation"));
     }
 
     #[test]

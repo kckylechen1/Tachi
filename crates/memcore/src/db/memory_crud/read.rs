@@ -165,21 +165,7 @@ pub fn list_by_path(
     limit: usize,
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let mut normalized = path_prefix.trim().to_string();
-    if normalized.is_empty() {
-        normalized = "/".to_string();
-    }
-    if !normalized.starts_with('/') {
-        normalized = format!("/{normalized}");
-    }
-    if normalized.len() > 1 {
-        normalized = normalized.trim_end_matches('/').to_string();
-    }
-    let like_prefix = if normalized == "/" {
-        "/%".to_string()
-    } else {
-        format!("{normalized}/%")
-    };
+    let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
 
     let sql = if include_archived {
         format!(
@@ -198,6 +184,37 @@ pub fn list_by_path(
          LIMIT ?3"
         )
     };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![normalized, like_prefix, limit as i64], row_to_entry)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Fetch active, unsuperseded entries under a path prefix.
+///
+/// This intentionally does not change [`list_by_path`]: audit callers still
+/// need the generic archived-only view so they can inspect active rows that
+/// have a lifecycle edge. Default Wiki listing uses this narrower route
+/// because a row with `superseded_by` is historical, not current truth.
+pub fn list_by_path_active_unsuperseded(
+    conn: &Connection,
+    path_prefix: &str,
+    limit: usize,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM memories
+         WHERE (path = ?1 OR path LIKE ?2)
+           AND archived = 0
+           AND superseded_by IS NULL
+         ORDER BY path ASC, timestamp DESC
+         LIMIT ?3"
+    );
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![normalized, like_prefix, limit as i64], row_to_entry)?;
@@ -227,21 +244,7 @@ pub fn list_by_path_recent(
     limit: usize,
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let mut normalized = path_prefix.trim().to_string();
-    if normalized.is_empty() {
-        normalized = "/".to_string();
-    }
-    if !normalized.starts_with('/') {
-        normalized = format!("/{normalized}");
-    }
-    if normalized.len() > 1 {
-        normalized = normalized.trim_end_matches('/').to_string();
-    }
-    let like_prefix = if normalized == "/" {
-        "/%".to_string()
-    } else {
-        format!("{normalized}/%")
-    };
+    let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
 
     let sql = if include_archived {
         format!(
@@ -270,9 +273,31 @@ pub fn list_by_path_recent(
     Ok(out)
 }
 
+fn normalize_path_prefix(path_prefix: &str) -> (String, String) {
+    let mut normalized = path_prefix.trim().to_string();
+    if normalized.is_empty() {
+        normalized = "/".to_string();
+    }
+    if !normalized.starts_with('/') {
+        normalized = format!("/{normalized}");
+    }
+    if normalized.len() > 1 {
+        normalized = normalized.trim_end_matches('/').to_string();
+    }
+    let like_prefix = if normalized == "/" {
+        "/%".to_string()
+    } else {
+        format!("{normalized}/%")
+    };
+    (normalized, like_prefix)
+}
+
 const USER_FACING_WIKI_SQL_PREDICATE: &str = r#"
            AND path != '/wiki/_log'
-           AND instr(path, '/recall-cache/') = 0
+           AND path NOT GLOB '/wiki/_log/*'
+           AND path NOT GLOB '*/recall-cache'
+           AND path NOT GLOB '*/recall-cache/*'
+           AND instr(path, 'foundry_recall_rerank_cache') = 0
            AND source != 'foundry_recall_rerank_cache'
            AND COALESCE(
                  json_extract(
@@ -285,17 +310,25 @@ const USER_FACING_WIKI_SQL_PREDICATE: &str = r#"
 /// One typed ownership predicate for rows ordinary Wiki reads and projection
 /// deduplication may expose or retire.
 pub fn is_reserved_wiki_internal_path(path: &str) -> bool {
-    path == "/wiki/_log" || path.contains("/recall-cache/")
+    path == "/wiki/_log"
+        || path.starts_with("/wiki/_log/")
+        || crate::namespace::path_contains_recall_cache(path)
 }
 
 pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
     !is_reserved_wiki_internal_path(&entry.path)
         && entry.source != "foundry_recall_rerank_cache"
-        && !entry
-            .metadata
-            .get("wiki_log")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
+        && !metadata_wiki_log_is_internal(&entry.metadata)
+}
+
+fn metadata_wiki_log_is_internal(metadata: &serde_json::Value) -> bool {
+    match metadata.get("wiki_log") {
+        Some(serde_json::Value::Bool(true)) => true,
+        Some(serde_json::Value::Number(number)) => {
+            number.as_i64() == Some(1) || number.as_u64() == Some(1) || number.as_f64() == Some(1.0)
+        }
+        _ => false,
+    }
 }
 
 pub fn list_wiki_duplicate_candidates(

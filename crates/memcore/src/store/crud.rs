@@ -208,6 +208,15 @@ impl MemoryStore {
         db::list_by_path(&self.conn, path_prefix, limit, include_archived)
     }
 
+    /// List active, unsuperseded entries under a path (exact + descendants).
+    pub fn list_by_path_active_unsuperseded(
+        &self,
+        path_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_by_path_active_unsuperseded(&self.conn, path_prefix, limit)
+    }
+
     /// List entries under a path (exact + descendants), newest-first by
     /// `timestamp`. Use this instead of `list_by_path` when the caller wants
     /// a recency-first view and applies `limit` as a hard cutoff — see

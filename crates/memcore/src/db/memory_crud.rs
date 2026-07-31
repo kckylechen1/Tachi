@@ -24,8 +24,8 @@ pub use access::{
 pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{
     fetch_by_ids, find_active_wiki_entry_by_path, find_exact_path_text_id, get_all,
-    is_reserved_wiki_internal_path, is_user_facing_wiki_entry, list_by_path, list_by_path_recent,
-    list_wiki_duplicate_candidates,
+    is_reserved_wiki_internal_path, is_user_facing_wiki_entry, list_by_path,
+    list_by_path_active_unsuperseded, list_by_path_recent, list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_symbolic_candidates_with_relevance;

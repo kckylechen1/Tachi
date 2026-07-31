@@ -22,7 +22,10 @@ fn run_identity_checked_store_action<T>(
     match (result, post) {
         (Ok(value), Ok(())) => Ok(value),
         (Ok(_), Err(error)) => Err(error),
-        (Err(error), _) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(identity_error)) => Err(format!(
+            "{error}; additionally, the physical identity invariant failed after the operation: {identity_error}"
+        )),
     }
 }
 

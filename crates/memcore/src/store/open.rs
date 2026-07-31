@@ -15,10 +15,23 @@ fn physical_db_identity_at_path(path: &Path) -> Option<String> {
             return Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()));
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if let (Some(volume), Some(index)) =
+            (metadata.volume_serial_number(), metadata.file_index())
+        {
+            return Some(format!("windows:{volume}:{index}"));
+        }
+    }
     Some(format!(
         "path:{}",
         std::fs::canonicalize(path).ok()?.display()
     ))
+}
+
+fn physical_db_identity_is_stable(identity: &str) -> bool {
+    identity.starts_with("unix:") || identity.starts_with("windows:")
 }
 
 fn physical_db_identity_at_open(db_path: &str) -> Option<String> {
@@ -476,16 +489,73 @@ impl MemoryStore {
         drop(migration_authorization);
         let _ = schema_result?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
+        let opened_physical_db_identity = validate_physical_db_identity_across_open(
+            db_path,
+            physical_identity_before_open.clone(),
+        )?;
+        if physical_identity_before_open.is_none() {
+            // A connection that created the path cannot prove which directory
+            // entry its SQLite handle owns from a post-open path sample alone:
+            // another process may have replaced the path in between. Close
+            // that initializer and reopen the now-existing file with a
+            // before/open/after identity bracket before returning a cacheable
+            // handle.
+            drop(reserved_reference_write);
+            drop(conn);
+            return Self::reopen_initialized_file_store(
+                db_path,
+                db_label,
+                path_validation,
+                busy_timeout,
+            );
+        }
         Ok(Self {
             conn,
             reserved_reference_write,
             vec_available,
             db_label: db_label.to_string(),
             path_validation,
-            opened_physical_db_identity: validate_physical_db_identity_across_open(
-                db_path,
-                physical_identity_before_open,
-            )?,
+            opened_physical_db_identity,
+        })
+    }
+
+    fn reopen_initialized_file_store(
+        db_path: &str,
+        db_label: &str,
+        path_validation: bool,
+        busy_timeout: Option<Duration>,
+    ) -> Result<Self, MemoryError> {
+        let before_reopen = physical_db_identity_at_open(db_path).ok_or_else(|| {
+            MemoryError::InvalidArg(format!(
+                "fresh database path disappeared before identity-bound reopen: {db_path}"
+            ))
+        })?;
+        let conn = match busy_timeout {
+            Some(busy_timeout) => db::open_read_write_with_busy_timeout(db_path, busy_timeout)?,
+            None => db::open_read_write(db_path)?,
+        };
+        let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        db::migrations::check_schema_version_gate(&conn)?;
+        let stored = db::migrations::read_schema_version(&conn)?;
+        if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
+            return Err(MemoryError::InvalidArg(format!(
+                "fresh database identity-bound reopen requires schema {}, found {stored}",
+                db::migrations::EXPECTED_SCHEMA_VERSION
+            )));
+        }
+        db::migrations::validate_current_schema_integrity(&conn)?;
+        db::validate_persistent_trigger_inventory(&conn, true)?;
+        let vec_available = db::try_load_sqlite_vec(&conn);
+        let opened_physical_db_identity =
+            validate_physical_db_identity_across_open(db_path, Some(before_reopen))?;
+        Ok(Self {
+            conn,
+            reserved_reference_write,
+            vec_available,
+            db_label: db_label.to_string(),
+            path_validation,
+            opened_physical_db_identity,
         })
     }
 
@@ -699,6 +769,12 @@ impl MemoryStore {
                 db_path.display()
             )));
         }
+        if !physical_db_identity_is_stable(opened) {
+            return Err(MemoryError::InvalidArg(format!(
+                "database path has no stable physical identity for detached-handle verification: {}",
+                db_path.display()
+            )));
+        }
         Ok(())
     }
 
@@ -820,6 +896,13 @@ mod exact_dedupe_open_tests {
         let error = validate_physical_db_identity_across_open(path.to_str().unwrap(), before)
             .expect_err("path replacement must not be recorded as the opened connection");
         assert!(error.to_string().contains("identity changed while opening"));
+    }
+
+    #[test]
+    fn detached_handle_verification_requires_a_stable_file_identity() {
+        assert!(physical_db_identity_is_stable("unix:1:2"));
+        assert!(physical_db_identity_is_stable("windows:1:2"));
+        assert!(!physical_db_identity_is_stable("path:/tmp/memory.db"));
     }
 
     fn open_compat_summaries(db_path: &str) -> Result<MemoryStore, MemoryError> {
