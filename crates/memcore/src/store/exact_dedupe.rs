@@ -79,6 +79,20 @@ pub struct ExactDedupeApplyResult {
     pub receipt: ExactDedupeReceipt,
 }
 
+/// Read-only reconciliation of a prepared receipt after its caller observed
+/// an error around the SQLite commit boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactDedupeReceiptDbState {
+    /// Every loser and its durable lineage exactly match the receipt's
+    /// committed post-state.
+    Applied,
+    /// Every loser still matches the pre-apply state and has no apply lineage.
+    NotApplied,
+    /// The rows are mixed, drifted, missing, or otherwise cannot prove either
+    /// atomic outcome.
+    Indeterminate,
+}
+
 /// One archived loser as recorded at apply time — the exact CAS binding
 /// [`MemoryStore::restore_exact_dedupe`] revalidates before undoing it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -852,6 +866,105 @@ impl MemoryStore {
         tx.commit()?;
         result.receipt = result.receipt.into_committed()?;
         Ok(result)
+    }
+
+    /// Classify whether a prepared exact-dedupe receipt reached its atomic DB
+    /// post-state. This never mutates rows. Callers use it only to decide
+    /// whether a public prepared receipt may be removed after an apply error.
+    pub fn classify_exact_dedupe_receipt_db_state(
+        &self,
+        receipt: &ExactDedupeReceipt,
+    ) -> Result<ExactDedupeReceiptDbState, MemoryError> {
+        receipt.validate()?;
+        self.validate_exact_dedupe_target_at_mutation_boundary(
+            "receipt",
+            &receipt.target_db_identity,
+            Some(&receipt.target_db_physical_identity),
+        )?;
+        if receipt.rows.is_empty() {
+            return Ok(ExactDedupeReceiptDbState::Indeterminate);
+        }
+
+        let mut all_applied = true;
+        let mut all_not_applied = true;
+        for row in &receipt.rows {
+            let state = self
+                .conn
+                .query_row(
+                    "SELECT archived,superseded_by,revision,path,valid_until,
+                            EXISTS (
+                                SELECT 1 FROM exact_dedupe_apply_lineage lineage
+                                WHERE lineage.loser_id=?1
+                                  AND lineage.apply_id=?2
+                                  AND lineage.plan_digest=?3
+                                  AND lineage.winner_id=?4
+                                  AND lineage.before_revision=?5
+                                  AND lineage.archived_revision=?6
+                                  AND lineage.loser_valid_until_before IS ?7
+                            ),
+                            EXISTS (
+                                SELECT 1 FROM exact_dedupe_apply_lineage lineage
+                                WHERE lineage.loser_id=?1
+                            )
+                     FROM memories WHERE id=?1",
+                    params![
+                        row.loser_id,
+                        receipt.apply_id,
+                        receipt.plan_digest,
+                        row.winner_id,
+                        row.before_revision,
+                        row.archived_revision,
+                        row.loser_valid_until_before
+                    ],
+                    |db_row| {
+                        Ok((
+                            db_row.get::<_, bool>(0)?,
+                            db_row.get::<_, Option<String>>(1)?,
+                            db_row.get::<_, i64>(2)?,
+                            db_row.get::<_, String>(3)?,
+                            db_row.get::<_, Option<String>>(4)?,
+                            db_row.get::<_, bool>(5)?,
+                            db_row.get::<_, bool>(6)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((
+                archived,
+                superseded_by,
+                revision,
+                path,
+                valid_until,
+                exact_lineage,
+                any_lineage,
+            )) = state
+            else {
+                return Ok(ExactDedupeReceiptDbState::Indeterminate);
+            };
+            let applied_valid_until = row
+                .loser_valid_until_before
+                .as_deref()
+                .unwrap_or(receipt.applied_at.as_str());
+            all_applied &= archived
+                && superseded_by.as_deref() == Some(row.winner_id.as_str())
+                && revision == row.archived_revision
+                && path == row.loser_path
+                && valid_until.as_deref() == Some(applied_valid_until)
+                && exact_lineage;
+            all_not_applied &= !archived
+                && superseded_by.is_none()
+                && revision == row.before_revision
+                && path == row.loser_path
+                && valid_until == row.loser_valid_until_before
+                && !any_lineage;
+        }
+        if all_applied {
+            Ok(ExactDedupeReceiptDbState::Applied)
+        } else if all_not_applied {
+            Ok(ExactDedupeReceiptDbState::NotApplied)
+        } else {
+            Ok(ExactDedupeReceiptDbState::Indeterminate)
+        }
     }
 
     /// Restore every loser archived by one [`ExactDedupeReceipt`]. All-or-nothing,
@@ -1715,10 +1828,15 @@ mod tests {
             archived, 0,
             "DB transaction committed without durable receipt"
         );
+        let prepared_receipt = prepared_receipt.expect("sink observed the exact prepared receipt");
+        assert_eq!(
+            store
+                .classify_exact_dedupe_receipt_db_state(&prepared_receipt)
+                .expect("classify rolled-back receipt"),
+            ExactDedupeReceiptDbState::NotApplied
+        );
         let restore_error = store
-            .restore_exact_dedupe(
-                &prepared_receipt.expect("sink observed the exact prepared receipt"),
-            )
+            .restore_exact_dedupe(&prepared_receipt)
             .expect_err("prepared receipt must not restore a transaction that rolled back");
         assert!(
             restore_error.to_string().contains("restore CAS failed"),
@@ -1744,6 +1862,12 @@ mod tests {
             .receipt
             .validate()
             .expect("validate committed receipt");
+        assert_eq!(
+            store
+                .classify_exact_dedupe_receipt_db_state(&result.receipt)
+                .expect("classify committed receipt"),
+            ExactDedupeReceiptDbState::Applied
+        );
     }
 
     #[test]

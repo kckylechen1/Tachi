@@ -117,17 +117,7 @@ async fn handle_tachi_wiki_write_inner(
     let existing = with_existing_wiki_store(server, &project_name, use_named_project, |store| {
         find_wiki_entry_by_path(store, &path)
     })?;
-    if let Some(existing) = &existing {
-        if let Some(obj) = wiki_metadata.as_object_mut() {
-            obj.insert("wiki_update_of".to_string(), json!(existing.id));
-            obj.insert(
-                "wiki_previous_revision".to_string(),
-                json!(existing.revision),
-            );
-        }
-    }
     let update_id = existing.as_ref().map(|entry| entry.id.clone());
-    let existing_revision = existing.as_ref().map(|entry| entry.revision).unwrap_or(1);
     let captured_at = Utc::now().to_rfc3339();
     let mut reference_mutations = build_evidence_refs_v1(&references, &captured_at)
         .into_iter()
@@ -222,12 +212,6 @@ async fn handle_tachi_wiki_write_inner(
         .to_string();
     if let Some(obj) = response.as_object_mut() {
         obj.insert("pattern_refs".to_string(), json!(pattern_refs.clone()));
-        if update_id.is_some() {
-            obj.insert(
-                "wiki_previous_revision".to_string(),
-                json!(existing_revision),
-            );
-        }
     }
     if duplicate {
         return serde_json::to_string(&response)

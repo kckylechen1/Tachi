@@ -786,6 +786,7 @@ async fn handle_save_memory_impl(
     wait_at_pre_upsert_pause(&entry.id, trusted_append);
 
     let mut wiki_duplicates_superseded = None;
+    let mut wiki_previous_revision = None;
     if wiki_projection {
         let result = upsert_wiki_projection_entry(
             server,
@@ -796,6 +797,7 @@ async fn handle_save_memory_impl(
             &evidence_write,
         )?;
         wiki_duplicates_superseded = Some(result.duplicates_superseded);
+        wiki_previous_revision = result.previous_revision;
         if let memcore::db::IdlessUpsertResult::Duplicate { id } = result.upsert {
             let response = build_duplicate_save_response(&id, &entry.path, target_db);
             return serde_json::to_string(&serde_json::Value::Object(response))
@@ -904,6 +906,9 @@ async fn handle_save_memory_impl(
 
     if let Some(count) = wiki_duplicates_superseded {
         response.insert("wiki_duplicates_superseded".into(), json!(count));
+    }
+    if let Some(revision) = wiki_previous_revision {
+        response.insert("wiki_previous_revision".into(), json!(revision));
     }
 
     if auto_link && !entry.entities.is_empty() && !is_training_seed(&entry) {

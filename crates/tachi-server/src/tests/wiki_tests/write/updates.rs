@@ -574,6 +574,96 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
     assert_eq!(active_count, 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_exact_path_updates_stamp_the_immediate_predecessor_revision() {
+    let mut canonical = make_entry("concurrent-update-lineage");
+    canonical.path = "/wiki/general/concurrent-update-lineage".to_string();
+    canonical.topic = "concurrent update lineage".to_string();
+    canonical.metadata = json!({"wiki": true});
+    canonical.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![canonical.clone()]);
+    let writer_one = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open first Wiki update writer");
+    let writer_two = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open second Wiki update writer");
+    let _barrier = crate::memory_search_ops::save_memory::install_pre_upsert_path_barrier(
+        &canonical.path,
+        std::sync::Arc::new(std::sync::Barrier::new(2)),
+    );
+
+    let write = |writer: MemoryServer, title: &'static str, text: &'static str| {
+        let path = canonical.path.clone();
+        tokio::spawn(async move {
+            writer
+                .tachi_wiki_write(Parameters(WikiWriteParams {
+                    title: title.to_string(),
+                    text: text.to_string(),
+                    path: Some(path),
+                    topic: Some("concurrent update lineage".to_string()),
+                    summary: None,
+                    category: "experience".to_string(),
+                    keywords: vec![],
+                    entities: vec![],
+                    importance: 0.8,
+                    scope: "global".to_string(),
+                    retention_policy: "permanent".to_string(),
+                    domain: None,
+                    project: None,
+                    metadata: None,
+                    force: true,
+                    references: vec![],
+                    include_patterns: false,
+                    pattern_query: None,
+                    pattern_top_k: None,
+                }))
+                .await
+        })
+    };
+    let first = write(
+        writer_one,
+        "Concurrent update A",
+        "First concurrent writer updates the same canonical Wiki path.",
+    );
+    let second = write(
+        writer_two,
+        "Concurrent update B",
+        "Second concurrent writer updates the same canonical Wiki path.",
+    );
+    let mut responses = Vec::new();
+    for task in [first, second] {
+        let raw = task
+            .await
+            .expect("Wiki update writer task")
+            .expect("Wiki update writer response");
+        responses.push(serde_json::from_str::<Value>(&raw).expect("Wiki update response JSON"));
+    }
+    let mut previous_revisions = responses
+        .iter()
+        .map(|response| {
+            response["wiki_previous_revision"]
+                .as_i64()
+                .expect("transaction-derived predecessor revision")
+        })
+        .collect::<Vec<_>>();
+    previous_revisions.sort_unstable();
+    assert_eq!(previous_revisions, vec![1, 2]);
+    assert!(responses
+        .iter()
+        .all(|response| response["wiki_write_mode"] == "updated"));
+
+    let stored = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get(&canonical.id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "canonical Wiki row disappeared".to_string())
+        })
+        .expect("read final canonical Wiki row");
+    assert_eq!(stored.revision, 3);
+    assert_eq!(stored.metadata["wiki_update_of"], canonical.id);
+    assert_eq!(stored.metadata["wiki_previous_revision"], 2);
+}
+
 #[tokio::test]
 async fn tachi_wiki_write_does_not_relocate_a_same_topic_cross_parent_row() {
     let mut ops = make_entry("ops-mcp");

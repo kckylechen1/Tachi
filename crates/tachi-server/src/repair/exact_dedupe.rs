@@ -2,7 +2,7 @@ use crate::daemon_lock::{DualDaemonLock, DualLockError};
 use crate::db_ownership::{daemon_ownership, DbOwnership};
 use crate::manifest::{DbRole, Manifest, MANIFEST_SCHEMA_VERSION};
 use memcore::store::exact_dedupe::{
-    ExactDedupePlan, ExactDedupeReceipt, ExactDedupeRestoreReceipt,
+    ExactDedupePlan, ExactDedupeReceipt, ExactDedupeReceiptDbState, ExactDedupeRestoreReceipt,
 };
 use memcore::MemoryStore;
 use std::fs::{self, File, OpenOptions};
@@ -17,6 +17,7 @@ std::thread_local! {
     static FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION: Cell<bool> = const { Cell::new(false) };
     static FAULT_DURING_PREPARED_STAGE_WRITE: Cell<bool> = const { Cell::new(false) };
     static FAULT_BEFORE_PREPARED_PARENT_SYNC: Cell<bool> = const { Cell::new(false) };
+    static FAULT_AFTER_PREPARED_PUBLISH_BEFORE_COMMIT: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -34,10 +35,25 @@ fn inject_fault_before_prepared_parent_sync_for_test(enabled: bool) {
     FAULT_BEFORE_PREPARED_PARENT_SYNC.with(|fault| fault.set(enabled));
 }
 
+#[cfg(test)]
+fn inject_fault_after_prepared_publish_before_commit_for_test(enabled: bool) {
+    FAULT_AFTER_PREPARED_PUBLISH_BEFORE_COMMIT.with(|fault| fault.set(enabled));
+}
+
 fn fault_after_db_commit_before_finalization() -> Result<(), &'static str> {
     #[cfg(test)]
     if FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION.with(|fault| fault.replace(false)) {
         return Err("injected post-commit/pre-finalization fault");
+    }
+    Ok(())
+}
+
+fn fault_after_prepared_publish_before_commit() -> Result<(), memcore::MemoryError> {
+    #[cfg(test)]
+    if FAULT_AFTER_PREPARED_PUBLISH_BEFORE_COMMIT.with(|fault| fault.replace(false)) {
+        return Err(memcore::MemoryError::InvalidArg(
+            "injected post-publication/pre-commit failure".to_string(),
+        ));
     }
     Ok(())
 }
@@ -165,6 +181,101 @@ fn finalize_prepared_receipt(
     fs::rename(&staged, receipt_out)?;
     sync_receipt_parent(receipt_out)?;
     Ok(())
+}
+
+fn public_receipt_matches_expected(
+    receipt_out: &Path,
+    expected: &ExactDedupeReceipt,
+) -> Result<bool, String> {
+    let metadata = fs::symlink_metadata(receipt_out)
+        .map_err(|error| format!("could not inspect public receipt: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Ok(false);
+    }
+    let bytes =
+        fs::read(receipt_out).map_err(|error| format!("could not read public receipt: {error}"))?;
+    let actual: ExactDedupeReceipt = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("public receipt is not valid v2 JSON: {error}"))?;
+    let actual = serde_json::to_value(actual)
+        .map_err(|error| format!("could not canonicalize public receipt: {error}"))?;
+    let expected = serde_json::to_value(expected)
+        .map_err(|error| format!("could not canonicalize expected receipt: {error}"))?;
+    Ok(actual == expected)
+}
+
+fn reconcile_failed_prepared_receipt(
+    store: &MemoryStore,
+    receipt_out: &Path,
+    receipt: &ExactDedupeReceipt,
+    apply_error: Box<dyn std::error::Error>,
+) -> Box<dyn std::error::Error> {
+    let original = apply_error.to_string();
+    let db_state = match store.classify_exact_dedupe_receipt_db_state(receipt) {
+        Ok(state) => state,
+        Err(error) => {
+            return format!(
+                "exact-dedupe apply failed after prepared receipt publication: {original}; DB outcome could not be reconciled ({error}), so the prepared receipt was retained at {}",
+                receipt_out.display()
+            )
+            .into()
+        }
+    };
+    match db_state {
+        ExactDedupeReceiptDbState::Applied => format!(
+            "exact-dedupe apply returned an error after prepared receipt publication: {original}; the committed DB post-state was proven, so the recovery receipt was retained at {}",
+            receipt_out.display()
+        )
+        .into(),
+        ExactDedupeReceiptDbState::Indeterminate => format!(
+            "exact-dedupe apply failed after prepared receipt publication: {original}; the DB outcome is indeterminate, so the prepared receipt was retained at {}",
+            receipt_out.display()
+        )
+        .into(),
+        ExactDedupeReceiptDbState::NotApplied => {
+            if !receipt_out.exists() {
+                return format!(
+                    "exact-dedupe apply failed after prepared receipt publication: {original}; DB rollback was proven and no public receipt remains"
+                )
+                .into();
+            }
+            match public_receipt_matches_expected(receipt_out, receipt) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return format!(
+                        "exact-dedupe apply failed after prepared receipt publication: {original}; DB rollback was proven, but the output path no longer contains the expected receipt and was not removed: {}",
+                        receipt_out.display()
+                    )
+                    .into()
+                }
+                Err(error) => {
+                    return format!(
+                        "exact-dedupe apply failed after prepared receipt publication: {original}; DB rollback was proven, but receipt cleanup was refused because {error}: {}",
+                        receipt_out.display()
+                    )
+                    .into()
+                }
+            }
+            if let Err(error) = fs::remove_file(receipt_out) {
+                return format!(
+                    "exact-dedupe apply failed after prepared receipt publication: {original}; DB rollback was proven, but the stale prepared receipt could not be removed at {}: {error}",
+                    receipt_out.display()
+                )
+                .into();
+            }
+            if let Err(error) = sync_receipt_parent(receipt_out) {
+                return format!(
+                    "exact-dedupe apply failed after prepared receipt publication: {original}; DB rollback was proven and the stale receipt was removed, but its parent sync failed at {}: {error}",
+                    receipt_out.display()
+                )
+                .into();
+            }
+            format!(
+                "exact-dedupe apply failed after prepared receipt publication: {original}; DB rollback was proven and the stale prepared receipt was removed from {}",
+                receipt_out.display()
+            )
+            .into()
+        }
+    }
 }
 
 fn run_physical_identity_checked_exact_dedupe<T>(
@@ -333,12 +444,29 @@ pub fn apply(
         .into());
     }
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
-    let (result, post_identity_error) =
+    let mut published_prepared_receipt = None;
+    let apply_attempt =
         run_physical_identity_checked_exact_dedupe(&mut store, &target, "apply", |store| {
             store.apply_exact_dedupe_with_precommit_receipt(&plan, |result| {
-                persist_prepared_receipt_before_commit(receipt_out, result)
+                persist_prepared_receipt_before_commit(receipt_out, result)?;
+                published_prepared_receipt = Some(result.receipt.clone());
+                fault_after_prepared_publish_before_commit()
             })
-        })?;
+        });
+    let (result, post_identity_error) = match apply_attempt {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(receipt) = published_prepared_receipt.as_ref() {
+                return Err(reconcile_failed_prepared_receipt(
+                    &store,
+                    receipt_out,
+                    receipt,
+                    error,
+                ));
+            }
+            return Err(error);
+        }
+    };
     if let Some(identity_error) = post_identity_error {
         eprintln!(
             "CRITICAL: exact-dedupe apply wrote and synced the receipt at {} before commit, then committed {} archived loser(s) to a database handle whose target path identity changed: {identity_error}",
@@ -1143,6 +1271,48 @@ mod tests {
             .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(archived, 0, "DB mutation must roll back with publication");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_publication_precommit_failure_proves_rollback_and_removes_prepared_receipt() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_after_prepared_publish_before_commit_for_test(true);
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect_err("failure after publication must reconcile the DB outcome");
+        let message = error.to_string();
+        assert!(
+            message.contains("injected post-publication/pre-commit failure")
+                && message.contains("DB rollback was proven")
+                && message.contains("stale prepared receipt was removed"),
+            "unexpected reconciliation error: {message}"
+        );
+        assert!(
+            !receipt_path.exists(),
+            "a prepared receipt proven not applied must be removed"
+        );
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0, "the pre-commit DB transaction must roll back");
+        let lineage: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM exact_dedupe_apply_lineage",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lineage, 0, "rollback must leave no durable apply lineage");
     }
 
     #[cfg(unix)]

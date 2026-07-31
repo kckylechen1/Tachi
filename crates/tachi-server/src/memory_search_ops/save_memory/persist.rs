@@ -6,6 +6,7 @@ use memcore::{db::IdlessUpsertResult, MemoryEntry, MemoryStore};
 pub(super) struct WikiProjectionWriteResult {
     pub upsert: IdlessUpsertResult,
     pub duplicates_superseded: usize,
+    pub previous_revision: Option<i64>,
 }
 
 pub(super) struct AtomicReferenceWrite {
@@ -208,7 +209,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
     evidence_write: &AtomicReferenceWrite,
 ) -> Result<WikiProjectionWriteResult, String> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
-        let (result, metadata, duplicates_superseded) = store
+        let (result, metadata, duplicates_superseded, previous_revision) = store
             .with_immutable_supersession_transaction(|projection| {
                 let active = projection.find_active_wiki_entry_by_path(&entry.path)?;
                 if idless_identity.is_none() {
@@ -219,6 +220,26 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                         )));
                     }
                 }
+                // Update lineage belongs to the same writer snapshot as the
+                // mutation. A facade pre-read can be stale by the time this
+                // BEGIN IMMEDIATE transaction runs, so derive and persist the
+                // immediate predecessor only here.
+                let previous_revision = if idless_identity.is_none() {
+                    let active = active.as_ref().expect("canonical check proved active row");
+                    let metadata = entry.metadata.as_object_mut().ok_or_else(|| {
+                        memcore::MemoryError::InvalidArg(
+                            "Wiki projection metadata must be an object".to_string(),
+                        )
+                    })?;
+                    metadata.insert("wiki_update_of".to_string(), serde_json::json!(active.id));
+                    metadata.insert(
+                        "wiki_previous_revision".to_string(),
+                        serde_json::json!(active.revision),
+                    );
+                    Some(active.revision)
+                } else {
+                    None
+                };
                 // The candidate query is corpus-bound by the target path:
                 // Guide rows compete only with Guide rows, ordinary Wiki rows
                 // only with ordinary Wiki rows. Both use the same writer
@@ -244,6 +265,14 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     })
                     .collect::<Vec<_>>();
                 let mut metadata_patch = evidence_write.metadata_patch.clone();
+                if let Some(previous_revision) = previous_revision {
+                    metadata_patch
+                        .insert("wiki_update_of".to_string(), serde_json::json!(entry.id));
+                    metadata_patch.insert(
+                        "wiki_previous_revision".to_string(),
+                        serde_json::json!(previous_revision),
+                    );
+                }
                 if active.as_ref().map(|winner| winner.id.as_str()) != Some(entry.id.as_str()) {
                     if let Some(invocation) = duplicates.iter().find_map(|candidate| {
                         crate::provenance::trusted_existing_model_invocation(&candidate.metadata)
@@ -261,7 +290,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                         false,
                     )?;
                 if matches!(result, IdlessUpsertResult::Duplicate { .. }) {
-                    return Ok((result, metadata, 0));
+                    return Ok((result, metadata, 0, None));
                 }
 
                 let created_at = chrono::Utc::now().to_rfc3339();
@@ -277,13 +306,14 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     ))?;
                     changed += 1;
                 }
-                Ok((result, metadata, changed))
+                Ok((result, metadata, changed, previous_revision))
             })
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
         entry.metadata = metadata;
         Ok(WikiProjectionWriteResult {
             upsert: result,
             duplicates_superseded,
+            previous_revision,
         })
     };
     if let Some(project_name) = named_project {
