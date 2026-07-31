@@ -897,7 +897,11 @@ mod immutable_supersession_tests {
         rem_draft.metadata = serde_json::json!({
             "wiki": true,
             "lifecycle": "pending_review",
-            "rem": {"operation_status": "pending_sources"}
+            "rem": {
+                "producer": "weekly_wiki_evolver",
+                "operation_id": rem_draft.id.clone(),
+                "operation_status": "pending_sources"
+            }
         });
 
         let mut pending = wiki_entry("pending-related-target");
@@ -909,7 +913,14 @@ mod immutable_supersession_tests {
         entity_drifted.path = "/wiki/general/entity-drifted-related-target".to_string();
         entity_drifted.entities = vec!["NoLongerShared".to_string()];
 
-        for entry in [&valid, &rem_draft, &pending, &entity_drifted] {
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation
+                    .insert_rem_operation_if_absent(&rem_draft)
+                    .map(|_| ())
+            })
+            .expect("seed REM related candidate");
+        for entry in [&valid, &pending, &entity_drifted] {
             store.upsert(entry).expect("seed related candidate");
         }
         let edges = [&valid, &rem_draft, &pending, &entity_drifted]

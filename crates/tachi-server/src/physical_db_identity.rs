@@ -122,6 +122,12 @@ pub(crate) struct PhysicalDbInventory {
     pub unresolved_paths: Vec<UnresolvedDbPath>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhysicalDbPathBinding {
+    pub(crate) physical_id: String,
+    pub(crate) is_primary_alias: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum IdentityKey {
     #[cfg(unix)]
@@ -455,7 +461,9 @@ pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> Physic
 /// set-level seam: classifying aliases independently cannot detect two live
 /// WAL/SHM owners for the same main-file inode. Such a topology has no safe
 /// logical mutation owner and therefore fails loudly.
-pub(crate) fn physical_db_ids_for_paths(paths: &[PathBuf]) -> Result<Vec<String>, String> {
+pub(crate) fn physical_db_bindings_for_paths(
+    paths: &[PathBuf],
+) -> Result<Vec<PhysicalDbPathBinding>, String> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -486,7 +494,10 @@ pub(crate) fn physical_db_ids_for_paths(paths: &[PathBuf]) -> Result<Vec<String>
                 .stores
                 .iter()
                 .find(|store| store.aliases.iter().any(|alias| alias == &display))
-                .map(|store| store.physical_id.clone())
+                .map(|store| PhysicalDbPathBinding {
+                    physical_id: store.physical_id.clone(),
+                    is_primary_alias: store.primary_path == display,
+                })
                 .ok_or_else(|| {
                     format!(
                         "physical database identity for {} was absent from the runtime inventory",

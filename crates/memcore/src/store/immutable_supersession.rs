@@ -63,6 +63,42 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         &mut self,
         entry: &MemoryEntry,
     ) -> Result<db::InsertMemoryResult, MemoryError> {
+        if entry.id.starts_with("wiki-rem:") {
+            return Err(MemoryError::InvalidArg(format!(
+                "id '{}' is in the reserved 'wiki-rem:' namespace; use insert_rem_operation_if_absent",
+                entry.id
+            )));
+        }
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::insert_if_absent_within_tx(&self.tx, entry, self.vec_available)
+    }
+
+    /// Persist a canonical weekly Wiki REM operation inside the same source-
+    /// claim transaction. This is the only insert seam that accepts the
+    /// reserved `wiki-rem:` id namespace and its producer-owned metadata.
+    pub fn insert_rem_operation_if_absent(
+        &mut self,
+        entry: &MemoryEntry,
+    ) -> Result<db::InsertMemoryResult, MemoryError> {
+        let rem_string = |key: &str| {
+            entry
+                .metadata
+                .pointer(&format!("/rem/{key}"))
+                .and_then(Value::as_str)
+        };
+        if !entry.id.starts_with("wiki-rem:")
+            || entry.source != "wiki"
+            || !entry.path.starts_with("/wiki/drafts/")
+            || rem_string("producer") != Some("weekly_wiki_evolver")
+            || rem_string("operation_id") != Some(entry.id.as_str())
+            || rem_string("operation_status") != Some("pending_sources")
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "invalid canonical Wiki REM operation entry: {}",
+                entry.id
+            )));
+        }
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::insert_if_absent_within_tx(&self.tx, entry, self.vec_available)

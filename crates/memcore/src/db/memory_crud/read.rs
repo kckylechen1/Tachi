@@ -120,8 +120,9 @@ pub fn get_all(
 }
 
 /// Return the id of an active (non-archived) row with the EXACT `path` and
-/// `text`, via a direct SQL predicate — no recency-window `LIMIT` to hide
-/// behind. #1041 F6: the previous dedup check ran `list_by_path(path, 64,
+/// `text`, excluding internal REM operation rows, via a direct SQL predicate
+/// — no recency-window `LIMIT` to hide behind. #1041 F6: the previous dedup
+/// check ran `list_by_path(path, 64,
 /// false)` (exact path OR descendant paths, ordered `path ASC, timestamp
 /// DESC`, capped at 64 rows) and THEN filtered in memory for an exact
 /// path+text match. Once 64+ rows already exist under a path's descendant
@@ -137,6 +138,7 @@ pub fn find_exact_path_text_id(
 ) -> Result<Option<String>, MemoryError> {
     conn.query_row(
         "SELECT id FROM memories WHERE path = ?1 AND text = ?2 AND archived = 0 \
+         AND id NOT LIKE 'wiki-rem:%' \
          ORDER BY timestamp DESC LIMIT 1",
         params![path, text],
         |row| row.get::<_, String>(0),

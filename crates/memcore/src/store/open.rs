@@ -683,6 +683,12 @@ impl MemoryStore {
         &mut self,
         entry: &MemoryEntry,
     ) -> Result<db::InsertMemoryResult, MemoryError> {
+        if entry.id.starts_with("wiki-rem:") {
+            return Err(MemoryError::InvalidArg(format!(
+                "id '{}' is in the reserved 'wiki-rem:' namespace; use the REM operation transaction",
+                entry.id
+            )));
+        }
         self.validate_write_path(entry)?;
         let db_label = self.db_label.clone();
         let authorization = self.reserved_reference_write.clone();

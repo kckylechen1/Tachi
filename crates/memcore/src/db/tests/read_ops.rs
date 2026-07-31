@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::find_active_wiki_entry_by_path_or_topic;
+use crate::db::{find_active_wiki_entry_by_path_or_topic, insert_if_absent};
 
 #[test]
 fn fetch_by_ids_returns_entries() {
@@ -177,7 +177,7 @@ fn ordinary_wiki_projection_does_not_select_rem_or_draft_rows() {
     let mut rem = make_entry("wiki-rem:reserved", "same topic rem draft");
     rem.path = "/wiki/drafts/rem".to_string();
     rem.topic = "shared-topic".to_string();
-    upsert(&mut conn, &rem, false).unwrap();
+    insert_if_absent(&mut conn, &rem, false).unwrap();
     let mut ordinary_draft = make_entry("ordinary-draft", "same topic ordinary draft");
     ordinary_draft.path = "/wiki/drafts/ordinary".to_string();
     ordinary_draft.topic = "shared-topic".to_string();
@@ -207,7 +207,7 @@ fn ordinary_draft_projection_can_update_non_rem_drafts_only() {
     let mut rem = make_entry("wiki-rem:reserved", "reserved rem draft");
     rem.path = "/wiki/drafts/reserved".to_string();
     rem.topic = "draft-topic".to_string();
-    upsert(&mut conn, &rem, false).unwrap();
+    insert_if_absent(&mut conn, &rem, false).unwrap();
     let mut ordinary = make_entry("ordinary-draft", "ordinary draft");
     ordinary.path = "/wiki/drafts/ordinary".to_string();
     ordinary.topic = "draft-topic".to_string();

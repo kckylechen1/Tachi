@@ -272,10 +272,14 @@ fn atomic_evidence_metadata_patch(
     patch
 }
 
-fn strip_reserved_reference_metadata(metadata: &mut Option<serde_json::Value>) {
+fn strip_reserved_public_metadata(metadata: &mut Option<serde_json::Value>) {
     if let Some(serde_json::Value::Object(object)) = metadata {
         object.remove("evidence_refs_v1");
         object.remove("source_refs");
+        // REM receipts are owned by the evolver and source-marker seams.
+        // Public/system save metadata must neither mint a pending operation
+        // nor reset a source's processed marker.
+        object.remove("rem");
     }
 }
 
@@ -498,7 +502,7 @@ async fn handle_save_memory_impl(
     model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
     wiki_projection: bool,
 ) -> Result<String, String> {
-    strip_reserved_reference_metadata(&mut params.metadata);
+    strip_reserved_public_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
     params.summary = scrub_think_tags(&params.summary);
     let (safe_text, secret_redactions) = scrub_secrets(&params.text);
@@ -609,7 +613,7 @@ async fn handle_save_memory_impl(
     // the race boundary: the v19 id-less identity constraint below is the
     // authoritative single-winner decision when concurrent callers both miss
     // this read.
-    if params.id.is_none() {
+    if params.id.is_none() && !wiki_projection {
         if let Some(existing_id) = find_exact_path_text_duplicate(
             server,
             &params.path,

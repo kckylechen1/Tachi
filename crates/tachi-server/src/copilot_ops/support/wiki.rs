@@ -158,9 +158,8 @@ pub(crate) fn is_wiki_projection_duplicate(
     let same_topic = target_subject.as_ref().is_some_and(|token| {
         let candidate_token = wiki_subject_token(&candidate.topic);
         candidate_token.as_ref() == Some(token)
-            && (token.len() > 1
-                || candidate.path.rsplit_once('/').map(|(parent, _)| parent)
-                    == path.rsplit_once('/').map(|(parent, _)| parent))
+            && candidate.path.rsplit_once('/').map(|(parent, _)| parent)
+                == path.rsplit_once('/').map(|(parent, _)| parent)
     });
     let similar_text =
         wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
@@ -197,4 +196,66 @@ pub(crate) fn wiki_parent_path(path: &str) -> String {
         .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
         .unwrap_or("/wiki")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wiki_candidate(id: &str, path: &str, topic: &str, text: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: path.to_string(),
+            summary: text.to_string(),
+            text: text.to_string(),
+            importance: 0.7,
+            timestamp: "2026-07-31T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "experience".to_string(),
+            topic: topic.to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "wiki".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
+            revision: 1,
+            metadata: json!({"wiki": true}),
+            vector: None,
+            retention_policy: Some("permanent".to_string()),
+            domain: Some("wiki".to_string()),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    #[test]
+    fn single_token_topic_requires_the_same_parent_to_be_a_duplicate() {
+        let candidate = wiki_candidate(
+            "ops-mcp",
+            "/wiki/ops/mcp",
+            "mcp",
+            "Operational transport retry notes with no engineering overlap.",
+        );
+
+        assert!(!is_wiki_projection_duplicate(
+            &candidate,
+            "/wiki/engineering/mcp",
+            "mcp",
+            "Engineering protocol schema conventions for tool interoperability.",
+        ));
+        assert!(is_wiki_projection_duplicate(
+            &candidate,
+            "/wiki/ops/mcp-replacement",
+            "mcp",
+            "A replacement operational transport note.",
+        ));
+    }
 }

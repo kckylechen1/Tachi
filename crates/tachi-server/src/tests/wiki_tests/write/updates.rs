@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool_params::SaveMemoryParams;
 
 #[test]
 fn raw_memory_connection_cannot_promote_rows_into_trusted_namespaces() {
@@ -166,6 +167,188 @@ async fn public_wiki_write_cannot_persist_internal_rem_coordination_metadata() {
 
     assert_eq!(entry.metadata["caller_marker"], json!("preserved"));
     assert_eq!(entry.metadata["rem"], Value::Null);
+}
+
+#[tokio::test]
+async fn generic_save_cannot_mint_a_wiki_rem_operation_row() {
+    let (server, _home) = seed_wiki_project_entries(Vec::new());
+    let error = server
+        .save_memory(Parameters(SaveMemoryParams {
+            text: "A generic save must not mint an internal REM operation.".to_string(),
+            summary: String::new(),
+            path: "/wiki/drafts/generic-rem-spoof".to_string(),
+            importance: 0.7,
+            category: "experience".to_string(),
+            topic: "generic-rem-spoof".to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            scope: "global".to_string(),
+            vector: None,
+            id: Some("wiki-rem:generic-spoof".to_string()),
+            force: true,
+            auto_link: false,
+            project: Some("wiki".to_string()),
+            project_explicit: true,
+            retention_policy: Some("permanent".to_string()),
+            domain: Some("wiki".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: Some(json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources",
+                    "sources": []
+                }
+            })),
+            emit_continuity: false,
+        }))
+        .await
+        .expect_err("generic save must reject the internal REM id namespace");
+
+    assert!(error.contains("reserved 'wiki-rem:' namespace"), "{error}");
+}
+
+#[tokio::test]
+async fn ordinary_wiki_write_ignores_exact_matching_rem_draft() {
+    let (server, _home) = seed_wiki_project_entries(Vec::new());
+    let mut rem_draft = make_entry("wiki-rem:exact-duplicate");
+    rem_draft.path = "/wiki/drafts/exact-duplicate-boundary".to_string();
+    rem_draft.topic = "exact-duplicate-boundary".to_string();
+    rem_draft.text = "An internal REM draft is not an ordinary Wiki duplicate winner.".to_string();
+    rem_draft.source = "wiki".to_string();
+    rem_draft.metadata = json!({
+        "wiki": true,
+        "artifact_kind": "draft",
+        "lifecycle": "pending_review",
+        "rem": {
+            "producer": "weekly_wiki_evolver",
+            "operation_id": rem_draft.id.clone(),
+            "operation_status": "pending_sources"
+        }
+    });
+    server
+        .with_named_project_store("wiki", |store| {
+            store
+                .with_immutable_supersession_transaction(|operation| {
+                    operation
+                        .insert_rem_operation_if_absent(&rem_draft)
+                        .map(|_| ())
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed internal REM draft");
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Ordinary exact duplicate boundary".to_string(),
+            text: rem_draft.text.clone(),
+            path: Some(rem_draft.path.clone()),
+            topic: Some(rem_draft.topic.clone()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.8,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("write ordinary Wiki row beside REM draft");
+    let response: Value = serde_json::from_str(&response).expect("wiki response JSON");
+
+    assert_eq!(response["wiki_write_mode"], json!("created"));
+    assert_ne!(response["id"], json!(rem_draft.id));
+    assert!(response["status"]
+        .as_str()
+        .is_some_and(|status| status.starts_with("saved")));
+}
+
+#[tokio::test]
+async fn generic_idless_save_cannot_select_or_mutate_a_matching_rem_operation() {
+    let (server, _home) = seed_wiki_project_entries(Vec::new());
+    let mut rem_draft = make_entry("wiki-rem:generic-duplicate-boundary");
+    rem_draft.path = "/wiki/drafts/generic-duplicate-boundary".to_string();
+    rem_draft.topic = "generic-duplicate-boundary".to_string();
+    rem_draft.text = "An internal REM operation cannot win generic save deduplication.".to_string();
+    rem_draft.source = "wiki".to_string();
+    rem_draft.metadata = json!({
+        "artifact_kind": "draft",
+        "review_status": "pending",
+        "rem": {
+            "producer": "weekly_wiki_evolver",
+            "operation_id": rem_draft.id.clone(),
+            "operation_status": "pending_sources"
+        }
+    });
+    server
+        .with_named_project_store("wiki", |store| {
+            store
+                .with_immutable_supersession_transaction(|operation| {
+                    operation
+                        .insert_rem_operation_if_absent(&rem_draft)
+                        .map(|_| ())
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed internal REM operation");
+
+    let response = server
+        .save_memory(Parameters(SaveMemoryParams {
+            text: rem_draft.text.clone(),
+            summary: String::new(),
+            path: rem_draft.path.clone(),
+            importance: 0.7,
+            category: "experience".to_string(),
+            topic: rem_draft.topic.clone(),
+            keywords: vec!["generic".to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            scope: "global".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: false,
+            project: Some("wiki".to_string()),
+            project_explicit: true,
+            retention_policy: Some("permanent".to_string()),
+            domain: Some("wiki".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: None,
+            emit_continuity: false,
+        }))
+        .await
+        .expect("generic save must create an ordinary row");
+    let response: Value = serde_json::from_str(&response).expect("save response json");
+    assert_ne!(response["status"], "duplicate");
+    assert_ne!(response["id"], rem_draft.id);
+
+    let stored_rem = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get(&rem_draft.id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "REM operation disappeared".to_string())
+        })
+        .expect("read REM operation");
+    assert!(stored_rem.keywords.is_empty());
+    assert_eq!(
+        stored_rem.metadata["rem"]["operation_status"],
+        "pending_sources"
+    );
 }
 
 #[tokio::test]

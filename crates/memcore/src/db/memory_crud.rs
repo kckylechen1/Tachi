@@ -304,6 +304,7 @@ fn merge_into_jaccard_candidate(
              WHERE memories_fts MATCH simple_query(?1)
                AND m.archived = 0 AND m.superseded_by IS NULL
                AND m.id != ?2
+               AND m.id NOT LIKE 'wiki-rem:%'
              LIMIT 5",
         )?;
         let rows = stmt.query_map(params![safe_query, entry.id], |r| {
@@ -750,6 +751,7 @@ pub(crate) fn upsert(
 }
 
 const RESERVED_REFERENCE_KEYS: [&str; 2] = ["evidence_refs_v1", "source_refs"];
+const RESERVED_REM_KEY: &str = "rem";
 
 fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
     let Some(mut object) = metadata.as_object().cloned() else {
@@ -782,6 +784,12 @@ fn merge_ordinary_reserved_metadata(
     incoming: &Value,
 ) -> Result<Value, MemoryError> {
     let mut sanitized = strip_untrusted_reserved_metadata(incoming);
+    if let Some(object) = sanitized.as_object_mut() {
+        // REM state is written only by the dedicated insert-once operation and
+        // source-marker seams. Ordinary upsert may preserve an existing value
+        // below, but it may never mint or replace one from its input payload.
+        object.remove(RESERVED_REM_KEY);
+    }
     let Some(existing) = read_existing_metadata(tx, entry_id)? else {
         return Ok(sanitized);
     };
@@ -790,6 +798,7 @@ fn merge_ordinary_reserved_metadata(
     };
     let reserved = RESERVED_REFERENCE_KEYS
         .into_iter()
+        .chain(std::iter::once(RESERVED_REM_KEY))
         .filter_map(|key| existing_object.get(key).cloned().map(|value| (key, value)))
         .collect::<Vec<_>>();
     if reserved.is_empty() {
@@ -963,7 +972,7 @@ fn merge_validated_reference_metadata(
         .cloned()
         .unwrap_or_default();
     for (key, value) in metadata_patch {
-        if key != "evidence_refs_v1" && key != "source_refs" {
+        if key != "evidence_refs_v1" && key != "source_refs" && key != RESERVED_REM_KEY {
             merged.insert(key.clone(), value.clone());
         }
     }
@@ -972,6 +981,11 @@ fn merge_validated_reference_metadata(
             return Err(MemoryError::InvalidArg(format!(
                 "trusted metadata removal cannot delete reserved reference key '{key}'"
             )));
+        }
+        if *key == RESERVED_REM_KEY {
+            return Err(MemoryError::InvalidArg(
+                "trusted metadata removal cannot delete reserved REM state".to_string(),
+            ));
         }
         merged.remove(*key);
     }
@@ -1176,6 +1190,43 @@ mod reserved_reference_tests {
         assert_eq!(refs(&stored), vec!["#100"]);
         assert_eq!(stored.metadata["kept"], json!(true));
         assert!(stored.metadata.get("source_refs").is_none());
+    }
+
+    #[test]
+    fn ordinary_store_upsert_cannot_mint_or_replace_reserved_rem_state() {
+        let (_dir, mut store) = open_store();
+        let forged = entry(
+            "reserved-rem-boundary",
+            json!({"rem": {"processed": 0, "processed_by": "forged"}}),
+        );
+        store.upsert(&forged).expect("ordinary insert");
+        let inserted = store.get(&forged.id).unwrap().unwrap();
+        assert!(inserted.metadata.get("rem").is_none());
+
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[(inserted.id.clone(), inserted.revision)],
+                "2026-07-31T01:00:00Z",
+                "wiki-rem:trusted",
+            )
+            .expect("trusted REM marker");
+        let hostile = entry(
+            "reserved-rem-boundary",
+            json!({
+                "ordinary": true,
+                "rem": {"processed": 0, "processed_by": "replaced"}
+            }),
+        );
+        store.upsert(&hostile).expect("ordinary hostile update");
+
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["ordinary"], true);
+        assert_eq!(stored.metadata["rem"]["processed"], 1);
+        assert_eq!(stored.metadata["rem"]["processed_by"], "wiki-rem:trusted");
+        assert_eq!(
+            stored.metadata["rem"]["processed_revision"],
+            inserted.revision
+        );
     }
 
     #[test]
@@ -2412,6 +2463,16 @@ fn upsert_prepared_within_tx(
     idless_identity: Option<&str>,
     allow_near_duplicate_merge: bool,
 ) -> Result<IdlessUpsertResult, MemoryError> {
+    // `wiki-rem:` rows are deterministic insert-once operation records. They
+    // are created only through the REM claim + insert_if_absent transaction;
+    // allowing ordinary ON CONFLICT upsert would let any caller rewrite the
+    // recovery identity, producer receipt, or active winner in place.
+    if entry.id.starts_with("wiki-rem:") {
+        return Err(MemoryError::InvalidArg(format!(
+            "id '{}' is in the reserved 'wiki-rem:' namespace; use the REM insert-once operation seam, not upsert",
+            entry.id
+        )));
+    }
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.
     let path = crate::path_router::normalize_path(&entry.path);

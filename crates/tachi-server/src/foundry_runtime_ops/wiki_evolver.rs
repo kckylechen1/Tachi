@@ -58,6 +58,19 @@ struct RemSourceStore {
     identity: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemSourceRole {
+    Global,
+    Project,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeRemSourceStores {
+    global: RemSourceStore,
+    project: Option<RemSourceStore>,
+    shared_route: RemSourceRole,
+}
+
 #[derive(Clone, Debug)]
 struct RemCandidate {
     store: RemSourceStore,
@@ -68,7 +81,11 @@ struct RemCandidate {
 struct RemSourceRef {
     store: RemSourceStore,
     id: String,
+    revision: i64,
 }
+
+type RemSourceRevision = (String, i64);
+type RoutedRemSources = (Vec<RemSourceRevision>, Vec<RemSourceRevision>);
 
 #[derive(serde::Serialize)]
 struct RemSourceSetIdentityV1<'a> {
@@ -178,24 +195,34 @@ pub(crate) struct WikiEvolverReport {
 fn rem_source_store_identities(
     global_path: &std::path::Path,
     project_path: Option<&std::path::Path>,
-) -> Result<(RemSourceStore, Option<RemSourceStore>), String> {
+) -> Result<RuntimeRemSourceStores, String> {
     let mut paths = vec![global_path.to_path_buf()];
     if let Some(project_path) = project_path {
         paths.push(project_path.to_path_buf());
     }
-    let identities = crate::physical_db_identity::physical_db_ids_for_paths(&paths)?;
+    let bindings = crate::physical_db_identity::physical_db_bindings_for_paths(&paths)?;
     let global = RemSourceStore {
-        identity: identities[0].clone(),
+        identity: bindings[0].physical_id.clone(),
     };
     let project = project_path.map(|_| RemSourceStore {
-        identity: identities[1].clone(),
+        identity: bindings[1].physical_id.clone(),
     });
-    Ok((global, project))
+    let shared_route = if project.as_ref() == Some(&global)
+        && bindings[1].is_primary_alias
+        && !bindings[0].is_primary_alias
+    {
+        RemSourceRole::Project
+    } else {
+        RemSourceRole::Global
+    };
+    Ok(RuntimeRemSourceStores {
+        global,
+        project,
+        shared_route,
+    })
 }
 
-fn runtime_rem_source_stores(
-    server: &MemoryServer,
-) -> Result<(RemSourceStore, Option<RemSourceStore>), String> {
+fn runtime_rem_source_stores(server: &MemoryServer) -> Result<RuntimeRemSourceStores, String> {
     let global_path = server.global_db_path_buf();
     let project_path = server.project_db_path_buf();
     rem_source_store_identities(&global_path, project_path.as_deref())
@@ -208,28 +235,37 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
             .map_err(|e| format!("query pattern memories: {e}"))
     };
 
-    let (global_store, project_store) = runtime_rem_source_stores(server)
+    let runtime_stores = runtime_rem_source_stores(server)
         .map_err(|error| format!("REM runtime source store identity: {error}"))?;
-    let mut entries = server
-        .with_global_store_read(collect)
-        .map_err(|e| format!("REM global candidate collection: {e}"))?
-        .into_iter()
-        .map(|entry| RemCandidate {
-            store: global_store.clone(),
-            entry,
-        })
-        .collect::<Vec<_>>();
+    let shared_physical_store = runtime_stores.project.as_ref() == Some(&runtime_stores.global);
+    let collect_global =
+        !shared_physical_store || runtime_stores.shared_route == RemSourceRole::Global;
+    let mut entries = if collect_global {
+        server
+            .with_global_store_read(collect)
+            .map_err(|e| format!("REM global candidate collection: {e}"))?
+            .into_iter()
+            .map(|entry| RemCandidate {
+                store: runtime_stores.global.clone(),
+                entry,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     if server.has_project_db() {
-        let project_store = project_store.ok_or_else(|| {
+        let project_store = runtime_stores.project.clone().ok_or_else(|| {
             "REM project candidate collection: project store identity is missing".to_string()
         })?;
-        let project = server
-            .with_project_store_read(collect)
-            .map_err(|e| format!("REM project candidate collection: {e}"))?;
-        entries.extend(project.into_iter().map(|entry| RemCandidate {
-            store: project_store.clone(),
-            entry,
-        }));
+        if !shared_physical_store || runtime_stores.shared_route == RemSourceRole::Project {
+            let project = server
+                .with_project_store_read(collect)
+                .map_err(|e| format!("REM project candidate collection: {e}"))?;
+            entries.extend(project.into_iter().map(|entry| RemCandidate {
+                store: project_store.clone(),
+                entry,
+            }));
+        }
     }
     deduplicate_rem_candidates(&mut entries);
     Ok(entries)
@@ -422,6 +458,7 @@ fn normalized_rem_sources(members: &[&RemCandidate]) -> Vec<RemSourceRef> {
         .map(|candidate| RemSourceRef {
             store: candidate.store.clone(),
             id: candidate.entry.id.clone(),
+            revision: candidate.entry.revision,
         })
         .collect::<Vec<_>>();
     sources.sort();
@@ -593,7 +630,7 @@ fn persist_rem_draft_operation(
                         &claimed_at,
                     )?;
                 }
-                let result = operation.insert_if_absent(entry)?;
+                let result = operation.insert_rem_operation_if_absent(entry)?;
                 if result == InsertMemoryResult::Existing {
                     let existing = operation.get_memory(&entry.id)?.ok_or_else(|| {
                         rem_identity_conflict(&entry.id, "existing row could not be read")
@@ -619,20 +656,19 @@ fn complete_rem_operation(
 ) -> Result<(), String> {
     ensure_rem_draft_winner(server, draft_id, sources)?;
     let now = Utc::now().to_rfc3339();
-    let (global_store, project_store) = runtime_rem_source_stores(server)?;
-    let (global_ids, project_ids) =
-        route_rem_source_ids(sources, &global_store, project_store.as_ref(), draft_id)?;
+    let runtime_stores = runtime_rem_source_stores(server)?;
+    let (global_sources, project_sources) = route_rem_sources(sources, &runtime_stores, draft_id)?;
 
-    if !global_ids.is_empty() {
+    if !global_sources.is_empty() {
         server
             .with_global_store(|store| {
                 store
-                    .mark_rem_processed_for_draft(&global_ids, &now, Some(draft_id))
+                    .mark_rem_processed_for_draft_at_revisions(&global_sources, &now, draft_id)
                     .map_err(|error| format!("mark global REM sources: {error}"))
             })
             .map_err(|error| format!("complete REM global source group: {error}"))?;
     }
-    if !project_ids.is_empty() {
+    if !project_sources.is_empty() {
         if !server.has_project_db() {
             return Err(format!(
                 "complete REM project source group: bound project store is unavailable for {draft_id}"
@@ -641,7 +677,7 @@ fn complete_rem_operation(
         server
             .with_project_store(|store| {
                 store
-                    .mark_rem_processed_for_draft(&project_ids, &now, Some(draft_id))
+                    .mark_rem_processed_for_draft_at_revisions(&project_sources, &now, draft_id)
                     .map_err(|error| format!("mark project REM sources: {error}"))
             })
             .map_err(|error| format!("complete REM project source group: {error}"))?;
@@ -655,30 +691,33 @@ fn complete_rem_operation(
 
 fn rem_sources_belong_to_runtime_stores(
     sources: &[RemSourceRef],
-    global_store: &RemSourceStore,
-    project_store: Option<&RemSourceStore>,
+    runtime_stores: &RuntimeRemSourceStores,
 ) -> bool {
     !sources.is_empty()
-        && sources
-            .iter()
-            .all(|source| &source.store == global_store || project_store == Some(&source.store))
+        && sources.iter().all(|source| {
+            source.store == runtime_stores.global
+                || runtime_stores.project.as_ref() == Some(&source.store)
+        })
 }
 
-fn route_rem_source_ids(
+fn route_rem_sources(
     sources: &[RemSourceRef],
-    global_store: &RemSourceStore,
-    project_store: Option<&RemSourceStore>,
+    runtime_stores: &RuntimeRemSourceStores,
     draft_id: &str,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    let mut global_ids = Vec::new();
-    let mut project_ids = Vec::new();
+) -> Result<RoutedRemSources, String> {
+    let mut global_sources = Vec::new();
+    let mut project_sources = Vec::new();
+    let shared_physical_store = runtime_stores.project.as_ref() == Some(&runtime_stores.global);
     for source in sources {
-        if &source.store == global_store {
-            // Prefer global when both logical roles alias the same physical DB;
-            // the row must be marked exactly once.
-            global_ids.push(source.id.clone());
-        } else if project_store == Some(&source.store) {
-            project_ids.push(source.id.clone());
+        let marker = (source.id.clone(), source.revision);
+        if source.store == runtime_stores.global {
+            if shared_physical_store && runtime_stores.shared_route == RemSourceRole::Project {
+                project_sources.push(marker);
+            } else {
+                global_sources.push(marker);
+            }
+        } else if runtime_stores.project.as_ref() == Some(&source.store) {
+            project_sources.push(marker);
         } else {
             return Err(format!(
                 "REM source store identity mismatch for {draft_id}: {}",
@@ -686,7 +725,7 @@ fn route_rem_source_ids(
             ));
         }
     }
-    Ok((global_ids, project_ids))
+    Ok((global_sources, project_sources))
 }
 
 fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
@@ -698,7 +737,7 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
     if wiki_path.is_none() {
         return Ok(());
     }
-    let (global_store, project_store) = runtime_rem_source_stores(server)?;
+    let runtime_stores = runtime_rem_source_stores(server)?;
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
     loop {
@@ -731,11 +770,7 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
                     continue;
                 }
             };
-            if !rem_sources_belong_to_runtime_stores(
-                &sources,
-                &global_store,
-                project_store.as_ref(),
-            ) {
+            if !rem_sources_belong_to_runtime_stores(&sources, &runtime_stores) {
                 continue;
             }
             validate_existing_rem_draft(&entry, &entry.id, &sources)
@@ -955,10 +990,12 @@ mod rem_identity_tests {
             RemSourceRef {
                 store: test_store("project-db"),
                 id: "same".to_string(),
+                revision: 1,
             },
             RemSourceRef {
                 store: test_store("global-db"),
                 id: "same".to_string(),
+                revision: 1,
             },
         ];
         let mut reversed = sources.clone();
@@ -972,7 +1009,15 @@ mod rem_identity_tests {
             stable_rem_draft_id(&[RemSourceRef {
                 store: test_store("project-db"),
                 id: "same".to_string(),
+                revision: 1,
             }])
+        );
+        let mut newer_revision = sorted.clone();
+        newer_revision[0].revision += 1;
+        assert_ne!(
+            stable_rem_draft_id(&sorted),
+            stable_rem_draft_id(&newer_revision),
+            "a changed source revision must produce a different draft operation"
         );
     }
 
@@ -985,18 +1030,20 @@ mod rem_identity_tests {
         std::fs::write(&first, b"REM physical identity fixture").unwrap();
         std::fs::hard_link(&first, &second).unwrap();
 
-        let (first_store, second_store) =
-            rem_source_store_identities(&first, Some(&second)).unwrap();
-        let second_store = second_store.expect("project alias identity");
+        let runtime_stores = rem_source_store_identities(&first, Some(&second)).unwrap();
+        let first_store = runtime_stores.global;
+        let second_store = runtime_stores.project.expect("project alias identity");
         assert_eq!(first_store, second_store);
 
         let first_id = stable_rem_draft_id(&[RemSourceRef {
             store: first_store,
             id: "same-source".to_string(),
+            revision: 1,
         }]);
         let second_id = stable_rem_draft_id(&[RemSourceRef {
             store: second_store,
             id: "same-source".to_string(),
+            revision: 1,
         }]);
         assert_eq!(first_id, second_id);
     }
@@ -1015,6 +1062,34 @@ mod rem_identity_tests {
         let error = rem_source_store_identities(&first, Some(&second))
             .expect_err("dual live WAL aliases must fail closed");
         assert!(error.contains("multiple live WAL/SHM owners"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rem_source_store_identity_routes_shared_store_through_live_project_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.db");
+        let project = dir.path().join("project.db");
+        std::fs::write(&global, b"REM physical identity fixture").unwrap();
+        std::fs::hard_link(&global, &project).unwrap();
+        std::fs::write(format!("{}-wal", project.display()), b"project WAL").unwrap();
+
+        let runtime_stores = rem_source_store_identities(&global, Some(&project)).unwrap();
+        assert_eq!(
+            runtime_stores.project.as_ref(),
+            Some(&runtime_stores.global)
+        );
+        assert_eq!(runtime_stores.shared_route, RemSourceRole::Project);
+
+        let sources = vec![RemSourceRef {
+            store: runtime_stores.global.clone(),
+            id: "source".to_string(),
+            revision: 7,
+        }];
+        let (global_sources, project_sources) =
+            route_rem_sources(&sources, &runtime_stores, "draft").unwrap();
+        assert!(global_sources.is_empty());
+        assert_eq!(project_sources, vec![("source".to_string(), 7)]);
     }
 
     #[test]
@@ -1044,24 +1119,33 @@ mod rem_identity_tests {
             RemSourceRef {
                 store: global.clone(),
                 id: "global-source".to_string(),
+                revision: 1,
             },
             RemSourceRef {
                 store: project_a.clone(),
                 id: "project-source".to_string(),
+                revision: 1,
             },
         ];
 
-        assert!(rem_sources_belong_to_runtime_stores(
-            &owned,
-            &global,
-            Some(&project_a)
-        ));
-        assert!(!rem_sources_belong_to_runtime_stores(
-            &owned,
-            &global,
-            Some(&project_b)
-        ));
-        assert!(!rem_sources_belong_to_runtime_stores(&owned, &global, None));
+        let runtime_a = RuntimeRemSourceStores {
+            global: global.clone(),
+            project: Some(project_a),
+            shared_route: RemSourceRole::Global,
+        };
+        assert!(rem_sources_belong_to_runtime_stores(&owned, &runtime_a));
+        let runtime_b = RuntimeRemSourceStores {
+            global: global.clone(),
+            project: Some(project_b),
+            shared_route: RemSourceRole::Global,
+        };
+        assert!(!rem_sources_belong_to_runtime_stores(&owned, &runtime_b));
+        let global_only = RuntimeRemSourceStores {
+            global,
+            project: None,
+            shared_route: RemSourceRole::Global,
+        };
+        assert!(!rem_sources_belong_to_runtime_stores(&owned, &global_only));
     }
 
     #[test]
@@ -1070,10 +1154,15 @@ mod rem_identity_tests {
         let sources = vec![RemSourceRef {
             store: shared.clone(),
             id: "source".to_string(),
+            revision: 1,
         }];
-        let (global, project) =
-            route_rem_source_ids(&sources, &shared, Some(&shared), "draft").unwrap();
-        assert_eq!(global, vec!["source"]);
+        let runtime_stores = RuntimeRemSourceStores {
+            global: shared.clone(),
+            project: Some(shared),
+            shared_route: RemSourceRole::Global,
+        };
+        let (global, project) = route_rem_sources(&sources, &runtime_stores, "draft").unwrap();
+        assert_eq!(global, vec![("source".to_string(), 1)]);
         assert!(project.is_empty());
     }
 
@@ -1082,6 +1171,7 @@ mod rem_identity_tests {
         let sources = vec![RemSourceRef {
             store: test_store("project-db"),
             id: "source-a".to_string(),
+            revision: 1,
         }];
         let id = stable_rem_draft_id(&sources);
         let valid = occupied_entry(&id, &sources);
@@ -1090,6 +1180,7 @@ mod rem_identity_tests {
         let collision_sources = vec![RemSourceRef {
             store: test_store("project-db"),
             id: "source-b".to_string(),
+            revision: 1,
         }];
         let collision = occupied_entry(&id, &collision_sources);
         let error = validate_existing_rem_draft(&collision, &id, &sources)
