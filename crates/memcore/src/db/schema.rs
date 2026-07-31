@@ -24,6 +24,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     super::validate_persistent_trigger_inventory(&tx, true)?;
     validate_recall_impression_ledger_schema(&tx)?;
     validate_typo_fallback_attribution_schema(&tx)?;
+    validate_wiki_recovery_ledgers_schema(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -96,6 +97,7 @@ pub fn init_schema_with_label_mut(
     super::validate_persistent_trigger_inventory(&tx, true)?;
     validate_recall_impression_ledger_schema(&tx)?;
     validate_typo_fallback_attribution_schema(&tx)?;
+    validate_wiki_recovery_ledgers_schema(&tx)?;
     tx.commit()?;
 
     remember_migration_fingerprint(conn, current_db_path)?;
@@ -510,6 +512,42 @@ pub(crate) fn validate_typo_fallback_attribution_schema(
         if !present {
             return Err(MemoryError::InvalidArg(format!(
                 "incomplete v27 typo fallback attribution: required column '{table}.{column}' is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Canonical v28 installer. Production callers reach this only through the
+/// sentinel-gated migration runner after migration authority has been checked.
+pub(crate) fn install_wiki_recovery_ledgers_schema(conn: &Connection) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::WIKI_RECOVERY_LEDGERS_V28_SQL)
+}
+
+pub(crate) fn validate_wiki_recovery_ledgers_schema(conn: &Connection) -> Result<(), MemoryError> {
+    const REQUIRED_OBJECTS: &[(&str, &str, &str)] = &[
+        ("table", "rem_source_claims", "rem_source_claims"),
+        ("index", "idx_rem_source_claims_draft", "rem_source_claims"),
+        (
+            "table",
+            "exact_dedupe_apply_lineage",
+            "exact_dedupe_apply_lineage",
+        ),
+    ];
+    for (object_type, name, table) in REQUIRED_OBJECTS {
+        let present = match conn.query_row(
+            "SELECT 1 FROM main.sqlite_schema
+             WHERE type = ?1 AND name = ?2 AND tbl_name = ?3",
+            params![object_type, name, table],
+            |_| Ok(()),
+        ) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v28 Wiki recovery ledgers: required {object_type} '{name}' on '{table}' is missing"
             )));
         }
     }

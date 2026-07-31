@@ -346,6 +346,9 @@ pub fn list_wiki_duplicate_candidates(
     limit: Option<usize>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let parent_like = format!("{}/%", parent_path.trim_end_matches('/'));
+    let guide_corpus = path == "/guide" || path.starts_with("/guide/");
+    let corpus_root = if guide_corpus { "/guide" } else { "/wiki" };
+    let corpus_like = format!("{corpus_root}/%");
     let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
     let sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS}
@@ -353,13 +356,14 @@ pub fn list_wiki_duplicate_candidates(
          WHERE archived = 0
            AND superseded_by IS NULL
            AND id NOT LIKE 'wiki-rem:%'
-           AND path LIKE '/wiki/%'
+           AND (path = ?6 OR path LIKE ?7)
            AND ({wiki_predicate})
            AND (
-               ((?1 = '/wiki/drafts' OR ?1 LIKE '/wiki/drafts/%')
+               (?8 = 1
+                OR ((?1 = '/wiki/drafts' OR ?1 LIKE '/wiki/drafts/%')
                 AND (path = '/wiki/drafts' OR path LIKE '/wiki/drafts/%'))
                OR ((?1 != '/wiki/drafts' AND ?1 NOT LIKE '/wiki/drafts/%')
-                   AND path != '/wiki/drafts' AND path NOT LIKE '/wiki/drafts/%')
+                   AND path != '/wiki/drafts' AND path NOT LIKE '/wiki/drafts/%'))
            )
            AND (path = ?1 OR (?2 != '' AND topic = ?2) OR path = ?3 OR path LIKE ?4)
          ORDER BY CASE WHEN path = ?1 THEN 0 WHEN topic = ?2 THEN 1 ELSE 2 END,
@@ -374,7 +378,10 @@ pub fn list_wiki_duplicate_candidates(
             topic,
             parent_path,
             parent_like,
-            limit.map(|value| value as i64).unwrap_or(-1)
+            limit.map(|value| value as i64).unwrap_or(-1),
+            corpus_root,
+            corpus_like,
+            i64::from(guide_corpus)
         ],
         row_to_entry,
     )?;

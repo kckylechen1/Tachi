@@ -15,11 +15,17 @@ use std::cell::Cell;
 #[cfg(test)]
 std::thread_local! {
     static FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION: Cell<bool> = const { Cell::new(false) };
+    static FAULT_DURING_PREPARED_STAGE_WRITE: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
 fn inject_fault_after_db_commit_before_finalization_for_test(enabled: bool) {
     FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION.with(|fault| fault.set(enabled));
+}
+
+#[cfg(test)]
+fn inject_fault_during_prepared_stage_write_for_test(enabled: bool) {
+    FAULT_DURING_PREPARED_STAGE_WRITE.with(|fault| fault.set(enabled));
 }
 
 fn fault_after_db_commit_before_finalization() -> Result<(), &'static str> {
@@ -38,30 +44,83 @@ fn sync_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
     File::open(parent)?.sync_all()
 }
 
+fn write_staged_receipt(
+    receipt_out: &Path,
+    phase: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, std::io::Error> {
+    let parent = receipt_out.parent().unwrap_or_else(|| Path::new("."));
+    let name = receipt_out
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "receipt".into());
+    for attempt in 0..32 {
+        let candidate = parent.join(format!(
+            ".{name}.exact-dedupe-{phase}-{}-{attempt}",
+            std::process::id()
+        ));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let write_result = (|| {
+            #[cfg(test)]
+            if phase == "prepared"
+                && FAULT_DURING_PREPARED_STAGE_WRITE.with(|fault| fault.replace(false))
+            {
+                file.write_all(&bytes[..bytes.len() / 2])?;
+                return Err(std::io::Error::other(
+                    "injected partial prepared-receipt write failure",
+                ));
+            }
+            file.write_all(bytes)?;
+            file.write_all(b"\n")?;
+            file.sync_all()
+        })();
+        drop(file);
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&candidate);
+            return Err(error);
+        }
+        return Ok(candidate);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate exact-dedupe receipt staging path",
+    ))
+}
+
 fn persist_prepared_receipt_before_commit(
     receipt_out: &Path,
     result: &memcore::store::exact_dedupe::ExactDedupeApplyResult,
 ) -> Result<(), memcore::MemoryError> {
-    let mut receipt_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(receipt_out)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                return memcore::MemoryError::InvalidArg(format!(
-                    "exact-dedupe receipt output already exists: {}",
-                    receipt_out.display()
-                ));
-            }
-            memcore::MemoryError::InvalidArg(format!(
-                "exact-dedupe receipt output could not be created durably before commit at {}: {error}",
+    let receipt_json = serde_json::to_vec_pretty(&result.receipt)?;
+    let staged = write_staged_receipt(receipt_out, "prepared", &receipt_json).map_err(|error| {
+        memcore::MemoryError::InvalidArg(format!(
+            "exact-dedupe prepared receipt could not be staged durably at {}: {error}",
+            receipt_out.display()
+        ))
+    })?;
+    if let Err(error) = fs::hard_link(&staged, receipt_out) {
+        let _ = fs::remove_file(&staged);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(memcore::MemoryError::InvalidArg(format!(
+                "exact-dedupe receipt output already exists: {}",
                 receipt_out.display()
-            ))
-        })?;
-    let receipt_json = serde_json::to_string_pretty(&result.receipt)?;
-    receipt_file.write_all(receipt_json.as_bytes())?;
-    receipt_file.write_all(b"\n")?;
-    receipt_file.sync_all()?;
+            )));
+        }
+        return Err(memcore::MemoryError::InvalidArg(format!(
+            "exact-dedupe prepared receipt could not be atomically published before commit at {}: {error}",
+            receipt_out.display()
+        )));
+    }
+    sync_receipt_parent(receipt_out)?;
+    fs::remove_file(&staged)?;
     sync_receipt_parent(receipt_out)?;
     Ok(())
 }
@@ -71,34 +130,7 @@ fn finalize_prepared_receipt(
     committed_receipt: &ExactDedupeReceipt,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = serde_json::to_vec_pretty(committed_receipt)?;
-    let parent = receipt_out.parent().unwrap_or_else(|| Path::new("."));
-    let name = receipt_out
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("exact-dedupe receipt output requires a UTF-8 filename")?;
-    let mut staged = None;
-    for attempt in 0..32 {
-        let candidate = parent.join(format!(
-            ".{name}.exact-dedupe-committed-{}-{attempt}",
-            std::process::id()
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(mut file) => {
-                file.write_all(&bytes)?;
-                file.write_all(b"\n")?;
-                file.sync_all()?;
-                staged = Some(candidate);
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let staged = staged.ok_or("could not allocate exact-dedupe committed receipt staging path")?;
+    let staged = write_staged_receipt(receipt_out, "committed", &bytes)?;
     fs::rename(&staged, receipt_out)?;
     sync_receipt_parent(receipt_out)?;
     Ok(())
@@ -987,9 +1019,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("could not be created durably before commit"),
+            error.to_string().contains("could not be staged durably"),
             "unexpected refusal: {error}"
         );
         let archived: i64 = rusqlite::Connection::open(&db_path)
@@ -998,6 +1028,48 @@ mod tests {
             .unwrap();
         assert_eq!(archived, 0);
         assert!(!receipt_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_prepared_stage_write_never_publishes_or_leaks_a_receipt() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_during_prepared_stage_write_for_test(true);
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect_err("partial staged write must abort before DB commit");
+        assert!(
+            error
+                .to_string()
+                .contains("injected partial prepared-receipt write failure"),
+            "unexpected refusal: {error}"
+        );
+        assert!(
+            !receipt_path.exists(),
+            "partial bytes must never appear at the public receipt path"
+        );
+        let leaked_stage = std::fs::read_dir(receipt_path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("exact-dedupe-prepared")
+            });
+        assert!(!leaked_stage, "partial staging file must be removed");
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
     }
 
     #[cfg(unix)]

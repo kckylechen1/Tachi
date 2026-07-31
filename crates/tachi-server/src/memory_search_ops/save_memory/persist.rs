@@ -219,20 +219,17 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                         )));
                     }
                 }
-                // Ordinary Wiki projection may retire only other ordinary Wiki
-                // rows. Guide writes share this persistence seam for atomic
-                // updates, but they are a separate corpus and must not claim a
-                // Wiki row as their supersession predecessor.
-                let candidates = if entry.path == "/wiki" || entry.path.starts_with("/wiki/") {
-                    let parent_path = crate::copilot_ops::wiki_parent_path(&entry.path);
-                    projection.list_all_wiki_duplicate_candidates(
-                        &entry.path,
-                        &entry.topic,
-                        &parent_path,
-                    )?
-                } else {
-                    Vec::new()
-                };
+                // The candidate query is corpus-bound by the target path:
+                // Guide rows compete only with Guide rows, ordinary Wiki rows
+                // only with ordinary Wiki rows. Both use the same writer
+                // snapshot so an id-less same-path race cannot leave two
+                // active winners.
+                let parent_path = crate::copilot_ops::wiki_parent_path(&entry.path);
+                let candidates = projection.list_all_wiki_duplicate_candidates(
+                    &entry.path,
+                    &entry.topic,
+                    &parent_path,
+                )?;
                 let duplicates = candidates
                     .into_iter()
                     .filter(|candidate| {

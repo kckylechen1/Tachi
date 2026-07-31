@@ -292,19 +292,6 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             created_at TEXT NOT NULL DEFAULT ''
         );
 
-        -- Shared REM coordination ledger. The Wiki store is the one database
-        -- every repo-local evolver can see, so source claims live here rather
-        -- than in one caller's global/project source store. Claims are
-        -- insert-once and retained after completion as replay evidence.
-        CREATE TABLE IF NOT EXISTS rem_source_claims (
-            source_key      TEXT PRIMARY KEY,
-            source_identity TEXT NOT NULL,
-            draft_id        TEXT NOT NULL,
-            claimed_at      TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_rem_source_claims_draft
-            ON rem_source_claims(draft_id);
-
         CREATE TABLE IF NOT EXISTS processed_events (
             event_hash TEXT NOT NULL,
             event_id   TEXT NOT NULL DEFAULT '',
@@ -987,6 +974,39 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             UNIQUE(agent_identity_id, connection_id)
         );
         CREATE INDEX IF NOT EXISTS idx_identity_admissions_connection ON identity_admissions(connection_id);
+"#;
+
+/// v28 recovery ledgers for Wiki REM source claims and exact-dedupe apply
+/// lineage. These objects are installed only by the sentinel-gated migration
+/// runner so an older stamped database cannot acquire newer write semantics
+/// without migration authority and a matching `user_version` stamp.
+pub(super) const WIKI_RECOVERY_LEDGERS_V28_SQL: &str = r#"
+        -- Shared REM coordination ledger. The Wiki store is the one database
+        -- every repo-local evolver can see, so source claims live here rather
+        -- than in one caller's global/project source store. Claims are
+        -- insert-once and retained after completion as replay evidence.
+        CREATE TABLE IF NOT EXISTS rem_source_claims (
+            source_key      TEXT PRIMARY KEY,
+            source_identity TEXT NOT NULL,
+            draft_id        TEXT NOT NULL,
+            claimed_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_rem_source_claims_draft
+            ON rem_source_claims(draft_id);
+
+        -- Transactional binding between an exact-dedupe apply receipt and
+        -- every archived loser. Keeping this outside caller metadata preserves
+        -- arbitrary valid JSON while preventing a legacy receipt downgrade
+        -- from claiming a v2-applied row.
+        CREATE TABLE IF NOT EXISTS exact_dedupe_apply_lineage (
+            loser_id          TEXT PRIMARY KEY,
+            apply_id          TEXT NOT NULL,
+            plan_digest       TEXT NOT NULL,
+            winner_id         TEXT NOT NULL,
+            before_revision   INTEGER NOT NULL,
+            archived_revision INTEGER NOT NULL,
+            applied_at        TEXT NOT NULL
+        );
 "#;
 
 /// Historical v25 DDL for the sampled, content-free recall impression ledger

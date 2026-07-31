@@ -50,6 +50,7 @@
 //! - v26: SHA-256 query fingerprints and complete replay-policy identity for
 //!   recall impressions; v25 groups remain honestly unversioned (#1447).
 //! - v27: content-free typo-fallback attribution columns on the v26 ledger (#1506).
+//! - v28: Wiki REM source-claim and exact-dedupe apply-lineage recovery ledgers (#1542).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -92,7 +93,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 27;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 28;
 
 mod basic;
 mod cross_db;
@@ -170,6 +171,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v25_recall_impression_ledger",
     "v26_recall_impression_replay_identity",
     "v27_typo_fallback_attribution",
+    "v28_wiki_recovery_ledgers",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -203,6 +205,7 @@ pub struct MigrationReport {
     pub recall_impression_schema_objects_created: usize,
     pub recall_impression_replay_identity_columns_added: usize,
     pub typo_fallback_attribution_columns_added: usize,
+    pub wiki_recovery_schema_objects_created: usize,
 }
 
 #[cfg(test)]
@@ -301,7 +304,8 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
         }
     }
     crate::db::schema::validate_recall_impression_ledger_schema(conn)?;
-    crate::db::schema::validate_typo_fallback_attribution_schema(conn)
+    crate::db::schema::validate_typo_fallback_attribution_schema(conn)?;
+    crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)
 }
 
 /// #1119 typed schema-migration gate. Runs at the DB-open funnel
@@ -659,6 +663,12 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v27_typo_fallback_attribution,
     )?
     .unwrap_or(0);
+    report.wiki_recovery_schema_objects_created = apply_versioned_migration(
+        conn,
+        "v28_wiki_recovery_ledgers",
+        migrate_v28_wiki_recovery_ledgers,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
 }
@@ -690,6 +700,12 @@ fn migrate_v27_typo_fallback_attribution(conn: &Connection) -> Result<usize, Mem
     crate::db::schema::install_typo_fallback_attribution_schema(conn)?;
     crate::db::schema::validate_typo_fallback_attribution_schema(conn)?;
     Ok(7)
+}
+
+fn migrate_v28_wiki_recovery_ledgers(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::install_wiki_recovery_ledgers_schema(conn)?;
+    crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)?;
+    Ok(3)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -1430,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn private_fresh_init_installs_v25_through_v27_migrations_once() {
+    fn private_fresh_init_installs_v25_through_v28_migrations_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1449,8 +1465,10 @@ mod tests {
         assert_eq!(sentinel_version("v25_recall_impression_ledger"), 1);
         assert_eq!(sentinel_version("v26_recall_impression_replay_identity"), 1);
         assert_eq!(sentinel_version("v27_typo_fallback_attribution"), 1);
+        assert_eq!(sentinel_version("v28_wiki_recovery_ledgers"), 1);
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
         crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
+        crate::db::schema::validate_wiki_recovery_ledgers_schema(&conn).unwrap();
 
         init_schema(&conn).expect("valid current private schema reopens idempotently");
         assert_eq!(
@@ -1467,6 +1485,11 @@ mod tests {
             sentinel_version("v27_typo_fallback_attribution"),
             1,
             "v27 migration must run once"
+        );
+        assert_eq!(
+            sentinel_version("v28_wiki_recovery_ledgers"),
+            1,
+            "v28 migration must run once"
         );
     }
 
@@ -2344,7 +2367,7 @@ mod tests {
         ]
     }
 
-    fn assert_current_v27_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
+    fn assert_current_v28_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
         let mut unexpected_acceptances = Vec::new();
         for (surface, open) in current_existing_openers() {
             let tmp = tempfile::tempdir().expect("tempdir");
@@ -2355,7 +2378,7 @@ mod tests {
                     &path_str,
                     &DbOpenContext::create_fresh(),
                 )
-                .expect("provision current v27 fixture");
+                .expect("provision current v28 fixture");
                 drop(store);
                 let conn = Connection::open(&path).expect("open fixture for corruption");
                 conn.execute_batch(corruption_sql).expect("corrupt fixture");
@@ -2393,25 +2416,25 @@ mod tests {
         }
         assert!(
             unexpected_acceptances.is_empty(),
-            "stamped-current corrupt v27 DB was accepted by {unexpected_acceptances:?}"
+            "stamped-current corrupt v28 DB was accepted by {unexpected_acceptances:?}"
         );
     }
 
     #[test]
-    fn stamped_current_v27_missing_ledger_table_or_index_is_refused_without_repair() {
-        assert_current_v27_corruption_is_not_repaired(
+    fn stamped_current_v28_missing_ledger_table_or_index_is_refused_without_repair() {
+        assert_current_v28_corruption_is_not_repaired(
             "DROP TABLE recall_impressions;",
             "recall_impressions",
         );
-        assert_current_v27_corruption_is_not_repaired(
+        assert_current_v28_corruption_is_not_repaired(
             "DROP INDEX idx_recall_impression_groups_fingerprint;",
             "idx_recall_impression_groups_fingerprint",
         );
     }
 
     #[test]
-    fn stamped_current_v27_malformed_replay_identity_is_refused_without_repair() {
-        assert_current_v27_corruption_is_not_repaired(
+    fn stamped_current_v28_malformed_replay_identity_is_refused_without_repair() {
+        assert_current_v28_corruption_is_not_repaired(
             "PRAGMA ignore_check_constraints = ON;
              INSERT INTO recall_impression_groups (
                  group_id, created_at,
@@ -2432,8 +2455,8 @@ mod tests {
     }
 
     #[test]
-    fn stamped_current_v27_missing_v26_sentinel_is_refused_without_repair() {
-        assert_current_v27_corruption_is_not_repaired(
+    fn stamped_current_v28_missing_v26_sentinel_is_refused_without_repair() {
+        assert_current_v28_corruption_is_not_repaired(
             "DELETE FROM hard_state
              WHERE namespace = 'migrations' AND key = 'v26_recall_impression_replay_identity';",
             "v26_recall_impression_replay_identity",
@@ -2441,11 +2464,36 @@ mod tests {
     }
 
     #[test]
-    fn stamped_current_v27_missing_v27_sentinel_is_refused_without_repair() {
-        assert_current_v27_corruption_is_not_repaired(
+    fn stamped_current_v28_missing_v27_sentinel_is_refused_without_repair() {
+        assert_current_v28_corruption_is_not_repaired(
             "DELETE FROM hard_state
              WHERE namespace = 'migrations' AND key = 'v27_typo_fallback_attribution';",
             "v27_typo_fallback_attribution",
+        );
+    }
+
+    #[test]
+    fn stamped_current_v28_missing_wiki_recovery_objects_is_refused_without_repair() {
+        assert_current_v28_corruption_is_not_repaired(
+            "DROP TABLE rem_source_claims;",
+            "rem_source_claims",
+        );
+        assert_current_v28_corruption_is_not_repaired(
+            "DROP INDEX idx_rem_source_claims_draft;",
+            "idx_rem_source_claims_draft",
+        );
+        assert_current_v28_corruption_is_not_repaired(
+            "DROP TABLE exact_dedupe_apply_lineage;",
+            "exact_dedupe_apply_lineage",
+        );
+    }
+
+    #[test]
+    fn stamped_current_v28_missing_v28_sentinel_is_refused_without_repair() {
+        assert_current_v28_corruption_is_not_repaired(
+            "DELETE FROM hard_state
+             WHERE namespace = 'migrations' AND key = 'v28_wiki_recovery_ledgers';",
+            "v28_wiki_recovery_ledgers",
         );
     }
 
@@ -2463,9 +2511,9 @@ mod tests {
     ];
 
     #[test]
-    fn stamped_current_v27_missing_each_v27_column_is_refused_without_repair() {
+    fn stamped_current_v28_missing_each_v27_column_is_refused_without_repair() {
         for (table, column) in V27_COLUMNS {
-            assert_current_v27_corruption_is_not_repaired(
+            assert_current_v28_corruption_is_not_repaired(
                 &format!("ALTER TABLE {table} DROP COLUMN {column};"),
                 &format!("{table}.{column}"),
             );
@@ -2473,19 +2521,19 @@ mod tests {
     }
 
     #[test]
-    fn valid_stamped_current_v27_reopens_on_all_existing_surfaces() {
+    fn valid_stamped_current_v28_reopens_on_all_existing_surfaces() {
         for (surface, open) in current_existing_openers() {
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join(format!("{surface}.db"));
             let path_str = path.to_string_lossy().to_string();
             let store =
                 crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision current v27 fixture");
+                    .expect("provision current v28 fixture");
             drop(store);
             let before = current_schema_snapshot(&path);
 
             let reopened = open(&path_str)
-                .unwrap_or_else(|error| panic!("valid current v27 {surface} reopen: {error}"));
+                .unwrap_or_else(|error| panic!("valid current v28 {surface} reopen: {error}"));
             drop(reopened);
 
             let after = current_schema_snapshot(&path);
@@ -2508,7 +2556,7 @@ mod tests {
     /// Deny must refuse before adding any column; Allow installs all columns,
     /// records the sentinel, and advances the version atomically.
     #[test]
-    fn v26_to_v27_typo_fallback_attribution_requires_authority_and_stamps() {
+    fn v26_to_current_typo_fallback_attribution_requires_authority_and_stamps() {
         use crate::db::DbOpenContext;
 
         const V27_SENTINEL: &str = "v27_typo_fallback_attribution";
@@ -2523,10 +2571,10 @@ mod tests {
         {
             let store =
                 crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision v27 fixture");
+                    .expect("provision current fixture");
             drop(store);
             let conn = Connection::open(&path).expect("open fixture");
-            assert_eq!(read_schema_version(&conn).unwrap(), 27);
+            assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
             assert!(was_run(&conn, V27_SENTINEL).unwrap());
             for (table, column) in V27_COLUMNS {
                 assert!(column_exists(&conn, table, column));
@@ -2541,6 +2589,10 @@ mod tests {
                  ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_activated;
                  DELETE FROM hard_state
                   WHERE namespace = 'migrations' AND key = 'v27_typo_fallback_attribution';
+                 DELETE FROM hard_state
+                  WHERE namespace = 'migrations' AND key = 'v28_wiki_recovery_ledgers';
+                 DROP TABLE exact_dedupe_apply_lineage;
+                 DROP TABLE rem_source_claims;
                  PRAGMA user_version = 26;",
             )
             .expect("simulate stamped v26 ledger");
@@ -2551,7 +2603,7 @@ mod tests {
             "global",
             &DbOpenContext::open_existing_deny(),
         ) {
-            Ok(_) => panic!("Deny must refuse stamped-v26 -> v27"),
+            Ok(_) => panic!("Deny must refuse stamped-v26 -> current"),
             Err(error) => error,
         };
         assert!(
@@ -2578,11 +2630,14 @@ mod tests {
             "global",
             &DbOpenContext::open_existing_allow("test:1506-v27"),
         )
-        .expect("Allow must migrate v26 -> v27");
+        .expect("Allow must migrate v26 -> current");
         drop(store);
 
-        let verify = Connection::open(&path).expect("verify migrated v27 DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), 27);
+        let verify = Connection::open(&path).expect("verify migrated current DB");
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
         assert!(was_run(&verify, V27_SENTINEL).unwrap());
         for (table, column) in V27_COLUMNS {
             assert!(
@@ -2590,6 +2645,91 @@ mod tests {
                 "v27 must add {table}.{column}"
             );
         }
+    }
+
+    /// #1542: the recovery ledgers are a distinct v28 change. A stamped-v27
+    /// database must not acquire them without typed migration authority.
+    #[test]
+    fn v27_to_v28_wiki_recovery_ledgers_require_authority_and_stamp() {
+        use crate::db::DbOpenContext;
+
+        const V28_SENTINEL: &str = "v28_wiki_recovery_ledgers";
+        let object_exists = |conn: &Connection, object_type: &str, name: &str| {
+            conn.query_row(
+                "SELECT 1 FROM main.sqlite_schema WHERE type=?1 AND name=?2",
+                params![object_type, name],
+                |_| Ok(true),
+            )
+            .unwrap_or(false)
+        };
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let store =
+                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
+                    .expect("provision current fixture");
+            drop(store);
+            let conn = Connection::open(&path).expect("open fixture");
+            conn.execute_batch(
+                "DROP TABLE exact_dedupe_apply_lineage;
+                 DROP TABLE rem_source_claims;
+                 DELETE FROM hard_state
+                  WHERE namespace = 'migrations' AND key = 'v28_wiki_recovery_ledgers';
+                 PRAGMA user_version = 27;",
+            )
+            .expect("simulate stamped v27 database");
+        }
+
+        let deny_error = match crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_deny(),
+        ) {
+            Ok(_) => panic!("Deny must refuse stamped-v27 -> v28"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                deny_error,
+                MemoryError::SchemaMigrationOptInRequired { stored: 27, .. }
+            ),
+            "unexpected deny error: {deny_error}"
+        );
+        {
+            let inspect = Connection::open(&path).expect("inspect denied v27 database");
+            assert_eq!(read_schema_version(&inspect).unwrap(), 27);
+            assert!(!was_run(&inspect, V28_SENTINEL).unwrap());
+            assert!(!object_exists(&inspect, "table", "rem_source_claims"));
+            assert!(!object_exists(
+                &inspect,
+                "table",
+                "exact_dedupe_apply_lineage"
+            ));
+        }
+
+        let store = crate::MemoryStore::open_with_label_and_context(
+            &path_str,
+            "global",
+            &DbOpenContext::open_existing_allow("test:1542-v28"),
+        )
+        .expect("Allow must migrate v27 -> v28");
+        drop(store);
+
+        let verify = Connection::open(&path).expect("verify migrated v28 database");
+        assert_eq!(read_schema_version(&verify).unwrap(), 28);
+        assert!(was_run(&verify, V28_SENTINEL).unwrap());
+        assert!(object_exists(&verify, "table", "rem_source_claims"));
+        assert!(object_exists(
+            &verify,
+            "index",
+            "idx_rem_source_claims_draft"
+        ));
+        assert!(object_exists(
+            &verify,
+            "table",
+            "exact_dedupe_apply_lineage"
+        ));
     }
 
     #[test]

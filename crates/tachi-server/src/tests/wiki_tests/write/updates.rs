@@ -1255,3 +1255,95 @@ async fn concurrent_idless_wiki_duplicate_reports_no_false_created_write() {
     assert!(duplicate.get("continuity_event").is_none());
     assert_eq!(created["id"], duplicate["id"]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_distinct_guide_writes_leave_one_active_same_path_winner() {
+    let (server, _home) = seed_wiki_project_entries(Vec::new());
+    let writer_one = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open first Guide writer");
+    let writer_two = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open second Guide writer");
+    let path = "/guide/global/workflows/concurrent-review";
+    let _barrier = crate::memory_search_ops::save_memory::install_pre_upsert_path_barrier(
+        path,
+        std::sync::Arc::new(std::sync::Barrier::new(2)),
+    );
+
+    let write = |writer: MemoryServer, title: &'static str, text: &'static str| {
+        tokio::spawn(async move {
+            writer
+                .tachi_wiki_write(Parameters(WikiWriteParams {
+                    title: title.to_string(),
+                    text: text.to_string(),
+                    path: Some(path.to_string()),
+                    topic: Some("concurrent guide review".to_string()),
+                    summary: None,
+                    category: "experience".to_string(),
+                    keywords: vec![],
+                    entities: vec![],
+                    importance: 0.9,
+                    scope: "global".to_string(),
+                    retention_policy: "permanent".to_string(),
+                    domain: None,
+                    project: None,
+                    metadata: None,
+                    force: true,
+                    references: vec![],
+                    include_patterns: false,
+                    pattern_query: None,
+                    pattern_top_k: None,
+                }))
+                .await
+        })
+    };
+    let first = write(
+        writer_one,
+        "Concurrent Guide A",
+        "First writer proposes a distinct guide body for the shared path.",
+    );
+    let second = write(
+        writer_two,
+        "Concurrent Guide B",
+        "Second writer proposes different operational guidance for the shared path.",
+    );
+    let first: Value = serde_json::from_str(
+        &first
+            .await
+            .expect("first Guide writer task")
+            .expect("first Guide writer response"),
+    )
+    .expect("first Guide response JSON");
+    let second: Value = serde_json::from_str(
+        &second
+            .await
+            .expect("second Guide writer task")
+            .expect("second Guide writer response"),
+    )
+    .expect("second Guide response JSON");
+    assert_ne!(
+        first["id"], second["id"],
+        "the writes must exercise distinct identities"
+    );
+
+    server
+        .with_named_project_store_read("wiki", |store| {
+            let (active, superseded): (i64, i64) = store
+                .connection()
+                .query_row(
+                    "SELECT
+                         sum(CASE WHEN archived=0 AND superseded_by IS NULL THEN 1 ELSE 0 END),
+                         sum(CASE WHEN superseded_by IS NOT NULL THEN 1 ELSE 0 END)
+                     FROM memories WHERE path=?1",
+                    [path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                active, 1,
+                "Guide path must have one active projection winner"
+            );
+            assert_eq!(superseded, 1, "the serialized loser must retain lineage");
+            Ok(())
+        })
+        .expect("verify Guide projection winner");
+}

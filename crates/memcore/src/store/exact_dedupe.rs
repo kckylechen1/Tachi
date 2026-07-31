@@ -15,7 +15,6 @@ pub const EXACT_DEDUPE_SCHEMA_VERSION: u32 = 2;
 pub const EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION: u32 = 2;
 pub const EXACT_DEDUPE_LEGACY_RECEIPT_SCHEMA_VERSION: u32 = 1;
 const EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY: &str = "exact-dedupe-in-memory-test-sentinel-v1";
-const EXACT_DEDUPE_APPLY_ID_METADATA_PATH: &str = "$._tachi_exact_dedupe_apply_id";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -117,8 +116,8 @@ pub struct ExactDedupeReceipt {
     pub target_db_identity: String,
     pub target_db_physical_identity: String,
     pub plan_digest: String,
-    /// Per-apply lineage token also written onto every archived loser in the
-    /// same SQLite transaction. Restore requires this exact token, so a
+    /// Per-apply lineage token also written to the durable lineage ledger in
+    /// the same SQLite transaction. Restore requires this exact token, so a
     /// re-hashed receipt cannot claim an unrelated archived row.
     pub apply_id: String,
     pub applied_at: String,
@@ -165,6 +164,7 @@ struct ExactDedupeRestoreView<'a> {
     rows: &'a [ExactDedupeReceiptRow],
     reject_reserved_rem: bool,
     apply_id: Option<&'a str>,
+    plan_digest: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +325,7 @@ impl ExactDedupeRestoreReceipt {
                 rows: &receipt.rows,
                 reject_reserved_rem: true,
                 apply_id: Some(&receipt.apply_id),
+                plan_digest: Some(&receipt.plan_digest),
             },
             Self::V1LegacyPathCas(receipt) => ExactDedupeRestoreView {
                 target_db_identity: &receipt.target_db_identity,
@@ -332,6 +333,7 @@ impl ExactDedupeRestoreReceipt {
                 rows: &receipt.rows,
                 reject_reserved_rem: false,
                 apply_id: None,
+                plan_digest: None,
             },
         }
     }
@@ -791,37 +793,28 @@ impl MemoryStore {
                     [&f.id],
                     |r| r.get(0),
                 )?;
-                let changed = tx.execute(
-                    &format!(
-                        "UPDATE memories
-                         SET archived=1,
-                             superseded_by=?1,
-                             valid_until=COALESCE(valid_until,?2),
-                             updated_at=?2,
-                             revision=revision+1,
-                             metadata=json_set(
-                               CASE WHEN json_valid(metadata) THEN metadata ELSE '{{}}' END,
-                               '{EXACT_DEDUPE_APPLY_ID_METADATA_PATH}', ?6
-                             )
-                         WHERE id=?3
-                           AND revision=?4
-                           AND archived=0
-                           AND superseded_by IS NULL
-                           AND path=?5
-                           AND id NOT LIKE 'wiki-rem:%'
-                           AND json_type(
-                                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{{}}' END,
-                                 '{EXACT_DEDUPE_APPLY_ID_METADATA_PATH}'
-                               ) IS NULL"
-                    ),
-                    params![g.winner.id, now, f.id, f.revision, f.path, apply_id],
-                )?;
+                let changed=tx.execute("UPDATE memories SET archived=1,superseded_by=?1,valid_until=COALESCE(valid_until,?2),updated_at=?2,revision=revision+1 WHERE id=?3 AND revision=?4 AND archived=0 AND superseded_by IS NULL AND path=?5 AND id NOT LIKE 'wiki-rem:%'",params![g.winner.id,now,f.id,f.revision,f.path])?;
                 if changed != 1 {
                     return Err(MemoryError::InvalidArg(format!(
                         "exact-dedupe CAS failed: {}",
                         f.id
                     )));
                 }
+                tx.execute(
+                    "INSERT INTO exact_dedupe_apply_lineage (
+                         loser_id,apply_id,plan_digest,winner_id,
+                         before_revision,archived_revision,applied_at
+                     ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![
+                        f.id,
+                        apply_id,
+                        plan.plan_digest,
+                        g.winner.id,
+                        f.revision,
+                        f.revision + 1,
+                        now
+                    ],
+                )?;
                 transfer_edges_to_winner(&tx, &f.id, &g.winner.id)?;
                 receipt_rows.push(ExactDedupeReceiptRow {
                     winner_id: g.winner.id.clone(),
@@ -891,23 +884,30 @@ impl MemoryStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let restore_sql = if view.reject_reserved_rem {
-            format!(
-                "UPDATE memories
-                 SET archived=0,
-                     superseded_by=NULL,
-                     valid_until=?1,
-                     revision=revision+1,
-                     metadata=json_remove(metadata, '{EXACT_DEDUPE_APPLY_ID_METADATA_PATH}')
-                 WHERE id=?2
-                   AND revision=?3
-                   AND archived=1
-                   AND superseded_by=?4
-                   AND path=?5
-                   AND id NOT LIKE 'wiki-rem:%'
-                   AND json_extract(metadata, '{EXACT_DEDUPE_APPLY_ID_METADATA_PATH}')=?6"
-            )
+            "UPDATE memories
+             SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1
+             WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4
+               AND path=?5 AND id NOT LIKE 'wiki-rem:%'
+               AND EXISTS (
+                 SELECT 1 FROM exact_dedupe_apply_lineage lineage
+                 WHERE lineage.loser_id=?2
+                   AND lineage.apply_id=?6
+                   AND lineage.plan_digest=?7
+                   AND lineage.winner_id=?4
+                   AND lineage.before_revision=?8
+                   AND lineage.archived_revision=?3
+               )"
+            .to_string()
         } else {
-            "UPDATE memories SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1 WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4 AND path=?5 AND ?6 IS NULL".to_string()
+            "UPDATE memories
+             SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1
+             WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4
+               AND path=?5 AND ?6 IS NULL AND ?7 IS NULL AND ?8 IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM exact_dedupe_apply_lineage lineage
+                 WHERE lineage.loser_id=?2
+               )"
+            .to_string()
         };
         for row in view.rows {
             let changed = tx.execute(
@@ -918,7 +918,9 @@ impl MemoryStore {
                     row.archived_revision,
                     row.winner_id,
                     row.loser_path,
-                    view.apply_id
+                    view.apply_id,
+                    view.plan_digest,
+                    view.apply_id.map(|_| row.before_revision)
                 ],
             )?;
             if changed != 1 {
@@ -926,6 +928,27 @@ impl MemoryStore {
                     "exact-dedupe restore CAS failed: {}",
                     row.loser_id
                 )));
+            }
+            if let Some(apply_id) = view.apply_id {
+                let removed = tx.execute(
+                    "DELETE FROM exact_dedupe_apply_lineage
+                     WHERE loser_id=?1 AND apply_id=?2 AND plan_digest=?3
+                       AND winner_id=?4 AND before_revision=?5 AND archived_revision=?6",
+                    params![
+                        row.loser_id,
+                        apply_id,
+                        view.plan_digest,
+                        row.winner_id,
+                        row.before_revision,
+                        row.archived_revision
+                    ],
+                )?;
+                if removed != 1 {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "exact-dedupe restore lineage CAS failed: {}",
+                        row.loser_id
+                    )));
+                }
             }
         }
         tx.commit()?;
@@ -1220,6 +1243,50 @@ mod tests {
             )
             .unwrap();
         assert!(archived, "failed lineage proof must not mutate the row");
+    }
+
+    #[test]
+    fn legacy_v1_receipt_cannot_downgrade_a_v2_applied_row() {
+        let (_dir, identity, mut store) = disk_store();
+        seed_winner_loser(&store);
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+        let receipt = store.apply_exact_dedupe(&plan).unwrap().receipt;
+        let mut downgraded = ExactDedupeLegacyReceiptV1 {
+            schema_version: EXACT_DEDUPE_LEGACY_RECEIPT_SCHEMA_VERSION,
+            policy_version: receipt.policy_version.clone(),
+            target_db_identity: receipt.target_db_identity.clone(),
+            plan_digest: receipt.plan_digest.clone(),
+            applied_at: receipt.applied_at.clone(),
+            rows: receipt.rows.clone(),
+            applied_groups: receipt.applied_groups,
+            applied_losers: receipt.applied_losers,
+            receipt_digest: String::new(),
+        };
+        downgraded.receipt_digest = downgraded.compute_digest().unwrap();
+        let parsed = ExactDedupeRestoreReceipt::from_slice(
+            &serde_json::to_vec(&downgraded).expect("serialize downgraded receipt"),
+        )
+        .expect("syntactically valid legacy receipt");
+
+        let error = store
+            .restore_exact_dedupe_versioned(&parsed)
+            .expect_err("legacy receipt must not claim a v2 lineage row");
+        assert!(
+            error.to_string().contains("restore CAS failed"),
+            "unexpected refusal: {error}"
+        );
+        let (archived, lineage_rows): (bool, i64) = store
+            .conn
+            .query_row(
+                "SELECT archived,
+                        (SELECT count(*) FROM exact_dedupe_apply_lineage WHERE loser_id='loser')
+                 FROM memories WHERE id='loser'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(archived);
+        assert_eq!(lineage_rows, 1);
     }
 
     #[test]
@@ -1675,6 +1742,41 @@ mod tests {
     }
 
     #[test]
+    fn apply_lineage_preserves_non_object_metadata_and_remains_restorable() {
+        let (_dir, identity, mut store) = disk_store();
+        seed_winner_loser(&store);
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute("UPDATE memories SET metadata='[]' WHERE id='loser'", [])
+                .unwrap();
+        });
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+
+        let receipt = store.apply_exact_dedupe(&plan).unwrap().receipt;
+        let archived_metadata: String = store
+            .conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived_metadata, "[]");
+
+        store.restore_exact_dedupe(&receipt).unwrap();
+        let restored_metadata: String = store
+            .conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored_metadata, "[]");
+    }
+
+    #[test]
     fn successful_apply_soft_archives_and_followup_plan_is_empty() {
         let (_dir, identity, mut store) = disk_store();
         insert(&store, "winner", "/Wiki//child/", "same");
@@ -1915,20 +2017,15 @@ mod tests {
         assert_eq!(archived, 0);
         assert_eq!(superseded_by, None);
         assert!(store.get("loser").unwrap().is_some());
-        let lineage_marker: Option<String> = store
+        let lineage_rows: i64 = store
             .conn
             .query_row(
-                &format!(
-                    "SELECT json_extract(metadata, '{EXACT_DEDUPE_APPLY_ID_METADATA_PATH}') FROM memories WHERE id='loser'"
-                ),
+                "SELECT count(*) FROM exact_dedupe_apply_lineage WHERE loser_id='loser'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(
-            lineage_marker.is_none(),
-            "restore must remove the internal apply-lineage marker"
-        );
+        assert_eq!(lineage_rows, 0, "restore must consume apply lineage");
 
         // The receipt is now stale (loser is no longer archived at the
         // recorded revision): repeat restore is a hard refusal, not a
@@ -1953,16 +2050,41 @@ mod tests {
         let plan = store
             .plan_exact_dedupe(identity.clone(), None, None)
             .expect("build plan");
-        let receipt = store.apply_exact_dedupe(&plan).expect("apply plan").receipt;
+        let applied_at = Utc::now().to_rfc3339();
+        let loser = &plan.groups[0].losers[0];
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories
+                     SET archived=1,superseded_by=?1,valid_until=?2,
+                         updated_at=?2,revision=revision+1
+                     WHERE id=?3 AND revision=?4",
+                    params![
+                        plan.groups[0].winner.id,
+                        applied_at,
+                        loser.id,
+                        loser.revision
+                    ],
+                )
+                .unwrap();
+        });
         let mut legacy = ExactDedupeLegacyReceiptV1 {
             schema_version: EXACT_DEDUPE_LEGACY_RECEIPT_SCHEMA_VERSION,
-            policy_version: receipt.policy_version.clone(),
-            target_db_identity: receipt.target_db_identity.clone(),
-            plan_digest: receipt.plan_digest.clone(),
-            applied_at: receipt.applied_at.clone(),
-            rows: receipt.rows.clone(),
-            applied_groups: receipt.applied_groups,
-            applied_losers: receipt.applied_losers,
+            policy_version: EXACT_DEDUPE_POLICY.to_string(),
+            target_db_identity: identity.clone(),
+            plan_digest: plan.plan_digest.clone(),
+            applied_at,
+            rows: vec![ExactDedupeReceiptRow {
+                winner_id: plan.groups[0].winner.id.clone(),
+                loser_id: loser.id.clone(),
+                loser_path: loser.path.clone(),
+                loser_valid_until_before: None,
+                before_revision: loser.revision,
+                archived_revision: loser.revision + 1,
+            }],
+            applied_groups: 1,
+            applied_losers: 1,
             receipt_digest: String::new(),
         };
         legacy.receipt_digest = legacy.compute_digest().unwrap();

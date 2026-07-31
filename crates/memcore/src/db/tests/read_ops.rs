@@ -210,6 +210,36 @@ fn list_wiki_duplicate_candidates_pushes_path_topic_and_parent_filter_to_sql() {
 }
 
 #[test]
+fn guide_projection_candidates_are_scanned_without_crossing_into_wiki() {
+    let mut conn = make_conn();
+    let mut guide = make_entry("guide-same-path", "older guide body");
+    guide.path = "/guide/global/workflows/review".to_string();
+    guide.topic = "review".to_string();
+    guide.category = "guide".to_string();
+    upsert(&mut conn, &guide, false).unwrap();
+
+    let mut wiki = make_entry("wiki-same-topic", "same semantic body");
+    wiki.path = "/wiki/global/workflows/review".to_string();
+    wiki.topic = "review".to_string();
+    upsert(&mut conn, &wiki, false).unwrap();
+
+    let candidates = list_wiki_duplicate_candidates(
+        &conn,
+        "/guide/global/workflows/review",
+        "review",
+        "/guide/global/workflows",
+        None,
+    )
+    .unwrap();
+    let ids = candidates
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(ids.contains("guide-same-path"));
+    assert!(!ids.contains("wiki-same-topic"));
+}
+
+#[test]
 fn ordinary_wiki_projection_does_not_select_rem_or_draft_rows() {
     let mut conn = make_conn();
     let mut rem = make_entry("wiki-rem:reserved", "same topic rem draft");

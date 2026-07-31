@@ -18,7 +18,8 @@ pub(crate) use handler::{
 };
 #[cfg(test)]
 pub(crate) use handler::{
-    install_pre_upsert_barrier, install_pre_upsert_identity_barrier, install_pre_upsert_pause,
+    install_pre_upsert_barrier, install_pre_upsert_identity_barrier,
+    install_pre_upsert_path_barrier, install_pre_upsert_pause,
 };
 pub(crate) use remember::handle_remember;
 
