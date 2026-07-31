@@ -1239,6 +1239,37 @@ mod reserved_reference_tests {
     }
 
     #[test]
+    fn ordinary_store_writes_reject_canonical_wiki_log_path_aliases() {
+        let aliases = ["/wiki//_log", "/wiki//_log/spoof", "/Wiki/_log"];
+        for (index, alias) in aliases.into_iter().enumerate() {
+            let (_dir, mut store) = open_store();
+            let mut candidate = entry(&format!("ordinary-wiki-log-alias-{index}"), json!({}));
+            candidate.path = alias.to_string();
+
+            let upsert_error = store
+                .upsert(&candidate)
+                .expect_err("ordinary upsert must reject a normalized Wiki log path alias");
+            assert!(
+                upsert_error
+                    .to_string()
+                    .contains("Wiki operation-log identity is reserved"),
+                "unexpected upsert refusal for {alias}: {upsert_error}"
+            );
+
+            let insert_error = store
+                .insert_if_absent(&candidate)
+                .expect_err("insert-if-absent must reject a normalized Wiki log path alias");
+            assert!(
+                insert_error
+                    .to_string()
+                    .contains("Wiki operation-log identity is reserved"),
+                "unexpected insert refusal for {alias}: {insert_error}"
+            );
+            assert!(store.get(&candidate.id).unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn ordinary_store_upsert_cannot_replace_trusted_evidence_on_update() {
         let (_dir, mut store) = open_store();
         let clean = entry("hostile-update", json!({}));
@@ -2377,16 +2408,16 @@ fn insert_if_absent_with_reference_mutations_within_tx(
             "entry.id must be non-empty and outside the reserved 'anchor:' namespace".to_string(),
         ));
     }
+    let path = crate::path_router::normalize_path(&entry.path);
     if entry.id == "wiki-operation-log"
-        || entry.path == "/wiki/_log"
-        || entry.path.starts_with("/wiki/_log/")
+        || path == "/wiki/_log"
+        || path.starts_with("/wiki/_log/")
         || entry.topic.eq_ignore_ascii_case("wiki_log")
     {
         return Err(MemoryError::InvalidArg(
             "Wiki operation-log identity is reserved; use the trusted Wiki log seam".to_string(),
         ));
     }
-    let path = crate::path_router::normalize_path(&entry.path);
     let source = MemorySource::parse_or_external(&entry.source);
     let category = MemoryCategory::normalize(&entry.category);
     let scope = MemoryScope::normalize(&entry.scope);
@@ -2584,10 +2615,11 @@ fn upsert_prepared_within_tx(
             entry.id
         )));
     }
+    let path = crate::path_router::normalize_path(&entry.path);
     if !allow_wiki_operation_log
         && (entry.id == "wiki-operation-log"
-            || entry.path == "/wiki/_log"
-            || entry.path.starts_with("/wiki/_log/")
+            || path == "/wiki/_log"
+            || path.starts_with("/wiki/_log/")
             || entry.topic.eq_ignore_ascii_case("wiki_log"))
     {
         return Err(MemoryError::InvalidArg(
@@ -2596,7 +2628,6 @@ fn upsert_prepared_within_tx(
     }
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.
-    let path = crate::path_router::normalize_path(&entry.path);
     let source = MemorySource::parse_or_external(&entry.source);
     let category = MemoryCategory::normalize(&entry.category);
     let scope = MemoryScope::normalize(&entry.scope);

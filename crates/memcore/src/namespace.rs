@@ -45,6 +45,7 @@ pub const USER_FACING_WIKI_SQL_WHERE: &str = r#"
     path != '/wiki/_log'
     AND path NOT GLOB '/wiki/_log/*'
     AND lower(topic) != 'wiki_log'
+    AND lower(id) NOT GLOB 'wiki-rem:*'
     AND lower(id) != 'foundry_recall_rerank_cache'
     AND lower(id) NOT GLOB 'foundry:recall-cache:*'
     AND path NOT GLOB '*/recall-cache'
@@ -63,6 +64,7 @@ pub const USER_FACING_WIKI_SQL_WHERE_M: &str = r#"
     m.path != '/wiki/_log'
     AND m.path NOT GLOB '/wiki/_log/*'
     AND lower(m.topic) != 'wiki_log'
+    AND lower(m.id) NOT GLOB 'wiki-rem:*'
     AND lower(m.id) != 'foundry_recall_rerank_cache'
     AND lower(m.id) NOT GLOB 'foundry:recall-cache:*'
     AND m.path NOT GLOB '*/recall-cache'
@@ -149,7 +151,9 @@ pub fn is_wiki_log_entry(entry: &MemoryEntry) -> bool {
 }
 
 pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
-    !is_wiki_log_entry(entry) && !is_recall_cache_entry(entry)
+    !entry.id.to_ascii_lowercase().starts_with("wiki-rem:")
+        && !is_wiki_log_entry(entry)
+        && !is_recall_cache_entry(entry)
 }
 
 pub fn is_wiki_entry(entry: &MemoryEntry) -> bool {

@@ -489,8 +489,23 @@ async fn synthesize_and_save(
     topic: &str,
     members: &[&RemCandidate],
 ) -> Result<InsertMemoryResult, String> {
-    let draft = synthesize_wiki_draft(server, topic, members).await?;
-    save_wiki_draft(server, topic, members, draft.value, &draft.invocation)
+    let selected = selected_rem_synthesis_members(members);
+    if selected.is_empty() {
+        return Err("all cluster entries too short after noise scrubbing".to_string());
+    }
+    let draft = synthesize_wiki_draft(server, topic, &selected).await?;
+    save_wiki_draft(server, topic, &selected, draft.value, &draft.invocation)
+}
+
+fn selected_rem_synthesis_members<'a>(members: &[&'a RemCandidate]) -> Vec<&'a RemCandidate> {
+    members
+        .iter()
+        .take(MAX_ENTRIES_PER_CLUSTER)
+        .filter_map(|candidate| {
+            let text = scrub_agent_noise(&candidate.entry.text);
+            (text.trim().len() >= MIN_TEXT_LEN).then_some(*candidate)
+        })
+        .collect()
 }
 
 async fn synthesize_wiki_draft(
@@ -500,18 +515,14 @@ async fn synthesize_wiki_draft(
 ) -> Result<Generated<WikiDraft>, String> {
     let scrubbed = members
         .iter()
-        .take(MAX_ENTRIES_PER_CLUSTER)
-        .filter_map(|e| {
+        .map(|e| {
             let text = scrub_agent_noise(&e.entry.text);
-            if text.trim().len() < MIN_TEXT_LEN {
-                return None;
-            }
-            Some(json!({
+            json!({
                 "summary": e.entry.summary,
                 "text": text.chars().take(600).collect::<String>(),
                 "importance": e.entry.importance,
                 "keywords": e.entry.keywords,
-            }))
+            })
         })
         .collect::<Vec<_>>();
 
@@ -1060,16 +1071,49 @@ fn rem_source_revisions_are_current(
     Ok(true)
 }
 
+fn rem_source_markers_exist(
+    server: &MemoryServer,
+    runtime_stores: &RuntimeRemSourceStores,
+) -> Result<bool, String> {
+    if with_rem_global_store_read(server, &runtime_stores.global, |store| {
+        store
+            .has_rem_processed_source_markers()
+            .map_err(|error| format!("scan global REM source markers: {error}"))
+    })? {
+        return Ok(true);
+    }
+    if server.has_project_db() && runtime_stores.project.as_ref() != Some(&runtime_stores.global) {
+        let project_store = runtime_stores
+            .project
+            .as_ref()
+            .ok_or_else(|| "REM project source identity is unavailable".to_string())?;
+        if with_rem_project_store_read(server, project_store, |store| {
+            store
+                .has_rem_processed_source_markers()
+                .map_err(|error| format!("scan project REM source markers: {error}"))
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn recover_pending_rem_operations(server: &MemoryServer) -> Result<RemRecoveryReport, String> {
     let wiki_path = MemoryServer::resolve_existing_named_project_db_path_in_home(
         "wiki",
         &server.tachi_home_dir(),
     )
     .map_err(|error| format!("resolve REM Wiki operation store: {error}"))?;
+    let runtime_stores = runtime_rem_source_stores(server)?;
     if wiki_path.is_none() {
+        if rem_source_markers_exist(server, &runtime_stores)? {
+            return Err(
+                "REM Wiki operation store is unavailable but REM source markers exist; cannot establish the pending-operation ledger"
+                    .to_string(),
+            );
+        }
         return Ok(RemRecoveryReport::default());
     }
-    let runtime_stores = runtime_rem_source_stores(server)?;
     let mut report = RemRecoveryReport::default();
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
@@ -1546,6 +1590,61 @@ mod rem_identity_tests {
     }
 
     #[test]
+    fn recovery_allows_first_run_without_wiki_db_when_no_source_markers_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+
+        let recovery =
+            recover_pending_rem_operations(&server).expect("first run has no ledger to recover");
+        assert_eq!(recovery, RemRecoveryReport::default());
+    }
+
+    #[test]
+    fn recovery_fails_loudly_when_wiki_db_is_missing_after_source_marker_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&source_entry("orphaned-source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed source");
+        let revision = server
+            .with_global_store_read(|store| {
+                store
+                    .get("orphaned-source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "source missing".to_string())
+            })
+            .expect("read source revision");
+        server
+            .with_global_store(|store| {
+                store
+                    .mark_rem_processed_for_draft_at_revisions(
+                        &[("orphaned-source".to_string(), revision)],
+                        "2026-07-31T00:00:01Z",
+                        "wiki-rem:orphaned",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("simulate source marker committed before Wiki ledger was available");
+
+        let error = recover_pending_rem_operations(&server)
+            .expect_err("missing Wiki coordination DB must not report recovered/no work");
+        assert!(
+            error.contains("Wiki operation store is unavailable"),
+            "{error}"
+        );
+        assert!(error.contains("source markers"), "{error}");
+    }
+
+    #[test]
     fn wiki_completion_failure_compensates_source_markers_and_keeps_pending_operation() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -1995,6 +2094,101 @@ mod rem_identity_tests {
     }
 
     #[test]
+    fn stale_recovery_treats_older_completed_marker_as_no_pending_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let wiki_db = home.join("projects/wiki").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(wiki_db.parent().unwrap()).expect("create Wiki store directory");
+        drop(memcore::MemoryStore::open(wiki_db.to_str().unwrap()).expect("initialize Wiki store"));
+        let server = MemoryServer::new_with_home_for_test(home.join("global.db"), None, home)
+            .expect("open runtime server");
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&source_entry("source"))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed source");
+        let older_revision = server
+            .with_global_store_read(|store| {
+                store
+                    .get("source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "source missing".to_string())
+            })
+            .expect("read older revision");
+        server
+            .with_global_store(|store| {
+                store
+                    .mark_rem_processed_for_draft_at_revisions(
+                        &[("source".to_string(), older_revision)],
+                        "2026-07-31T00:00:01Z",
+                        "wiki-rem:older-complete",
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("mark older completed operation");
+        server
+            .with_global_store(|store| {
+                let mut source = store
+                    .get("source")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "source missing".to_string())?;
+                source.text = "source revision included by stale pending draft".to_string();
+                store.upsert(&source).map_err(|error| error.to_string())
+            })
+            .expect("advance source to pending draft revision");
+
+        let runtime = runtime_rem_source_stores(&server).expect("bind runtime source stores");
+        let pending_revision = server
+            .with_global_store_read(|store| {
+                store
+                    .get("source")
+                    .map_err(|error| error.to_string())?
+                    .map(|entry| entry.revision)
+                    .ok_or_else(|| "source missing".to_string())
+            })
+            .expect("read pending revision");
+        let sources = vec![RemSourceRef {
+            store: runtime.global,
+            id: "source".to_string(),
+            revision: pending_revision,
+        }];
+        let draft_id = stable_rem_draft_id(&sources);
+        persist_rem_draft_operation(&server, &occupied_entry(&draft_id, &sources), &sources)
+            .expect("persist pending REM operation");
+        server
+            .with_global_store(|store| {
+                let mut source = store
+                    .get("source")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "source missing".to_string())?;
+                source.text = "source changed again before stale recovery".to_string();
+                store.upsert(&source).map_err(|error| error.to_string())
+            })
+            .expect("make pending operation stale");
+
+        let recovery =
+            recover_pending_rem_operations(&server).expect("older marker must not wedge recovery");
+        assert_eq!(recovery.completed, 0);
+        assert_eq!(recovery.aborted_stale, 1);
+        let source = server
+            .with_global_store_read(|store| {
+                store
+                    .get("source")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "source missing".to_string())
+            })
+            .expect("read source after stale recovery");
+        assert_eq!(
+            source.metadata["rem"]["processed_by"],
+            "wiki-rem:older-complete"
+        );
+        assert_eq!(source.metadata["rem"]["processed_revision"], older_revision);
+    }
+
+    #[test]
     fn stale_recovery_keeps_operation_pending_when_marker_compensation_fails() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -2243,6 +2437,51 @@ mod rem_identity_tests {
         let (global, project) = route_rem_sources(&sources, &runtime_stores, "draft").unwrap();
         assert_eq!(global, vec![("source".to_string(), 1)]);
         assert!(project.is_empty());
+    }
+
+    #[test]
+    fn selected_synthesis_sources_match_prompt_members_after_cap_and_text_filtering() {
+        let store = test_store("global-db");
+        let mut candidates = Vec::new();
+        for idx in 0..(MAX_ENTRIES_PER_CLUSTER + 2) {
+            let mut entry = source_entry(&format!("long-{idx}"));
+            entry.revision = idx as i64 + 1;
+            entry.text = format!(
+                "long candidate {idx} contains enough substantive text to survive the REM wiki synthesis minimum length filter"
+            );
+            candidates.push(RemCandidate {
+                store: store.clone(),
+                entry,
+            });
+        }
+        let mut short = source_entry("short");
+        short.revision = 99;
+        short.text = "too short".to_string();
+        candidates.insert(
+            1,
+            RemCandidate {
+                store: store.clone(),
+                entry: short,
+            },
+        );
+        let member_refs = candidates.iter().collect::<Vec<_>>();
+
+        let selected = selected_rem_synthesis_members(&member_refs);
+        let selected_ids = selected
+            .iter()
+            .map(|candidate| candidate.entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected_ids,
+            vec!["long-0", "long-1", "long-2", "long-3", "long-4", "long-5", "long-6"],
+            "selection must apply MAX_ENTRIES_PER_CLUSTER before MIN_TEXT_LEN filtering"
+        );
+        let sources = normalized_rem_sources(&selected);
+        assert_eq!(sources.len(), selected.len());
+        assert!(sources.iter().all(|source| source.id.starts_with("long-")));
+        assert!(!sources.iter().any(|source| source.id == "short"));
+        assert!(!sources.iter().any(|source| source.id == "long-7"));
+        assert!(!sources.iter().any(|source| source.id == "long-8"));
     }
 
     #[test]

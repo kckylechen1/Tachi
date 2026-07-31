@@ -369,6 +369,22 @@ fn user_facing_wiki_predicate_matches_recall_cache_and_log_variants() {
 }
 
 #[test]
+fn user_facing_wiki_projection_excludes_rem_operations_even_with_lifecycle_all() {
+    let mut conn = make_conn();
+    let mut rem = make_entry("wiki-rem:internal-operation", "internal REM operation");
+    rem.path = "/wiki/drafts/internal-operation".to_string();
+    rem.topic = "draft-topic".to_string();
+    insert_if_absent(&mut conn, &rem, false).unwrap();
+
+    assert!(!crate::db::is_user_facing_wiki_entry(&rem));
+    let listed = list_user_facing_wiki_entries(&conn, "/wiki", 10, true).unwrap();
+    assert!(
+        listed.is_empty(),
+        "lifecycle=all must not expose reserved REM operation rows"
+    );
+}
+
+#[test]
 fn ordinary_draft_projection_can_update_non_rem_drafts_only() {
     let mut conn = make_conn();
     let mut rem = make_entry("wiki-rem:reserved", "reserved rem draft");

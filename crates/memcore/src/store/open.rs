@@ -462,6 +462,10 @@ impl MemoryStore {
             Some(busy_timeout) => db::open_read_write_with_busy_timeout(db_path, busy_timeout)?,
             None => db::open_read_write(db_path)?,
         };
+        let opened_physical_db_identity = validate_physical_db_identity_across_open(
+            db_path,
+            physical_identity_before_open.clone(),
+        )?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         let existing_application_schema = has_existing_application_schema(&conn)?;
@@ -491,7 +495,7 @@ impl MemoryStore {
         db::validate_persistent_trigger_inventory(&conn, true)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
             db_path,
-            physical_identity_before_open.clone(),
+            opened_physical_db_identity.clone(),
         )?;
         if physical_identity_before_open.is_none() {
             // A connection that created the path cannot prove which directory
@@ -621,6 +625,8 @@ impl MemoryStore {
         db::register_sqlite_vec();
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
         let conn = db::open_read_only(db_path)?;
+        let opened_physical_db_identity =
+            validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         if compat_operation.is_some() {
@@ -663,10 +669,7 @@ impl MemoryStore {
             vec_available,
             db_label: "unknown".to_string(),
             path_validation: false,
-            opened_physical_db_identity: validate_physical_db_identity_across_open(
-                db_path,
-                physical_identity_before_open,
-            )?,
+            opened_physical_db_identity,
         })
     }
 
@@ -681,6 +684,8 @@ impl MemoryStore {
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
         let conn =
             Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let opened_physical_db_identity =
+            validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
@@ -718,10 +723,7 @@ impl MemoryStore {
             vec_available,
             db_label: "unknown".to_string(),
             path_validation: false,
-            opened_physical_db_identity: validate_physical_db_identity_across_open(
-                db_path,
-                physical_identity_before_open,
-            )?,
+            opened_physical_db_identity,
         })
     }
 

@@ -1,11 +1,47 @@
 use crate::daemon_lock::{DualDaemonLock, DualLockError};
 use crate::db_ownership::{daemon_ownership, DbOwnership};
 use crate::manifest::{DbRole, Manifest, MANIFEST_SCHEMA_VERSION};
-use memcore::store::exact_dedupe::{ExactDedupePlan, ExactDedupeReceipt};
+use memcore::store::exact_dedupe::{ExactDedupePlan, ExactDedupeRestoreReceipt};
 use memcore::MemoryStore;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+fn sync_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
+    let parent = receipt_out
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+fn persist_receipt_before_commit(
+    receipt_out: &Path,
+    result: &memcore::store::exact_dedupe::ExactDedupeApplyResult,
+) -> Result<(), memcore::MemoryError> {
+    let mut receipt_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(receipt_out)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                return memcore::MemoryError::InvalidArg(format!(
+                    "exact-dedupe receipt output already exists: {}",
+                    receipt_out.display()
+                ));
+            }
+            memcore::MemoryError::InvalidArg(format!(
+                "exact-dedupe receipt output could not be created durably before commit at {}: {error}",
+                receipt_out.display()
+            ))
+        })?;
+    let receipt_json = serde_json::to_string_pretty(&result.receipt)?;
+    receipt_file.write_all(receipt_json.as_bytes())?;
+    receipt_file.write_all(b"\n")?;
+    receipt_file.sync_all()?;
+    sync_receipt_parent(receipt_out)?;
+    Ok(())
+}
 
 fn run_physical_identity_checked_exact_dedupe<T>(
     store: &mut MemoryStore,
@@ -165,45 +201,25 @@ pub fn apply(
             .into())
         }
     }
-    let mut receipt_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(receipt_out)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                return format!(
-                    "exact-dedupe receipt output already exists: {}",
-                    receipt_out.display()
-                );
-            }
-            format!(
-                "exact-dedupe receipt output could not be reserved before mutation at {}: {error}",
-                receipt_out.display()
-            )
-        })?;
+    if std::fs::symlink_metadata(receipt_out).is_ok() {
+        return Err(format!(
+            "exact-dedupe receipt output already exists: {}",
+            receipt_out.display()
+        )
+        .into());
+    }
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
     let (result, post_identity_error) =
         run_physical_identity_checked_exact_dedupe(&mut store, &target, "apply", |store| {
-            store.apply_exact_dedupe(&plan)
+            store.apply_exact_dedupe_with_precommit_receipt(&plan, |result| {
+                persist_receipt_before_commit(receipt_out, result)
+            })
         })?;
-    let receipt_json = serde_json::to_string_pretty(&result.receipt)?;
-    if let Err(error) = receipt_file
-        .write_all(receipt_json.as_bytes())
-        .and_then(|()| receipt_file.write_all(b"\n"))
-        .and_then(|()| receipt_file.sync_all())
-    {
-        eprintln!(
-            "CRITICAL: exact-dedupe apply committed {} archived loser(s) but the receipt could not be fully written and synced to {}: {error}\nReceipt JSON (save for a manual `repair dedupe restore`):\n{receipt_json}",
-            result.applied_losers,
-            receipt_out.display(),
-        );
-        return Err(format!("exact-dedupe receipt write failed after commit: {error}").into());
-    }
     if let Some(identity_error) = post_identity_error {
         eprintln!(
-            "CRITICAL: exact-dedupe apply committed {} archived loser(s) to a database handle whose target path identity changed; the detached-store receipt was written to {}: {identity_error}",
-            result.applied_losers,
+            "CRITICAL: exact-dedupe apply wrote and synced the receipt at {} before commit, then committed {} archived loser(s) to a database handle whose target path identity changed: {identity_error}",
             receipt_out.display(),
+            result.applied_losers,
         );
         return Err(identity_error.into());
     }
@@ -221,9 +237,9 @@ pub fn restore(
         return Err("exact-dedupe restore requires --yes".into());
     }
     let (target, daemon_scope) = target_and_daemon_scope("exact-dedupe", db, app_home, true)?;
-    let receipt: ExactDedupeReceipt = serde_json::from_slice(&std::fs::read(receipt_path)?)?;
+    let receipt = ExactDedupeRestoreReceipt::from_slice(&std::fs::read(receipt_path)?)?;
     receipt.validate()?;
-    if std::fs::canonicalize(&receipt.target_db_identity)? != target {
+    if std::fs::canonicalize(receipt.target_db_identity())? != target {
         return Err("exact-dedupe receipt target DB mismatch".into());
     }
     let _lock = match DualDaemonLock::acquire(app_home, &daemon_scope) {
@@ -257,7 +273,7 @@ pub fn restore(
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
     let (result, post_identity_error) =
         run_physical_identity_checked_exact_dedupe(&mut store, &target, "restore", |store| {
-            store.restore_exact_dedupe(&receipt)
+            store.restore_exact_dedupe_versioned(&receipt)
         })?;
     if let Some(identity_error) = post_identity_error {
         eprintln!(
@@ -822,7 +838,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn apply_refuses_missing_receipt_parent_before_mutation() {
+    fn apply_refuses_missing_receipt_parent_without_committing_mutation() {
         let (dir, app_home, db_path, plan_path, _receipt_path) = fixture();
         let receipt_path = dir.path().join("missing-parent").join("receipt.json");
         set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
@@ -838,7 +854,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("could not be reserved before mutation"),
+                .contains("could not be created durably before commit"),
             "unexpected refusal: {error}"
         );
         let archived: i64 = rusqlite::Connection::open(&db_path)
@@ -847,6 +863,71 @@ mod tests {
             .unwrap();
         assert_eq!(archived, 0);
         assert!(!receipt_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_leaves_no_receipt_on_precommit_core_failure() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        let mut store = MemoryStore::open_existing_read_write(&db_path.to_string_lossy()).unwrap();
+        store
+            .insert_if_absent(&memcore::MemoryEntry {
+                id: "drifter".into(),
+                path: "/same".into(),
+                summary: String::new(),
+                text: "duplicate".into(),
+                importance: 0.7,
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                valid_from: String::new(),
+                valid_until: None,
+                category: "fact".into(),
+                topic: String::new(),
+                keywords: Vec::new(),
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                source: "test".into(),
+                scope: "general".into(),
+                archived: false,
+                access_count: 0,
+                scored_count: 0,
+                last_access: None,
+                last_use_at: None,
+                revision: 1,
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                metadata: serde_json::json!({}),
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".into(),
+            })
+            .unwrap();
+        drop(store);
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("group membership drifted"),
+            "unexpected refusal: {error}"
+        );
+        assert!(
+            !receipt_path.exists(),
+            "precommit core failure must not create the final receipt"
+        );
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
     }
 
     #[test]

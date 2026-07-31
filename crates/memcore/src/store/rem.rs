@@ -192,6 +192,26 @@ impl MemoryStore {
         self.mark_rem_processed_sources(&sources, processed_at, Some(draft_id))
     }
 
+    /// True when this source store contains a REM marker that names a draft
+    /// operation. Recovery uses this to distinguish legitimate first-run
+    /// initialization from a missing coordination ledger after source markers
+    /// may already have committed.
+    pub fn has_rem_processed_source_markers(&self) -> Result<bool, MemoryError> {
+        let found = self.conn.query_row(
+            r#"SELECT EXISTS(
+                 SELECT 1
+                 FROM memories
+                 WHERE json_valid(metadata)
+                   AND json_extract(metadata, '$.rem.processed') = 1
+                   AND json_extract(metadata, '$.rem.processed_by') LIKE 'wiki-rem:%'
+                 LIMIT 1
+               )"#,
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(found != 0)
+    }
+
     fn mark_rem_processed_sources(
         &mut self,
         sources: &[(String, Option<i64>)],
@@ -354,9 +374,12 @@ impl MemoryStore {
                 if processed == 0 {
                     continue;
                 }
-                if processed_by.as_deref() != Some(draft_id)
-                    || processed_revision != Some(*expected_revision)
-                {
+                let same_draft = processed_by.as_deref() == Some(draft_id);
+                let same_revision = processed_revision == Some(*expected_revision);
+                if !same_draft && !same_revision && processed_revision.is_some() {
+                    continue;
+                }
+                if !same_draft || !same_revision {
                     return Err(MemoryError::InvalidArg(format!(
                         "REM marker compensation ownership changed: {id}"
                     )));
@@ -959,6 +982,115 @@ mod tests {
                 .metadata["rem"]["processed"],
             1
         );
+    }
+
+    #[test]
+    fn rem_marker_compensation_ignores_unrelated_older_completed_marker() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let first_revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), first_revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:older-complete",
+            )
+            .expect("mark older completed operation");
+
+        let mut changed = store
+            .get("source")
+            .expect("read older marked source")
+            .expect("source exists");
+        changed.text = "source changed after older REM completion".to_string();
+        store.upsert(&changed).expect("advance source revision");
+        let second_revision = store
+            .get("source")
+            .expect("read advanced source")
+            .expect("source exists")
+            .revision;
+        assert_ne!(second_revision, first_revision);
+
+        store
+            .rollback_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), second_revision)],
+                "wiki-rem:stale-pending",
+            )
+            .expect("older completed marker is not owned by the stale pending draft");
+        let source = store
+            .get("source")
+            .expect("read compensated source")
+            .expect("source exists");
+        assert_eq!(
+            source.metadata["rem"]["processed_by"],
+            "wiki-rem:older-complete"
+        );
+        assert_eq!(source.metadata["rem"]["processed_revision"], first_revision);
+    }
+
+    #[test]
+    fn rem_marker_compensation_rejects_foreign_marker_on_the_pending_revision() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:foreign",
+            )
+            .expect("mark foreign operation on same revision");
+
+        let error = store
+            .rollback_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), revision)],
+                "wiki-rem:stale-pending",
+            )
+            .expect_err("same-revision foreign marker is dangerous ownership drift");
+        assert!(error.to_string().contains("ownership changed"));
+        let source = store
+            .get("source")
+            .expect("read uncompensated source")
+            .expect("source exists");
+        assert_eq!(source.metadata["rem"]["processed_by"], "wiki-rem:foreign");
+    }
+
+    #[test]
+    fn detects_rem_source_markers_for_missing_coordination_ledger_recovery() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("plain", "pattern", json!({})))
+            .expect("seed plain source");
+        assert!(!store
+            .has_rem_processed_source_markers()
+            .expect("scan empty markers"));
+
+        let revision = store
+            .get("plain")
+            .expect("read plain source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("plain".to_string(), revision)],
+                "2026-07-31T00:00:01Z",
+                "wiki-rem:pending",
+            )
+            .expect("mark source");
+        assert!(store
+            .has_rem_processed_source_markers()
+            .expect("scan committed marker"));
     }
 
     #[test]
