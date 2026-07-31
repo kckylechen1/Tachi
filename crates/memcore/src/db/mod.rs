@@ -112,7 +112,7 @@ pub(crate) use memory_crud::AccessUpdate;
 pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
 pub use memory_crud::{
     access_event_density, archive_memory, archive_memory_if_revision, delete,
-    delete_memories_symbolic_fts, fetch_by_ids, find_active_wiki_entry_by_path_or_topic,
+    delete_memories_symbolic_fts, fetch_by_ids, find_active_wiki_entry_by_path,
     find_exact_path_text_id, get_access_times, get_all, get_use_access_times, list_by_path,
     list_by_path_recent, list_wiki_duplicate_candidates, normalize_for_write,
     record_enrichment_failure, record_memory_use, release_event_claim,
@@ -135,7 +135,8 @@ pub(crate) use memory_crud::{
 /// body (main row + FTS + vectors + idless semantics) inside a caller-owned
 /// `BEGIN IMMEDIATE` transaction. See `memory_crud::upsert_within_tx`.
 pub(crate) use memory_crud::{
-    insert_if_absent, insert_if_absent_within_tx, upsert, upsert_idless, upsert_within_tx,
+    insert_if_absent, insert_if_absent_within_tx, insert_rem_operation_if_absent_within_tx, upsert,
+    upsert_idless, upsert_within_tx,
 };
 /// Public: see `open::ensure_reserved_reference_write_guard`'s doc comment.
 pub use open::ensure_reserved_reference_write_guard;

@@ -101,7 +101,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         }
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        db::insert_if_absent_within_tx(&self.tx, entry, self.vec_available)
+        db::insert_rem_operation_if_absent_within_tx(&self.tx, entry, self.vec_available)
     }
 
     /// Read a memory from the same transaction, including archived rows.
@@ -222,14 +222,13 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         db::list_wiki_duplicate_candidates(&self.tx, path, topic, parent_path, None)
     }
 
-    /// Read the active Wiki/Guide winner for a path/topic pair from this
+    /// Read the active Wiki/Guide winner for an exact path from this
     /// transaction's writer snapshot.
-    pub fn find_active_wiki_entry_by_path_or_topic(
+    pub fn find_active_wiki_entry_by_path(
         &self,
         path: &str,
-        topic: &str,
     ) -> Result<Option<MemoryEntry>, MemoryError> {
-        db::find_active_wiki_entry_by_path_or_topic(&self.tx, path, topic)
+        db::find_active_wiki_entry_by_path(&self.tx, path)
     }
 
     /// Archive a source after its supersession claim has succeeded.

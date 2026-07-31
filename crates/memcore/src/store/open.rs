@@ -5,6 +5,22 @@ use std::time::Duration;
 
 use crate::{db, db::DbOpenContext, error::MemoryError, path_router, MemoryEntry, MemoryStore};
 
+fn physical_db_identity_at_open(db_path: &str) -> Option<String> {
+    let path = std::path::Path::new(db_path);
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.dev() != 0 || metadata.ino() != 0 {
+            return Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()));
+        }
+    }
+    Some(format!(
+        "path:{}",
+        std::fs::canonicalize(path).ok()?.display()
+    ))
+}
+
 /// Dry-run operation whose read schema must be proven before a compatibility
 /// handle is returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,6 +458,7 @@ impl MemoryStore {
             vec_available,
             db_label: db_label.to_string(),
             path_validation,
+            opened_physical_db_identity: physical_db_identity_at_open(db_path),
         })
     }
 
@@ -534,6 +551,7 @@ impl MemoryStore {
             vec_available,
             db_label: "unknown".to_string(),
             path_validation: false,
+            opened_physical_db_identity: physical_db_identity_at_open(db_path),
         })
     }
 
@@ -584,6 +602,7 @@ impl MemoryStore {
             vec_available,
             db_label: "unknown".to_string(),
             path_validation: false,
+            opened_physical_db_identity: physical_db_identity_at_open(db_path),
         })
     }
 
@@ -612,7 +631,12 @@ impl MemoryStore {
             vec_available,
             db_label: "unknown".to_string(),
             path_validation: false,
+            opened_physical_db_identity: None,
         })
+    }
+
+    pub fn opened_physical_db_identity(&self) -> Option<&str> {
+        self.opened_physical_db_identity.as_deref()
     }
 
     fn validate_write_path(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {

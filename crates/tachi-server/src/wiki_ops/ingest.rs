@@ -383,7 +383,7 @@ fn persist_wiki_ingest_entry(
     store
         .with_immutable_supersession_transaction(|replacement| {
             let old_entry = replacement
-                .find_active_wiki_entry_by_path_or_topic(&entry.path, &entry.topic)?
+                .find_active_wiki_entry_by_path(&entry.path)?
                 .filter(|existing| existing.id != entry.id);
             let trusted_existing_receipt = old_entry
                 .as_ref()

@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::{find_active_wiki_entry_by_path_or_topic, insert_if_absent};
+use crate::db::{find_active_wiki_entry_by_path, insert_if_absent};
 
 #[test]
 fn fetch_by_ids_returns_entries() {
@@ -183,13 +183,11 @@ fn ordinary_wiki_projection_does_not_select_rem_or_draft_rows() {
     ordinary_draft.topic = "shared-topic".to_string();
     upsert(&mut conn, &ordinary_draft, false).unwrap();
 
-    assert!(find_active_wiki_entry_by_path_or_topic(
-        &conn,
-        "/wiki/general/shared-topic",
-        "shared-topic"
-    )
-    .unwrap()
-    .is_none());
+    assert!(
+        find_active_wiki_entry_by_path(&conn, "/wiki/general/shared-topic")
+            .unwrap()
+            .is_none()
+    );
     assert!(list_wiki_duplicate_candidates(
         &conn,
         "/wiki/general/shared-topic",
@@ -213,10 +211,9 @@ fn ordinary_draft_projection_can_update_non_rem_drafts_only() {
     ordinary.topic = "draft-topic".to_string();
     upsert(&mut conn, &ordinary, false).unwrap();
 
-    let winner =
-        find_active_wiki_entry_by_path_or_topic(&conn, "/wiki/drafts/new-path", "draft-topic")
-            .unwrap()
-            .expect("ordinary draft winner");
+    let winner = find_active_wiki_entry_by_path(&conn, "/wiki/drafts/ordinary")
+        .unwrap()
+        .expect("ordinary draft winner");
     assert_eq!(winner.id, "ordinary-draft");
 }
 

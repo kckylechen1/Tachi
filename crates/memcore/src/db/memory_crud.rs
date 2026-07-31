@@ -23,8 +23,8 @@ pub use access::{
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{
-    fetch_by_ids, find_active_wiki_entry_by_path_or_topic, find_exact_path_text_id, get_all,
-    list_by_path, list_by_path_recent, list_wiki_duplicate_candidates,
+    fetch_by_ids, find_active_wiki_entry_by_path, find_exact_path_text_id, get_all, list_by_path,
+    list_by_path_recent, list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
@@ -753,7 +753,7 @@ pub(crate) fn upsert(
 const RESERVED_REFERENCE_KEYS: [&str; 2] = ["evidence_refs_v1", "source_refs"];
 const RESERVED_REM_KEY: &str = "rem";
 
-fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
+fn strip_untrusted_reference_metadata(metadata: &Value) -> Value {
     let Some(mut object) = metadata.as_object().cloned() else {
         return metadata.clone();
     };
@@ -761,6 +761,14 @@ fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
         object.remove(key);
     }
     Value::Object(object)
+}
+
+fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
+    let mut sanitized = strip_untrusted_reference_metadata(metadata);
+    if let Some(object) = sanitized.as_object_mut() {
+        object.remove(RESERVED_REM_KEY);
+    }
+    sanitized
 }
 
 fn read_existing_metadata(
@@ -784,12 +792,9 @@ fn merge_ordinary_reserved_metadata(
     incoming: &Value,
 ) -> Result<Value, MemoryError> {
     let mut sanitized = strip_untrusted_reserved_metadata(incoming);
-    if let Some(object) = sanitized.as_object_mut() {
-        // REM state is written only by the dedicated insert-once operation and
-        // source-marker seams. Ordinary upsert may preserve an existing value
-        // below, but it may never mint or replace one from its input payload.
-        object.remove(RESERVED_REM_KEY);
-    }
+    // REM state is written only by the dedicated insert-once operation and
+    // source-marker seams. Ordinary upsert may preserve an existing value
+    // below, but it may never mint or replace one from its input payload.
     let Some(existing) = read_existing_metadata(tx, entry_id)? else {
         return Ok(sanitized);
     };
@@ -919,6 +924,7 @@ impl crate::MemoryStore {
                     vec_available,
                     Some(metadata_patch),
                     mutations,
+                    false,
                 )
             },
         )
@@ -1181,7 +1187,12 @@ mod reserved_reference_tests {
                     "ref": "#999",
                     "captured_at": "2026-07-25T00:00:00Z"
                 }],
-                "source_refs": ["#998"]
+                "source_refs": ["#998"],
+                "rem": {
+                    "processed": 1,
+                    "processed_revision": 1,
+                    "processed_by": "wiki-rem:forged"
+                }
             }),
         );
         store.upsert(&hostile).expect("ordinary hostile update");
@@ -1190,6 +1201,7 @@ mod reserved_reference_tests {
         assert_eq!(refs(&stored), vec!["#100"]);
         assert_eq!(stored.metadata["kept"], json!(true));
         assert!(stored.metadata.get("source_refs").is_none());
+        assert!(stored.metadata.get("rem").is_none());
     }
 
     #[test]
@@ -1645,7 +1657,12 @@ mod reserved_reference_tests {
                     "ref": "#999",
                     "captured_at": "2026-07-25T00:00:00Z"
                 }],
-                "source_refs": ["#998"]
+                "source_refs": ["#998"],
+                "rem": {
+                    "processed": 1,
+                    "processed_revision": 1,
+                    "processed_by": "wiki-rem:forged"
+                }
             }),
         );
         assert_eq!(
@@ -1656,6 +1673,7 @@ mod reserved_reference_tests {
         assert_eq!(stored.metadata["kept"], json!(true));
         assert!(stored.metadata.get("evidence_refs_v1").is_none());
         assert!(stored.metadata.get("source_refs").is_none());
+        assert!(stored.metadata.get("rem").is_none());
     }
 
     #[test]
@@ -2233,7 +2251,7 @@ pub(crate) fn insert_if_absent(
     entry: &MemoryEntry,
     vec_available: bool,
 ) -> Result<InsertMemoryResult, MemoryError> {
-    insert_if_absent_with_reference_mutations(conn, entry, vec_available, None, &[])
+    insert_if_absent_with_reference_mutations(conn, entry, vec_available, None, &[], false)
 }
 
 fn insert_if_absent_with_reference_mutations(
@@ -2242,6 +2260,7 @@ fn insert_if_absent_with_reference_mutations(
     vec_available: bool,
     metadata_patch: Option<&Map<String, Value>>,
     mutations: &[ValidatedReferenceMutation],
+    allow_reserved_rem: bool,
 ) -> Result<InsertMemoryResult, MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let result = insert_if_absent_with_reference_mutations_within_tx(
@@ -2250,6 +2269,7 @@ fn insert_if_absent_with_reference_mutations(
         vec_available,
         metadata_patch,
         mutations,
+        allow_reserved_rem,
     )?;
     tx.commit()?;
     Ok(result)
@@ -2262,7 +2282,15 @@ pub(crate) fn insert_if_absent_within_tx(
     entry: &MemoryEntry,
     vec_available: bool,
 ) -> Result<InsertMemoryResult, MemoryError> {
-    insert_if_absent_with_reference_mutations_within_tx(tx, entry, vec_available, None, &[])
+    insert_if_absent_with_reference_mutations_within_tx(tx, entry, vec_available, None, &[], false)
+}
+
+pub(crate) fn insert_rem_operation_if_absent_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+) -> Result<InsertMemoryResult, MemoryError> {
+    insert_if_absent_with_reference_mutations_within_tx(tx, entry, vec_available, None, &[], true)
 }
 
 fn insert_if_absent_with_reference_mutations_within_tx(
@@ -2271,6 +2299,7 @@ fn insert_if_absent_with_reference_mutations_within_tx(
     vec_available: bool,
     metadata_patch: Option<&Map<String, Value>>,
     mutations: &[ValidatedReferenceMutation],
+    allow_reserved_rem: bool,
 ) -> Result<InsertMemoryResult, MemoryError> {
     if entry.id.trim().is_empty() || entry.id.starts_with("anchor:") {
         return Err(MemoryError::InvalidArg(
@@ -2315,6 +2344,7 @@ fn insert_if_absent_with_reference_mutations_within_tx(
         Some(metadata_patch) => {
             merge_validated_reference_metadata(tx, &entry.id, metadata_patch, &[], mutations)?
         }
+        None if allow_reserved_rem => strip_untrusted_reference_metadata(&entry.metadata),
         None => strip_untrusted_reserved_metadata(&entry.metadata),
     };
     let path = crate::types::apply_location_relocation(&path, &entry.location, &mut metadata);

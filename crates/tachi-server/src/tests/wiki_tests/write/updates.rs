@@ -427,6 +427,54 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
 }
 
 #[tokio::test]
+async fn tachi_wiki_write_does_not_relocate_a_same_topic_cross_parent_row() {
+    let mut ops = make_entry("ops-mcp");
+    ops.path = "/wiki/ops/mcp".to_string();
+    ops.topic = "mcp".to_string();
+    ops.text = "Operations-specific MCP deployment guidance.".to_string();
+    ops.metadata = json!({"wiki": true});
+    ops.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![ops.clone()]);
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "MCP Engineering Contract".to_string(),
+            text: "Engineering-specific MCP protocol and schema guidance.".to_string(),
+            path: Some("/wiki/engineering/mcp".to_string()),
+            topic: Some("mcp".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["mcp".to_string()],
+            entities: vec!["MCP".to_string()],
+            importance: 0.8,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("write cross-parent same-topic Wiki row");
+    let response: Value = serde_json::from_str(&response).expect("wiki response JSON");
+
+    assert_ne!(response["id"], ops.id);
+    assert_eq!(response["wiki_write_mode"], "created");
+    let preserved = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(&ops.id).map_err(|error| error.to_string())
+        })
+        .expect("read original row")
+        .expect("original row remains");
+    assert_eq!(preserved.path, "/wiki/ops/mcp");
+    assert_eq!(preserved.text, ops.text);
+}
+
+#[tokio::test]
 async fn tachi_wiki_write_supersedes_duplicate_topic_rows() {
     let mut canonical = make_entry("canonical-trendlock-row");
     canonical.path = "/wiki/agent/tachi/trendlock".to_string();

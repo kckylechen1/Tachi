@@ -403,7 +403,7 @@ impl MemoryStore {
         } else {
             "0"
         };
-        let mut sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE archived=0 AND superseded_by IS NULL");
+        let mut sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE archived=0 AND superseded_by IS NULL AND id NOT LIKE 'wiki-rem:%'");
         sql.push_str(" ORDER BY path,text,id");
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt
@@ -492,8 +492,8 @@ impl MemoryStore {
         } else {
             "0"
         };
-        let candidate_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE id=?1");
-        let live_group_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE text=?1 AND archived=0 AND superseded_by IS NULL");
+        let candidate_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE id=?1 AND id NOT LIKE 'wiki-rem:%'");
+        let live_group_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE text=?1 AND archived=0 AND superseded_by IS NULL AND id NOT LIKE 'wiki-rem:%'");
         for g in &plan.groups {
             let winner = tx
                 .query_row(&candidate_sql, [&g.winner.id], candidate_from_row)
@@ -553,7 +553,7 @@ impl MemoryStore {
                     [&f.id],
                     |r| r.get(0),
                 )?;
-                let changed=tx.execute("UPDATE memories SET archived=1,superseded_by=?1,valid_until=COALESCE(valid_until,?2),updated_at=?2,revision=revision+1 WHERE id=?3 AND revision=?4 AND archived=0 AND superseded_by IS NULL AND path=?5",params![g.winner.id,now,f.id,f.revision,f.path])?;
+                let changed=tx.execute("UPDATE memories SET archived=1,superseded_by=?1,valid_until=COALESCE(valid_until,?2),updated_at=?2,revision=revision+1 WHERE id=?3 AND revision=?4 AND archived=0 AND superseded_by IS NULL AND path=?5 AND id NOT LIKE 'wiki-rem:%'",params![g.winner.id,now,f.id,f.revision,f.path])?;
                 if changed != 1 {
                     return Err(MemoryError::InvalidArg(format!(
                         "exact-dedupe CAS failed: {}",
@@ -776,6 +776,51 @@ mod tests {
         assert_eq!(literal.groups[0].normalized_path, "/wiki/%_literal");
         assert_eq!(literal.groups[0].winner.path, "/wiki/%_literal");
         assert_eq!(literal.groups[0].losers[0].path, "/Wiki//%_literal/");
+    }
+
+    #[test]
+    fn exact_dedupe_never_plans_or_mutates_a_rem_operation_row() {
+        let (_dir, identity, mut store) = disk_store();
+        insert(
+            &store,
+            "wiki-rem:protected",
+            "/wiki/drafts/protected",
+            "same draft text",
+        );
+        insert(
+            &store,
+            "ordinary-a",
+            "/wiki/drafts/protected",
+            "same draft text",
+        );
+        insert(
+            &store,
+            "ordinary-b",
+            "/wiki/drafts/protected",
+            "same draft text",
+        );
+
+        let plan = store
+            .plan_exact_dedupe(identity, None, Some("/wiki/drafts"))
+            .unwrap();
+        assert_eq!(plan.groups.len(), 1);
+        assert!(plan.groups[0]
+            .ranked_candidates
+            .iter()
+            .all(|candidate| !candidate.row.id.starts_with("wiki-rem:")));
+        store.apply_exact_dedupe(&plan).unwrap();
+
+        let protected = store.get("wiki-rem:protected").unwrap().unwrap();
+        assert!(!protected.archived);
+        let superseded_by: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id = 'wiki-rem:protected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(superseded_by.is_none());
     }
 
     #[test]

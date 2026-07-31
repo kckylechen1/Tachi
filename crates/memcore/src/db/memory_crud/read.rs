@@ -315,15 +315,13 @@ pub fn list_wiki_duplicate_candidates(
     Ok(out)
 }
 
-/// Find the canonical active Wiki or Guide row for a path/topic pair.
+/// Find the canonical active Wiki or Guide row for one exact path.
 ///
-/// Exact paths may address either corpus. Topic fallback is confined to the
-/// candidate path's corpus so a Guide write cannot rewrite a Wiki row (or the
-/// reverse) merely because they describe the same subject.
-pub fn find_active_wiki_entry_by_path_or_topic(
+/// Topic similarity is duplicate evidence, not row identity. It is handled by
+/// the projection classifier after this exact update target has been chosen.
+pub fn find_active_wiki_entry_by_path(
     conn: &Connection,
     path: &str,
-    topic: &str,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
     let sql = format!(
         r#"SELECT {MEMORY_SELECT_COLUMNS}
@@ -331,30 +329,12 @@ pub fn find_active_wiki_entry_by_path_or_topic(
            WHERE archived = 0
              AND superseded_by IS NULL
              AND id NOT LIKE 'wiki-rem:%'
-             AND (
-                 path = ?1
-                 OR (
-                     topic = ?2
-                     AND (
-                         ((?1 = '/wiki' OR ?1 LIKE '/wiki/%')
-                          AND (
-                              ((?1 = '/wiki/drafts' OR ?1 LIKE '/wiki/drafts/%')
-                               AND (path = '/wiki/drafts' OR path LIKE '/wiki/drafts/%'))
-                              OR ((?1 != '/wiki/drafts' AND ?1 NOT LIKE '/wiki/drafts/%')
-                                  AND (path = '/wiki' OR path LIKE '/wiki/%')
-                                  AND path != '/wiki/drafts'
-                                  AND path NOT LIKE '/wiki/drafts/%')
-                          ))
-                         OR ((?1 = '/guide' OR ?1 LIKE '/guide/%')
-                             AND (path = '/guide' OR path LIKE '/guide/%'))
-                     )
-                 )
-             )
-           ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END, timestamp DESC
+             AND path = ?1
+           ORDER BY timestamp DESC
            LIMIT 1"#
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query_map(params![path, topic], row_to_entry)?;
+    let mut rows = stmt.query_map(params![path], row_to_entry)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
         None => Ok(None),

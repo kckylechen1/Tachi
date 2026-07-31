@@ -236,6 +236,10 @@ pub struct MemoryStore {
     /// Whether path validation is enforced for this store. Disabled when
     /// db_label is unknown to avoid breaking unlabeled callers.
     pub(crate) path_validation: bool,
+    /// Physical identity captured immediately after this connection opened.
+    /// Long-lived runtimes use it to fail closed if the path is later replaced
+    /// while SQLite still holds the original file descriptor.
+    pub(crate) opened_physical_db_identity: Option<String>,
 }
 
 #[cfg(test)]

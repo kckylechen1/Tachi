@@ -109,7 +109,7 @@ async fn handle_tachi_wiki_write_inner(
     }
 
     let existing = with_existing_wiki_store(server, &project_name, use_named_project, |store| {
-        find_wiki_entry_by_path_or_topic(store, &path, &topic)
+        find_wiki_entry_by_path(store, &path)
     })?;
     if let Some(existing) = &existing {
         if let Some(obj) = wiki_metadata.as_object_mut() {

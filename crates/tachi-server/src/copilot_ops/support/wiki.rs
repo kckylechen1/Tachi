@@ -100,12 +100,11 @@ pub(in crate::copilot_ops) fn wiki_text_jaccard_sets(
     }
 }
 
-pub(in crate::copilot_ops) fn find_wiki_entry_by_path_or_topic(
+pub(in crate::copilot_ops) fn find_wiki_entry_by_path(
     store: &mut MemoryStore,
     path: &str,
-    topic: &str,
 ) -> Result<Option<MemoryEntry>, String> {
-    memcore::db::find_active_wiki_entry_by_path_or_topic(store.connection(), path, topic)
+    memcore::db::find_active_wiki_entry_by_path(store.connection(), path)
         .map_err(|e| format!("wiki existing lookup: {e}"))
 }
 

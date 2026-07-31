@@ -193,8 +193,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
         let (result, metadata, duplicates_superseded) = store
             .with_immutable_supersession_transaction(|projection| {
                 if idless_identity.is_none() {
-                    let active = projection
-                        .find_active_wiki_entry_by_path_or_topic(&entry.path, &entry.topic)?;
+                    let active = projection.find_active_wiki_entry_by_path(&entry.path)?;
                     if active.as_ref().map(|winner| winner.id.as_str()) != Some(entry.id.as_str()) {
                         return Err(memcore::MemoryError::InvalidArg(format!(
                             "wiki projection canonical changed before commit: expected {}",
