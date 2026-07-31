@@ -13,5 +13,8 @@ pub(super) use skills::recommend_skills_light;
 use skills::tokenize_skill_text;
 pub(super) use wiki::{
     default_named_project_available, find_wiki_entry_by_path_or_topic, normalize_wiki_path,
-    supersede_wiki_duplicates, wiki_layer_metadata, with_existing_wiki_store,
+    wiki_layer_metadata, with_existing_wiki_store,
+};
+pub(crate) use wiki::{
+    is_wiki_projection_duplicate, wiki_parent_path, wiki_projection_supersedes_edge,
 };

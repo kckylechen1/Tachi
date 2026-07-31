@@ -14,6 +14,7 @@ pub(crate) use handler::{
 pub(crate) use handler::{
     handle_save_memory_with_authorized_reference_mutations,
     handle_save_memory_with_authorized_reference_mutations_and_invocation,
+    handle_save_memory_with_wiki_projection,
 };
 #[cfg(test)]
 pub(crate) use handler::{install_pre_upsert_barrier, install_pre_upsert_pause};

@@ -53,6 +53,20 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         Some(temp_home.join("project.db")),
     )
     .expect("server");
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("pattern-a");
+            entry.path = "/global/tachi/pattern-a".to_string();
+            entry.summary = "Global recall diversity gate".to_string();
+            entry.text = "Global experience independently confirms that recall diversity should gate durable Wiki promotion and remain pending until review.".to_string();
+            entry.importance = 0.9;
+            entry.topic = "recall-gate".to_string();
+            entry.keywords = vec!["recall".to_string(), "promotion".to_string()];
+            entry.source = "manual".to_string();
+            entry.tier = "pattern".to_string();
+            store.upsert(&entry).map_err(|error| error.to_string())
+        })
+        .expect("seed same-id global pattern");
     server.with_project_store(|store| {
         for (id, summary, text) in [
             (
@@ -109,19 +123,42 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         .await
         .expect("wiki evolution");
     assert_eq!(report.drafts_written, 1);
-    let (review_status, model_receipt) = server.with_named_project_store_read("wiki", |store| {
+    let (draft_id, review_status, model_receipt, operation_status, source_count) = server.with_named_project_store_read("wiki", |store| {
         store.connection().query_row(
-            "SELECT json_extract(metadata, '$.review_status'), json_extract(metadata, '$.provenance.model_invocation.schema') FROM memories WHERE path LIKE '/wiki/drafts/%' LIMIT 1",
+            "SELECT id, json_extract(metadata, '$.review_status'), json_extract(metadata, '$.provenance.model_invocation.schema'), json_extract(metadata, '$.rem.operation_status'), json_array_length(json_extract(metadata, '$.rem.sources')) FROM memories WHERE path LIKE '/wiki/drafts/%' LIMIT 1",
             [],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?)),
         ).map_err(|e| e.to_string())
     }).expect("read wiki draft metadata");
+    assert!(draft_id.starts_with("wiki-rem:"), "{draft_id}");
     assert_eq!(review_status.as_deref(), Some("pending"));
     assert_eq!(
         model_receipt.as_deref(),
         Some("model-invocation-v1"),
         "REM's first wiki draft write must carry the typed model receipt"
     );
+    assert_eq!(operation_status.as_deref(), Some("complete"));
+    assert_eq!(
+        source_count, 3,
+        "same memory ID in two stores stays distinct"
+    );
+    for read_marker in [
+        server.with_global_store_read(|store| {
+            store.get("pattern-a").map_err(|error| error.to_string())
+        }),
+        server.with_project_store_read(|store| {
+            store.get("pattern-a").map_err(|error| error.to_string())
+        }),
+    ] {
+        let source = read_marker
+            .expect("read REM source marker")
+            .expect("source exists");
+        assert_eq!(source.metadata["rem"]["processed"], json!(1));
+        assert_eq!(
+            source.metadata["rem"]["processed_by"],
+            json!(draft_id.clone())
+        );
+    }
     let sft_processed: Option<i64> = server
         .with_project_store_read(|store| {
             store
@@ -138,6 +175,23 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         sft_processed, None,
         "SFT pattern seeds must not be consumed by REM wiki evolution"
     );
+    let replay = crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&server)
+        .await
+        .expect("second REM run");
+    assert_eq!(replay.drafts_written, 0, "replay must not mint a draft");
+    let draft_count: i64 = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE path LIKE '/wiki/drafts/%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("count REM drafts after replay");
+    assert_eq!(draft_count, 1);
 
     server_task.abort();
     if let Some(value) = original_home {

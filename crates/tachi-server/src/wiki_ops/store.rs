@@ -14,17 +14,17 @@ pub(super) fn find_related_by_entities(
     entities: &[String],
     exclude_id: &str,
     limit: usize,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, String> {
     let entity_set: HashSet<String> = entities
         .iter()
         .map(|entity| entity.trim().to_ascii_lowercase())
         .filter(|entity| !entity.is_empty())
         .collect();
     if entity_set.is_empty() || limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let entries = list_related_candidates(server, project, 5000).unwrap_or_default();
+    let entries = list_related_candidates(server, project, 5000)?;
 
     let mut related = entries
         .into_iter()
@@ -46,12 +46,12 @@ pub(super) fn find_related_by_entities(
     });
 
     let mut seen = HashSet::new();
-    related
+    Ok(related
         .into_iter()
         .filter(|entry| seen.insert(entry.id.clone()))
         .take(limit)
         .map(|entry| compact_entry(&entry))
-        .collect()
+        .collect())
 }
 
 pub(super) fn list_related_candidates(

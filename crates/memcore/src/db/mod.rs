@@ -106,6 +106,7 @@ pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
+pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
 #[cfg(test)]
 pub(crate) use memory_crud::AccessUpdate;
 pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;

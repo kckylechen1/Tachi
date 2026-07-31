@@ -3,6 +3,11 @@ use crate::memory_search_ops::contradiction::apply_auto_contradiction_detection;
 use crate::{DbScope, MemoryServer};
 use memcore::{db::IdlessUpsertResult, MemoryEntry, MemoryStore};
 
+pub(super) struct WikiProjectionWriteResult {
+    pub upsert: IdlessUpsertResult,
+    pub duplicates_superseded: usize,
+}
+
 pub(super) struct AtomicReferenceWrite {
     pub metadata_patch: serde_json::Map<String, serde_json::Value>,
     pub metadata_removals: Vec<&'static str>,
@@ -164,6 +169,89 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
         entry.metadata = metadata;
         Ok(result)
+    };
+    if let Some(project_name) = named_project {
+        server.with_named_project_store(project_name, |store| persist(store, Some(project_name)))
+    } else {
+        server.with_store_for_scope(target_db, |store| persist(store, None))
+    }
+}
+
+/// Persist the canonical Wiki/Guide row, every duplicate supersession claim,
+/// and every corresponding graph edge under one `BEGIN IMMEDIATE` writer
+/// snapshot. A failed scan, claim, or edge write rolls the canonical upsert
+/// back with the rest of the projection.
+pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
+    server: &MemoryServer,
+    entry: &mut MemoryEntry,
+    idless_identity: Option<&str>,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    evidence_write: &AtomicReferenceWrite,
+) -> Result<WikiProjectionWriteResult, String> {
+    let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
+        let (result, metadata, duplicates_superseded) = store
+            .with_immutable_supersession_transaction(|projection| {
+                if idless_identity.is_none() {
+                    let active = projection
+                        .find_active_wiki_entry_by_path_or_topic(&entry.path, &entry.topic)?;
+                    if active.as_ref().map(|winner| winner.id.as_str()) != Some(entry.id.as_str()) {
+                        return Err(memcore::MemoryError::InvalidArg(format!(
+                            "wiki projection canonical changed before commit: expected {}",
+                            entry.id
+                        )));
+                    }
+                }
+                let (result, metadata) = projection
+                    .upsert_with_validated_reference_mutations_and_metadata_removals(
+                        entry,
+                        idless_identity,
+                        &evidence_write.metadata_patch,
+                        &evidence_write.metadata_removals,
+                        &evidence_write.mutations,
+                        false,
+                    )?;
+                if matches!(result, IdlessUpsertResult::Duplicate { .. }) {
+                    return Ok((result, metadata, 0));
+                }
+
+                let parent_path = crate::copilot_ops::wiki_parent_path(&entry.path);
+                let candidates = projection.list_all_wiki_duplicate_candidates(
+                    &entry.path,
+                    &entry.topic,
+                    &parent_path,
+                )?;
+                let created_at = chrono::Utc::now().to_rfc3339();
+                let mut changed = 0usize;
+                for candidate in candidates {
+                    if candidate.id == entry.id
+                        || !crate::copilot_ops::is_wiki_projection_duplicate(
+                            &candidate,
+                            &entry.path,
+                            &entry.topic,
+                            &entry.text,
+                        )
+                    {
+                        continue;
+                    }
+                    projection.claim_immutable_supersession(&candidate.id, &entry.id)?;
+                    projection.add_edge(&crate::copilot_ops::wiki_projection_supersedes_edge(
+                        &entry.id,
+                        &candidate.id,
+                        &entry.path,
+                        &entry.topic,
+                        &created_at,
+                    ))?;
+                    changed += 1;
+                }
+                Ok((result, metadata, changed))
+            })
+            .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
+        entry.metadata = metadata;
+        Ok(WikiProjectionWriteResult {
+            upsert: result,
+            duplicates_superseded,
+        })
     };
     if let Some(project_name) = named_project {
         server.with_named_project_store(project_name, |store| persist(store, Some(project_name)))

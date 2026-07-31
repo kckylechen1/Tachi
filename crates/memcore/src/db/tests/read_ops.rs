@@ -156,7 +156,7 @@ fn list_wiki_duplicate_candidates_pushes_path_topic_and_parent_filter_to_sql() {
         "/wiki/engineering/mcp",
         "mcp",
         "/wiki/engineering",
-        10,
+        Some(10),
     )
     .unwrap();
     let ids = candidates

@@ -273,7 +273,7 @@ pub fn list_wiki_duplicate_candidates(
     path: &str,
     topic: &str,
     parent_path: &str,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let parent_like = format!("{}/%", parent_path.trim_end_matches('/'));
     let sql = format!(
@@ -281,7 +281,7 @@ pub fn list_wiki_duplicate_candidates(
          FROM memories
          WHERE archived = 0
            AND superseded_by IS NULL
-           AND path LIKE '/wiki/%'
+           AND (path LIKE '/wiki/%' OR path LIKE '/guide/%')
            AND (path = ?1 OR (?2 != '' AND topic = ?2) OR path = ?3 OR path LIKE ?4)
          ORDER BY CASE WHEN path = ?1 THEN 0 WHEN topic = ?2 THEN 1 ELSE 2 END,
                   path ASC,
@@ -290,7 +290,13 @@ pub fn list_wiki_duplicate_candidates(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        params![path, topic, parent_path, parent_like, limit as i64],
+        params![
+            path,
+            topic,
+            parent_path,
+            parent_like,
+            limit.map(|value| value as i64).unwrap_or(-1)
+        ],
         row_to_entry,
     )?;
     let mut out = Vec::new();
@@ -311,7 +317,7 @@ pub fn find_active_wiki_entry_by_path_or_topic(
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL
-             AND (path = ?1 OR (topic = ?2 AND path LIKE '/wiki/%'))
+             AND (path = ?1 OR (topic = ?2 AND (path LIKE '/wiki/%' OR path LIKE '/guide/%')))
            ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END, timestamp DESC
            LIMIT 1"#
     );

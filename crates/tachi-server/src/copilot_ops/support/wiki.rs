@@ -142,67 +142,56 @@ pub(in crate::copilot_ops) fn default_named_project_available(
     server.global_db_path_buf().starts_with(&app_home) || server_home == app_home
 }
 
-/// Identify and supersede wiki entries that duplicate the newly written entry.
-pub(in crate::copilot_ops) fn supersede_wiki_duplicates(
-    store: &mut MemoryStore,
-    canonical_id: &str,
+/// Decide whether an active Wiki/Guide row describes the same semantic subject
+/// as a canonical projection candidate.
+pub(crate) fn is_wiki_projection_duplicate(
+    candidate: &MemoryEntry,
     path: &str,
     topic: &str,
     text: &str,
-) -> Result<usize, String> {
-    let parent_path = wiki_parent_path(path);
-    let candidates = store
-        .list_wiki_duplicate_candidates(path, topic, &parent_path, 500)
-        .map_err(|e| format!("wiki duplicate scan: {e}"))?;
-    let mut changed = 0usize;
+) -> bool {
     let target_subject = wiki_subject_token(topic);
     let target_text_tokens = wiki_text_tokens(text);
-    for candidate in candidates {
-        if candidate.id == canonical_id {
-            continue;
-        }
-        // Dedup criteria (OR-combined, but single-token topic match requires path prefix overlap)
-        let same_path = candidate.path == path;
-        let same_topic = target_subject.as_ref().is_some_and(|token| {
-            let cand_token = wiki_subject_token(&candidate.topic);
-            cand_token.as_ref() == Some(token)
-                // Single-token topics require path prefix overlap to avoid over-broad matching
-                && (token.len() > 1
-                    || candidate.path.rsplit_once('/').map(|(parent, _)| parent) == path.rsplit_once('/').map(|(parent, _)| parent))
-        });
-        let similar_text =
-            wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
-                >= WIKI_DUP_JACCARD_THRESHOLD;
-        let same_subject = same_path || same_topic || similar_text;
-        if !same_subject {
-            continue;
-        }
-        if store
-            .supersede_memory(&candidate.id, canonical_id)
-            .map_err(|e| format!("wiki duplicate supersede: {e}"))?
-        {
-            let edge = memcore::MemoryEdge {
-                source_id: canonical_id.to_string(),
-                target_id: candidate.id.clone(),
-                relation: "supersedes".to_string(),
-                weight: 0.9,
-                metadata: json!({
-                    "source": "wiki_write_dedup",
-                    "path": path,
-                    "topic": topic,
-                }),
-                created_at: Utc::now().to_rfc3339(),
-                valid_from: String::new(),
-                valid_to: None,
-            };
-            let _ = store.add_edge(&edge);
-            changed += 1;
-        }
-    }
-    Ok(changed)
+    // Dedup criteria (OR-combined, but single-token topic match requires path
+    // prefix overlap to avoid over-broad matching).
+    let same_path = candidate.path == path;
+    let same_topic = target_subject.as_ref().is_some_and(|token| {
+        let candidate_token = wiki_subject_token(&candidate.topic);
+        candidate_token.as_ref() == Some(token)
+            && (token.len() > 1
+                || candidate.path.rsplit_once('/').map(|(parent, _)| parent)
+                    == path.rsplit_once('/').map(|(parent, _)| parent))
+    });
+    let similar_text =
+        wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
+            >= WIKI_DUP_JACCARD_THRESHOLD;
+    same_path || same_topic || similar_text
 }
 
-pub(in crate::copilot_ops) fn wiki_parent_path(path: &str) -> String {
+pub(crate) fn wiki_projection_supersedes_edge(
+    canonical_id: &str,
+    candidate_id: &str,
+    path: &str,
+    topic: &str,
+    created_at: &str,
+) -> memcore::MemoryEdge {
+    memcore::MemoryEdge {
+        source_id: canonical_id.to_string(),
+        target_id: candidate_id.to_string(),
+        relation: "supersedes".to_string(),
+        weight: 0.9,
+        metadata: json!({
+            "source": "wiki_write_dedup",
+            "path": path,
+            "topic": topic,
+        }),
+        created_at: created_at.to_string(),
+        valid_from: String::new(),
+        valid_to: None,
+    }
+}
+
+pub(crate) fn wiki_parent_path(path: &str) -> String {
     path.trim_end_matches('/')
         .rsplit_once('/')
         .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })

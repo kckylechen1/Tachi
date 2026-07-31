@@ -376,16 +376,16 @@ impl TrustedExistingModelInvocationReceipt {
 fn persist_wiki_ingest_entry(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
-    old_id: Option<&str>,
     reference_appends: &[memcore::db::ValidatedReferenceMutation],
     new_invocation: Option<&tachi_llm::PersistedModelInvocationReceiptV1>,
+    related_edges: &[memcore::MemoryEdge],
 ) -> Result<(), String> {
     store
         .with_immutable_supersession_transaction(|replacement| {
-            let trusted_existing_receipt = old_id
-                .map(|old_id| replacement.get_memory(old_id))
-                .transpose()?
-                .flatten()
+            let old_entry = replacement
+                .find_active_wiki_entry_by_path_or_topic(&entry.path, &entry.topic)?
+                .filter(|existing| existing.id != entry.id);
+            let trusted_existing_receipt = old_entry
                 .as_ref()
                 .and_then(TrustedExistingModelInvocationReceipt::from_existing_row);
             let mut replacement_entry = entry.clone();
@@ -405,16 +405,21 @@ fn persist_wiki_ingest_entry(
                 .as_object()
                 .cloned()
                 .unwrap_or_default();
-            if let Some(old_id) = old_id {
-                replacement.claim_immutable_supersession(old_id, &replacement_entry.id)?;
+            if let Some(old_entry) = old_entry.as_ref() {
+                replacement.claim_immutable_supersession(&old_entry.id, &replacement_entry.id)?;
             }
             replacement.upsert_with_validated_reference_mutations(
                 &replacement_entry,
                 &metadata_patch,
                 reference_appends,
             )?;
-            if let Some(old_id) = old_id {
-                replacement.archive_claimed_source(old_id)?;
+            if let Some(old_entry) = old_entry.as_ref() {
+                replacement.archive_claimed_source(&old_entry.id)?;
+            }
+            for edge in related_edges {
+                replacement.add_edge(edge).map_err(|error| {
+                    memcore::MemoryError::Internal(format!("wiki ingest edge: {error}"))
+                })?;
             }
             Ok(())
         })
@@ -554,45 +559,16 @@ pub(crate) async fn handle_wiki_ingest(
         tier: "raw".to_string(),
     };
 
-    server.with_named_project_store("wiki", |store| {
-        let old_id = {
-            let mut stmt = store
-                .connection()
-                .prepare(
-                    "SELECT id FROM memories
-                     WHERE (path = ?1 OR (domain = 'wiki' AND topic = ?2))
-                       AND archived = 0
-                       AND superseded_by IS NULL
-                     LIMIT 1",
-                )
-                .map_err(|e| format!("prepare wiki duplicate query failed: {e}"))?;
-            let mut rows = stmt
-                .query_map((&path, &topic), |row| row.get::<_, String>(0))
-                .map_err(|e| format!("query wiki duplicate failed: {e}"))?;
-            if let Some(row) = rows.next() {
-                Some(row.map_err(|e| format!("read wiki duplicate row failed: {e}"))?)
-            } else {
-                None
-            }
-        };
-
-        persist_wiki_ingest_entry(
-            store,
-            &entry,
-            old_id.as_deref(),
-            &reference_appends,
-            model_invocation.as_ref(),
-        )
-    })?;
-
     let mut related = Vec::new();
+    let mut related_edges = Vec::new();
     if params.update_related {
-        related = find_related_by_entities(server, "wiki", &entities, &id, 10);
+        related = find_related_by_entities(server, "wiki", &entities, &id, 10)
+            .map_err(|error| format!("wiki ingest related lookup: {error}"))?;
         for related_entry in &related {
             let Some(target_id) = related_entry.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            let edge = memcore::MemoryEdge {
+            related_edges.push(memcore::MemoryEdge {
                 source_id: id.clone(),
                 target_id: target_id.to_string(),
                 relation: "references".to_string(),
@@ -604,17 +580,19 @@ pub(crate) async fn handle_wiki_ingest(
                 created_at: Utc::now().to_rfc3339(),
                 valid_from: String::new(),
                 valid_to: None,
-            };
-            if let Err(e) = server.with_named_project_store("wiki", |store| {
-                store
-                    .add_edge(&edge)
-                    .map_err(|e| format!("wiki ingest edge: {e}"))
-            }) {
-                tracing::warn!("wiki ingest edge write failed: {e}");
-                return Err(e);
-            }
+            });
         }
     }
+
+    server.with_named_project_store("wiki", |store| {
+        persist_wiki_ingest_entry(
+            store,
+            &entry,
+            &reference_appends,
+            model_invocation.as_ref(),
+            &related_edges,
+        )
+    })?;
 
     // #1413 concern 1: bust the shared (global) recall cache AFTER every
     // content-changing write in this ingest has committed — the entry upsert
@@ -750,44 +728,46 @@ mod immutable_supersession_tests {
     }
 
     #[test]
-    fn conflicted_predecessor_refuses_before_saving_a_new_wiki_candidate() {
+    fn replacement_selects_current_active_predecessor_inside_transaction() {
         let temp = tempfile::tempdir().expect("wiki immutable-edge tempdir");
         let db_path = temp.path().join("wiki.db");
         let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
             .expect("open wiki test store");
         let old = wiki_entry("old-wiki-entry");
         let canonical = wiki_entry("canonical-wiki-entry");
-        let candidate = wiki_entry("stale-wiki-candidate");
+        let mut candidate = wiki_entry("fresh-wiki-candidate");
+        candidate.path = canonical.path.clone();
+        candidate.topic = canonical.topic.clone();
         store.upsert(&old).expect("seed old wiki entry");
         store.upsert(&canonical).expect("seed canonical wiki entry");
         assert!(store
             .supersede_memory(&old.id, &canonical.id)
             .expect("seed immutable predecessor edge"));
 
-        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id), &[], None)
-            .expect_err("conflicted predecessor must refuse wiki candidate");
-        assert!(err.contains("immutable supersession CAS"), "err: {err}");
+        persist_wiki_ingest_entry(&mut store, &candidate, &[], None, &[])
+            .expect("replacement must select and claim the current active winner");
         let old_after = store
             .get_with_options(&old.id, true)
             .expect("read old wiki entry")
             .expect("old wiki entry remains");
         assert!(
             !old_after.archived,
-            "failed CAS must not archive the established predecessor"
+            "historical predecessor must not be rewritten"
         );
         assert_eq!(
             store
                 .supersession_target(&old.id)
                 .expect("read predecessor edge"),
-            Some(Some(canonical.id)),
-            "failed CAS must preserve the original predecessor edge"
+            Some(Some(canonical.id.clone())),
+            "historical predecessor edge must remain immutable"
         );
-        assert!(
+        assert_eq!(
             store
-                .get_with_options(&candidate.id, true)
-                .expect("read candidate")
-                .is_none(),
-            "failed CAS must not leave a new competing wiki candidate"
+                .supersession_target(&canonical.id)
+                .expect("read current winner edge"),
+            Some(Some(candidate.id.clone())),
+            "replacement must claim the winner observed in its transaction"
         );
+        assert!(store.get(&candidate.id).expect("read candidate").is_some());
     }
 }

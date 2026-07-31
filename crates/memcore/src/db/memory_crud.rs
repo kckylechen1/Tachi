@@ -1030,6 +1030,7 @@ fn upsert_with_validated_reference_mutations(
         metadata_patch,
         metadata_removals,
         mutations,
+        true,
     )?;
     tx.commit()?;
     Ok(result)
@@ -1051,10 +1052,12 @@ pub(crate) fn upsert_with_validated_reference_mutations_within_tx(
         metadata_patch,
         &[],
         mutations,
+        true,
     )
 }
 
-fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+#[allow(clippy::too_many_arguments)] // fixed transaction seam; grouping these trust channels would blur them
+pub(crate) fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
     tx: &rusqlite::Transaction<'_>,
     entry: &MemoryEntry,
     vec_available: bool,
@@ -1062,6 +1065,7 @@ fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
     metadata_patch: &Map<String, Value>,
     metadata_removals: &[&str],
     mutations: &[ValidatedReferenceMutation],
+    allow_near_duplicate_merge: bool,
 ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let mut merged_entry = entry.clone();
     merged_entry.metadata = merge_validated_reference_metadata(
@@ -1071,7 +1075,13 @@ fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
         metadata_removals,
         mutations,
     )?;
-    let result = upsert_prepared_within_tx(tx, &merged_entry, vec_available, idless_identity)?;
+    let result = upsert_prepared_within_tx(
+        tx,
+        &merged_entry,
+        vec_available,
+        idless_identity,
+        allow_near_duplicate_merge,
+    )?;
     Ok((result, merged_entry.metadata))
 }
 
@@ -2412,7 +2422,7 @@ pub(crate) fn upsert_within_tx(
 ) -> Result<IdlessUpsertResult, MemoryError> {
     let mut sanitized = entry.clone();
     sanitized.metadata = merge_ordinary_reserved_metadata(tx, &entry.id, &entry.metadata)?;
-    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity)
+    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity, true)
 }
 
 fn upsert_prepared_within_tx(
@@ -2420,6 +2430,7 @@ fn upsert_prepared_within_tx(
     entry: &MemoryEntry,
     vec_available: bool,
     idless_identity: Option<&str>,
+    allow_near_duplicate_merge: bool,
 ) -> Result<IdlessUpsertResult, MemoryError> {
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.
@@ -2474,7 +2485,7 @@ fn upsert_prepared_within_tx(
         |r| r.get::<_, i64>(0),
     )? == 0;
 
-    if is_new && idless_identity.is_none() {
+    if allow_near_duplicate_merge && is_new && idless_identity.is_none() {
         if let Some(cand_id) = merge_into_jaccard_candidate(tx, entry, importance, &write_time_utc)?
         {
             // Write this entry as superseded by the candidate
@@ -2620,7 +2631,7 @@ fn upsert_prepared_within_tx(
     // which origin/main's `upsert()` always deduped via this same
     // FTS+Jaccard search. Run it now, after the atomic decision, so the two
     // mechanisms never compete over the same row.
-    if idless_identity.is_some() {
+    if allow_near_duplicate_merge && idless_identity.is_some() {
         if let Some(cand_id) = merge_into_jaccard_candidate(tx, entry, importance, &write_time_utc)?
         {
             // `entry`'s row just won the identity race and is currently the

@@ -237,7 +237,7 @@ impl MemoryStore {
         parent_path: &str,
         limit: usize,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
-        db::list_wiki_duplicate_candidates(&self.conn, path, topic, parent_path, limit)
+        db::list_wiki_duplicate_candidates(&self.conn, path, topic, parent_path, Some(limit))
     }
 
     /// Run PRAGMA quick_check to detect database corruption early.

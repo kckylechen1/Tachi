@@ -3,7 +3,7 @@ use super::entry::build_save_entry;
 use super::persist::{
     find_exact_path_text_duplicate, lookup_existing_entry, mark_save_target_used,
     spawn_save_contradiction_detection, upsert_idless_save_entry, upsert_save_entry,
-    AtomicReferenceWrite,
+    upsert_wiki_projection_entry, AtomicReferenceWrite,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
@@ -332,6 +332,7 @@ pub(crate) async fn handle_save_memory(
         SaveMetadataAuthority::Public,
         SaveInitiator::System,
         None,
+        false,
     )
     .await
 }
@@ -350,6 +351,7 @@ pub(crate) async fn handle_save_memory_from_caller(
         SaveMetadataAuthority::Public,
         SaveInitiator::Caller,
         None,
+        false,
     )
     .await
 }
@@ -370,6 +372,7 @@ pub(crate) async fn handle_save_memory_with_references(
         SaveMetadataAuthority::Public,
         SaveInitiator::Caller,
         None,
+        false,
     )
     .await
 }
@@ -386,12 +389,14 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
         SaveMetadataAuthority::ServerVerified,
         SaveInitiator::System,
         None,
+        false,
     )
     .await
 }
 
 /// Server-internal first-write seam for durable model-derived artifacts.
 /// The receipt is typed and never passes through public JSON metadata.
+#[allow(dead_code)] // retained as the text-save sibling promised by the receipt API contract
 pub(crate) async fn handle_save_memory_with_authorized_reference_mutations_and_invocation(
     server: &MemoryServer,
     params: SaveMemoryParams,
@@ -405,6 +410,27 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations_and_i
         SaveMetadataAuthority::ServerVerified,
         SaveInitiator::System,
         Some(invocation),
+        false,
+    )
+    .await
+}
+
+/// Server-internal Wiki/Guide projection save. The canonical row, duplicate
+/// supersession claims, and supersedes edges share one transaction.
+pub(crate) async fn handle_save_memory_with_wiki_projection(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+    mutations: Vec<memcore::db::ValidatedReferenceMutation>,
+    model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
+) -> Result<String, String> {
+    handle_save_memory_impl(
+        server,
+        params,
+        AuthorizedReferenceMutations::from_authorized(mutations),
+        SaveMetadataAuthority::ServerVerified,
+        SaveInitiator::System,
+        model_invocation,
+        true,
     )
     .await
 }
@@ -416,6 +442,7 @@ async fn handle_save_memory_impl(
     metadata_authority: SaveMetadataAuthority,
     initiator: SaveInitiator,
     model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
+    wiki_projection: bool,
 ) -> Result<String, String> {
     strip_reserved_reference_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
@@ -643,7 +670,23 @@ async fn handle_save_memory_impl(
     #[cfg(test)]
     wait_at_pre_upsert_pause(&entry.id, trusted_append);
 
-    if let Some(identity) = idless_identity.as_deref() {
+    let mut wiki_duplicates_superseded = None;
+    if wiki_projection {
+        let result = upsert_wiki_projection_entry(
+            server,
+            &mut entry,
+            idless_identity.as_deref(),
+            target_db,
+            named_project.as_deref(),
+            &evidence_write,
+        )?;
+        wiki_duplicates_superseded = Some(result.duplicates_superseded);
+        if let memcore::db::IdlessUpsertResult::Duplicate { id } = result.upsert {
+            let response = build_duplicate_save_response(&id, &entry.path, target_db);
+            return serde_json::to_string(&serde_json::Value::Object(response))
+                .map_err(|error| format!("Failed to serialize response: {error}"));
+        }
+    } else if let Some(identity) = idless_identity.as_deref() {
         match upsert_idless_save_entry(
             server,
             &mut entry,
@@ -742,6 +785,10 @@ async fn handle_save_memory_impl(
 
     if let Some(note) = affinity_note {
         response.insert("domain_affinity".into(), domain_affinity_note_json(&note));
+    }
+
+    if let Some(count) = wiki_duplicates_superseded {
+        response.insert("wiki_duplicates_superseded".into(), json!(count));
     }
 
     if auto_link && !entry.entities.is_empty() && !is_training_seed(&entry) {

@@ -75,6 +75,18 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         Ok(entries.remove(id))
     }
 
+    /// Check that a deterministic-id occupant is still an active canonical
+    /// row. `get_memory` intentionally includes archived rows and therefore
+    /// cannot answer the supersession half of this invariant by itself.
+    pub fn memory_is_active_unsuperseded(&self, id: &str) -> Result<bool, MemoryError> {
+        let count = self.tx.query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = ?1 AND archived = 0 AND superseded_by IS NULL",
+            [id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count == 1)
+    }
+
     /// Persist an entry with server-authorized, shape-validated reference
     /// appends inside the same replacement transaction.
     pub fn upsert_with_validated_reference_mutations(
@@ -94,6 +106,57 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
             mutations,
         )
         .map(|_| ())
+    }
+
+    /// Persist an entry while applying trusted metadata removals and validated
+    /// reference mutations inside this transaction.
+    ///
+    /// This is the transactional counterpart of `MemoryStore`'s ordinary save
+    /// seam. It exists so a domain projection can make the canonical row and
+    /// its dependent graph/lifecycle mutations one commit boundary without
+    /// exposing the raw SQLite transaction.
+    pub fn upsert_with_validated_reference_mutations_and_metadata_removals(
+        &mut self,
+        entry: &MemoryEntry,
+        idless_identity: Option<&str>,
+        metadata_patch: &Map<String, Value>,
+        metadata_removals: &[&str],
+        mutations: &[db::ValidatedReferenceMutation],
+        allow_near_duplicate_merge: bool,
+    ) -> Result<(db::IdlessUpsertResult, Value), MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+            &self.tx,
+            entry,
+            self.vec_available,
+            idless_identity,
+            metadata_patch,
+            metadata_removals,
+            mutations,
+            allow_near_duplicate_merge,
+        )
+    }
+
+    /// Read active Wiki/Guide candidates from the same writer snapshot used
+    /// for a projection mutation.
+    pub fn list_all_wiki_duplicate_candidates(
+        &self,
+        path: &str,
+        topic: &str,
+        parent_path: &str,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_wiki_duplicate_candidates(&self.tx, path, topic, parent_path, None)
+    }
+
+    /// Read the active Wiki/Guide winner for a path/topic pair from this
+    /// transaction's writer snapshot.
+    pub fn find_active_wiki_entry_by_path_or_topic(
+        &self,
+        path: &str,
+        topic: &str,
+    ) -> Result<Option<MemoryEntry>, MemoryError> {
+        db::find_active_wiki_entry_by_path_or_topic(&self.tx, path, topic)
     }
 
     /// Archive a source after its supersession claim has succeeded.

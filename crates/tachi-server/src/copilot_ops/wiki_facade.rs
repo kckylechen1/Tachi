@@ -181,25 +181,13 @@ async fn handle_tachi_wiki_write_inner(
         metadata: Some(wiki_metadata),
         emit_continuity: false,
     };
-    let save_result = match model_invocation {
-        Some(invocation) => {
-            crate::memory_search_ops::handle_save_memory_with_authorized_reference_mutations_and_invocation(
-                server,
-                save_params,
-                reference_mutations,
-                invocation,
-            )
-            .await?
-        }
-        None => {
-            crate::memory_search_ops::handle_save_memory_with_authorized_reference_mutations(
-                server,
-                save_params,
-                reference_mutations,
-            )
-            .await?
-        }
-    };
+    let save_result = crate::memory_search_ops::handle_save_memory_with_wiki_projection(
+        server,
+        save_params,
+        reference_mutations,
+        model_invocation,
+    )
+    .await?;
 
     let mut response: Value =
         serde_json::from_str(&save_result).map_err(|e| format!("parse wiki save response: {e}"))?;
@@ -220,26 +208,7 @@ async fn handle_tachi_wiki_write_inner(
         .and_then(Value::as_str)
         .ok_or_else(|| "wiki write response missing id".to_string())?
         .to_string();
-    let duplicate_action = |store: &mut MemoryStore| {
-        supersede_wiki_duplicates(store, &canonical_id, &path, &topic, &entry_text)
-    };
-    let duplicates_superseded = match with_existing_wiki_store(
-        server,
-        &project_name,
-        use_named_project,
-        duplicate_action,
-    ) {
-        Ok(count) => count,
-        Err(err) => {
-            tracing::warn!(wiki_path = %path, wiki_topic = %topic, error = %err, "wiki duplicate scan failed");
-            0
-        }
-    };
     if let Some(obj) = response.as_object_mut() {
-        obj.insert(
-            "wiki_duplicates_superseded".to_string(),
-            json!(duplicates_superseded),
-        );
         obj.insert("pattern_refs".to_string(), json!(pattern_refs.clone()));
         if update_id.is_some() {
             obj.insert(
@@ -282,7 +251,10 @@ async fn handle_tachi_wiki_write_inner(
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
-            duplicates_superseded
+            response
+                .get("wiki_duplicates_superseded")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
         ),
     );
     if let Some(obj) = response.as_object_mut() {

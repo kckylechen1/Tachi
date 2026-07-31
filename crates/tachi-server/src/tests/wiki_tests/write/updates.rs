@@ -257,3 +257,306 @@ async fn tachi_wiki_write_supersedes_duplicate_topic_rows() {
     assert_eq!(superseded_by, Some("canonical-trendlock-row".to_string()));
     assert_eq!(json["wiki_write_mode"], json!("updated"));
 }
+
+#[tokio::test]
+async fn tachi_wiki_write_scans_the_complete_parent_bucket_for_duplicates() {
+    let replacement_text =
+        "Canonical queue recovery guidance requires durable claims and replay-safe receipts.";
+    let mut canonical = make_entry("complete-scan-canonical");
+    canonical.path = "/wiki/agent/tachi/complete-scan".to_string();
+    canonical.topic = "complete-scan".to_string();
+    canonical.text = "Older canonical queue recovery guidance.".to_string();
+    canonical.metadata = json!({"wiki": true});
+    canonical.domain = Some("wiki".to_string());
+
+    let mut entries = vec![canonical];
+    for index in 0..501 {
+        let mut unrelated = make_entry(&format!("complete-scan-noise-{index:03}"));
+        unrelated.path = format!("/wiki/agent/tachi/a-noise-{index:03}");
+        unrelated.topic = format!("noise-{index:03}");
+        unrelated.text = format!(
+            "Unrelated article {index} discusses an isolated subject with no queue vocabulary."
+        );
+        unrelated.metadata = json!({"wiki": true});
+        unrelated.domain = Some("wiki".to_string());
+        entries.push(unrelated);
+    }
+    let mut late_duplicate = make_entry("complete-scan-late-duplicate");
+    late_duplicate.path = "/wiki/agent/tachi/zzzz-late-duplicate".to_string();
+    late_duplicate.topic = "late-copy".to_string();
+    late_duplicate.text = replacement_text.to_string();
+    late_duplicate.metadata = json!({"wiki": true});
+    late_duplicate.domain = Some("wiki".to_string());
+    entries.push(late_duplicate);
+    let (server, _home) = seed_wiki_project_entries(entries);
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Complete duplicate scan".to_string(),
+            text: replacement_text.to_string(),
+            path: Some("/wiki/agent/tachi/complete-scan".to_string()),
+            topic: Some("complete-scan".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["queue".to_string(), "replay".to_string()],
+            entities: vec!["QueueRecovery".to_string()],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("complete Wiki duplicate scan");
+    let response: Value = serde_json::from_str(&response).expect("write json");
+    assert_eq!(response["id"], json!("complete-scan-canonical"));
+
+    let superseded_by: Option<String> = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT superseded_by FROM memories WHERE id = 'complete-scan-late-duplicate'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("read late duplicate");
+    assert_eq!(
+        superseded_by.as_deref(),
+        Some("complete-scan-canonical"),
+        "a duplicate beyond the former fixed scan boundary must be projected"
+    );
+}
+
+#[tokio::test]
+async fn tachi_wiki_write_rolls_back_canonical_and_claim_when_supersedes_edge_fails() {
+    let mut canonical = make_entry("atomic-wiki-canonical");
+    canonical.path = "/wiki/agent/tachi/atomic-wiki".to_string();
+    canonical.topic = "atomic-wiki".to_string();
+    canonical.text = "Original canonical Wiki text.".to_string();
+    canonical.metadata = json!({"wiki": true});
+    canonical.domain = Some("wiki".to_string());
+
+    let mut duplicate = make_entry("atomic-wiki-duplicate");
+    duplicate.path = "/wiki/agent/tachi/atomic-wiki-copy".to_string();
+    duplicate.topic = "atomic-wiki".to_string();
+    duplicate.text = "Older duplicate Wiki text.".to_string();
+    duplicate.metadata = json!({"wiki": true});
+    duplicate.domain = Some("wiki".to_string());
+
+    let (server, _home) = seed_wiki_project_entries(vec![canonical, duplicate]);
+    let wiki_db: String = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("resolve Wiki DB path");
+    let offline = rusqlite::Connection::open(wiki_db).expect("open edge failpoint connection");
+    offline
+        .execute_batch(
+            r#"
+            INSERT INTO memory_edges
+                (source_id, target_id, relation, weight, metadata, created_at)
+            VALUES
+                ('wiki-edge-failure-blocker', 'wiki-edge-failure-blocker', 'test', 1.0, '{}', '');
+            CREATE UNIQUE INDEX "injected wiki projection edge failure"
+                ON memory_edges ((1));
+            "#,
+        )
+        .expect("install edge failure constraint");
+    drop(offline);
+
+    let error = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Atomic Wiki".to_string(),
+            text: "Replacement canonical Wiki text that must roll back.".to_string(),
+            path: Some("/wiki/agent/tachi/atomic-wiki".to_string()),
+            topic: Some("atomic-wiki".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["atomic-wiki".to_string()],
+            entities: vec![],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect_err("edge failure must fail the whole Wiki projection");
+    assert!(error.contains("UNIQUE constraint failed"), "{error}");
+
+    server
+        .with_named_project_store_read("wiki", |store| {
+            let canonical = store
+                .get("atomic-wiki-canonical")
+                .map_err(|error| error.to_string())?
+                .expect("canonical survives");
+            assert_eq!(canonical.text, "Original canonical Wiki text.");
+            let superseded_by: Option<String> = store
+                .connection()
+                .query_row(
+                    "SELECT superseded_by FROM memories WHERE id = 'atomic-wiki-duplicate'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            assert_eq!(superseded_by, None);
+            Ok(())
+        })
+        .expect("verify rolled-back projection");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_wiki_canonical_cannot_supersede_the_new_active_winner() {
+    let mut canonical = make_entry("wiki-stale-canonical");
+    canonical.path = "/wiki/agent/tachi/stale-canonical".to_string();
+    canonical.topic = "stale-canonical".to_string();
+    canonical.text =
+        "Stable projection concurrency rule keeps one active canonical wiki winner.".to_string();
+    canonical.metadata = json!({"wiki": true});
+    canonical.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![canonical]);
+    let stale_server = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open independent stale writer");
+
+    let arrived = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let _pause = crate::memory_search_ops::save_memory::install_pre_upsert_pause(
+        "wiki-stale-canonical",
+        true,
+        std::sync::Arc::clone(&arrived),
+        std::sync::Arc::clone(&release),
+    );
+    let stale_write = tokio::spawn(async move {
+        stale_server
+            .tachi_wiki_write(Parameters(WikiWriteParams {
+                title: "Stale canonical".to_string(),
+                text: "Stale writer must not become canonical after another writer wins."
+                    .to_string(),
+                path: Some("/wiki/agent/tachi/stale-canonical".to_string()),
+                topic: Some("stale-canonical".to_string()),
+                summary: None,
+                category: "experience".to_string(),
+                keywords: vec![],
+                entities: vec![],
+                importance: 0.9,
+                scope: "global".to_string(),
+                retention_policy: "permanent".to_string(),
+                domain: None,
+                project: None,
+                metadata: None,
+                force: true,
+                references: vec![],
+                include_patterns: false,
+                pattern_query: None,
+                pattern_top_k: None,
+            }))
+            .await
+    });
+    tokio::task::spawn_blocking(move || arrived.wait())
+        .await
+        .expect("stale writer reaches pre-upsert pause");
+
+    let winner_response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Fresh canonical".to_string(),
+            text: "Stable projection concurrency rule keeps one active canonical wiki winner."
+                .to_string(),
+            path: Some("/wiki/agent/tachi/fresh-canonical".to_string()),
+            topic: Some("fresh-canonical".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("fresh writer wins");
+    let winner_id = serde_json::from_str::<Value>(&winner_response).expect("winner response JSON")
+        ["id"]
+        .as_str()
+        .expect("winner id")
+        .to_string();
+    assert_ne!(winner_id, "wiki-stale-canonical", "{winner_response}");
+    server
+        .with_named_project_store_read("wiki", |store| {
+            assert_eq!(
+                store
+                    .supersession_target("wiki-stale-canonical")
+                    .map_err(|error| error.to_string())?,
+                Some(Some(winner_id.clone())),
+                "fresh writer must claim the prior canonical"
+            );
+            assert_eq!(
+                store
+                    .supersession_target(&winner_id)
+                    .map_err(|error| error.to_string())?,
+                Some(None),
+                "fresh writer must initially be active"
+            );
+            Ok(())
+        })
+        .expect("verify fresh writer before releasing stale writer");
+
+    tokio::task::spawn_blocking(move || release.wait())
+        .await
+        .expect("release stale writer");
+    let error = stale_write
+        .await
+        .expect("join stale writer")
+        .expect_err("stale canonical must be refused");
+    assert!(
+        error.contains("wiki projection canonical changed"),
+        "{error}"
+    );
+
+    server
+        .with_named_project_store_read("wiki", |store| {
+            assert_eq!(
+                store
+                    .supersession_target("wiki-stale-canonical")
+                    .map_err(|error| error.to_string())?,
+                Some(Some(winner_id.clone()))
+            );
+            assert_eq!(
+                store
+                    .supersession_target(&winner_id)
+                    .map_err(|error| error.to_string())?,
+                Some(None),
+                "the active winner must never point back to the stale canonical"
+            );
+            Ok(())
+        })
+        .expect("verify one-way supersession");
+}
