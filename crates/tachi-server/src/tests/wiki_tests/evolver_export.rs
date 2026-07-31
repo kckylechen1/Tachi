@@ -6,10 +6,16 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
     let _lock = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
 
     use axum::{routing::post, Json, Router};
+    let synthesis_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let app = Router::new().route(
         "/chat/completions",
-        post(|Json(_body): Json<serde_json::Value>| async {
-            Json(json!({
+        post({
+            let synthesis_barrier = synthesis_barrier.clone();
+            move |Json(_body): Json<serde_json::Value>| {
+                let synthesis_barrier = synthesis_barrier.clone();
+                async move {
+                    synthesis_barrier.wait().await;
+                    Json(json!({
                 "choices": [
                     {
                         "message": {
@@ -20,7 +26,9 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
                     }
                 ],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
-            }))
+                    }))
+                }
+            }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -119,10 +127,23 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         "expected two live pattern memories plus one SFT seed before REM run"
     );
 
-    let report = crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&server)
-        .await
-        .expect("wiki evolution");
-    assert_eq!(report.drafts_written, 1);
+    let (first, second) = tokio::join!(
+        crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&server),
+        crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&server),
+    );
+    let reports = [
+        first.expect("first concurrent wiki evolution"),
+        second.expect("second concurrent wiki evolution"),
+    ];
+    assert_eq!(
+        reports
+            .iter()
+            .map(|report| report.drafts_written)
+            .sum::<usize>(),
+        1,
+        "concurrent replay must report exactly one newly written draft"
+    );
+    assert_eq!(reports.iter().map(|report| report.errors).sum::<usize>(), 0);
     let (draft_id, review_status, model_receipt, operation_status, source_count) = server.with_named_project_store_read("wiki", |store| {
         store.connection().query_row(
             "SELECT id, json_extract(metadata, '$.review_status'), json_extract(metadata, '$.provenance.model_invocation.schema'), json_extract(metadata, '$.rem.operation_status'), json_array_length(json_extract(metadata, '$.rem.sources')) FROM memories WHERE path LIKE '/wiki/drafts/%' LIMIT 1",

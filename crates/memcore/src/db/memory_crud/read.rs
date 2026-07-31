@@ -281,7 +281,7 @@ pub fn list_wiki_duplicate_candidates(
          FROM memories
          WHERE archived = 0
            AND superseded_by IS NULL
-           AND (path LIKE '/wiki/%' OR path LIKE '/guide/%')
+           AND path LIKE '/wiki/%'
            AND (path = ?1 OR (?2 != '' AND topic = ?2) OR path = ?3 OR path LIKE ?4)
          ORDER BY CASE WHEN path = ?1 THEN 0 WHEN topic = ?2 THEN 1 ELSE 2 END,
                   path ASC,
@@ -317,7 +317,7 @@ pub fn find_active_wiki_entry_by_path_or_topic(
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL
-             AND (path = ?1 OR (topic = ?2 AND (path LIKE '/wiki/%' OR path LIKE '/guide/%')))
+             AND (path = ?1 OR (topic = ?2 AND path LIKE '/wiki/%'))
            ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END, timestamp DESC
            LIMIT 1"#
     );

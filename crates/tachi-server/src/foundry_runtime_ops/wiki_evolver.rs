@@ -145,9 +145,8 @@ pub(crate) async fn run_weekly_wiki_evolution(
         }
 
         match synthesize_and_save(server, topic, members).await {
-            Ok(()) => {
-                drafts_written += 1;
-            }
+            Ok(InsertMemoryResult::Inserted) => drafts_written += 1,
+            Ok(InsertMemoryResult::Existing) => skipped += 1,
             Err(e) => {
                 errors += 1;
                 eprintln!("[wiki_evolver] error synthesizing cluster '{topic}': {e}");
@@ -278,7 +277,7 @@ async fn synthesize_and_save(
     server: &MemoryServer,
     topic: &str,
     members: &[&RemCandidate],
-) -> Result<(), String> {
+) -> Result<InsertMemoryResult, String> {
     let draft = synthesize_wiki_draft(server, topic, members).await?;
     save_wiki_draft(server, topic, members, draft.value, &draft.invocation)
 }
@@ -727,7 +726,7 @@ fn save_wiki_draft(
     members: &[&RemCandidate],
     draft: WikiDraft,
     invocation: &PersistedModelInvocationReceiptV1,
-) -> Result<(), String> {
+) -> Result<InsertMemoryResult, String> {
     server.prepare_named_project_store_for_write("wiki")?;
     let sources = normalized_rem_sources(members);
     let draft_id = stable_rem_draft_id(&sources);
@@ -847,8 +846,9 @@ fn save_wiki_draft(
         tier: "raw".to_string(),
     };
 
-    persist_rem_draft_operation(server, &entry, &sources)?;
-    complete_rem_operation(server, &draft_id, &sources)
+    let result = persist_rem_draft_operation(server, &entry, &sources)?;
+    complete_rem_operation(server, &draft_id, &sources)?;
+    Ok(result)
 }
 
 // ─── Internal types ───────────────────────────────────────────────────────────

@@ -259,6 +259,72 @@ async fn tachi_wiki_write_supersedes_duplicate_topic_rows() {
 }
 
 #[tokio::test]
+async fn ordinary_wiki_write_never_rewrites_or_supersedes_a_guide() {
+    let shared_text =
+        "Agent review guidance requires exact evidence and an independent final verdict.";
+    let mut guide = make_entry("guide-agent-review");
+    guide.path = "/guide/global/workflows/agent-review".to_string();
+    guide.topic = "agent-review".to_string();
+    guide.text = shared_text.to_string();
+    guide.summary = "Agent review guide".to_string();
+    guide.metadata = json!({"layer": "guide", "artifact_kind": "guide"});
+    guide.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![guide]);
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Agent review Wiki".to_string(),
+            text: shared_text.to_string(),
+            path: Some("/wiki/general/agent-review".to_string()),
+            topic: Some("agent-review".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec!["review".to_string()],
+            entities: vec!["AgentReview".to_string()],
+            importance: 0.9,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: None,
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("write Wiki row beside same-topic Guide");
+    let response: Value = serde_json::from_str(&response).expect("write json");
+    assert_ne!(response["id"], json!("guide-agent-review"));
+    assert_eq!(response["wiki_write_mode"], json!("created"));
+
+    let guide = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get("guide-agent-review")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Guide row disappeared".to_string())
+        })
+        .expect("read unchanged Guide");
+    assert_eq!(guide.path, "/guide/global/workflows/agent-review");
+    assert_eq!(guide.text, shared_text);
+    let superseded_by: Option<String> = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT superseded_by FROM memories WHERE id = 'guide-agent-review'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("read Guide supersession state");
+    assert_eq!(superseded_by, None);
+}
+
+#[tokio::test]
 async fn tachi_wiki_write_scans_the_complete_parent_bucket_for_duplicates() {
     let replacement_text =
         "Canonical queue recovery guidance requires durable claims and replay-safe receipts.";
