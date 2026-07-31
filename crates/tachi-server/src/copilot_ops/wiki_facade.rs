@@ -197,9 +197,13 @@ async fn handle_tachi_wiki_write_inner(
         serde_json::from_str(&save_result).map_err(|e| format!("parse wiki save response: {e}"))?;
     let duplicate = response.get("saved").and_then(Value::as_bool) == Some(false)
         && response.get("status").and_then(Value::as_str) == Some("duplicate");
+    let transaction_replaced_existing = response
+        .get("wiki_previous_revision")
+        .and_then(Value::as_i64)
+        .is_some();
     let wiki_write_mode = if duplicate {
         "duplicate"
-    } else if update_id.is_some() {
+    } else if update_id.is_some() || transaction_replaced_existing {
         "updated"
     } else {
         "created"

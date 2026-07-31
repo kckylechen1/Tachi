@@ -1514,6 +1514,8 @@ async fn concurrent_distinct_guide_writes_leave_one_active_same_path_winner() {
         .expect("first creation has no predecessor");
     let replacement_id = replacement["id"].as_str().expect("replacement id");
     let original_id = original["id"].as_str().expect("original id");
+    assert_eq!(replacement["wiki_write_mode"], json!("updated"));
+    assert_eq!(original["wiki_write_mode"], json!("created"));
 
     server
         .with_named_project_store_read("wiki", |store| {
