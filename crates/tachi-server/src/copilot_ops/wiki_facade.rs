@@ -88,6 +88,10 @@ async fn handle_tachi_wiki_write_inner(
         obj.remove("review_receipt");
         obj.remove("source_bundle_hash");
         obj.remove("artifact_metadata_warnings");
+        // `rem` is an internal coordination receipt owned by the weekly Wiki
+        // evolver. Accepting it from an ordinary facade caller would let a
+        // user row impersonate or obstruct replay recovery.
+        obj.remove("rem");
         obj.insert("wiki".to_string(), json!(true));
         obj.insert("wiki_title".to_string(), json!(params.title.clone()));
         obj.insert("user_force".to_string(), json!(params.force));
@@ -191,17 +195,19 @@ async fn handle_tachi_wiki_write_inner(
 
     let mut response: Value =
         serde_json::from_str(&save_result).map_err(|e| format!("parse wiki save response: {e}"))?;
+    let duplicate = response.get("saved").and_then(Value::as_bool) == Some(false)
+        && response.get("status").and_then(Value::as_str) == Some("duplicate");
+    let wiki_write_mode = if duplicate {
+        "duplicate"
+    } else if update_id.is_some() {
+        "updated"
+    } else {
+        "created"
+    };
     if let Some(obj) = response.as_object_mut() {
         obj.insert("wiki_path".to_string(), json!(path));
         obj.insert("wiki_topic".to_string(), json!(topic));
-        obj.insert(
-            "wiki_write_mode".to_string(),
-            json!(if update_id.is_some() {
-                "updated"
-            } else {
-                "created"
-            }),
-        );
+        obj.insert("wiki_write_mode".to_string(), json!(wiki_write_mode));
     }
     let canonical_id = response
         .get("id")
@@ -217,11 +223,10 @@ async fn handle_tachi_wiki_write_inner(
             );
         }
     }
-    let wiki_write_mode = if update_id.is_some() {
-        "updated"
-    } else {
-        "created"
-    };
+    if duplicate {
+        return serde_json::to_string(&response)
+            .map_err(|e| format!("serialize duplicate wiki_write: {e}"));
+    }
     let continuity_event = crate::continuity_ops::emit_wiki_saved_event(
         server,
         crate::continuity_ops::WikiSavedEventInput {

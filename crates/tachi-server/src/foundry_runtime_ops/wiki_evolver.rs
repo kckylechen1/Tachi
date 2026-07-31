@@ -175,10 +175,30 @@ pub(crate) struct WikiEvolverReport {
 
 // ─── Candidate collection ─────────────────────────────────────────────────────
 
-fn rem_source_store_identity(db_path: &std::path::Path) -> Result<RemSourceStore, String> {
-    Ok(RemSourceStore {
-        identity: crate::physical_db_identity::physical_db_id_for_path(db_path)?,
-    })
+fn rem_source_store_identities(
+    global_path: &std::path::Path,
+    project_path: Option<&std::path::Path>,
+) -> Result<(RemSourceStore, Option<RemSourceStore>), String> {
+    let mut paths = vec![global_path.to_path_buf()];
+    if let Some(project_path) = project_path {
+        paths.push(project_path.to_path_buf());
+    }
+    let identities = crate::physical_db_identity::physical_db_ids_for_paths(&paths)?;
+    let global = RemSourceStore {
+        identity: identities[0].clone(),
+    };
+    let project = project_path.map(|_| RemSourceStore {
+        identity: identities[1].clone(),
+    });
+    Ok((global, project))
+}
+
+fn runtime_rem_source_stores(
+    server: &MemoryServer,
+) -> Result<(RemSourceStore, Option<RemSourceStore>), String> {
+    let global_path = server.global_db_path_buf();
+    let project_path = server.project_db_path_buf();
+    rem_source_store_identities(&global_path, project_path.as_deref())
 }
 
 fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, String> {
@@ -188,8 +208,8 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
             .map_err(|e| format!("query pattern memories: {e}"))
     };
 
-    let global_store = rem_source_store_identity(&server.global_db_path_buf())
-        .map_err(|error| format!("REM global source store identity: {error}"))?;
+    let (global_store, project_store) = runtime_rem_source_stores(server)
+        .map_err(|error| format!("REM runtime source store identity: {error}"))?;
     let mut entries = server
         .with_global_store_read(collect)
         .map_err(|e| format!("REM global candidate collection: {e}"))?
@@ -200,11 +220,9 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
         })
         .collect::<Vec<_>>();
     if server.has_project_db() {
-        let project_path = server.project_db_path_buf().ok_or_else(|| {
-            "REM project candidate collection: project path is missing".to_string()
+        let project_store = project_store.ok_or_else(|| {
+            "REM project candidate collection: project store identity is missing".to_string()
         })?;
-        let project_store = rem_source_store_identity(&project_path)
-            .map_err(|error| format!("REM project source store identity: {error}"))?;
         let project = server
             .with_project_store_read(collect)
             .map_err(|e| format!("REM project candidate collection: {e}"))?;
@@ -601,11 +619,7 @@ fn complete_rem_operation(
 ) -> Result<(), String> {
     ensure_rem_draft_winner(server, draft_id, sources)?;
     let now = Utc::now().to_rfc3339();
-    let global_store = rem_source_store_identity(&server.global_db_path_buf())?;
-    let project_store = server
-        .project_db_path_buf()
-        .map(|path| rem_source_store_identity(&path))
-        .transpose()?;
+    let (global_store, project_store) = runtime_rem_source_stores(server)?;
     let (global_ids, project_ids) =
         route_rem_source_ids(sources, &global_store, project_store.as_ref(), draft_id)?;
 
@@ -684,11 +698,7 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
     if wiki_path.is_none() {
         return Ok(());
     }
-    let global_store = rem_source_store_identity(&server.global_db_path_buf())?;
-    let project_store = server
-        .project_db_path_buf()
-        .map(|path| rem_source_store_identity(&path))
-        .transpose()?;
+    let (global_store, project_store) = runtime_rem_source_stores(server)?;
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
     loop {
@@ -975,8 +985,9 @@ mod rem_identity_tests {
         std::fs::write(&first, b"REM physical identity fixture").unwrap();
         std::fs::hard_link(&first, &second).unwrap();
 
-        let first_store = rem_source_store_identity(&first).unwrap();
-        let second_store = rem_source_store_identity(&second).unwrap();
+        let (first_store, second_store) =
+            rem_source_store_identities(&first, Some(&second)).unwrap();
+        let second_store = second_store.expect("project alias identity");
         assert_eq!(first_store, second_store);
 
         let first_id = stable_rem_draft_id(&[RemSourceRef {
@@ -988,6 +999,22 @@ mod rem_identity_tests {
             id: "same-source".to_string(),
         }]);
         assert_eq!(first_id, second_id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rem_source_store_identity_rejects_distinct_live_wal_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("global.db");
+        let second = dir.path().join("project.db");
+        std::fs::write(&first, b"REM physical identity fixture").unwrap();
+        std::fs::hard_link(&first, &second).unwrap();
+        std::fs::write(format!("{}-wal", first.display()), b"global WAL").unwrap();
+        std::fs::write(format!("{}-wal", second.display()), b"project WAL").unwrap();
+
+        let error = rem_source_store_identities(&first, Some(&second))
+            .expect_err("dual live WAL aliases must fail closed");
+        assert!(error.contains("multiple live WAL/SHM owners"), "{error}");
     }
 
     #[test]

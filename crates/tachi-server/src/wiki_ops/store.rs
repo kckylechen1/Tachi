@@ -26,17 +26,15 @@ pub(super) fn find_related_by_entities(
 
     let entries = list_related_candidates(server, project, 5000)?;
 
-    let mut related = entries
-        .into_iter()
-        .filter(is_user_facing_wiki_entry)
-        .filter(|entry| entry.id != exclude_id)
-        .filter(|entry| {
-            entry
-                .entities
-                .iter()
-                .any(|entity| entity_set.contains(&entity.trim().to_ascii_lowercase()))
-        })
-        .collect::<Vec<_>>();
+    let mut related = Vec::new();
+    for entry in entries {
+        if entry.id != exclude_id
+            && is_ordinary_related_wiki_entry(&entry)?
+            && entry_shares_normalized_entity(&entry, &entity_set)
+        {
+            related.push(entry);
+        }
+    }
     related.sort_by(|a, b| {
         b.importance
             .partial_cmp(&a.importance)
@@ -52,6 +50,27 @@ pub(super) fn find_related_by_entities(
         .take(limit)
         .map(|entry| compact_entry(&entry))
         .collect())
+}
+
+pub(super) fn entry_shares_normalized_entity(
+    entry: &MemoryEntry,
+    normalized_entities: &HashSet<String>,
+) -> bool {
+    entry
+        .entities
+        .iter()
+        .any(|entity| normalized_entities.contains(&entity.trim().to_ascii_lowercase()))
+}
+
+/// Related edges from ordinary Wiki ingest may target only the same
+/// user-facing, default-retrievable corpus. Drafts and REM operations are
+/// intentionally excluded even while their rows are active in SQLite.
+pub(super) fn is_ordinary_related_wiki_entry(entry: &MemoryEntry) -> Result<bool, String> {
+    Ok(is_user_facing_wiki_entry(entry)
+        && entry.path != "/wiki/drafts"
+        && !entry.path.starts_with("/wiki/drafts/")
+        && !entry.id.starts_with("wiki-rem:")
+        && wiki_entry_matches_lifecycle_scope(entry, None)?)
 }
 
 pub(super) fn list_related_candidates(

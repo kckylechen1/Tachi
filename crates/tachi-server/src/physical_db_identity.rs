@@ -449,13 +449,17 @@ pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> Physic
     }
 }
 
-/// Resolve one existing database path to the repository's physical store ID.
+/// Resolve a runtime set of database paths together, preserving input order.
 ///
-/// This is identity evidence only; it grants no mutation authority. In
-/// particular, Unix hardlink and symlink aliases of the same file return the
-/// same `(dev, ino)`-backed ID.
-pub(crate) fn physical_db_id_for_path(path: &Path) -> Result<String, String> {
-    let inventory = classify_paths(std::iter::once(path.to_path_buf()));
+/// Callers that may mutate through more than one logical alias must use this
+/// set-level seam: classifying aliases independently cannot detect two live
+/// WAL/SHM owners for the same main-file inode. Such a topology has no safe
+/// logical mutation owner and therefore fails loudly.
+pub(crate) fn physical_db_ids_for_paths(paths: &[PathBuf]) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let inventory = classify_paths(paths.iter().cloned());
     if let Some(unresolved) = inventory.unresolved_paths.first() {
         return Err(format!(
             "physical database identity unavailable for {}: {}",
@@ -463,14 +467,34 @@ pub(crate) fn physical_db_id_for_path(path: &Path) -> Result<String, String> {
             unresolved.error
         ));
     }
-    match inventory.stores.as_slice() {
-        [store] => Ok(store.physical_id.clone()),
-        stores => Err(format!(
-            "physical database identity for {} resolved to {} stores",
-            path.display(),
-            stores.len()
-        )),
+    if let Some(store) = inventory
+        .stores
+        .iter()
+        .find(|store| store.mutation_state == PhysicalStoreMutationState::AmbiguousPhysicalStore)
+    {
+        return Err(format!(
+            "invariant: physical database aliases for {} have multiple live WAL/SHM owners; mutation routing is ambiguous",
+            store.physical_id
+        ));
     }
+
+    paths
+        .iter()
+        .map(|path| {
+            let display = path.display().to_string();
+            inventory
+                .stores
+                .iter()
+                .find(|store| store.aliases.iter().any(|alias| alias == &display))
+                .map(|store| store.physical_id.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "physical database identity for {} was absent from the runtime inventory",
+                        path.display()
+                    )
+                })
+        })
+        .collect()
 }
 
 pub(crate) fn same_physical_file(left: &Path, right: &Path) -> bool {

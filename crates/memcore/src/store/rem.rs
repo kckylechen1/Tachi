@@ -61,6 +61,8 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} FROM memories
              WHERE path LIKE '/wiki/drafts/%'
+               AND id LIKE 'wiki-rem:%'
+               AND json_extract(metadata, '$.rem.producer') = 'weekly_wiki_evolver'
                AND json_extract(metadata, '$.rem.operation_status') = 'pending_sources'
                AND (?1 IS NULL
                     OR timestamp > ?1
@@ -417,7 +419,12 @@ mod tests {
         let mut draft = test_entry(
             "wiki-rem:pending",
             "raw",
-            json!({"rem": {"operation_status": "pending_sources"}}),
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
         );
         draft.path = "/wiki/drafts/pending".to_string();
         store.upsert(&draft).expect("seed pending draft");
@@ -445,5 +452,83 @@ mod tests {
             .expect("read draft")
             .expect("draft exists");
         assert_eq!(draft.metadata["rem"]["operation_status"], "complete");
+    }
+
+    #[test]
+    fn pending_rem_scan_ignores_ordinary_drafts_with_rem_shaped_metadata() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut ordinary = test_entry(
+            "ordinary-draft",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        ordinary.path = "/wiki/drafts/ordinary".to_string();
+        let mut canonical = test_entry(
+            "wiki-rem:canonical",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        canonical.path = "/wiki/drafts/canonical".to_string();
+        store.upsert(&ordinary).expect("seed ordinary draft");
+        store.upsert(&canonical).expect("seed canonical REM draft");
+
+        assert_eq!(
+            store
+                .pending_rem_wiki_operations(10)
+                .expect("list canonical pending REM operations")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["wiki-rem:canonical"]
+        );
+    }
+
+    #[test]
+    fn pending_rem_winner_refuses_generic_archive_and_supersession_until_complete() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut draft = test_entry(
+            "wiki-rem:protected",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        draft.path = "/wiki/drafts/protected".to_string();
+        store.upsert(&draft).expect("seed protected REM draft");
+
+        let archive = store
+            .archive_memory(&draft.id)
+            .expect_err("pending REM winner must reject generic archive");
+        assert!(archive.to_string().contains("pending REM operation winner"));
+        let supersede = store
+            .supersede_memory(&draft.id, "replacement")
+            .expect_err("pending REM winner must reject generic supersession");
+        assert!(supersede
+            .to_string()
+            .contains("pending REM operation winner"));
+        let delete = store
+            .delete(&draft.id)
+            .expect_err("pending REM winner must reject generic deletion");
+        assert!(delete.to_string().contains("pending REM operation winner"));
+
+        store
+            .complete_rem_wiki_operation(&draft.id, "2026-07-05T02:00:00Z")
+            .expect("complete REM operation");
+        assert!(store
+            .archive_memory(&draft.id)
+            .expect("completed REM draft may be archived"));
     }
 }

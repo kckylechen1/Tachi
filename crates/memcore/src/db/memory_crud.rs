@@ -3108,6 +3108,7 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
     if trimmed.is_empty() {
         return Err(MemoryError::InvalidArg("empty ID".to_string()));
     }
+    refuse_pending_rem_winner_mutation(conn, trimmed, "deleted")?;
 
     let tx = conn.transaction()?;
 
@@ -3147,7 +3148,35 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
     Ok(deleted)
 }
 
+fn refuse_pending_rem_winner_mutation(
+    conn: &Connection,
+    id: &str,
+    action: &str,
+) -> Result<(), MemoryError> {
+    let protected = conn.query_row(
+        r#"SELECT EXISTS(
+             SELECT 1 FROM memories
+             WHERE id = ?1
+               AND id LIKE 'wiki-rem:%'
+               AND path LIKE '/wiki/drafts/%'
+               AND archived = 0
+               AND superseded_by IS NULL
+               AND json_extract(metadata, '$.rem.producer') = 'weekly_wiki_evolver'
+               AND json_extract(metadata, '$.rem.operation_status') = 'pending_sources'
+           )"#,
+        [id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if protected {
+        return Err(MemoryError::InvalidArg(format!(
+            "invariant: pending REM operation winner {id} cannot be {action} before source completion"
+        )));
+    }
+    Ok(())
+}
+
 pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
+    refuse_pending_rem_winner_mutation(conn, id, "archived")?;
     let now = now_utc_iso();
     conn.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0",
@@ -3161,6 +3190,7 @@ pub fn archive_memory_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
+    refuse_pending_rem_winner_mutation(conn, id, "archived")?;
     let now = now_utc_iso();
     conn.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0 AND revision = ?3",
@@ -3192,6 +3222,7 @@ pub fn supersede_memory(
     if id == superseded_by {
         return Ok(false);
     }
+    refuse_pending_rem_winner_mutation(conn, id, "superseded")?;
     let now = now_utc_iso();
     // Closing valid_until at supersession time turns the superseded row into a
     // point-in-time-recoverable version: `as_of` before `now` still returns it,

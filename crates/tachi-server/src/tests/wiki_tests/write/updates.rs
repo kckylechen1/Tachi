@@ -119,6 +119,56 @@ async fn tachi_wiki_write_update_tombstones_legacy_source_refs() {
 }
 
 #[tokio::test]
+async fn public_wiki_write_cannot_persist_internal_rem_coordination_metadata() {
+    let (server, _home) = seed_wiki_project_entries(Vec::new());
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Reserved REM metadata".to_string(),
+            text: "Ordinary Wiki content must not impersonate an internal REM operation."
+                .to_string(),
+            path: Some("/wiki/general/reserved-rem-metadata".to_string()),
+            topic: Some("reserved-rem-metadata".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.8,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            metadata: Some(json!({
+                "caller_marker": "preserved",
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            })),
+            force: true,
+            references: vec![],
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("write ordinary Wiki row");
+    let response: Value = serde_json::from_str(&response).expect("wiki response json");
+    let id = response["id"].as_str().expect("wiki id");
+    let entry = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get(id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "written Wiki row disappeared".to_string())
+        })
+        .expect("read ordinary Wiki row");
+
+    assert_eq!(entry.metadata["caller_marker"], json!("preserved"));
+    assert_eq!(entry.metadata["rem"], Value::Null);
+}
+
+#[tokio::test]
 async fn tachi_wiki_write_updates_existing_path_in_place() {
     let (server, _home) = seed_wiki_project_entries(Vec::new());
 
@@ -691,4 +741,73 @@ async fn stale_wiki_canonical_cannot_supersede_the_new_active_winner() {
             Ok(())
         })
         .expect("verify one-way supersession");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_idless_wiki_duplicate_reports_no_false_created_write() {
+    let (server, _home) = seed_wiki_project_entries(Vec::new());
+    let writer_one = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open first Wiki writer");
+    let writer_two = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open second Wiki writer");
+    let path = "/wiki/general/concurrent-idless-truth";
+    let text = "Concurrent Wiki projection must report only one actual created write.";
+    let _barrier = crate::memory_search_ops::save_memory::install_pre_upsert_identity_barrier(
+        path,
+        text,
+        std::sync::Arc::new(std::sync::Barrier::new(2)),
+    );
+
+    let write = |writer: MemoryServer| {
+        tokio::spawn(async move {
+            writer
+                .tachi_wiki_write(Parameters(WikiWriteParams {
+                    title: "Concurrent idless truth".to_string(),
+                    text: text.to_string(),
+                    path: Some(path.to_string()),
+                    topic: Some("concurrent-idless-truth".to_string()),
+                    summary: None,
+                    category: "experience".to_string(),
+                    keywords: vec![],
+                    entities: vec![],
+                    importance: 0.8,
+                    scope: "global".to_string(),
+                    retention_policy: "permanent".to_string(),
+                    domain: None,
+                    project: None,
+                    metadata: None,
+                    force: true,
+                    references: vec![],
+                    include_patterns: false,
+                    pattern_query: None,
+                    pattern_top_k: None,
+                }))
+                .await
+        })
+    };
+    let first = write(writer_one);
+    let second = write(writer_two);
+    let mut parsed = Vec::new();
+    for task in [first, second] {
+        let raw = task
+            .await
+            .expect("Wiki writer task")
+            .expect("Wiki writer response");
+        parsed.push(serde_json::from_str::<Value>(&raw).expect("Wiki response JSON"));
+    }
+    let created = parsed
+        .iter()
+        .find(|response| response["wiki_write_mode"] == "created")
+        .expect("one writer reports the committed creation");
+    let duplicate = parsed
+        .iter()
+        .find(|response| response["wiki_write_mode"] == "duplicate")
+        .expect("one writer reports the no-write duplicate");
+
+    assert!(created["status"]
+        .as_str()
+        .is_some_and(|status| status.starts_with("saved")));
+    assert_eq!(duplicate["saved"], json!(false));
+    assert!(duplicate.get("continuity_event").is_none());
+    assert_eq!(created["id"], duplicate["id"]);
 }

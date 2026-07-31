@@ -85,8 +85,19 @@ struct PreUpsertBarrier {
 }
 
 #[cfg(test)]
+struct PreUpsertIdentityBarrier {
+    identity: String,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
 static PRE_UPSERT_BARRIER: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsertBarrier>>> =
     std::sync::OnceLock::new();
+
+#[cfg(test)]
+static PRE_UPSERT_IDENTITY_BARRIER: std::sync::OnceLock<
+    std::sync::Mutex<Option<PreUpsertIdentityBarrier>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 struct PreUpsertPause {
@@ -102,6 +113,9 @@ static PRE_UPSERT_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsertPa
 
 #[cfg(test)]
 pub(crate) struct PreUpsertBarrierGuard;
+
+#[cfg(test)]
+pub(crate) struct PreUpsertIdentityBarrierGuard;
 
 #[cfg(test)]
 pub(crate) struct PreUpsertPauseGuard;
@@ -123,6 +137,30 @@ pub(crate) fn install_pre_upsert_barrier(
 impl Drop for PreUpsertBarrierGuard {
     fn drop(&mut self) {
         if let Some(slot) = PRE_UPSERT_BARRIER.get() {
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_pre_upsert_identity_barrier(
+    path: &str,
+    text: &str,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+) -> PreUpsertIdentityBarrierGuard {
+    let slot = PRE_UPSERT_IDENTITY_BARRIER.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(PreUpsertIdentityBarrier {
+            identity: idless_save_identity(path, text),
+            barrier,
+        });
+    PreUpsertIdentityBarrierGuard
+}
+
+#[cfg(test)]
+impl Drop for PreUpsertIdentityBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = PRE_UPSERT_IDENTITY_BARRIER.get() {
             *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
     }
@@ -162,6 +200,22 @@ fn wait_at_pre_upsert_barrier(entry_id: &str) {
             .as_ref()
             .filter(|configured| configured.entry_id == entry_id)
             .map(|configured| std::sync::Arc::clone(&configured.barrier))
+    });
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+#[cfg(test)]
+fn wait_at_pre_upsert_identity_barrier(identity: Option<&str>) {
+    let barrier = identity.and_then(|identity| {
+        PRE_UPSERT_IDENTITY_BARRIER.get().and_then(|slot| {
+            slot.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .filter(|configured| configured.identity == identity)
+                .map(|configured| std::sync::Arc::clone(&configured.barrier))
+        })
     });
     if let Some(barrier) = barrier {
         barrier.wait();
@@ -667,6 +721,8 @@ async fn handle_save_memory_impl(
 
     #[cfg(test)]
     wait_at_pre_upsert_barrier(&entry.id);
+    #[cfg(test)]
+    wait_at_pre_upsert_identity_barrier(idless_identity.as_deref());
     #[cfg(test)]
     wait_at_pre_upsert_pause(&entry.id, trusted_append);
 

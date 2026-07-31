@@ -417,11 +417,27 @@ fn persist_wiki_ingest_entry(
                 replacement.archive_claimed_source(&old_entry.id)?;
             }
             let mut committed_related_ids = Vec::new();
+            let normalized_entities = replacement_entry
+                .entities
+                .iter()
+                .map(|entity| entity.trim().to_ascii_lowercase())
+                .filter(|entity| !entity.is_empty())
+                .collect::<HashSet<_>>();
             for edge in related_edges {
                 if old_entry
                     .as_ref()
                     .is_some_and(|predecessor| predecessor.id == edge.target_id)
-                    || !replacement.memory_is_active_unsuperseded(&edge.target_id)?
+                    || edge.target_id == replacement_entry.id
+                {
+                    continue;
+                }
+                let Some(target) = replacement.get_memory(&edge.target_id)? else {
+                    continue;
+                };
+                if !replacement.memory_is_active_unsuperseded(&edge.target_id)?
+                    || !is_ordinary_related_wiki_entry(&target)
+                        .map_err(memcore::MemoryError::InvalidArg)?
+                    || !entry_shares_normalized_entity(&target, &normalized_entities)
                 {
                     continue;
                 }
@@ -858,6 +874,71 @@ mod immutable_supersession_tests {
         assert!(
             edges.iter().all(|edge| edge.target_id != old.id),
             "the archived predecessor is not a truthful related target"
+        );
+    }
+
+    #[test]
+    fn replacement_revalidates_related_corpus_lifecycle_and_entities_in_transaction() {
+        let temp = tempfile::tempdir().expect("wiki related revalidation tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+
+        let mut replacement = wiki_entry("fresh-related-candidate");
+        replacement.entities = vec!["SharedEntity".to_string()];
+
+        let mut valid = wiki_entry("active-related-target");
+        valid.path = "/wiki/general/active-related-target".to_string();
+        valid.entities = vec!["sharedentity".to_string()];
+
+        let mut rem_draft = wiki_entry("wiki-rem:pending-related-target");
+        rem_draft.path = "/wiki/drafts/rem-pending-related-target".to_string();
+        rem_draft.entities = vec!["SharedEntity".to_string()];
+        rem_draft.metadata = serde_json::json!({
+            "wiki": true,
+            "lifecycle": "pending_review",
+            "rem": {"operation_status": "pending_sources"}
+        });
+
+        let mut pending = wiki_entry("pending-related-target");
+        pending.path = "/wiki/general/pending-related-target".to_string();
+        pending.entities = vec!["SharedEntity".to_string()];
+        pending.metadata = serde_json::json!({"wiki": true, "lifecycle": "pending_review"});
+
+        let mut entity_drifted = wiki_entry("entity-drifted-related-target");
+        entity_drifted.path = "/wiki/general/entity-drifted-related-target".to_string();
+        entity_drifted.entities = vec!["NoLongerShared".to_string()];
+
+        for entry in [&valid, &rem_draft, &pending, &entity_drifted] {
+            store.upsert(entry).expect("seed related candidate");
+        }
+        let edges = [&valid, &rem_draft, &pending, &entity_drifted]
+            .into_iter()
+            .map(|target| memcore::MemoryEdge {
+                source_id: replacement.id.clone(),
+                target_id: target.id.clone(),
+                relation: "references".to_string(),
+                weight: 0.6,
+                metadata: serde_json::json!({"wiki_ingest": true}),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_to: None,
+            })
+            .collect::<Vec<_>>();
+
+        let committed = persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &edges)
+            .expect("persist replacement with transactionally revalidated relations");
+
+        assert_eq!(committed, vec![valid.id.clone()]);
+        let persisted = store
+            .get_edges(&replacement.id, "outgoing", Some("references"))
+            .expect("read committed related edges");
+        assert_eq!(
+            persisted
+                .into_iter()
+                .map(|edge| edge.target_id)
+                .collect::<Vec<_>>(),
+            vec![valid.id]
         );
     }
 }
