@@ -379,7 +379,7 @@ fn persist_wiki_ingest_entry(
     reference_appends: &[memcore::db::ValidatedReferenceMutation],
     new_invocation: Option<&tachi_llm::PersistedModelInvocationReceiptV1>,
     related_edges: &[memcore::MemoryEdge],
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     store
         .with_immutable_supersession_transaction(|replacement| {
             let old_entry = replacement
@@ -416,12 +416,21 @@ fn persist_wiki_ingest_entry(
             if let Some(old_entry) = old_entry.as_ref() {
                 replacement.archive_claimed_source(&old_entry.id)?;
             }
+            let mut committed_related_ids = Vec::new();
             for edge in related_edges {
+                if old_entry
+                    .as_ref()
+                    .is_some_and(|predecessor| predecessor.id == edge.target_id)
+                    || !replacement.memory_is_active_unsuperseded(&edge.target_id)?
+                {
+                    continue;
+                }
                 replacement.add_edge(edge).map_err(|error| {
                     memcore::MemoryError::Internal(format!("wiki ingest edge: {error}"))
                 })?;
+                committed_related_ids.push(edge.target_id.clone());
             }
-            Ok(())
+            Ok(committed_related_ids)
         })
         .map_err(|e| format!("wiki ingest refused: {e}"))
 }
@@ -584,7 +593,7 @@ pub(crate) async fn handle_wiki_ingest(
         }
     }
 
-    server.with_named_project_store("wiki", |store| {
+    let committed_related_ids = server.with_named_project_store("wiki", |store| {
         persist_wiki_ingest_entry(
             store,
             &entry,
@@ -593,6 +602,15 @@ pub(crate) async fn handle_wiki_ingest(
             &related_edges,
         )
     })?;
+    let committed_related_ids = committed_related_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    related.retain(|entry| {
+        entry
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| committed_related_ids.contains(id))
+    });
 
     // #1413 concern 1: bust the shared (global) recall cache AFTER every
     // content-changing write in this ingest has committed — the entry upsert
@@ -769,5 +787,77 @@ mod immutable_supersession_tests {
             "replacement must claim the winner observed in its transaction"
         );
         assert!(store.get(&candidate.id).expect("read candidate").is_some());
+    }
+
+    #[test]
+    fn replacement_stays_canonical_when_an_unrelated_jaccard_candidate_exists() {
+        let temp = tempfile::tempdir().expect("wiki replacement jaccard tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+        let mut old = wiki_entry("old-replacement-target");
+        old.text = "The predecessor has deliberately unrelated content.".to_string();
+        let mut near_duplicate = wiki_entry("unrelated-near-duplicate");
+        near_duplicate.text =
+            "Canonical ingest content must remain the active replacement winner.".to_string();
+        let mut replacement = wiki_entry("fresh-replacement");
+        replacement.path = old.path.clone();
+        replacement.topic = old.topic.clone();
+        replacement.text = near_duplicate.text.clone();
+        store.upsert(&old).expect("seed predecessor");
+        store.upsert(&near_duplicate).expect("seed near duplicate");
+
+        persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &[])
+            .expect("persist canonical replacement");
+
+        assert_eq!(
+            store
+                .supersession_target(&replacement.id)
+                .expect("read replacement supersession"),
+            Some(None),
+            "replacement must not be inserted as a generic Jaccard loser"
+        );
+        assert_eq!(
+            store
+                .supersession_target(&old.id)
+                .expect("read predecessor supersession"),
+            Some(Some(replacement.id.clone()))
+        );
+    }
+
+    #[test]
+    fn replacement_does_not_relate_to_the_predecessor_it_archives() {
+        let temp = tempfile::tempdir().expect("wiki replacement relation tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+        let old = wiki_entry("related-predecessor");
+        let mut replacement = wiki_entry("fresh-related-replacement");
+        replacement.path = old.path.clone();
+        replacement.topic = old.topic.clone();
+        store.upsert(&old).expect("seed predecessor");
+        let edge = memcore::MemoryEdge {
+            source_id: replacement.id.clone(),
+            target_id: old.id.clone(),
+            relation: "references".to_string(),
+            weight: 0.6,
+            metadata: serde_json::json!({"wiki_ingest": true}),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+
+        let committed_related =
+            persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &[edge])
+                .expect("persist replacement without stale relation");
+
+        assert!(committed_related.is_empty());
+        let edges = store
+            .get_edges(&replacement.id, "outgoing", Some("references"))
+            .expect("read replacement edges");
+        assert!(
+            edges.iter().all(|edge| edge.target_id != old.id),
+            "the archived predecessor is not a truthful related target"
+        );
     }
 }

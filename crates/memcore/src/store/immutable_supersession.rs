@@ -97,15 +97,52 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     ) -> Result<(), MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        db::upsert_with_validated_reference_mutations_within_tx(
+        // A replacement transaction has already selected its canonical target.
+        // Generic Jaccard merging here could insert that target as somebody
+        // else's loser after the predecessor claim succeeded, leaving no active
+        // winner for the requested projection.
+        db::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
             &self.tx,
             entry,
             self.vec_available,
             None,
             metadata_patch,
+            &[],
             mutations,
+            false,
         )
         .map(|_| ())
+    }
+
+    /// Claim one physical REM source in the shared Wiki coordination store.
+    ///
+    /// Same-draft replay is accepted only when the canonical serialized source
+    /// identity also matches. A competing draft or deterministic-key occupant
+    /// aborts the surrounding draft transaction.
+    pub fn claim_rem_source(
+        &mut self,
+        source_key: &str,
+        source_identity: &str,
+        draft_id: &str,
+        claimed_at: &str,
+    ) -> Result<(), MemoryError> {
+        self.tx.execute(
+            "INSERT INTO rem_source_claims (source_key, source_identity, draft_id, claimed_at) \
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(source_key) DO NOTHING",
+            rusqlite::params![source_key, source_identity, draft_id, claimed_at],
+        )?;
+        let occupant = self.tx.query_row(
+            "SELECT source_identity, draft_id FROM rem_source_claims WHERE source_key = ?1",
+            [source_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        if occupant != (source_identity.to_string(), draft_id.to_string()) {
+            return Err(MemoryError::InvalidArg(format!(
+                "REM source claim conflict for {source_key}: owned by {}",
+                occupant.1
+            )));
+        }
+        Ok(())
     }
 
     /// Persist an entry while applying trusted metadata removals and validated
@@ -223,5 +260,56 @@ impl MemoryStore {
             replacement.tx.commit()?;
             Ok(result)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rem_source_claim_is_insert_once_and_replay_safe() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_rem_source(
+                    "rem-source:one",
+                    r#"{"store":"physical","id":"one"}"#,
+                    "draft-a",
+                    "2026-07-31T00:00:00Z",
+                )
+            })
+            .expect("first claim");
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_rem_source(
+                    "rem-source:one",
+                    r#"{"store":"physical","id":"one"}"#,
+                    "draft-a",
+                    "2026-07-31T00:00:01Z",
+                )
+            })
+            .expect("same operation replay");
+
+        let error = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_rem_source(
+                    "rem-source:one",
+                    r#"{"store":"physical","id":"one"}"#,
+                    "draft-b",
+                    "2026-07-31T00:00:02Z",
+                )
+            })
+            .expect_err("competing draft must not steal the source");
+        assert!(error.to_string().contains("REM source claim conflict"));
+        let occupant: String = store
+            .connection()
+            .query_row(
+                "SELECT draft_id FROM rem_source_claims WHERE source_key = 'rem-source:one'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read claim occupant");
+        assert_eq!(occupant, "draft-a");
     }
 }

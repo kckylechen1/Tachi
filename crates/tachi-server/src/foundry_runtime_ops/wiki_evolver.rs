@@ -21,7 +21,7 @@
 //! summaries*, NOT causal inference claims. The module never writes to
 //! the "active" wiki path space (`/wiki/` without `drafts/` prefix).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -50,20 +50,11 @@ const MIN_TEXT_LEN: usize = 60;
 const DRAFT_IMPORTANCE: f64 = 0.65;
 
 const REM_WIKI_SOURCE_SET_CONTRACT: &str = "rem-wiki-source-set-v1";
+const REM_WIKI_SOURCE_CLAIM_CONTRACT: &str = "rem-wiki-source-claim-v1";
 const REM_WIKI_PRODUCER_VERSION: &str = "weekly-wiki-evolver-v1";
-
-#[derive(
-    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
-)]
-#[serde(rename_all = "snake_case")]
-enum RemSourceScope {
-    Global,
-    Project,
-}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
 struct RemSourceStore {
-    scope: RemSourceScope,
     identity: String,
 }
 
@@ -84,6 +75,12 @@ struct RemSourceSetIdentityV1<'a> {
     contract: &'static str,
     producer_version: &'static str,
     sources: &'a [RemSourceRef],
+}
+
+#[derive(serde::Serialize)]
+struct RemSourceClaimIdentityV1<'a> {
+    contract: &'static str,
+    source: &'a RemSourceRef,
 }
 
 /// System prompt for wiki synthesis.
@@ -178,12 +175,8 @@ pub(crate) struct WikiEvolverReport {
 
 // ─── Candidate collection ─────────────────────────────────────────────────────
 
-fn rem_source_store_identity(
-    scope: RemSourceScope,
-    db_path: &std::path::Path,
-) -> Result<RemSourceStore, String> {
+fn rem_source_store_identity(db_path: &std::path::Path) -> Result<RemSourceStore, String> {
     Ok(RemSourceStore {
-        scope,
         identity: crate::physical_db_identity::physical_db_id_for_path(db_path)?,
     })
 }
@@ -195,9 +188,8 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
             .map_err(|e| format!("query pattern memories: {e}"))
     };
 
-    let global_store =
-        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf())
-            .map_err(|error| format!("REM global source store identity: {error}"))?;
+    let global_store = rem_source_store_identity(&server.global_db_path_buf())
+        .map_err(|error| format!("REM global source store identity: {error}"))?;
     let mut entries = server
         .with_global_store_read(collect)
         .map_err(|e| format!("REM global candidate collection: {e}"))?
@@ -211,7 +203,7 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
         let project_path = server.project_db_path_buf().ok_or_else(|| {
             "REM project candidate collection: project path is missing".to_string()
         })?;
-        let project_store = rem_source_store_identity(RemSourceScope::Project, &project_path)
+        let project_store = rem_source_store_identity(&project_path)
             .map_err(|error| format!("REM project source store identity: {error}"))?;
         let project = server
             .with_project_store_read(collect)
@@ -221,7 +213,15 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
             entry,
         }));
     }
+    deduplicate_rem_candidates(&mut entries);
     Ok(entries)
+}
+
+fn deduplicate_rem_candidates(entries: &mut Vec<RemCandidate>) {
+    let mut seen = HashSet::new();
+    entries.retain(|candidate| {
+        seen.insert((candidate.store.identity.clone(), candidate.entry.id.clone()))
+    });
 }
 
 // ─── Clustering ────────────────────────────────────────────────────────────────
@@ -424,6 +424,19 @@ fn stable_rem_draft_id(sources: &[RemSourceRef]) -> String {
     )
 }
 
+fn stable_rem_source_claim(source: &RemSourceRef) -> (String, String) {
+    let identity = serde_json::to_string(&RemSourceClaimIdentityV1 {
+        contract: REM_WIKI_SOURCE_CLAIM_CONTRACT,
+        source,
+    })
+    .expect("serializing a REM source claim cannot fail");
+    let key = format!(
+        "rem-source:{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.as_bytes())
+    );
+    (key, identity)
+}
+
 fn rem_identity_conflict(draft_id: &str, reason: &str) -> MemoryError {
     MemoryError::InvalidArg(format!(
         "rem_wiki_identity_conflict: source-set identity collision for {draft_id}: {reason}"
@@ -552,6 +565,16 @@ fn persist_rem_draft_operation(
     server.with_named_project_store("wiki", |store| {
         store
             .with_immutable_supersession_transaction(|operation| {
+                let claimed_at = Utc::now().to_rfc3339();
+                for source in sources {
+                    let (source_key, source_identity) = stable_rem_source_claim(source);
+                    operation.claim_rem_source(
+                        &source_key,
+                        &source_identity,
+                        &entry.id,
+                        &claimed_at,
+                    )?;
+                }
                 let result = operation.insert_if_absent(entry)?;
                 if result == InsertMemoryResult::Existing {
                     let existing = operation.get_memory(&entry.id)?.ok_or_else(|| {
@@ -578,45 +601,13 @@ fn complete_rem_operation(
 ) -> Result<(), String> {
     ensure_rem_draft_winner(server, draft_id, sources)?;
     let now = Utc::now().to_rfc3339();
-    let global_store =
-        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf())?;
-    let global_ids = sources
-        .iter()
-        .filter(|source| source.store.scope == RemSourceScope::Global)
-        .map(|source| {
-            if source.store != global_store {
-                return Err(format!(
-                    "REM global source store identity mismatch for {draft_id}"
-                ));
-            }
-            Ok(source.id.clone())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let project_sources = sources
-        .iter()
-        .filter(|source| source.store.scope == RemSourceScope::Project)
-        .collect::<Vec<_>>();
-    let project_ids = if project_sources.is_empty() {
-        Vec::new()
-    } else {
-        let project_path = server.project_db_path_buf().ok_or_else(|| {
-            format!(
-                "complete REM project source group: bound project store is unavailable for {draft_id}"
-            )
-        })?;
-        let project_store = rem_source_store_identity(RemSourceScope::Project, &project_path)?;
-        project_sources
-            .into_iter()
-            .map(|source| {
-                if source.store != project_store {
-                    return Err(format!(
-                        "REM project source store identity mismatch for {draft_id}"
-                    ));
-                }
-                Ok(source.id.clone())
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    let global_store = rem_source_store_identity(&server.global_db_path_buf())?;
+    let project_store = server
+        .project_db_path_buf()
+        .map(|path| rem_source_store_identity(&path))
+        .transpose()?;
+    let (global_ids, project_ids) =
+        route_rem_source_ids(sources, &global_store, project_store.as_ref(), draft_id)?;
 
     if !global_ids.is_empty() {
         server
@@ -654,10 +645,34 @@ fn rem_sources_belong_to_runtime_stores(
     project_store: Option<&RemSourceStore>,
 ) -> bool {
     !sources.is_empty()
-        && sources.iter().all(|source| match source.store.scope {
-            RemSourceScope::Global => &source.store == global_store,
-            RemSourceScope::Project => project_store == Some(&source.store),
-        })
+        && sources
+            .iter()
+            .all(|source| &source.store == global_store || project_store == Some(&source.store))
+}
+
+fn route_rem_source_ids(
+    sources: &[RemSourceRef],
+    global_store: &RemSourceStore,
+    project_store: Option<&RemSourceStore>,
+    draft_id: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut global_ids = Vec::new();
+    let mut project_ids = Vec::new();
+    for source in sources {
+        if &source.store == global_store {
+            // Prefer global when both logical roles alias the same physical DB;
+            // the row must be marked exactly once.
+            global_ids.push(source.id.clone());
+        } else if project_store == Some(&source.store) {
+            project_ids.push(source.id.clone());
+        } else {
+            return Err(format!(
+                "REM source store identity mismatch for {draft_id}: {}",
+                source.store.identity
+            ));
+        }
+    }
+    Ok((global_ids, project_ids))
 }
 
 fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
@@ -669,11 +684,10 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
     if wiki_path.is_none() {
         return Ok(());
     }
-    let global_store =
-        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf())?;
+    let global_store = rem_source_store_identity(&server.global_db_path_buf())?;
     let project_store = server
         .project_db_path_buf()
-        .map(|path| rem_source_store_identity(RemSourceScope::Project, &path))
+        .map(|path| rem_source_store_identity(&path))
         .transpose()?;
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
@@ -871,9 +885,8 @@ struct WikiDraft {
 mod rem_identity_tests {
     use super::*;
 
-    fn test_store(scope: RemSourceScope, identity: &str) -> RemSourceStore {
+    fn test_store(identity: &str) -> RemSourceStore {
         RemSourceStore {
-            scope,
             identity: identity.to_string(),
         }
     }
@@ -930,11 +943,11 @@ mod rem_identity_tests {
     fn rem_identity_is_sorted_and_store_aware() {
         let sources = vec![
             RemSourceRef {
-                store: test_store(RemSourceScope::Project, "project-db"),
+                store: test_store("project-db"),
                 id: "same".to_string(),
             },
             RemSourceRef {
-                store: test_store(RemSourceScope::Global, "global-db"),
+                store: test_store("global-db"),
                 id: "same".to_string(),
             },
         ];
@@ -947,7 +960,7 @@ mod rem_identity_tests {
         assert_ne!(
             stable_rem_draft_id(&sorted),
             stable_rem_draft_id(&[RemSourceRef {
-                store: test_store(RemSourceScope::Project, "project-db"),
+                store: test_store("project-db"),
                 id: "same".to_string(),
             }])
         );
@@ -962,8 +975,8 @@ mod rem_identity_tests {
         std::fs::write(&first, b"REM physical identity fixture").unwrap();
         std::fs::hard_link(&first, &second).unwrap();
 
-        let first_store = rem_source_store_identity(RemSourceScope::Project, &first).unwrap();
-        let second_store = rem_source_store_identity(RemSourceScope::Project, &second).unwrap();
+        let first_store = rem_source_store_identity(&first).unwrap();
+        let second_store = rem_source_store_identity(&second).unwrap();
         assert_eq!(first_store, second_store);
 
         let first_id = stable_rem_draft_id(&[RemSourceRef {
@@ -978,10 +991,28 @@ mod rem_identity_tests {
     }
 
     #[test]
+    fn candidate_dedup_uses_physical_store_and_source_id() {
+        let store = test_store("same-physical-db");
+        let source = occupied_entry("same-source", &[]);
+        let mut candidates = vec![
+            RemCandidate {
+                store: store.clone(),
+                entry: source.clone(),
+            },
+            RemCandidate {
+                store,
+                entry: source,
+            },
+        ];
+        deduplicate_rem_candidates(&mut candidates);
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
     fn pending_recovery_accepts_only_the_current_runtime_source_stores() {
-        let global = test_store(RemSourceScope::Global, "/home/global.db");
-        let project_a = test_store(RemSourceScope::Project, "/home/projects/a.db");
-        let project_b = test_store(RemSourceScope::Project, "/home/projects/b.db");
+        let global = test_store("/home/global.db");
+        let project_a = test_store("/home/projects/a.db");
+        let project_b = test_store("/home/projects/b.db");
         let owned = vec![
             RemSourceRef {
                 store: global.clone(),
@@ -1007,9 +1038,22 @@ mod rem_identity_tests {
     }
 
     #[test]
+    fn source_routing_marks_a_dual_role_physical_store_once() {
+        let shared = test_store("same-physical-db");
+        let sources = vec![RemSourceRef {
+            store: shared.clone(),
+            id: "source".to_string(),
+        }];
+        let (global, project) =
+            route_rem_source_ids(&sources, &shared, Some(&shared), "draft").unwrap();
+        assert_eq!(global, vec!["source"]);
+        assert!(project.is_empty());
+    }
+
+    #[test]
     fn deterministic_id_occupant_must_match_exact_source_set() {
         let sources = vec![RemSourceRef {
-            store: test_store(RemSourceScope::Project, "project-db"),
+            store: test_store("project-db"),
             id: "source-a".to_string(),
         }];
         let id = stable_rem_draft_id(&sources);
@@ -1017,7 +1061,7 @@ mod rem_identity_tests {
         validate_existing_rem_draft(&valid, &id, &sources).expect("canonical occupant");
 
         let collision_sources = vec![RemSourceRef {
-            store: test_store(RemSourceScope::Project, "project-db"),
+            store: test_store("project-db"),
             id: "source-b".to_string(),
         }];
         let collision = occupied_entry(&id, &collision_sources);

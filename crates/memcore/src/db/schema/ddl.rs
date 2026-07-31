@@ -292,6 +292,19 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             created_at TEXT NOT NULL DEFAULT ''
         );
 
+        -- Shared REM coordination ledger. The Wiki store is the one database
+        -- every repo-local evolver can see, so source claims live here rather
+        -- than in one caller's global/project source store. Claims are
+        -- insert-once and retained after completion as replay evidence.
+        CREATE TABLE IF NOT EXISTS rem_source_claims (
+            source_key      TEXT PRIMARY KEY,
+            source_identity TEXT NOT NULL,
+            draft_id        TEXT NOT NULL,
+            claimed_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_rem_source_claims_draft
+            ON rem_source_claims(draft_id);
+
         CREATE TABLE IF NOT EXISTS processed_events (
             event_hash TEXT NOT NULL,
             event_id   TEXT NOT NULL DEFAULT '',

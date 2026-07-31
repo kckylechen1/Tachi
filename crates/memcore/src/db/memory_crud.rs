@@ -1036,26 +1036,6 @@ fn upsert_with_validated_reference_mutations(
     Ok(result)
 }
 
-pub(crate) fn upsert_with_validated_reference_mutations_within_tx(
-    tx: &rusqlite::Transaction<'_>,
-    entry: &MemoryEntry,
-    vec_available: bool,
-    idless_identity: Option<&str>,
-    metadata_patch: &Map<String, Value>,
-    mutations: &[ValidatedReferenceMutation],
-) -> Result<(IdlessUpsertResult, Value), MemoryError> {
-    upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
-        tx,
-        entry,
-        vec_available,
-        idless_identity,
-        metadata_patch,
-        &[],
-        mutations,
-        true,
-    )
-}
-
 #[allow(clippy::too_many_arguments)] // fixed transaction seam; grouping these trust channels would blur them
 pub(crate) fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
     tx: &rusqlite::Transaction<'_>,

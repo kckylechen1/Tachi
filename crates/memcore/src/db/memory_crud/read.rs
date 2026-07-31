@@ -281,7 +281,14 @@ pub fn list_wiki_duplicate_candidates(
          FROM memories
          WHERE archived = 0
            AND superseded_by IS NULL
+           AND id NOT LIKE 'wiki-rem:%'
            AND path LIKE '/wiki/%'
+           AND (
+               ((?1 = '/wiki/drafts' OR ?1 LIKE '/wiki/drafts/%')
+                AND (path = '/wiki/drafts' OR path LIKE '/wiki/drafts/%'))
+               OR ((?1 != '/wiki/drafts' AND ?1 NOT LIKE '/wiki/drafts/%')
+                   AND path != '/wiki/drafts' AND path NOT LIKE '/wiki/drafts/%')
+           )
            AND (path = ?1 OR (?2 != '' AND topic = ?2) OR path = ?3 OR path LIKE ?4)
          ORDER BY CASE WHEN path = ?1 THEN 0 WHEN topic = ?2 THEN 1 ELSE 2 END,
                   path ASC,
@@ -321,13 +328,21 @@ pub fn find_active_wiki_entry_by_path_or_topic(
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL
+             AND id NOT LIKE 'wiki-rem:%'
              AND (
                  path = ?1
                  OR (
                      topic = ?2
                      AND (
                          ((?1 = '/wiki' OR ?1 LIKE '/wiki/%')
-                          AND (path = '/wiki' OR path LIKE '/wiki/%'))
+                          AND (
+                              ((?1 = '/wiki/drafts' OR ?1 LIKE '/wiki/drafts/%')
+                               AND (path = '/wiki/drafts' OR path LIKE '/wiki/drafts/%'))
+                              OR ((?1 != '/wiki/drafts' AND ?1 NOT LIKE '/wiki/drafts/%')
+                                  AND (path = '/wiki' OR path LIKE '/wiki/%')
+                                  AND path != '/wiki/drafts'
+                                  AND path NOT LIKE '/wiki/drafts/%')
+                          ))
                          OR ((?1 = '/guide' OR ?1 LIKE '/guide/%')
                              AND (path = '/guide' OR path LIKE '/guide/%'))
                      )
