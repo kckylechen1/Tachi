@@ -178,12 +178,14 @@ pub(crate) struct WikiEvolverReport {
 
 // ─── Candidate collection ─────────────────────────────────────────────────────
 
-fn rem_source_store_identity(scope: RemSourceScope, db_path: &std::path::Path) -> RemSourceStore {
-    let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
-    RemSourceStore {
+fn rem_source_store_identity(
+    scope: RemSourceScope,
+    db_path: &std::path::Path,
+) -> Result<RemSourceStore, String> {
+    Ok(RemSourceStore {
         scope,
-        identity: canonical.display().to_string(),
-    }
+        identity: crate::physical_db_identity::physical_db_id_for_path(db_path)?,
+    })
 }
 
 fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, String> {
@@ -194,7 +196,8 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
     };
 
     let global_store =
-        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf());
+        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf())
+            .map_err(|error| format!("REM global source store identity: {error}"))?;
     let mut entries = server
         .with_global_store_read(collect)
         .map_err(|e| format!("REM global candidate collection: {e}"))?
@@ -208,7 +211,8 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<RemCandidate>, 
         let project_path = server.project_db_path_buf().ok_or_else(|| {
             "REM project candidate collection: project path is missing".to_string()
         })?;
-        let project_store = rem_source_store_identity(RemSourceScope::Project, &project_path);
+        let project_store = rem_source_store_identity(RemSourceScope::Project, &project_path)
+            .map_err(|error| format!("REM project source store identity: {error}"))?;
         let project = server
             .with_project_store_read(collect)
             .map_err(|e| format!("REM project candidate collection: {e}"))?;
@@ -575,7 +579,7 @@ fn complete_rem_operation(
     ensure_rem_draft_winner(server, draft_id, sources)?;
     let now = Utc::now().to_rfc3339();
     let global_store =
-        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf());
+        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf())?;
     let global_ids = sources
         .iter()
         .filter(|source| source.store.scope == RemSourceScope::Global)
@@ -600,7 +604,7 @@ fn complete_rem_operation(
                 "complete REM project source group: bound project store is unavailable for {draft_id}"
             )
         })?;
-        let project_store = rem_source_store_identity(RemSourceScope::Project, &project_path);
+        let project_store = rem_source_store_identity(RemSourceScope::Project, &project_path)?;
         project_sources
             .into_iter()
             .map(|source| {
@@ -666,10 +670,11 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<(), String> {
         return Ok(());
     }
     let global_store =
-        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf());
+        rem_source_store_identity(RemSourceScope::Global, &server.global_db_path_buf())?;
     let project_store = server
         .project_db_path_buf()
-        .map(|path| rem_source_store_identity(RemSourceScope::Project, &path));
+        .map(|path| rem_source_store_identity(RemSourceScope::Project, &path))
+        .transpose()?;
     let mut after: Option<(String, String)> = None;
     const PAGE_SIZE: usize = 500;
     loop {
@@ -946,6 +951,30 @@ mod rem_identity_tests {
                 id: "same".to_string(),
             }])
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rem_source_store_identity_collapses_hardlink_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("project-a.db");
+        let second = dir.path().join("project-b.db");
+        std::fs::write(&first, b"REM physical identity fixture").unwrap();
+        std::fs::hard_link(&first, &second).unwrap();
+
+        let first_store = rem_source_store_identity(RemSourceScope::Project, &first).unwrap();
+        let second_store = rem_source_store_identity(RemSourceScope::Project, &second).unwrap();
+        assert_eq!(first_store, second_store);
+
+        let first_id = stable_rem_draft_id(&[RemSourceRef {
+            store: first_store,
+            id: "same-source".to_string(),
+        }]);
+        let second_id = stable_rem_draft_id(&[RemSourceRef {
+            store: second_store,
+            id: "same-source".to_string(),
+        }]);
+        assert_eq!(first_id, second_id);
     }
 
     #[test]

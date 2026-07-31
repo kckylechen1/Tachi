@@ -449,6 +449,30 @@ pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> Physic
     }
 }
 
+/// Resolve one existing database path to the repository's physical store ID.
+///
+/// This is identity evidence only; it grants no mutation authority. In
+/// particular, Unix hardlink and symlink aliases of the same file return the
+/// same `(dev, ino)`-backed ID.
+pub(crate) fn physical_db_id_for_path(path: &Path) -> Result<String, String> {
+    let inventory = classify_paths(std::iter::once(path.to_path_buf()));
+    if let Some(unresolved) = inventory.unresolved_paths.first() {
+        return Err(format!(
+            "physical database identity unavailable for {}: {}",
+            unresolved.path.display(),
+            unresolved.error
+        ));
+    }
+    match inventory.stores.as_slice() {
+        [store] => Ok(store.physical_id.clone()),
+        stores => Err(format!(
+            "physical database identity for {} resolved to {} stores",
+            path.display(),
+            stores.len()
+        )),
+    }
+}
+
 pub(crate) fn same_physical_file(left: &Path, right: &Path) -> bool {
     #[cfg(unix)]
     {
