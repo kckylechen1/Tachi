@@ -529,6 +529,9 @@ enum CorpusRaceHook {
         store: LogicalStore,
         replacement_path: PathBuf,
     },
+    ArchiveTargetBeforeCompletedReturn {
+        source_id: String,
+    },
     MutateReclassificationAfterPlanValidation {
         source_id: String,
     },
@@ -2378,6 +2381,68 @@ fn reinventory_apply_scans(scans: &[StoreScan]) -> Vec<StoreScan> {
     current
 }
 
+/// Hold a writer reservation on every distinct physical store while the
+/// completed no-op proof is refreshed. SQLite has no transaction spanning the
+/// separate corpus databases, so the stores are acquired in deterministic
+/// physical-id order; the final inventory is taken only after all reservations
+/// are held. A failed acquisition therefore refuses the no-op rather than
+/// returning from an unstable snapshot.
+struct CompletedNoOpLocks {
+    stores: Vec<MemoryStore>,
+}
+
+impl CompletedNoOpLocks {
+    fn acquire(scans: &[StoreScan]) -> Result<Self, String> {
+        let mut physical_stores = BTreeMap::<String, (PathBuf, Vec<PathBuf>)>::new();
+        for scan in scans {
+            check_authority(scan, None)?;
+            let physical = scan.physical.as_ref().ok_or_else(|| {
+                format!(
+                    "completed no-op store {} has no physical identity",
+                    scan.spec.logical_store.reference()
+                )
+            })?;
+            let addressed_path = scan.spec.addressed_path.clone().ok_or_else(|| {
+                format!(
+                    "completed no-op store {} has no addressed path",
+                    scan.spec.logical_store.reference()
+                )
+            })?;
+            let entry = physical_stores
+                .entry(physical.physical_id.clone())
+                .or_insert_with(|| (PathBuf::from(&physical.primary_path), Vec::new()));
+            entry.1.push(addressed_path);
+        }
+
+        let mut stores = Vec::with_capacity(physical_stores.len());
+        for (physical_id, (primary_path, addressed_paths)) in physical_stores {
+            let store = MemoryStore::open_existing_read_write(&primary_path.display().to_string())
+                .map_err(|error| {
+                    format!("completed no-op cannot open physical store {physical_id}: {error}")
+                })?;
+            for addressed_path in addressed_paths {
+                verify_opened_apply_store(&store, &addressed_path, "completed no-op")?;
+            }
+            store
+                .connection()
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|error| {
+                    format!("completed no-op cannot acquire writer lock for {physical_id}: {error}")
+                })?;
+            stores.push(store);
+        }
+        Ok(Self { stores })
+    }
+}
+
+impl Drop for CompletedNoOpLocks {
+    fn drop(&mut self) {
+        for store in &self.stores {
+            let _ = store.connection().execute_batch("ROLLBACK");
+        }
+    }
+}
+
 fn check_authority(scan: &StoreScan, target: Option<&Path>) -> Result<(), String> {
     let physical = scan
         .physical
@@ -2510,6 +2575,49 @@ fn maybe_swap_logical_path_before_completed_return(
             logical_path.display()
         )
     })
+}
+
+fn maybe_archive_target_before_completed_return(
+    scans: &[StoreScan],
+    plan: &WikiCorpusPlan,
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let source_id = match race_hook.as_ref() {
+        Some(CorpusRaceHook::ArchiveTargetBeforeCompletedReturn { source_id }) => source_id.clone(),
+        _ => return Ok(()),
+    };
+    let item = plan
+        .items
+        .iter()
+        .find(|item| item.source_id == source_id && item.action == "copy_to_shared_and_supersede")
+        .ok_or_else(|| format!("race hook cannot find copy item for source {source_id}"))?;
+    let target_id = item
+        .target_id
+        .as_deref()
+        .ok_or_else(|| "race hook copy item has no target id".to_string())?;
+    let target_scan = find_scan(scans, &item.target_store_ref)?;
+    let target_path = target_scan
+        .spec
+        .addressed_path
+        .as_deref()
+        .ok_or_else(|| "race hook target has no addressed path".to_string())?;
+    race_hook.take();
+    let target_store = MemoryStore::open_existing_read_write(&target_path.display().to_string())
+        .map_err(|error| error.to_string())?;
+    let target_entry = target_store
+        .get_with_options(target_id, true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("race hook target {target_id} disappeared"))?;
+    if !target_store
+        .archive_memory_if_revision(target_id, target_entry.revision)
+        .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "race hook could not archive target {target_id} at revision {}",
+            target_entry.revision
+        ));
+    }
+    Ok(())
 }
 
 fn maybe_mutate_reclassification_after_plan_validation(
@@ -4263,7 +4371,24 @@ fn apply_plan_internal(
         };
         verify_retained_backups(&retained_backups)?;
         maybe_swap_logical_path_before_completed_return(scans, &mut race_hook)?;
+        maybe_archive_target_before_completed_return(scans, plan, &mut race_hook)?;
         validate_apply_inventory(scans)?;
+        // Keep every writer reservation alive through the final proof and the
+        // return expression; dropping the guard is the last operation here.
+        let _completed_no_op_locks = CompletedNoOpLocks::acquire(scans)?;
+        let final_scans = reinventory_apply_scans(scans);
+        validate_apply_inventory(&final_scans)?;
+        if !plan
+            .items
+            .iter()
+            .all(|item| plan_item_completed(&final_scans, plan, item))
+        {
+            return Err(
+                "completed Wiki corpus state changed before existing_no_op return; completion proof is no longer valid"
+                    .to_string(),
+            );
+        }
+        validate_plan(&final_scans, plan)?;
         verify_retained_backups(&retained_backups)?;
         return Ok((completed, plan.items.iter().map(existing_outcome).collect()));
     }
@@ -6488,6 +6613,66 @@ mod tests {
             &plan.plan_id,
             &["reclassified"]
         ));
+    }
+
+    #[test]
+    fn completed_copy_no_op_rejects_target_archive_after_first_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry(
+                "source",
+                "/wiki/completed-target-archive",
+                shared_metadata(),
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+
+        let mut initial_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut initial_scans);
+        let plan = build_plan(&initial_scans).unwrap();
+        let target_id = plan.items[0].target_id.clone().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        apply_plan(&initial_scans, &plan, &backup_dir).unwrap();
+
+        let mut completed_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut completed_scans);
+        assert!(plan
+            .items
+            .iter()
+            .all(|item| plan_item_completed(&completed_scans, &plan, item)));
+
+        let error = apply_plan_with_race_hook(
+            &completed_scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::ArchiveTargetBeforeCompletedReturn {
+                source_id: "source".to_string(),
+            },
+        )
+        .expect_err("completed no-op must reject a target archived after its first proof");
+
+        assert!(
+            error.contains("completed Wiki corpus state changed")
+                || error.contains("existing_no_op proof"),
+            "{error}"
+        );
+        let target = fixture_scan(LogicalStore::SharedWiki, &target_path);
+        assert!(target.raw_row(&target_id).unwrap().archived);
+        let source = fixture_scan(LogicalStore::LegacyGlobal, &source_path);
+        assert_eq!(
+            source.raw_row("source").unwrap().superseded_by.as_deref(),
+            Some(target_id.as_str())
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
