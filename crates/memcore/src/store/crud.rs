@@ -10,7 +10,7 @@ use crate::{
         hybrid_search, hybrid_search_with_receipt, SearchOptions, SearchPhaseReceipt,
         SearchReceiptDatabaseScope, SearchReceiptOperation,
     },
-    types::{ExpectedMemoryState, MemoryEntry, SearchResult, StatsResult},
+    types::{MemoryEntry, SearchResult, StatsResult},
     MemoryStore,
 };
 
@@ -245,19 +245,6 @@ impl MemoryStore {
         let db_label = self.db_label.clone();
         db::retry_memory_locked("delete", &db_label, || {
             db::delete(&mut self.conn, id, self.vec_available)
-        })
-    }
-
-    /// Delete only if the complete expected state still identifies the exact
-    /// occupant. Used for fail-closed compensation of deterministic inserts.
-    pub fn delete_if_expected_state(
-        &mut self,
-        id: &str,
-        expected: &ExpectedMemoryState,
-    ) -> Result<bool, MemoryError> {
-        let db_label = self.db_label.clone();
-        db::retry_memory_locked("delete_if_expected_state", &db_label, || {
-            db::delete_if_expected_state(&mut self.conn, id, expected, self.vec_available)
         })
     }
 

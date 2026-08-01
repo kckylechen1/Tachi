@@ -1,6 +1,4 @@
 use super::*;
-use crate::db::delete_if_expected_state;
-use crate::types::ExpectedMemoryState;
 
 #[test]
 fn delete_existing() {
@@ -24,31 +22,6 @@ fn delete_existing() {
     // Verify it's gone from FTS
     let fts_results = search_fts(&conn, "deleted", 5, false, false, None, None, None).unwrap();
     assert!(!fts_results.contains_key("del-1"));
-}
-
-#[test]
-fn delete_if_expected_state_refuses_drift_and_deletes_exact_occupant() {
-    let mut conn = make_conn();
-    let entry = make_entry("del-guarded", "guarded target");
-    upsert(&mut conn, &entry, false).unwrap();
-    let stale = ExpectedMemoryState::from_entry(&entry, None);
-
-    conn.execute(
-        "UPDATE memories SET valid_until = ?1 WHERE id = ?2",
-        params!["2026-12-31T23:59:59Z", entry.id],
-    )
-    .unwrap();
-    assert!(!delete_if_expected_state(&mut conn, &entry.id, &stale, false).unwrap());
-
-    let current = fetch_by_ids(&conn, std::slice::from_ref(&entry.id), true)
-        .unwrap()
-        .remove(&entry.id)
-        .unwrap();
-    let exact = ExpectedMemoryState::from_entry(&current, None);
-    assert!(delete_if_expected_state(&mut conn, &entry.id, &exact, false).unwrap());
-    assert!(fetch_by_ids(&conn, std::slice::from_ref(&entry.id), true)
-        .unwrap()
-        .is_empty());
 }
 
 #[test]

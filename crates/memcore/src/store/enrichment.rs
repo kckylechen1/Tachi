@@ -133,6 +133,66 @@ impl MemoryStore {
         })
     }
 
+    /// Atomically write final migration metadata and supersede an exact source
+    /// state. A mismatch performs zero writes.
+    pub fn supersede_with_metadata_if_expected_state(
+        &mut self,
+        id: &str,
+        superseded_by: &str,
+        new_metadata: &serde_json::Value,
+        expected: &ExpectedMemoryState,
+    ) -> Result<bool, MemoryError> {
+        if crate::namespace::is_reserved_wiki_rem_id(id) {
+            return Err(MemoryError::InvalidArg(format!(
+                "invariant: reserved REM operation {id} cannot be superseded through a migration seam"
+            )));
+        }
+        let metadata_json = serde_json::to_string(new_metadata)?;
+        let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
+        db::retry_memory_locked(
+            "supersede_with_metadata_if_expected_state",
+            &db_label,
+            || {
+                let _authorization = db::authorize_reserved_reference_write(&authorization)?;
+                db::supersede_with_metadata_if_expected_state(
+                    &mut self.conn,
+                    id,
+                    superseded_by,
+                    &metadata_json,
+                    expected,
+                )
+            },
+        )
+    }
+
+    /// Atomically archive an exact deterministic occupant and replace its
+    /// migration metadata. The row is retained for audit and replay diagnosis.
+    pub fn archive_with_metadata_if_expected_state(
+        &mut self,
+        id: &str,
+        new_metadata: &serde_json::Value,
+        expected: &ExpectedMemoryState,
+    ) -> Result<bool, MemoryError> {
+        if crate::namespace::is_reserved_wiki_rem_id(id) {
+            return Err(MemoryError::InvalidArg(format!(
+                "invariant: reserved REM operation {id} cannot be archived through a migration seam"
+            )));
+        }
+        let metadata_json = serde_json::to_string(new_metadata)?;
+        let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
+        db::retry_memory_locked("archive_with_metadata_if_expected_state", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
+            db::archive_with_metadata_if_expected_state(
+                &mut self.conn,
+                id,
+                &metadata_json,
+                expected,
+            )
+        })
+    }
+
     /// Update only enrichment fields (summary, vector, keywords, entities) with revision check.
     /// Returns false if revision mismatch (entry was updated since enrichment started).
     pub fn update_enrichment_fields(

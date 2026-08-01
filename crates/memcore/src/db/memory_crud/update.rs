@@ -124,6 +124,92 @@ pub(crate) fn update_with_revision_if_expected_state(
     Ok(updated)
 }
 
+fn expected_state_matches_within_tx(
+    tx: &Transaction<'_>,
+    id: &str,
+    expected: &ExpectedMemoryState,
+) -> Result<bool, MemoryError> {
+    let ids = vec![id.to_string()];
+    let mut current = super::fetch_by_ids(tx, &ids, true)?;
+    let Some(current) = current.remove(id) else {
+        return Ok(false);
+    };
+    let superseded_by = tx
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id = ?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(expected.matches(&current, superseded_by.as_deref()))
+}
+
+/// Atomically bind a complete expected source state to its final migration
+/// receipt and supersession lifecycle transition.
+pub(crate) fn supersede_with_metadata_if_expected_state(
+    conn: &mut Connection,
+    id: &str,
+    superseded_by: &str,
+    new_metadata: &str,
+    expected: &ExpectedMemoryState,
+) -> Result<bool, MemoryError> {
+    if id == superseded_by {
+        return Ok(false);
+    }
+    super::refuse_reserved_rem_operation_mutation(id, "superseded")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !expected_state_matches_within_tx(&tx, id, expected)? {
+        tx.commit()?;
+        return Ok(false);
+    }
+    let incoming_metadata = serde_json::from_str(new_metadata)?;
+    let metadata = super::merge_ordinary_reserved_metadata(&tx, id, &incoming_metadata)?;
+    let metadata_json = serde_json::to_string(&metadata)?;
+    let now = now_utc_iso();
+    tx.execute(
+        "UPDATE memories
+         SET metadata = ?1, superseded_by = ?2,
+             valid_until = COALESCE(valid_until, ?3), updated_at = ?3,
+             revision = revision + 1
+         WHERE id = ?4 AND revision = ?5 AND superseded_by IS NULL",
+        params![metadata_json, superseded_by, now, id, expected.revision()],
+    )?;
+    let updated = tx.changes() == 1;
+    tx.commit()?;
+    Ok(updated)
+}
+
+/// Atomically mark an exact deterministic occupant non-canonical while
+/// replacing its migration metadata. The row remains durable for audit.
+pub(crate) fn archive_with_metadata_if_expected_state(
+    conn: &mut Connection,
+    id: &str,
+    new_metadata: &str,
+    expected: &ExpectedMemoryState,
+) -> Result<bool, MemoryError> {
+    super::refuse_reserved_rem_operation_mutation(id, "archived")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !expected_state_matches_within_tx(&tx, id, expected)? {
+        tx.commit()?;
+        return Ok(false);
+    }
+    let incoming_metadata = serde_json::from_str(new_metadata)?;
+    let metadata = super::merge_ordinary_reserved_metadata(&tx, id, &incoming_metadata)?;
+    let metadata_json = serde_json::to_string(&metadata)?;
+    let now = now_utc_iso();
+    tx.execute(
+        "UPDATE memories
+         SET metadata = ?1, archived = 1, updated_at = ?2,
+             revision = revision + 1
+         WHERE id = ?3 AND revision = ?4",
+        params![metadata_json, now, id, expected.revision()],
+    )?;
+    let updated = tx.changes() == 1;
+    tx.commit()?;
+    Ok(updated)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_with_revision_within_tx(
     tx: &Transaction<'_>,

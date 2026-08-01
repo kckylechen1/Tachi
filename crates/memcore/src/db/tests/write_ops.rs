@@ -1,5 +1,8 @@
 use super::*;
-use crate::db::update_with_revision_if_expected_state;
+use crate::db::{
+    archive_with_metadata_if_expected_state, supersede_with_metadata_if_expected_state,
+    update_with_revision_if_expected_state,
+};
 use crate::store::enrichment::ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS;
 use crate::types::ExpectedMemoryState;
 use crate::MemoryStore;
@@ -724,6 +727,108 @@ fn guarded_revision_update_rejects_same_revision_enrichment_drift() {
     assert_eq!(current.summary, "generated after snapshot");
     assert_eq!(current.vector, Some(enriched_vector));
     assert!(current.metadata.get("migration").is_none());
+}
+
+#[test]
+fn typed_source_transition_is_atomic_against_same_revision_drift() {
+    let mut conn = make_conn();
+    let entry = make_entry("atomic-source", "source text");
+    upsert(&mut conn, &entry, false).unwrap();
+    let stale = ExpectedMemoryState::from_entry(&entry, None);
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("generated after receipt prep"),
+        None,
+        None,
+        None,
+        entry.revision,
+        None,
+        None,
+        None,
+    )
+    .unwrap());
+    let final_metadata = serde_json::to_string(&json!({"migration": "source_superseded"})).unwrap();
+    assert!(!supersede_with_metadata_if_expected_state(
+        &mut conn,
+        &entry.id,
+        "canonical-target",
+        &final_metadata,
+        &stale,
+    )
+    .unwrap());
+
+    let current = fetch_by_ids(&conn, std::slice::from_ref(&entry.id), true)
+        .unwrap()
+        .remove(&entry.id)
+        .unwrap();
+    assert_eq!(current.revision, entry.revision);
+    assert_eq!(current.summary, "generated after receipt prep");
+    assert!(current.metadata.get("migration").is_none());
+    let superseded_by: Option<String> = conn
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id = ?1",
+            [&entry.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(superseded_by.is_none());
+
+    let expected = ExpectedMemoryState::from_entry(&current, None);
+    assert!(supersede_with_metadata_if_expected_state(
+        &mut conn,
+        &entry.id,
+        "canonical-target",
+        &final_metadata,
+        &expected,
+    )
+    .unwrap());
+    let final_entry = fetch_by_ids(&conn, std::slice::from_ref(&entry.id), true)
+        .unwrap()
+        .remove(&entry.id)
+        .unwrap();
+    assert_eq!(final_entry.revision, entry.revision + 1);
+    assert!(final_entry.valid_until.is_some());
+    assert_eq!(final_entry.metadata["migration"], "source_superseded");
+    let superseded_by: Option<String> = conn
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id = ?1",
+            [&entry.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(superseded_by.as_deref(), Some("canonical-target"));
+}
+
+#[test]
+fn typed_noncanonical_transition_archives_without_hard_delete() {
+    let mut conn = make_conn();
+    let entry = make_entry("noncanonical-target", "copied text");
+    upsert(&mut conn, &entry, false).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER no_hard_delete
+         BEFORE DELETE ON memories
+         BEGIN SELECT RAISE(ABORT, 'hard delete forbidden'); END;",
+    )
+    .unwrap();
+    let persisted = fetch_by_ids(&conn, std::slice::from_ref(&entry.id), true)
+        .unwrap()
+        .remove(&entry.id)
+        .unwrap();
+    let expected = ExpectedMemoryState::from_entry(&persisted, None);
+    let metadata = serde_json::to_string(&json!({"migration": "target_noncanonical"})).unwrap();
+    assert!(
+        archive_with_metadata_if_expected_state(&mut conn, &entry.id, &metadata, &expected,)
+            .unwrap()
+    );
+
+    let current = fetch_by_ids(&conn, std::slice::from_ref(&entry.id), true)
+        .unwrap()
+        .remove(&entry.id)
+        .unwrap();
+    assert!(current.archived);
+    assert_eq!(current.revision, entry.revision + 1);
+    assert_eq!(current.metadata["migration"], "target_noncanonical");
 }
 
 #[test]

@@ -1,12 +1,9 @@
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{Map, Value};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::MemoryError;
-use crate::types::{
-    default_retention_for, ExpectedMemoryState, MemoryCategory, MemoryEntry, MemoryScope,
-    MemorySource,
-};
+use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
 
 use super::common::{normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
@@ -37,7 +34,10 @@ pub use search::{
     search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
-pub(crate) use update::update_with_revision_if_expected_state;
+pub(crate) use update::{
+    archive_with_metadata_if_expected_state, supersede_with_metadata_if_expected_state,
+    update_with_revision_if_expected_state,
+};
 pub use update::{
     record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, try_claim_event, update_enrichment_fields, update_with_revision,
@@ -3328,54 +3328,6 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
     refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
 
     let tx = conn.transaction()?;
-    let deleted = delete_within_tx(&tx, trimmed, vec_available)?;
-    tx.commit()?;
-    Ok(deleted)
-}
-
-/// Delete only when the complete typed state still names the exact occupant.
-/// The comparison and all dependent cleanup share one writer transaction.
-pub fn delete_if_expected_state(
-    conn: &mut Connection,
-    id: &str,
-    expected: &ExpectedMemoryState,
-    vec_available: bool,
-) -> Result<bool, MemoryError> {
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
-        return Err(MemoryError::InvalidArg("empty ID".to_string()));
-    }
-    refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
-
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let ids = vec![trimmed.to_string()];
-    let mut current = fetch_by_ids(&tx, &ids, true)?;
-    let Some(current) = current.remove(trimmed) else {
-        tx.commit()?;
-        return Ok(false);
-    };
-    let superseded_by = tx
-        .query_row(
-            "SELECT superseded_by FROM memories WHERE id = ?1",
-            [trimmed],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
-    if !expected.matches(&current, superseded_by.as_deref()) {
-        tx.commit()?;
-        return Ok(false);
-    }
-    let deleted = delete_within_tx(&tx, trimmed, vec_available)?;
-    tx.commit()?;
-    Ok(deleted)
-}
-
-fn delete_within_tx(
-    tx: &Transaction<'_>,
-    trimmed: &str,
-    vec_available: bool,
-) -> Result<bool, MemoryError> {
     // Delete from main table and check if anything was actually removed
     tx.execute("DELETE FROM memories WHERE id = ?1", params![trimmed])?;
     let deleted = tx.changes() > 0;
@@ -3383,7 +3335,7 @@ fn delete_within_tx(
     if deleted {
         // Clean up FTS index
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![trimmed])?;
-        delete_memories_symbolic_fts(tx, trimmed)?;
+        delete_memories_symbolic_fts(&tx, trimmed)?;
 
         if vec_available {
             tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed])?;
@@ -3408,6 +3360,7 @@ fn delete_within_tx(
         )?;
     }
 
+    tx.commit()?;
     Ok(deleted)
 }
 
