@@ -102,15 +102,42 @@ fn preview_source_fingerprints(path: &Path) -> Result<[Option<PreviewFileFingerp
     ])
 }
 
-fn preview_staging_dir() -> Result<PathBuf, String> {
-    let root = std::env::temp_dir();
+fn create_private_preview_directory(path: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        let metadata = fs::symlink_metadata(path)?;
+        let owner = unsafe { libc::geteuid() };
+        if metadata.file_type().is_symlink()
+            || !metadata.file_type().is_dir()
+            || metadata.uid() != owner
+            || metadata.permissions().mode() & 0o777 != 0o700
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "preview staging directory is not an owner-only 0700 directory",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn preview_staging_dir_in(root: &Path) -> Result<PathBuf, String> {
     let process_id = std::process::id();
     for attempt in 0..32u64 {
         let sequence = PREVIEW_SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = root.join(format!(
             "sigil-wiki-corpus-preview-{process_id}-{sequence}-{attempt}"
         ));
-        match fs::create_dir(&path) {
+        match create_private_preview_directory(&path) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
@@ -122,6 +149,10 @@ fn preview_staging_dir() -> Result<PathBuf, String> {
         }
     }
     Err("cannot allocate a private preview staging directory".to_string())
+}
+
+fn preview_staging_dir() -> Result<PathBuf, String> {
+    preview_staging_dir_in(&std::env::temp_dir())
 }
 
 fn copy_preview_file(source: &Path, destination: &Path, required: bool) -> Result<(), String> {
@@ -486,8 +517,19 @@ enum MigrationBoundary {
 enum CorpusRaceHook {
     ReplaceBackupTempWithNormalFile,
     ReplaceManifestTempWithNormalFile,
+    ReplaceExistingBackupAfterRetain {
+        replacement_path: PathBuf,
+    },
     SwapOpenedStorePath {
         store: LogicalStore,
+        replacement_path: PathBuf,
+    },
+    SwapLogicalPathAfterInventory {
+        store: LogicalStore,
+        replacement_path: PathBuf,
+    },
+    SwapReclassificationPathAfterReceiptRead {
+        source_id: String,
         replacement_path: PathBuf,
     },
 }
@@ -2212,9 +2254,45 @@ fn validate_apply_inventory(scans: &[StoreScan]) -> Result<(), String> {
         .iter()
         .filter_map(|scan| scan.spec.addressed_path.clone())
         .collect::<Vec<_>>();
-    physical_db_bindings_for_paths(&addressed_paths)
+    let bindings = physical_db_bindings_for_paths(&addressed_paths)
         .map_err(|error| format!("apply refuses ambiguous physical mutation identity: {error}"))?;
+    for (scan, binding) in scans
+        .iter()
+        .filter(|scan| scan.spec.addressed_path.is_some())
+        .zip(bindings.iter())
+    {
+        let physical = scan
+            .physical
+            .as_ref()
+            .ok_or_else(|| "apply inventory lost its physical identity".to_string())?;
+        let addressed = scan
+            .spec
+            .addressed_path
+            .as_ref()
+            .expect("filtered to addressed stores");
+        let expected_primary = physical.primary_path == addressed.display().to_string();
+        if binding.physical_id != physical.physical_id
+            || binding.is_primary_alias != expected_primary
+        {
+            return Err(format!(
+                "apply refuses physical binding changed since inventory for {}",
+                scan.spec.logical_store.reference()
+            ));
+        }
+    }
     Ok(())
+}
+
+fn reinventory_apply_scans(scans: &[StoreScan]) -> Vec<StoreScan> {
+    let mut current = scans
+        .iter()
+        .map(|scan| inventory_store(scan.spec.clone()))
+        .collect::<Vec<_>>();
+    finalize_classifications(&mut current);
+    for scan in current.iter_mut() {
+        refresh_report(scan);
+    }
+    current
 }
 
 fn check_authority(scan: &StoreScan, target: Option<&Path>) -> Result<(), String> {
@@ -2280,10 +2358,57 @@ fn maybe_swap_opened_store_path(
     })
 }
 
+fn maybe_swap_logical_path_after_inventory(
+    scans: &[StoreScan],
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let (store, replacement_path) = match race_hook.as_ref() {
+        Some(CorpusRaceHook::SwapLogicalPathAfterInventory {
+            store,
+            replacement_path,
+        }) => (*store, replacement_path.clone()),
+        _ => return Ok(()),
+    };
+    let logical_path = scans
+        .iter()
+        .find(|scan| scan.spec.logical_store == store)
+        .and_then(|scan| scan.spec.addressed_path.as_deref())
+        .ok_or_else(|| format!("race hook cannot find logical store {}", store.reference()))?;
+    race_hook.take();
+    atomic_exchange_paths(logical_path, &replacement_path).map_err(|error| {
+        format!(
+            "cannot inject post-inventory path replacement for {}: {error}",
+            logical_path.display()
+        )
+    })
+}
+
+fn maybe_swap_reclassification_after_receipt_read(
+    item: &PlanItem,
+    logical_path: &Path,
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let replacement_path = match race_hook.as_ref() {
+        Some(CorpusRaceHook::SwapReclassificationPathAfterReceiptRead {
+            source_id,
+            replacement_path,
+        }) if source_id == &item.source_id => replacement_path.clone(),
+        _ => return Ok(()),
+    };
+    race_hook.take();
+    atomic_exchange_paths(logical_path, &replacement_path).map_err(|error| {
+        format!(
+            "cannot inject reclassification path replacement for {}: {error}",
+            logical_path.display()
+        )
+    })
+}
+
 fn apply_reclassification(
     scan: &StoreScan,
     item: &PlanItem,
     plan_id: &str,
+    race_hook: &mut Option<CorpusRaceHook>,
 ) -> Result<MigrationOutcome, String> {
     check_authority(scan, None)?;
     let mut store = open_apply_store(scan)?;
@@ -2299,6 +2424,8 @@ fn apply_reclassification(
         .ok_or_else(|| format!("source row {} disappeared during apply", item.source_id))?;
     let source_row = raw_from_entry(&entry);
     if receipt_matches(&source_row, item, plan_id, &["reclassified"]) {
+        maybe_swap_reclassification_after_receipt_read(item, logical_path, race_hook)?;
+        verify_opened_apply_store(&store, logical_path, "reclassification")?;
         return Ok(MigrationOutcome {
             source_store_ref: item.source_store_ref.clone(),
             source_id: item.source_id.clone(),
@@ -2336,6 +2463,21 @@ fn apply_reclassification(
             item.source_store_ref, item.source_id
         ));
     }
+    let final_entry = store
+        .get_with_options(&item.source_id, true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "reclassification row disappeared after receipt write".to_string())?;
+    let final_row = raw_from_entry(&final_entry);
+    if final_entry.revision != item.source_revision + 1
+        || !receipt_matches(&final_row, item, plan_id, &["reclassified"])
+    {
+        return Err(format!(
+            "reclassification receipt was not durably recorded for {}:{}",
+            item.source_store_ref, item.source_id
+        ));
+    }
+    maybe_swap_reclassification_after_receipt_read(item, logical_path, race_hook)?;
+    verify_opened_apply_store(&store, logical_path, "reclassification")?;
     Ok(MigrationOutcome {
         source_store_ref: item.source_store_ref.clone(),
         source_id: item.source_id.clone(),
@@ -2874,6 +3016,25 @@ impl RetainedPathFile {
     }
 }
 
+fn verify_sqlite_connection_retained_identity(
+    connection: &Connection,
+    retained: &RetainedPathFile,
+    retained_path: &Path,
+) -> Result<(), String> {
+    retained.verify_path(retained_path)?;
+    let opened_path: String = connection
+        .query_row("PRAGMA database_list", [], |row| row.get(2))
+        .map_err(|error| format!("cannot resolve opened backup database path: {error}"))?;
+    let opened_metadata = regular_non_symlink_metadata(Path::new(&opened_path))?;
+    if retained_file_identity(&opened_metadata)? != retained.identity {
+        return Err(format!(
+            "opened SQLite backup handle is detached from retained object: {}",
+            retained_path.display()
+        ));
+    }
+    retained.verify_path(retained_path)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArtifactRacePoint {
     Backup,
@@ -2918,6 +3079,25 @@ fn maybe_replace_reserved_artifact(
         .sync_all()
         .map_err(|error| format!("cannot sync race replacement: {error}"))?;
     Ok(())
+}
+
+fn maybe_replace_existing_backup_after_retain(
+    backup_path: &Path,
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let replacement_path = match race_hook.as_ref() {
+        Some(CorpusRaceHook::ReplaceExistingBackupAfterRetain { replacement_path }) => {
+            replacement_path.clone()
+        }
+        _ => return Ok(()),
+    };
+    race_hook.take();
+    atomic_exchange_paths(backup_path, &replacement_path).map_err(|error| {
+        format!(
+            "cannot inject existing backup replacement for {}: {error}",
+            backup_path.display()
+        )
+    })
 }
 
 fn read_file_no_follow(path: &Path) -> Result<Vec<u8>, String> {
@@ -3148,71 +3328,9 @@ fn verify_backup(
     logical_store_refs: Vec<String>,
     expected: &PlanStoreFingerprint,
 ) -> Result<BackupReceipt, String> {
-    let source_physical = source
-        .physical
-        .as_ref()
-        .ok_or_else(|| "backup source has no physical identity".to_string())?;
     regular_non_symlink_metadata(backup_path)?;
-    let backup_inventory = classify_paths([backup_path.to_path_buf()]);
-    if let Some(unresolved) = backup_inventory.unresolved_paths.first() {
-        return Err(format!(
-            "backup path {} has no readable physical identity: {}",
-            backup_path.display(),
-            unresolved.error
-        ));
-    }
-    let backup_physical = backup_inventory
-        .stores
-        .into_iter()
-        .next()
-        .ok_or_else(|| "backup has no physical identity".to_string())?;
-    if backup_physical.physical_id == source_physical.physical_id {
-        return Err(format!(
-            "backup path {} resolves to the source physical database",
-            backup_path.display()
-        ));
-    }
-    let backup_open_path = canonical_parent_open_path(Path::new(&backup_physical.open_path))?;
-    let conn = open_sqlite_no_follow(&backup_open_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| error.to_string())?;
-    let schema = read_schema_version(&conn).map_err(|error| error.to_string())?;
-    if schema != EXPECTED_SCHEMA_VERSION {
-        return Err(format!(
-            "backup {} schema mismatch: stored {}, expected {}",
-            backup_path.display(),
-            schema,
-            EXPECTED_SCHEMA_VERSION
-        ));
-    }
-    let quick_check = quick_check(&conn)?;
-    let (rows, _, vector_table_present) = load_rows(&conn)?;
-    let backup_digest = row_digest(&rows, vector_table_present);
-    if rows.len() != expected.total_memory_rows
-        || backup_digest != expected.row_digest
-        || vector_table_present != expected.vector_table_present
-    {
-        return Err(format!(
-            "backup {} row evidence mismatch",
-            backup_path.display()
-        ));
-    }
-    Ok(BackupReceipt {
-        logical_store_refs,
-        source_physical_id: source_physical.physical_id.clone(),
-        source_canonical_path: source_physical.canonical_path.clone(),
-        source_open_path: source_physical.open_path.clone(),
-        backup_path: backup_path.display().to_string(),
-        backup_physical_id: backup_physical.physical_id,
-        schema,
-        total_memory_rows: rows.len(),
-        source_row_digest: expected.row_digest.clone(),
-        backup_row_digest: backup_digest,
-        vector_table_present,
-        source_identity_verified: true,
-        backup_identity_verified: true,
-        quick_check,
-        verified: true,
-    })
+    let retained = RetainedPathFile::open(backup_path, true, false, false)?;
+    verify_retained_backup(&retained, source, backup_path, logical_store_refs, expected)
 }
 
 #[cfg(test)]
@@ -3239,10 +3357,85 @@ fn verify_retained_backup(
     logical_store_refs: Vec<String>,
     expected: &PlanStoreFingerprint,
 ) -> Result<BackupReceipt, String> {
+    let source_physical = source
+        .physical
+        .as_ref()
+        .ok_or_else(|| "backup source has no physical identity".to_string())?;
     retained.verify_path(backup_path)?;
-    let receipt = verify_backup(source, backup_path, logical_store_refs, expected)?;
+    let source_retained =
+        RetainedPathFile::open(Path::new(&source_physical.open_path), true, false, false)?;
+    if retained.identity == source_retained.identity {
+        return Err(format!(
+            "backup path {} resolves to the source physical database",
+            backup_path.display()
+        ));
+    }
+    source_retained.verify_path(Path::new(&source_physical.open_path))?;
+    let backup_inventory = classify_paths([backup_path.to_path_buf()]);
+    if let Some(unresolved) = backup_inventory.unresolved_paths.first() {
+        return Err(format!(
+            "backup path {} has no readable physical identity: {}",
+            backup_path.display(),
+            unresolved.error
+        ));
+    }
+    let backup_physical = backup_inventory
+        .stores
+        .into_iter()
+        .next()
+        .ok_or_else(|| "backup has no physical identity".to_string())?;
     retained.verify_path(backup_path)?;
-    Ok(receipt)
+    let backup_open_path = canonical_parent_open_path(Path::new(&backup_physical.open_path))?;
+    let conn = open_sqlite_no_follow(&backup_open_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
+    verify_sqlite_connection_retained_identity(&conn, retained, backup_path)?;
+    let schema = read_schema_version(&conn).map_err(|error| error.to_string())?;
+    if schema != EXPECTED_SCHEMA_VERSION {
+        return Err(format!(
+            "backup {} schema mismatch: stored {}, expected {}",
+            backup_path.display(),
+            schema,
+            EXPECTED_SCHEMA_VERSION
+        ));
+    }
+    let quick_check = quick_check(&conn)?;
+    let (rows, _, vector_table_present) = load_rows(&conn)?;
+    let backup_digest = row_digest(&rows, vector_table_present);
+    if rows.len() != expected.total_memory_rows
+        || backup_digest != expected.row_digest
+        || vector_table_present != expected.vector_table_present
+    {
+        return Err(format!(
+            "backup {} row evidence mismatch: rows={}/{} digest={}/{} vector_table={}/{}",
+            backup_path.display(),
+            rows.len(),
+            expected.total_memory_rows,
+            backup_digest,
+            expected.row_digest,
+            vector_table_present,
+            expected.vector_table_present
+        ));
+    }
+    verify_sqlite_connection_retained_identity(&conn, retained, backup_path)?;
+    retained.verify_path(backup_path)?;
+    source_retained.verify_path(Path::new(&source_physical.open_path))?;
+    Ok(BackupReceipt {
+        logical_store_refs,
+        source_physical_id: source_physical.physical_id.clone(),
+        source_canonical_path: source_physical.canonical_path.clone(),
+        source_open_path: source_physical.open_path.clone(),
+        backup_path: backup_path.display().to_string(),
+        backup_physical_id: backup_physical.physical_id,
+        schema,
+        total_memory_rows: rows.len(),
+        source_row_digest: expected.row_digest.clone(),
+        backup_row_digest: backup_digest,
+        vector_table_present,
+        source_identity_verified: true,
+        backup_identity_verified: true,
+        quick_check,
+        verified: true,
+    })
 }
 
 fn create_or_verify_backup_with_hook(
@@ -3261,7 +3454,16 @@ fn create_or_verify_backup_with_hook(
         .ok_or_else(|| "backup source has no physical identity".to_string())?;
     let backup_path = backup_dir.join(backup_file_name(&source_physical.physical_id));
     if fs::symlink_metadata(&backup_path).is_ok() {
-        return verify_backup(source, &backup_path, logical_store_refs, expected);
+        regular_non_symlink_metadata(&backup_path)?;
+        let retained = RetainedPathFile::open(&backup_path, true, false, false)?;
+        maybe_replace_existing_backup_after_retain(&backup_path, race_hook)?;
+        return verify_retained_backup(
+            &retained,
+            source,
+            &backup_path,
+            logical_store_refs,
+            expected,
+        );
     }
 
     if source.row_digest != expected.row_digest
@@ -3437,6 +3639,7 @@ fn existing_outcome(item: &PlanItem) -> MigrationOutcome {
     }
 }
 
+#[cfg(test)]
 fn apply_plan(
     scans: &[StoreScan],
     plan: &WikiCorpusPlan,
@@ -3456,7 +3659,10 @@ fn apply_plan_internal(
     let backup_dir = fs::canonicalize(backup_dir)
         .map_err(|error| format!("cannot canonicalize backup directory: {error}"))?;
     validate_apply_inventory(scans)?;
-    validate_plan(scans, plan)?;
+    let current_scans = reinventory_apply_scans(scans);
+    validate_apply_inventory(&current_scans)?;
+    validate_plan(&current_scans, plan)?;
+    let scans = current_scans.as_slice();
     if !plan.items.is_empty()
         && plan
             .items
@@ -3573,7 +3779,7 @@ fn apply_plan_internal(
     for item in &plan.items {
         let outcome = if item.action == "reclassify_in_place" {
             let source = find_scan(scans, &item.source_store_ref)?;
-            apply_reclassification(source, item, &plan.plan_id)?
+            apply_reclassification(source, item, &plan.plan_id, &mut race_hook)?
         } else {
             let source = find_scan(scans, &item.source_store_ref)?;
             let target = find_scan(scans, &item.target_store_ref)?;
@@ -3650,6 +3856,22 @@ pub(crate) fn run_wiki_corpus_command(
     project_db: Option<&Path>,
     app_home: &Path,
 ) -> Result<WikiCorpusReport, String> {
+    run_wiki_corpus_command_internal(
+        apply, confirm, backup_dir, plan_path, global_db, project_db, app_home, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_wiki_corpus_command_internal(
+    apply: bool,
+    confirm: Option<String>,
+    backup_dir: Option<PathBuf>,
+    plan_path: Option<PathBuf>,
+    global_db: &Path,
+    project_db: Option<&Path>,
+    app_home: &Path,
+    mut race_hook: Option<CorpusRaceHook>,
+) -> Result<WikiCorpusReport, String> {
     if !apply {
         if confirm.is_some() || backup_dir.is_some() || plan_path.is_some() {
             return Err("--confirm, --backup-dir, and --plan require explicit --apply".to_string());
@@ -3680,6 +3902,9 @@ pub(crate) fn run_wiki_corpus_command(
     for scan in scans.iter_mut() {
         refresh_report(scan);
     }
+    if apply {
+        maybe_swap_logical_path_after_inventory(&scans, &mut race_hook)?;
+    }
     let warnings = scans
         .iter()
         .filter_map(|scan| {
@@ -3708,7 +3933,8 @@ pub(crate) fn run_wiki_corpus_command(
             .ok_or_else(|| "cannot build an apply plan from the inventory".to_string())?,
     };
     let backup_dir = backup_dir.expect("validated above");
-    let (backup_manifest, migration_outcomes) = apply_plan(&scans, &plan, &backup_dir)?;
+    let (backup_manifest, migration_outcomes) =
+        apply_plan_internal(&scans, &plan, &backup_dir, None, race_hook)?;
     Ok(WikiCorpusReport {
         version: REPORT_VERSION.to_string(),
         mode: "apply".to_string(),
@@ -3719,6 +3945,30 @@ pub(crate) fn run_wiki_corpus_command(
         migration_outcomes,
         warnings,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_wiki_corpus_command_with_race_hook(
+    apply: bool,
+    confirm: Option<String>,
+    backup_dir: Option<PathBuf>,
+    plan_path: Option<PathBuf>,
+    global_db: &Path,
+    project_db: Option<&Path>,
+    app_home: &Path,
+    race_hook: CorpusRaceHook,
+) -> Result<WikiCorpusReport, String> {
+    run_wiki_corpus_command_internal(
+        apply,
+        confirm,
+        backup_dir,
+        plan_path,
+        global_db,
+        project_db,
+        app_home,
+        Some(race_hook),
+    )
 }
 
 #[cfg(test)]
@@ -4194,6 +4444,22 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn preview_staging_directory_is_owner_only_before_any_snapshot_copy() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let controlled_root = tempfile::tempdir().unwrap();
+        let staging = preview_staging_dir_in(controlled_root.path()).unwrap();
+        let metadata = fs::symlink_metadata(&staging).unwrap();
+
+        assert!(metadata.file_type().is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+    }
+
     #[test]
     fn preview_inventories_schema_18_fixture_and_classifies_it_without_writing() {
         let directory = tempfile::tempdir().unwrap();
@@ -4506,6 +4772,77 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
     #[test]
+    fn existing_final_backup_replacement_by_ordinary_or_source_hardlink_fails_closed() {
+        for replace_with_source_hardlink in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let source_path = directory.path().join("source.db");
+            create_current_fixture(
+                &source_path,
+                &[fixture_entry(
+                    "source",
+                    "/wiki/existing-backup-race",
+                    shared_metadata(),
+                )],
+            );
+            let mut source = fixture_scan(LogicalStore::LegacyGlobal, &source_path);
+            classify_scans(std::slice::from_mut(&mut source));
+            let expected = source.fingerprint().unwrap();
+            let backup_dir = directory.path().join("backups");
+            fs::create_dir(&backup_dir).unwrap();
+            create_or_verify_backup(
+                &source,
+                &backup_dir,
+                vec![LogicalStore::LegacyGlobal.reference().to_string()],
+                &expected,
+            )
+            .unwrap();
+            let backup_path = backup_dir.join(backup_file_name(
+                &source.physical.as_ref().unwrap().physical_id,
+            ));
+            let replacement_path = directory.path().join("replacement.db");
+            if replace_with_source_hardlink {
+                fs::hard_link(&source_path, &replacement_path).unwrap();
+            } else {
+                create_current_fixture(
+                    &replacement_path,
+                    &[fixture_entry(
+                        "replacement",
+                        "/wiki/ordinary-replacement",
+                        json!({"kind": "ordinary_replacement"}),
+                    )],
+                );
+            }
+            let source_before = db_snapshot_fingerprint(&db_snapshot(&source_path));
+            let mut race_hook =
+                Some(CorpusRaceHook::ReplaceExistingBackupAfterRetain { replacement_path });
+
+            let error = create_or_verify_backup_with_hook(
+                &source,
+                &backup_dir,
+                vec![LogicalStore::LegacyGlobal.reference().to_string()],
+                &expected,
+                &mut race_hook,
+            )
+            .expect_err("existing final backup replacement must fail closed");
+
+            assert!(
+                error.contains("identity changed after reservation"),
+                "{error}"
+            );
+            assert_eq!(
+                db_snapshot_fingerprint(&db_snapshot(&source_path)),
+                source_before
+            );
+            assert!(backup_path.exists());
+            let source_after = fixture_scan(LogicalStore::LegacyGlobal, &source_path);
+            let row = source_after.raw_row("source").unwrap();
+            assert_eq!(row.revision, 1);
+            assert!(parse_migration_receipt(row).unwrap().is_none());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
     fn opened_source_or_target_path_swap_fails_before_first_write() {
         for swapped_store in [LogicalStore::LegacyGlobal, LogicalStore::SharedWiki] {
             let directory = tempfile::tempdir().unwrap();
@@ -4578,6 +4915,102 @@ mod tests {
                 .raw_row("replacement")
                 .is_some());
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn mixed_completion_reclassification_swap_after_receipt_read_cannot_report_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let shared_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &shared_path,
+            &[
+                fixture_entry("a-completed", "/wiki/a", shared_metadata()),
+                fixture_entry("z-pending", "/wiki/z", shared_metadata()),
+            ],
+        );
+        let mut initial_scans = vec![fixture_scan(LogicalStore::SharedWiki, &shared_path)];
+        classify_scans(&mut initial_scans);
+        let plan = build_plan(&initial_scans).unwrap();
+        assert_eq!(plan.items.len(), 2);
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let expected = initial_scans[0].fingerprint().unwrap();
+        create_or_verify_backup(
+            &initial_scans[0],
+            &backup_dir,
+            vec![LogicalStore::SharedWiki.reference().to_string()],
+            &expected,
+        )
+        .unwrap();
+        let completed = plan
+            .items
+            .iter()
+            .find(|item| item.source_id == "a-completed")
+            .unwrap();
+        let mut store =
+            MemoryStore::open_existing_read_write(&shared_path.display().to_string()).unwrap();
+        let entry = store
+            .get_with_options(&completed.source_id, true)
+            .unwrap()
+            .unwrap();
+        let row = raw_from_entry(&entry);
+        let metadata = metadata_with_receipt(
+            &row,
+            receipt_value(completed, &plan.plan_id, "reclassified"),
+        )
+        .unwrap();
+        assert!(store
+            .update_with_revision(
+                &entry.id,
+                &entry.text,
+                &entry.summary,
+                &entry.source,
+                &metadata,
+                entry.vector.as_deref(),
+                entry.revision,
+            )
+            .unwrap());
+        drop(store);
+
+        let mut partial_scans = vec![fixture_scan(LogicalStore::SharedWiki, &shared_path)];
+        classify_scans(&mut partial_scans);
+        let replacement_path = directory.path().join("replacement.db");
+        create_current_fixture(
+            &replacement_path,
+            &[fixture_entry(
+                "replacement",
+                "/wiki/reclassification-replacement",
+                json!({"kind": "replacement"}),
+            )],
+        );
+        let error = apply_plan_with_race_hook(
+            &partial_scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::SwapReclassificationPathAfterReceiptRead {
+                source_id: completed.source_id.clone(),
+                replacement_path: replacement_path.clone(),
+            },
+        )
+        .expect_err("reclassification must revalidate after its final receipt read");
+
+        assert!(error.contains("detached from logical path"), "{error}");
+        let original = fixture_scan(LogicalStore::SharedWiki, &replacement_path);
+        let completed_row = original.raw_row("a-completed").unwrap();
+        assert_eq!(completed_row.revision, 2);
+        assert!(receipt_matches(
+            completed_row,
+            completed,
+            &plan.plan_id,
+            &["reclassified"]
+        ));
+        let pending_row = original.raw_row("z-pending").unwrap();
+        assert_eq!(pending_row.revision, 1);
+        assert!(parse_migration_receipt(pending_row).unwrap().is_none());
+        assert!(fixture_scan(LogicalStore::SharedWiki, &shared_path)
+            .raw_row("replacement")
+            .is_some());
     }
 
     #[test]
@@ -4864,6 +5297,106 @@ mod tests {
         assert!(replay_outcomes
             .iter()
             .all(|outcome| outcome.outcome == "existing_no_op"));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn completed_run_command_rejects_post_inventory_logical_path_swap() {
+        let directory = tempfile::tempdir().unwrap();
+        let global_path = directory.path().join("global.db");
+        let project_path = directory.path().join("project.db");
+        let app_home = directory.path().join("home");
+        let shared_path = app_home.join("projects/wiki/memory.db");
+        fs::create_dir_all(shared_path.parent().unwrap()).unwrap();
+        create_current_fixture(
+            &global_path,
+            &[fixture_entry(
+                "global",
+                "/wiki/completed-replay-race",
+                shared_metadata(),
+            )],
+        );
+        create_current_fixture(&project_path, &[]);
+        create_current_fixture(&shared_path, &[]);
+
+        let preview = run_wiki_corpus_command(
+            false,
+            None,
+            None,
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+        let plan = preview.plan.unwrap();
+        let plan_path = directory.path().join("plan.json");
+        fs::write(
+            &plan_path,
+            serde_json::to_vec_pretty(&json!({"plan": plan})).unwrap(),
+        )
+        .unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        run_wiki_corpus_command(
+            true,
+            Some(WIKI_CORPUS_CONFIRMATION_TOKEN.to_string()),
+            Some(backup_dir.clone()),
+            Some(plan_path.clone()),
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+
+        let replacement_path = directory.path().join("replacement.db");
+        create_current_fixture(
+            &replacement_path,
+            &[fixture_entry(
+                "replacement",
+                "/wiki/post-inventory-replacement",
+                json!({"kind": "replacement"}),
+            )],
+        );
+        let shared_before = db_snapshot_fingerprint(&db_snapshot(&shared_path));
+        let backups_before = directory_snapshot(&backup_dir);
+
+        let error = run_wiki_corpus_command_with_race_hook(
+            true,
+            Some(WIKI_CORPUS_CONFIRMATION_TOKEN.to_string()),
+            Some(backup_dir.clone()),
+            Some(plan_path),
+            &global_path,
+            Some(&project_path),
+            &app_home,
+            CorpusRaceHook::SwapLogicalPathAfterInventory {
+                store: LogicalStore::LegacyGlobal,
+                replacement_path: replacement_path.clone(),
+            },
+        )
+        .expect_err("completed replay must not trust its stale inventory");
+
+        assert!(
+            error.contains("physical binding changed since inventory"),
+            "{error}"
+        );
+        assert_eq!(
+            db_snapshot_fingerprint(&db_snapshot(&shared_path)),
+            shared_before
+        );
+        assert_eq!(directory_snapshot(&backup_dir), backups_before);
+        assert!(fixture_scan(LogicalStore::LegacyGlobal, &global_path)
+            .raw_row("replacement")
+            .is_some());
+        let original = fixture_scan(LogicalStore::LegacyGlobal, &replacement_path);
+        let completed_row = original.raw_row("global").unwrap();
+        assert_eq!(
+            parse_migration_receipt(completed_row)
+                .unwrap()
+                .unwrap()
+                .phase,
+            MigrationPhase::SourceSuperseded
+        );
     }
 
     #[test]
