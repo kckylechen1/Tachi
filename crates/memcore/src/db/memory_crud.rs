@@ -3436,9 +3436,62 @@ pub fn supersede_memory(
     Ok(conn.changes() > 0)
 }
 
+/// Mark a memory as superseded only when its revision is the one the caller
+/// inspected. This is the lifecycle counterpart to `update_with_revision` for
+/// migration paths that must not race a concurrent content/review write.
+pub fn supersede_memory_if_revision(
+    conn: &Connection,
+    id: &str,
+    superseded_by: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    if id == superseded_by {
+        return Ok(false);
+    }
+    refuse_reserved_rem_operation_mutation(id, "superseded")?;
+    let now = now_utc_iso();
+    conn.execute(
+        "UPDATE memories
+         SET superseded_by = ?1, updated_at = ?2, revision = revision + 1,
+             valid_until = COALESCE(valid_until, ?2)
+         WHERE id = ?3 AND superseded_by IS NULL AND revision = ?4",
+        params![superseded_by, now, id, expected_revision],
+    )?;
+    Ok(conn.changes() > 0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::simple_query_input;
+    use super::{simple_query_input, supersede_memory_if_revision};
+    use rusqlite::Connection;
+
+    #[test]
+    fn supersede_memory_if_revision_is_a_revision_cas() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                superseded_by TEXT,
+                updated_at TEXT,
+                valid_until TEXT,
+                revision INTEGER NOT NULL
+            );
+            INSERT INTO memories (id, revision) VALUES ('source', 4);",
+        )
+        .unwrap();
+
+        assert!(supersede_memory_if_revision(&conn, "source", "target", 4).unwrap());
+        assert!(!supersede_memory_if_revision(&conn, "source", "other", 4).unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT superseded_by, revision FROM memories WHERE id = 'source'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            ("target".to_string(), 5)
+        );
+    }
 
     #[test]
     fn simple_query_input_treats_fts_punctuation_as_separators() {

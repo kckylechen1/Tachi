@@ -2,6 +2,50 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
+    let preview =
+        Cli::try_parse_from(["tachi", "wiki", "corpus"]).expect("wiki corpus preview should parse");
+    assert!(matches!(
+        preview.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Corpus {
+                apply: false,
+                confirm: None,
+                backup_dir: None,
+                plan: None,
+            }
+        })
+    ));
+
+    let apply = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "corpus",
+        "--apply",
+        "--confirm",
+        "MIGRATE_WIKI_CORPUS_V1",
+        "--backup-dir",
+        "/tmp/wiki-backups",
+        "--plan",
+        "/tmp/wiki-plan.json",
+    ])
+    .expect("wiki corpus apply flags should parse");
+    assert!(matches!(
+        apply.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Corpus {
+                apply: true,
+                confirm: Some(confirm),
+                backup_dir: Some(backup_dir),
+                plan: Some(plan),
+            }
+        }) if confirm == "MIGRATE_WIKI_CORPUS_V1"
+            && backup_dir == std::path::Path::new("/tmp/wiki-backups")
+            && plan == std::path::Path::new("/tmp/wiki-plan.json")
+    ));
+}
+
+#[test]
 fn recall_coverage_cli_requires_db_and_exposes_explicit_options() {
     let parsed = Cli::try_parse_from([
         "tachi",

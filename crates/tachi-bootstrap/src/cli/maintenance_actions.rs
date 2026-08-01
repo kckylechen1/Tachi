@@ -668,6 +668,24 @@ pub enum WikiAction {
         #[arg(long, default_value = "wiki")]
         project: String,
     },
+    /// Audit the project, shared Wiki, and legacy global Wiki corpus.
+    ///
+    /// This is a read-only JSON preview unless `--apply` is supplied together
+    /// with the exact confirmation token and an existing backup directory.
+    Corpus {
+        /// Apply the precomputed, backup-gated migration plan.
+        #[arg(long)]
+        apply: bool,
+        /// Exact confirmation token required for apply.
+        #[arg(long, value_name = "TOKEN")]
+        confirm: Option<String>,
+        /// Existing directory in which deterministic SQLite backups are stored.
+        #[arg(long, value_name = "DIR")]
+        backup_dir: Option<PathBuf>,
+        /// Optional JSON preview plan to apply; source revisions are checked.
+        #[arg(long, value_name = "PATH")]
+        plan: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

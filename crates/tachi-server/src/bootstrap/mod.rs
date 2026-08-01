@@ -25,6 +25,7 @@ mod setup_wizard;
 mod skill_surface_cli;
 mod tidy;
 mod vault_sync;
+mod wiki_corpus;
 
 mod vault_cli;
 
