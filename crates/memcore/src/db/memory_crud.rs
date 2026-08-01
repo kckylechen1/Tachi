@@ -34,6 +34,7 @@ pub use search::{
     search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
+pub(crate) use update::update_with_revision_if_current;
 pub use update::{
     record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, try_claim_event, update_enrichment_fields, update_with_revision,

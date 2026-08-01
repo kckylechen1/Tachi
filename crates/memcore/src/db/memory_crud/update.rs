@@ -1,8 +1,8 @@
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{Map, Value};
 
 use crate::error::MemoryError;
-use crate::types::MemorySource;
+use crate::types::{MemoryEntry, MemorySource};
 
 use super::now_utc_iso;
 
@@ -63,13 +63,92 @@ pub fn update_with_revision(
     new_vec: Option<&[u8]>,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let updated = update_with_revision_within_tx(
+        &tx,
+        id,
+        new_text,
+        new_summary,
+        new_source,
+        new_metadata,
+        new_vec,
+        expected_revision,
+    )?;
+    tx.commit()?;
+    Ok(updated)
+}
+
+/// Revision update whose caller-supplied full-state guard is evaluated after
+/// `BEGIN IMMEDIATE` and against the same writer snapshot as the update.
+///
+/// This is intentionally narrower than exposing a transaction: callers can
+/// inspect the complete hydrated memory plus its supersession state, then
+/// either allow the ordinary revision update or fail closed with zero writes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_with_revision_if_current<F>(
+    conn: &mut Connection,
+    id: &str,
+    new_text: &str,
+    new_summary: &str,
+    new_source: &str,
+    new_metadata: &str,
+    new_vec: Option<&[u8]>,
+    expected_revision: i64,
+    current_guard: F,
+) -> Result<bool, MemoryError>
+where
+    F: Fn(&MemoryEntry, Option<&str>) -> bool,
+{
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let ids = vec![id.to_string()];
+    let mut current = super::fetch_by_ids(&tx, &ids, true)?;
+    let Some(current) = current.remove(id) else {
+        tx.commit()?;
+        return Ok(false);
+    };
+    let superseded_by = tx
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id = ?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if current.revision != expected_revision || !current_guard(&current, superseded_by.as_deref()) {
+        tx.commit()?;
+        return Ok(false);
+    }
+    let updated = update_with_revision_within_tx(
+        &tx,
+        id,
+        new_text,
+        new_summary,
+        new_source,
+        new_metadata,
+        new_vec,
+        expected_revision,
+    )?;
+    tx.commit()?;
+    Ok(updated)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_with_revision_within_tx(
+    tx: &Transaction<'_>,
+    id: &str,
+    new_text: &str,
+    new_summary: &str,
+    new_source: &str,
+    new_metadata: &str,
+    new_vec: Option<&[u8]>,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
     let new_revision = expected_revision + 1;
     // Normalize source to satisfy CHECK constraint.
     let new_source = MemorySource::parse_or_external(new_source);
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let incoming_metadata = serde_json::from_str(new_metadata)?;
-    let metadata = super::merge_ordinary_reserved_metadata(&tx, id, &incoming_metadata)?;
+    let metadata = super::merge_ordinary_reserved_metadata(tx, id, &incoming_metadata)?;
     let metadata_json = serde_json::to_string(&metadata)?;
 
     let clean_text = crate::noise::scrub_think_tags(new_text);
@@ -106,7 +185,7 @@ pub fn update_with_revision(
                FROM memories WHERE id = ?1"#,
             params![id],
         )?;
-        super::sync_memories_symbolic_fts(&tx, id)?;
+        super::sync_memories_symbolic_fts(tx, id)?;
 
         if let Some(vec_blob) = new_vec {
             tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![id])?;
@@ -117,7 +196,6 @@ pub fn update_with_revision(
         }
     }
 
-    tx.commit()?;
     Ok(updated)
 }
 

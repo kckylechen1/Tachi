@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::update_with_revision_if_current;
 use crate::store::enrichment::ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS;
 use crate::MemoryStore;
 
@@ -674,6 +675,58 @@ fn update_with_revision_detects_conflict() {
     )
     .unwrap();
     assert!(!stale);
+}
+
+#[test]
+fn guarded_revision_update_rejects_same_revision_enrichment_drift() {
+    let mut conn = make_conn();
+    let mut entry = make_entry("guarded-rev-1", "original");
+    entry.vector = Some(vec![0.11; 1024]);
+    upsert(&mut conn, &entry, true).unwrap();
+
+    let enriched_vector = vec![0.91; 1024];
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("generated after snapshot"),
+        Some(&serialize_f32(&enriched_vector)),
+        None,
+        None,
+        entry.revision,
+        None,
+        None,
+        None,
+    )
+    .unwrap());
+
+    let metadata = serde_json::to_string(&json!({"migration": "must-not-land"})).unwrap();
+    let original_vector = entry.vector.as_deref().map(serialize_f32);
+    let updated = update_with_revision_if_current(
+        &mut conn,
+        &entry.id,
+        &entry.text,
+        &entry.summary,
+        &entry.source,
+        &metadata,
+        original_vector.as_deref(),
+        entry.revision,
+        |current, superseded_by| {
+            current.summary == entry.summary
+                && current.vector == entry.vector
+                && superseded_by.is_none()
+        },
+    )
+    .unwrap();
+    assert!(!updated, "same-revision generated-field drift must refuse");
+
+    let current = fetch_by_ids(&conn, std::slice::from_ref(&entry.id), true)
+        .unwrap()
+        .remove(&entry.id)
+        .unwrap();
+    assert_eq!(current.revision, entry.revision);
+    assert_eq!(current.summary, "generated after snapshot");
+    assert_eq!(current.vector, Some(enriched_vector));
+    assert!(current.metadata.get("migration").is_none());
 }
 
 #[test]

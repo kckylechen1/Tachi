@@ -222,19 +222,6 @@ enum CorpusClassification {
     ManualReview,
 }
 
-impl CorpusClassification {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::SharedCandidate => "shared_candidate",
-            Self::ProjectBound => "project_bound",
-            Self::OperationalSnapshot => "operational_snapshot",
-            Self::TestEphemeral => "test_ephemeral",
-            Self::AuthorityRecord => "authority_record",
-            Self::ManualReview => "manual_review",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogicalStore {
     BoundProject,
@@ -539,6 +526,9 @@ enum CorpusRaceHook {
         store: LogicalStore,
         replacement_path: PathBuf,
     },
+    MutateReclassificationAfterPlanValidation {
+        source_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -667,10 +657,6 @@ impl RawRow {
 
     fn vector_fingerprint(&self, table_present: bool) -> VectorFingerprint {
         VectorFingerprint::from_vector(table_present, self.vector.as_deref())
-    }
-
-    fn migration_receipt(&self) -> Option<&Map<String, Value>> {
-        self.metadata.get(RECEIPT_KEY).and_then(Value::as_object)
     }
 
     fn is_superseded_by(&self, id: &str) -> bool {
@@ -1721,6 +1707,7 @@ fn metadata_with_receipt(row: &RawRow, receipt: Value) -> Result<Value, String> 
     Ok(Value::Object(metadata))
 }
 
+#[cfg(test)]
 fn validate_target_occupant(
     item: &PlanItem,
     plan_id: &str,
@@ -2436,6 +2423,52 @@ fn maybe_swap_logical_path_before_completed_return(
     })
 }
 
+fn maybe_mutate_reclassification_after_plan_validation(
+    scans: &[StoreScan],
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let source_id = match race_hook.as_ref() {
+        Some(CorpusRaceHook::MutateReclassificationAfterPlanValidation { source_id }) => {
+            source_id.clone()
+        }
+        _ => return Ok(()),
+    };
+    let scan = scans
+        .iter()
+        .find(|scan| scan.raw_row(&source_id).is_some())
+        .ok_or_else(|| format!("race hook cannot find reclassification row {source_id}"))?;
+    let logical_path = scan
+        .spec
+        .addressed_path
+        .as_deref()
+        .ok_or_else(|| "race hook reclassification store has no addressed path".to_string())?;
+    let revision = scan
+        .raw_row(&source_id)
+        .expect("row selected above")
+        .revision;
+    race_hook.take();
+    let mut store = MemoryStore::open_existing_read_write(&logical_path.display().to_string())
+        .map_err(|error| error.to_string())?;
+    let keywords = vec!["post-validation".to_string(), "enrichment".to_string()];
+    let vector = vec![0.91_f32; 1024];
+    let changed = store
+        .update_enrichment_fields(
+            &source_id,
+            Some("post-validation generated summary"),
+            Some(&vector),
+            Some(&keywords),
+            None,
+            revision,
+        )
+        .map_err(|error| error.to_string())?;
+    if !changed {
+        return Err(format!(
+            "race hook could not mutate reclassification row {source_id}"
+        ));
+    }
+    Ok(())
+}
+
 fn apply_reclassification(
     scan: &StoreScan,
     item: &PlanItem,
@@ -2477,10 +2510,12 @@ fn apply_reclassification(
     }
     let metadata =
         metadata_with_receipt(&source_row, receipt_value(item, plan_id, "reclassified"))?;
+    let expected_fingerprint = plan_row_fingerprint_from_item(item);
+    let vector_table_present = scan.vector_table_present;
     verify_opened_apply_store(&store, logical_path, "reclassification")?;
     verify_backups_before_source_mutation(retained_backups, race_hook)?;
     let changed = store
-        .update_with_revision(
+        .update_with_revision_if_current(
             &entry.id,
             &entry.text,
             &entry.summary,
@@ -2488,13 +2523,18 @@ fn apply_reclassification(
             &metadata,
             entry.vector.as_deref(),
             entry.revision,
+            |current, superseded_by| {
+                let mut current = raw_from_entry(current);
+                current.superseded_by = superseded_by.map(str::to_string);
+                plan_row_fingerprint(&current, vector_table_present) == expected_fingerprint
+            },
         )
         .map_err(|error| error.to_string())?;
     verify_retained_backups(retained_backups)?;
     verify_opened_apply_store(&store, logical_path, "reclassification")?;
     if !changed {
         return Err(format!(
-            "source revision CAS failed for {}:{}",
+            "source fingerprint changed during reclassification for {}:{}",
             item.source_store_ref, item.source_id
         ));
     }
@@ -3007,7 +3047,7 @@ fn retained_file_identity(metadata: &std::fs::Metadata) -> Result<RetainedFileId
         if device == 0 || inode == 0 {
             return Err("protected Wiki corpus object has no stable Unix identity".to_string());
         }
-        return Ok(RetainedFileIdentity::Unix { device, inode });
+        Ok(RetainedFileIdentity::Unix { device, inode })
     }
     #[cfg(windows)]
     {
@@ -3018,7 +3058,7 @@ fn retained_file_identity(metadata: &std::fs::Metadata) -> Result<RetainedFileId
         let index = metadata.file_index().ok_or_else(|| {
             "protected Wiki corpus object has no Windows file identity".to_string()
         })?;
-        return Ok(RetainedFileIdentity::Windows { volume, index });
+        Ok(RetainedFileIdentity::Windows { volume, index })
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -3871,6 +3911,7 @@ fn apply_plan_internal(
     validate_apply_inventory(&current_scans)?;
     validate_plan(&current_scans, plan)?;
     let scans = current_scans.as_slice();
+    maybe_mutate_reclassification_after_plan_validation(scans, &mut race_hook)?;
     if !plan.items.is_empty()
         && plan
             .items
@@ -5284,6 +5325,60 @@ mod tests {
         assert!(fixture_scan(LogicalStore::SharedWiki, &shared_path)
             .raw_row("replacement")
             .is_some());
+    }
+
+    #[test]
+    fn post_validation_enrichment_cannot_commit_a_stale_reclassification_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let shared_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &shared_path,
+            &[fixture_entry_with_vector(
+                "source",
+                "/wiki/reclassification-enrichment-race",
+                shared_metadata(),
+                vec![0.11; 1024],
+            )],
+        );
+        let mut scans = vec![fixture_scan(LogicalStore::SharedWiki, &shared_path)];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].action, "reclassify_in_place");
+        let expected = scans[0].fingerprint().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        create_or_verify_backup(
+            &scans[0],
+            &backup_dir,
+            vec![LogicalStore::SharedWiki.reference().to_string()],
+            &expected,
+        )
+        .unwrap();
+
+        let error = apply_plan_with_race_hook(
+            &scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::MutateReclassificationAfterPlanValidation {
+                source_id: "source".to_string(),
+            },
+        )
+        .expect_err("post-validation enrichment must invalidate reclassification");
+
+        assert!(
+            error.contains("source fingerprint changed during reclassification"),
+            "{error}"
+        );
+        let current = fixture_scan(LogicalStore::SharedWiki, &shared_path);
+        let row = current.raw_row("source").unwrap();
+        assert_eq!(row.revision, 1);
+        assert_eq!(row.summary, "post-validation generated summary");
+        assert_ne!(
+            row.vector_fingerprint(current.vector_table_present),
+            plan.items[0].source_vector
+        );
+        assert!(parse_migration_receipt(row).unwrap().is_none());
     }
 
     #[test]
