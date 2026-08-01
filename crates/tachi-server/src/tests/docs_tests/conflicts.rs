@@ -1,10 +1,11 @@
 use super::*;
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_docs_mtime_conflict_resolution() {
     let server = make_server();
-    let temp_docs = tempdir().expect("create temp docs dir");
-    let docs_path = temp_docs.path();
+    let workspace = DocsWorktree::new();
+    let docs_path = workspace.docs_path();
 
     // 准备一个已经在标准目录的文件，比如 "engineering/architecture/api.md"
     let arch_dir = docs_path.join("engineering").join("architecture");
@@ -43,10 +44,11 @@ async fn test_docs_mtime_conflict_resolution() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_docs_conflict_archive_names_are_unique() {
     let server = make_server();
-    let temp_docs = tempdir().expect("create temp docs dir");
-    let docs_path = temp_docs.path();
+    let workspace = DocsWorktree::new();
+    let docs_path = workspace.docs_path();
 
     let arch_dir = docs_path.join("engineering").join("architecture");
     fs::create_dir_all(&arch_dir).unwrap();

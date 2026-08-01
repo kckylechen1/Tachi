@@ -1,6 +1,6 @@
 use super::{default_limit, default_true, HybridWeightsParam};
 use rmcp::schemars::{self, JsonSchema};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 fn default_wiki_path_prefix() -> String {
     "/wiki".to_string()
@@ -302,13 +302,34 @@ pub struct TachiWikiIngestParams {
     pub update_related: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, JsonSchema)]
 pub struct TachiWikiOrganizeParams {
     /// Absolute path to the docs directory to organize.
     pub dir_path: String,
     /// When true, report planned moves / frontmatter / task-sync changes
     /// WITHOUT touching the filesystem (no moves, no writes, no _index.md
-    /// rebuild). Defaults to false (apply changes).
+    /// rebuild). Defaults to true (in preview mode).
     #[serde(default)]
+    #[schemars(default = "default_true")]
     pub dry_run: bool,
+}
+
+impl<'de> Deserialize<'de> for TachiWikiOrganizeParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireParams {
+            dir_path: String,
+            #[serde(default = "default_true")]
+            dry_run: bool,
+        }
+
+        let params = WireParams::deserialize(deserializer)?;
+        Ok(Self {
+            dir_path: params.dir_path,
+            dry_run: params.dry_run,
+        })
+    }
 }

@@ -48,7 +48,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Organize workspace docs: automatically classify/move files, sync task checkmarks, and rebuild docs/_index.md tree. Pass dry_run=true to preview planned moves/frontmatter/task-sync changes without modifying any files."
+        description = "Organize workspace docs: automatically classify/move files, sync task checkmarks, and rebuild docs/_index.md tree. Omitted dry_run means preview; pass false to apply; preview makes no filesystem or task-sync changes."
     )]
     pub(crate) async fn tachi_wiki_organize(
         &self,
