@@ -438,7 +438,7 @@ struct WikiCorpusPlan {
     items: Vec<PlanItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct BackupReceipt {
     logical_store_refs: Vec<String>,
     source_physical_id: String,
@@ -530,6 +530,13 @@ enum CorpusRaceHook {
     },
     SwapReclassificationPathAfterReceiptRead {
         source_id: String,
+        replacement_path: PathBuf,
+    },
+    ReplaceRetainedBackupBeforeSourceMutation {
+        replacement_path: PathBuf,
+    },
+    SwapLogicalPathBeforeCompletedReturn {
+        store: LogicalStore,
         replacement_path: PathBuf,
     },
 }
@@ -2404,10 +2411,36 @@ fn maybe_swap_reclassification_after_receipt_read(
     })
 }
 
+fn maybe_swap_logical_path_before_completed_return(
+    scans: &[StoreScan],
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let (store, replacement_path) = match race_hook.as_ref() {
+        Some(CorpusRaceHook::SwapLogicalPathBeforeCompletedReturn {
+            store,
+            replacement_path,
+        }) => (*store, replacement_path.clone()),
+        _ => return Ok(()),
+    };
+    let logical_path = scans
+        .iter()
+        .find(|scan| scan.spec.logical_store == store)
+        .and_then(|scan| scan.spec.addressed_path.as_deref())
+        .ok_or_else(|| format!("race hook cannot find logical store {}", store.reference()))?;
+    race_hook.take();
+    atomic_exchange_paths(logical_path, &replacement_path).map_err(|error| {
+        format!(
+            "cannot inject completed-return path replacement for {}: {error}",
+            logical_path.display()
+        )
+    })
+}
+
 fn apply_reclassification(
     scan: &StoreScan,
     item: &PlanItem,
     plan_id: &str,
+    retained_backups: &[RetainedBackup],
     race_hook: &mut Option<CorpusRaceHook>,
 ) -> Result<MigrationOutcome, String> {
     check_authority(scan, None)?;
@@ -2445,6 +2478,7 @@ fn apply_reclassification(
     let metadata =
         metadata_with_receipt(&source_row, receipt_value(item, plan_id, "reclassified"))?;
     verify_opened_apply_store(&store, logical_path, "reclassification")?;
+    verify_backups_before_source_mutation(retained_backups, race_hook)?;
     let changed = store
         .update_with_revision(
             &entry.id,
@@ -2456,6 +2490,7 @@ fn apply_reclassification(
             entry.revision,
         )
         .map_err(|error| error.to_string())?;
+    verify_retained_backups(retained_backups)?;
     verify_opened_apply_store(&store, logical_path, "reclassification")?;
     if !changed {
         return Err(format!(
@@ -2495,6 +2530,7 @@ fn apply_copy_and_supersede(
     item: &PlanItem,
     plan_id: &str,
     interruption: &mut Option<MigrationInterruption>,
+    retained_backups: &[RetainedBackup],
     race_hook: &mut Option<CorpusRaceHook>,
 ) -> Result<MigrationOutcome, String> {
     let target_path = target_scan
@@ -2628,12 +2664,14 @@ fn apply_copy_and_supersede(
         target_entry.metadata =
             metadata_with_receipt(&source_row, receipt_value(item, plan_id, "target_copied"))?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        verify_retained_backups(retained_backups)?;
         match target_store
             .insert_if_absent(&target_entry)
             .map_err(|error| error.to_string())?
         {
             InsertMemoryResult::Inserted | InsertMemoryResult::Existing => {}
         }
+        verify_retained_backups(retained_backups)?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         let verified_target = target_store
             .get_with_options(target_id, true)
@@ -2673,6 +2711,7 @@ fn apply_copy_and_supersede(
     }
     if current_supersession.as_deref() == Some(target_id) && source_superseded_receipted {
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        verify_retained_backups(retained_backups)?;
         phases.push("source_superseded".to_string());
         return Ok(MigrationOutcome {
             source_store_ref: item.source_store_ref.clone(),
@@ -2692,6 +2731,7 @@ fn apply_copy_and_supersede(
         )?;
         let expected_revision = source_entry.revision;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        verify_backups_before_source_mutation(retained_backups, race_hook)?;
         if !source_store
             .update_with_revision(
                 &source_entry.id,
@@ -2709,6 +2749,7 @@ fn apply_copy_and_supersede(
                 item.source_store_ref, item.source_id
             ));
         }
+        verify_retained_backups(retained_backups)?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         source_entry = source_store
             .get_with_options(&item.source_id, true)
@@ -2732,6 +2773,7 @@ fn apply_copy_and_supersede(
     if current_supersession.is_none() {
         let expected_revision = source_entry.revision;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        verify_backups_before_source_mutation(retained_backups, race_hook)?;
         if !source_store
             .supersede_memory_if_revision(&source_entry.id, target_id, expected_revision)
             .map_err(|error| error.to_string())?
@@ -2747,6 +2789,7 @@ fn apply_copy_and_supersede(
                 ));
             }
         }
+        verify_retained_backups(retained_backups)?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     }
     let observed = source_store
@@ -2778,6 +2821,7 @@ fn apply_copy_and_supersede(
             receipt_value(item, plan_id, "source_superseded"),
         )?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        verify_backups_before_source_mutation(retained_backups, race_hook)?;
         if !source_store
             .update_with_revision(
                 &source_entry.id,
@@ -2809,6 +2853,7 @@ fn apply_copy_and_supersede(
                 ));
             }
         }
+        verify_retained_backups(retained_backups)?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     }
     let final_source = source_store
@@ -2831,6 +2876,7 @@ fn apply_copy_and_supersede(
         ));
     }
     verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+    verify_retained_backups(retained_backups)?;
     phases.push("source_superseded".to_string());
     Ok(MigrationOutcome {
         source_store_ref: item.source_store_ref.clone(),
@@ -3014,6 +3060,96 @@ impl RetainedPathFile {
         }
         Ok(())
     }
+}
+
+struct RetainedBackup {
+    receipt: BackupReceipt,
+    path: PathBuf,
+    retained: RetainedPathFile,
+}
+
+impl RetainedBackup {
+    fn verify(&self) -> Result<(), String> {
+        self.retained.verify_path(&self.path)?;
+        let inventory = classify_paths([self.path.clone()]);
+        if let Some(unresolved) = inventory.unresolved_paths.first() {
+            return Err(format!(
+                "retained backup {} has no readable physical identity: {}",
+                self.path.display(),
+                unresolved.error
+            ));
+        }
+        let physical = inventory
+            .stores
+            .into_iter()
+            .next()
+            .ok_or_else(|| "retained backup has no physical identity".to_string())?;
+        if physical.physical_id != self.receipt.backup_physical_id {
+            return Err(format!(
+                "retained backup {} physical identity changed",
+                self.path.display()
+            ));
+        }
+        self.retained.verify_path(&self.path)?;
+        let open_path = canonical_parent_open_path(Path::new(&physical.open_path))?;
+        let connection = open_sqlite_no_follow(&open_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| error.to_string())?;
+        verify_sqlite_connection_retained_identity(&connection, &self.retained, &self.path)?;
+        let schema = read_schema_version(&connection).map_err(|error| error.to_string())?;
+        let quick_check = quick_check(&connection)?;
+        let (rows, _, vector_table_present) = load_rows(&connection)?;
+        let digest = row_digest(&rows, vector_table_present);
+        if schema != self.receipt.schema
+            || rows.len() != self.receipt.total_memory_rows
+            || digest != self.receipt.backup_row_digest
+            || vector_table_present != self.receipt.vector_table_present
+            || quick_check != self.receipt.quick_check
+        {
+            return Err(format!(
+                "retained backup {} evidence changed after verification",
+                self.path.display()
+            ));
+        }
+        verify_sqlite_connection_retained_identity(&connection, &self.retained, &self.path)?;
+        self.retained.verify_path(&self.path)
+    }
+}
+
+fn verify_retained_backups(backups: &[RetainedBackup]) -> Result<(), String> {
+    for backup in backups {
+        backup.verify()?;
+    }
+    Ok(())
+}
+
+fn maybe_replace_retained_backup_before_source_mutation(
+    backups: &[RetainedBackup],
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let replacement_path = match race_hook.as_ref() {
+        Some(CorpusRaceHook::ReplaceRetainedBackupBeforeSourceMutation { replacement_path }) => {
+            replacement_path.clone()
+        }
+        _ => return Ok(()),
+    };
+    let backup = backups
+        .first()
+        .ok_or_else(|| "race hook requires a retained rollback backup".to_string())?;
+    race_hook.take();
+    atomic_exchange_paths(&backup.path, &replacement_path).map_err(|error| {
+        format!(
+            "cannot inject retained backup replacement for {}: {error}",
+            backup.path.display()
+        )
+    })
+}
+
+fn verify_backups_before_source_mutation(
+    backups: &[RetainedBackup],
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    maybe_replace_retained_backup_before_source_mutation(backups, race_hook)?;
+    verify_retained_backups(backups)
 }
 
 fn verify_sqlite_connection_retained_identity(
@@ -3327,10 +3463,16 @@ fn verify_backup(
     backup_path: &Path,
     logical_store_refs: Vec<String>,
     expected: &PlanStoreFingerprint,
-) -> Result<BackupReceipt, String> {
+) -> Result<RetainedBackup, String> {
     regular_non_symlink_metadata(backup_path)?;
     let retained = RetainedPathFile::open(backup_path, true, false, false)?;
-    verify_retained_backup(&retained, source, backup_path, logical_store_refs, expected)
+    let receipt =
+        verify_retained_backup(&retained, source, backup_path, logical_store_refs, expected)?;
+    Ok(RetainedBackup {
+        receipt,
+        path: backup_path.to_path_buf(),
+        retained,
+    })
 }
 
 #[cfg(test)]
@@ -3348,6 +3490,7 @@ fn create_or_verify_backup(
         expected,
         &mut race_hook,
     )
+    .map(|backup| backup.receipt)
 }
 
 fn verify_retained_backup(
@@ -3444,7 +3587,7 @@ fn create_or_verify_backup_with_hook(
     logical_store_refs: Vec<String>,
     expected: &PlanStoreFingerprint,
     race_hook: &mut Option<CorpusRaceHook>,
-) -> Result<BackupReceipt, String> {
+) -> Result<RetainedBackup, String> {
     regular_directory_metadata(backup_dir)?;
     let backup_dir = fs::canonicalize(backup_dir)
         .map_err(|error| format!("cannot canonicalize backup directory: {error}"))?;
@@ -3457,13 +3600,18 @@ fn create_or_verify_backup_with_hook(
         regular_non_symlink_metadata(&backup_path)?;
         let retained = RetainedPathFile::open(&backup_path, true, false, false)?;
         maybe_replace_existing_backup_after_retain(&backup_path, race_hook)?;
-        return verify_retained_backup(
+        let receipt = verify_retained_backup(
             &retained,
             source,
             &backup_path,
             logical_store_refs,
             expected,
-        );
+        )?;
+        return Ok(RetainedBackup {
+            receipt,
+            path: backup_path,
+            retained,
+        });
     }
 
     if source.row_digest != expected.row_digest
@@ -3539,13 +3687,20 @@ fn create_or_verify_backup_with_hook(
 
     retained.verify_path(&temporary)?;
     match atomic_noreplace(&temporary, &backup_path) {
-        Ok(()) => verify_retained_backup(
-            &retained,
-            source,
-            &backup_path,
-            logical_store_refs,
-            expected,
-        ),
+        Ok(()) => {
+            let receipt = verify_retained_backup(
+                &retained,
+                source,
+                &backup_path,
+                logical_store_refs,
+                expected,
+            )?;
+            Ok(RetainedBackup {
+                receipt,
+                path: backup_path,
+                retained,
+            })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             retained.verify_path(&temporary)?;
             verify_backup(source, &backup_path, logical_store_refs, expected)
@@ -3639,6 +3794,59 @@ fn existing_outcome(item: &PlanItem) -> MigrationOutcome {
     }
 }
 
+fn retain_plan_backups(
+    scans: &[StoreScan],
+    plan: &WikiCorpusPlan,
+    backup_dir: &Path,
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<Vec<RetainedBackup>, String> {
+    let mut groups = BTreeMap::<String, (Vec<String>, &StoreScan)>::new();
+    for scan in scans {
+        let Some(physical) = scan.physical.as_ref() else {
+            continue;
+        };
+        let entry = groups
+            .entry(physical.physical_id.clone())
+            .or_insert_with(|| (Vec::new(), scan));
+        entry
+            .0
+            .push(scan.spec.logical_store.reference().to_string());
+    }
+
+    let mut backups = Vec::new();
+    for (_physical_id, (mut logical_refs, source)) in groups {
+        logical_refs.sort();
+        logical_refs.dedup();
+        check_authority(source, None)?;
+        let expected = plan
+            .store_fingerprints
+            .iter()
+            .find(|fingerprint| {
+                fingerprint.logical_store_ref == source.spec.logical_store.reference()
+            })
+            .ok_or_else(|| {
+                format!(
+                    "plan has no original backup evidence for {}",
+                    source.spec.logical_store.reference()
+                )
+            })?;
+        backups.push(create_or_verify_backup_with_hook(
+            source,
+            backup_dir,
+            logical_refs,
+            expected,
+            race_hook,
+        )?);
+    }
+    backups.sort_by(|left, right| {
+        left.receipt
+            .source_physical_id
+            .cmp(&right.receipt.source_physical_id)
+    });
+    verify_retained_backups(&backups)?;
+    Ok(backups)
+}
+
 #[cfg(test)]
 fn apply_plan(
     scans: &[StoreScan],
@@ -3671,20 +3879,43 @@ fn apply_plan_internal(
     {
         let final_path = backup_dir.join("wiki-corpus-v1-apply-receipt.json");
         let initial_path = backup_dir.join("wiki-corpus-v1-manifest.json");
-        let manifest = if let Some(final_manifest) = read_manifest_if_present(&final_path)? {
-            final_manifest
+        let (manifest, needs_final_receipt) = if let Some(final_manifest) =
+            read_manifest_if_present(&final_path)?
+        {
+            (final_manifest, false)
         } else if let Some(initial) = read_manifest_if_present(&initial_path)? {
-            if initial.plan_id != plan.plan_id {
+            if initial.plan_id != plan.plan_id || initial.status != "backups_verified" {
                 return Err(
                     "existing backup manifest belongs to a different completed plan".to_string(),
                 );
             }
+            (initial, true)
+        } else {
+            return Err("completed Wiki corpus state has no backup manifest evidence".to_string());
+        };
+        if manifest.plan_id != plan.plan_id
+            || (!needs_final_receipt && manifest.status != "apply_completed")
+        {
+            return Err("existing apply receipt does not match the completed plan".to_string());
+        }
+        let retained_backups = retain_plan_backups(scans, plan, &backup_dir, &mut race_hook)?;
+        let verified_receipts = retained_backups
+            .iter()
+            .map(|backup| backup.receipt.clone())
+            .collect::<Vec<_>>();
+        if manifest.receipts != verified_receipts {
+            return Err(
+                "completed Wiki corpus manifest does not match retained backup evidence"
+                    .to_string(),
+            );
+        }
+        let completed = if needs_final_receipt {
             let completed = BackupManifest {
-                version: initial.version.clone(),
+                version: manifest.version.clone(),
                 status: "apply_completed".to_string(),
-                plan_id: initial.plan_id.clone(),
-                backup_directory: initial.backup_directory.clone(),
-                receipts: initial.receipts.clone(),
+                plan_id: manifest.plan_id.clone(),
+                backup_directory: manifest.backup_directory.clone(),
+                receipts: verified_receipts,
                 migration_receipts: plan
                     .items
                     .iter()
@@ -3701,12 +3932,13 @@ fn apply_plan_internal(
             write_manifest_if_needed_with_hook(&final_path, &completed, &mut race_hook)?;
             completed
         } else {
-            return Err("completed Wiki corpus state has no backup manifest evidence".to_string());
+            manifest
         };
-        if manifest.plan_id != plan.plan_id || manifest.status != "apply_completed" {
-            return Err("existing apply receipt does not match the completed plan".to_string());
-        }
-        return Ok((manifest, plan.items.iter().map(existing_outcome).collect()));
+        verify_retained_backups(&retained_backups)?;
+        maybe_swap_logical_path_before_completed_return(scans, &mut race_hook)?;
+        validate_apply_inventory(scans)?;
+        verify_retained_backups(&retained_backups)?;
+        return Ok((completed, plan.items.iter().map(existing_outcome).collect()));
     }
     if plan.items.is_empty() {
         let manifest = BackupManifest {
@@ -3719,47 +3951,16 @@ fn apply_plan_internal(
         };
         let manifest_path = backup_dir.join("wiki-corpus-v1-manifest.json");
         write_manifest_if_needed_with_hook(&manifest_path, &manifest, &mut race_hook)?;
+        maybe_swap_logical_path_before_completed_return(scans, &mut race_hook)?;
+        validate_apply_inventory(scans)?;
         return Ok((manifest, Vec::new()));
     }
 
-    let mut groups = BTreeMap::<String, (Vec<String>, &StoreScan)>::new();
-    for scan in scans {
-        let Some(physical) = scan.physical.as_ref() else {
-            continue;
-        };
-        let entry = groups
-            .entry(physical.physical_id.clone())
-            .or_insert_with(|| (Vec::new(), scan));
-        entry
-            .0
-            .push(scan.spec.logical_store.reference().to_string());
-    }
-    let mut receipts = Vec::new();
-    for (_physical_id, (mut logical_refs, source)) in groups {
-        logical_refs.sort();
-        logical_refs.dedup();
-        check_authority(source, None)?;
-        let expected = plan
-            .store_fingerprints
-            .iter()
-            .find(|fingerprint| {
-                fingerprint.logical_store_ref == source.spec.logical_store.reference()
-            })
-            .ok_or_else(|| {
-                format!(
-                    "plan has no original backup evidence for {}",
-                    source.spec.logical_store.reference()
-                )
-            })?;
-        receipts.push(create_or_verify_backup_with_hook(
-            source,
-            &backup_dir,
-            logical_refs,
-            expected,
-            &mut race_hook,
-        )?);
-    }
-    receipts.sort_by(|left, right| left.source_physical_id.cmp(&right.source_physical_id));
+    let retained_backups = retain_plan_backups(scans, plan, &backup_dir, &mut race_hook)?;
+    let receipts = retained_backups
+        .iter()
+        .map(|backup| backup.receipt.clone())
+        .collect::<Vec<_>>();
     let manifest_path = backup_dir.join("wiki-corpus-v1-manifest.json");
     let initial_manifest = BackupManifest {
         version: REPORT_VERSION.to_string(),
@@ -3777,9 +3978,16 @@ fn apply_plan_internal(
 
     let mut outcomes = Vec::new();
     for item in &plan.items {
+        verify_retained_backups(&retained_backups)?;
         let outcome = if item.action == "reclassify_in_place" {
             let source = find_scan(scans, &item.source_store_ref)?;
-            apply_reclassification(source, item, &plan.plan_id, &mut race_hook)?
+            apply_reclassification(
+                source,
+                item,
+                &plan.plan_id,
+                &retained_backups,
+                &mut race_hook,
+            )?
         } else {
             let source = find_scan(scans, &item.source_store_ref)?;
             let target = find_scan(scans, &item.target_store_ref)?;
@@ -3789,9 +3997,11 @@ fn apply_plan_internal(
                 item,
                 &plan.plan_id,
                 &mut interruption,
+                &retained_backups,
                 &mut race_hook,
             )?
         };
+        verify_retained_backups(&retained_backups)?;
         outcomes.push(outcome);
     }
     let final_manifest = BackupManifest {
@@ -3823,7 +4033,9 @@ fn apply_plan_internal(
     // The initial manifest remains the deterministic evidence of all verified
     // backups. The separate final receipt makes an interrupted run explicit.
     let final_path = backup_dir.join("wiki-corpus-v1-apply-receipt.json");
+    verify_retained_backups(&retained_backups)?;
     write_manifest_if_needed_with_hook(&final_path, &final_manifest, &mut race_hook)?;
+    verify_retained_backups(&retained_backups)?;
     Ok((final_manifest, outcomes))
 }
 
@@ -4823,7 +5035,8 @@ mod tests {
                 &expected,
                 &mut race_hook,
             )
-            .expect_err("existing final backup replacement must fail closed");
+            .err()
+            .expect("existing final backup replacement must fail closed");
 
             assert!(
                 error.contains("identity changed after reservation"),
@@ -4836,6 +5049,66 @@ mod tests {
             assert!(backup_path.exists());
             let source_after = fixture_scan(LogicalStore::LegacyGlobal, &source_path);
             let row = source_after.raw_row("source").unwrap();
+            assert_eq!(row.revision, 1);
+            assert!(parse_migration_receipt(row).unwrap().is_none());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn retained_backup_replacement_before_first_source_update_fails_closed() {
+        for replace_with_source_hardlink in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let source_path = directory.path().join("shared.db");
+            create_current_fixture(
+                &source_path,
+                &[fixture_entry(
+                    "source",
+                    "/wiki/retained-backup-boundary",
+                    shared_metadata(),
+                )],
+            );
+            let mut scans = vec![fixture_scan(LogicalStore::SharedWiki, &source_path)];
+            classify_scans(&mut scans);
+            let plan = build_plan(&scans).unwrap();
+            assert_eq!(plan.items.len(), 1);
+            assert_eq!(plan.items[0].action, "reclassify_in_place");
+
+            let replacement_path = directory.path().join("replacement.db");
+            if replace_with_source_hardlink {
+                fs::hard_link(&source_path, &replacement_path).unwrap();
+            } else {
+                create_current_fixture(
+                    &replacement_path,
+                    &[fixture_entry(
+                        "replacement",
+                        "/wiki/ordinary-backup-replacement",
+                        json!({"kind": "replacement"}),
+                    )],
+                );
+            }
+            let source_before = db_snapshot_fingerprint(&db_snapshot(&source_path));
+            let backup_dir = directory.path().join("backups");
+            fs::create_dir(&backup_dir).unwrap();
+
+            let error = apply_plan_with_race_hook(
+                &scans,
+                &plan,
+                &backup_dir,
+                CorpusRaceHook::ReplaceRetainedBackupBeforeSourceMutation { replacement_path },
+            )
+            .expect_err("a detached rollback backup must block the first source update");
+
+            assert!(
+                error.contains("identity changed after reservation"),
+                "{error}"
+            );
+            assert_eq!(
+                db_snapshot_fingerprint(&db_snapshot(&source_path)),
+                source_before
+            );
+            let source = fixture_scan(LogicalStore::SharedWiki, &source_path);
+            let row = source.raw_row("source").unwrap();
             assert_eq!(row.revision, 1);
             assert!(parse_migration_receipt(row).unwrap().is_none());
         }
@@ -5397,6 +5670,128 @@ mod tests {
                 .phase,
             MigrationPhase::SourceSuperseded
         );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn completed_no_op_rejects_path_swap_at_actual_success_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry(
+                "source",
+                "/wiki/completed-success-boundary",
+                shared_metadata(),
+            )],
+        );
+        let mut initial_scans = vec![fixture_scan(LogicalStore::SharedWiki, &source_path)];
+        classify_scans(&mut initial_scans);
+        let plan = build_plan(&initial_scans).unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        apply_plan(&initial_scans, &plan, &backup_dir).unwrap();
+
+        let mut completed_scans = vec![fixture_scan(LogicalStore::SharedWiki, &source_path)];
+        classify_scans(&mut completed_scans);
+        assert!(plan
+            .items
+            .iter()
+            .all(|item| plan_item_completed(&completed_scans, &plan, item)));
+        let replacement_path = directory.path().join("replacement.db");
+        create_current_fixture(
+            &replacement_path,
+            &[fixture_entry(
+                "replacement",
+                "/wiki/completed-return-replacement",
+                json!({"kind": "replacement"}),
+            )],
+        );
+        let backups_before = directory_snapshot(&backup_dir);
+
+        let error = apply_plan_with_race_hook(
+            &completed_scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::SwapLogicalPathBeforeCompletedReturn {
+                store: LogicalStore::SharedWiki,
+                replacement_path: replacement_path.clone(),
+            },
+        )
+        .expect_err("completed no-op must revalidate its logical path at return");
+
+        assert!(
+            error.contains("physical binding changed since inventory"),
+            "{error}"
+        );
+        assert_eq!(directory_snapshot(&backup_dir), backups_before);
+        assert!(fixture_scan(LogicalStore::SharedWiki, &source_path)
+            .raw_row("replacement")
+            .is_some());
+        let original = fixture_scan(LogicalStore::SharedWiki, &replacement_path);
+        let row = original.raw_row("source").unwrap();
+        assert_eq!(row.revision, 2);
+        assert!(receipt_matches(
+            row,
+            &plan.items[0],
+            &plan.plan_id,
+            &["reclassified"]
+        ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn completed_no_op_reverifies_backup_object_instead_of_trusting_manifest() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry(
+                "source",
+                "/wiki/completed-backup-recheck",
+                shared_metadata(),
+            )],
+        );
+        let mut initial_scans = vec![fixture_scan(LogicalStore::SharedWiki, &source_path)];
+        classify_scans(&mut initial_scans);
+        let plan = build_plan(&initial_scans).unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        apply_plan(&initial_scans, &plan, &backup_dir).unwrap();
+
+        let mut completed_scans = vec![fixture_scan(LogicalStore::SharedWiki, &source_path)];
+        classify_scans(&mut completed_scans);
+        let replacement_path = directory.path().join("replacement.db");
+        create_current_fixture(
+            &replacement_path,
+            &[fixture_entry(
+                "replacement",
+                "/wiki/completed-backup-replacement",
+                json!({"kind": "replacement"}),
+            )],
+        );
+
+        let error = apply_plan_with_race_hook(
+            &completed_scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::ReplaceExistingBackupAfterRetain { replacement_path },
+        )
+        .expect_err("completed replay must reopen and retain its rollback backup");
+
+        assert!(
+            error.contains("identity changed after reservation"),
+            "{error}"
+        );
+        let source = fixture_scan(LogicalStore::SharedWiki, &source_path);
+        let row = source.raw_row("source").unwrap();
+        assert_eq!(row.revision, 2);
+        assert!(receipt_matches(
+            row,
+            &plan.items[0],
+            &plan.plan_id,
+            &["reclassified"]
+        ));
     }
 
     #[test]
