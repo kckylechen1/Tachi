@@ -1,6 +1,6 @@
 //! Enrichment, FTS, and vector maintenance methods on [`MemoryStore`].
 
-use crate::{db, error::MemoryError, types::MemoryEntry, MemoryStore};
+use crate::{db, error::MemoryError, types::ExpectedMemoryState, MemoryStore};
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::params;
 
@@ -92,13 +92,10 @@ impl MemoryStore {
         })
     }
 
-    /// Apply an ordinary revision update only when a caller-defined complete
-    /// state guard still matches under the same `BEGIN IMMEDIATE` transaction.
-    ///
-    /// The guard receives the hydrated row, including its vector, and the
-    /// current supersession target. Returning `false` performs zero writes.
+    /// Apply an ordinary revision update only when a typed complete-state
+    /// snapshot still matches under the same `BEGIN IMMEDIATE` transaction.
     #[allow(clippy::too_many_arguments)]
-    pub fn update_with_revision_if_current<F>(
+    pub fn update_with_revision_if_expected_state(
         &mut self,
         id: &str,
         new_text: &str,
@@ -106,12 +103,8 @@ impl MemoryStore {
         new_source: &str,
         new_metadata: &serde_json::Value,
         new_vec: Option<&[f32]>,
-        expected_revision: i64,
-        current_guard: F,
-    ) -> Result<bool, MemoryError>
-    where
-        F: Fn(&MemoryEntry, Option<&str>) -> bool,
-    {
+        expected: &ExpectedMemoryState,
+    ) -> Result<bool, MemoryError> {
         if crate::namespace::is_reserved_wiki_rem_id(id) {
             return Err(MemoryError::InvalidArg(format!(
                 "invariant: reserved REM operation {id} cannot be revision-updated through a generic enrichment seam"
@@ -125,9 +118,9 @@ impl MemoryStore {
         };
         let db_label = self.db_label.clone();
         let authorization = self.reserved_reference_write.clone();
-        db::retry_memory_locked("update_with_revision_if_current", &db_label, || {
+        db::retry_memory_locked("update_with_revision_if_expected_state", &db_label, || {
             let _authorization = db::authorize_reserved_reference_write(&authorization)?;
-            db::update_with_revision_if_current(
+            db::update_with_revision_if_expected_state(
                 &mut self.conn,
                 id,
                 new_text,
@@ -135,8 +128,7 @@ impl MemoryStore {
                 new_source,
                 &metadata_json,
                 vec_blob.as_deref(),
-                expected_revision,
-                &current_guard,
+                expected,
             )
         })
     }

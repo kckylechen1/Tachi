@@ -17,7 +17,7 @@ use crate::tool_params::{
     WikiKnowledgeScopeV1,
 };
 use memcore::db::migrations::{read_schema_version, EXPECTED_SCHEMA_VERSION};
-use memcore::{InsertMemoryResult, MemoryEntry, MemoryStore};
+use memcore::{ExpectedMemoryState, InsertMemoryResult, MemoryEntry, MemoryStore};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -409,6 +409,7 @@ struct PlanItem {
     normalized_path: String,
     source_revision: i64,
     source_content_sha256: String,
+    source_valid_until: Option<String>,
     source_superseded_by: Option<String>,
     source_vector: VectorFingerprint,
     replay_identity: String,
@@ -529,6 +530,12 @@ enum CorpusRaceHook {
     MutateReclassificationAfterPlanValidation {
         source_id: String,
     },
+    MutateValidUntilAfterPlanValidation {
+        source_id: String,
+    },
+    MutateCopySourceAfterPrecheck {
+        source_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -638,6 +645,7 @@ impl RawRow {
             "importance": self.importance,
             "timestamp": self.timestamp,
             "valid_from": self.valid_from,
+            "valid_until": self.valid_until,
             "category": self.category,
             "topic": self.topic,
             "keywords": self.keywords,
@@ -1583,6 +1591,7 @@ fn build_plan_item(source: &StoreScan, row: &RawRow, target: &StoreScan) -> Plan
         normalized_path: row.normalized_path(),
         source_revision: row.revision,
         source_content_sha256: row.content_sha256(),
+        source_valid_until: row.valid_until.clone(),
         source_superseded_by: row.superseded_by.clone(),
         source_vector: row.vector_fingerprint(source.vector_table_present),
         replay_identity: replay_identity.clone(),
@@ -1753,14 +1762,14 @@ fn expected_item_for_live_source(
     row: &RawRow,
     target: &StoreScan,
     source_revision: i64,
+    source_valid_until: Option<String>,
     source_superseded_by: Option<String>,
 ) -> PlanItem {
-    let mut expected = build_plan_item(source, row, target);
-    expected.source_revision = source_revision;
-    expected.source_superseded_by = source_superseded_by.clone();
     let mut identity_row = row.clone();
     identity_row.revision = source_revision;
+    identity_row.valid_until = source_valid_until;
     identity_row.superseded_by = source_superseded_by;
+    let mut expected = build_plan_item(source, &identity_row, target);
     expected.replay_identity = replay_identity_for(
         &expected.source_store_ref,
         &expected.source_physical_id,
@@ -1771,6 +1780,29 @@ fn expected_item_for_live_source(
         expected.target_id = Some(format!("wiki-corpus:{}", expected.replay_identity));
     }
     expected
+}
+
+fn superseded_validity_matches_plan(row: &RawRow, item: &PlanItem) -> bool {
+    match item.source_valid_until.as_ref() {
+        Some(expected) => row.valid_until.as_ref() == Some(expected),
+        None => row.valid_until.is_some(),
+    }
+}
+
+fn source_content_matches_plan(
+    row: &RawRow,
+    item: &PlanItem,
+    supersession_is_proven: bool,
+) -> bool {
+    if !supersession_is_proven {
+        return row.content_sha256() == item.source_content_sha256;
+    }
+    if !superseded_validity_matches_plan(row, item) {
+        return false;
+    }
+    let mut original = row.clone();
+    original.valid_until.clone_from(&item.source_valid_until);
+    original.content_sha256() == item.source_content_sha256
 }
 
 fn validate_live_source_item(
@@ -1796,6 +1828,7 @@ fn validate_live_source_item(
         row,
         target,
         item.source_revision,
+        item.source_valid_until.clone(),
         item.source_superseded_by.clone(),
     );
     if item != &expected {
@@ -1828,6 +1861,7 @@ fn validate_live_source_item(
     match receipt {
         None => {
             if row.revision != item.source_revision
+                || row.valid_until != item.source_valid_until
                 || row.superseded_by != item.source_superseded_by
             {
                 return Err(format!(
@@ -1846,6 +1880,7 @@ fn validate_live_source_item(
             match receipt.phase {
                 MigrationPhase::Reclassified => {
                     if row.revision != item.source_revision + 1
+                        || row.valid_until != item.source_valid_until
                         || row.superseded_by != item.source_superseded_by
                     {
                         return Err(format!(
@@ -1856,8 +1891,10 @@ fn validate_live_source_item(
                 }
                 MigrationPhase::SourceReceipted => {
                     let receipt_only = row.revision == item.source_revision + 1
+                        && row.valid_until == item.source_valid_until
                         && row.superseded_by == item.source_superseded_by;
                     let supersession_observed = row.revision == item.source_revision + 2
+                        && superseded_validity_matches_plan(row, item)
                         && row.superseded_by == item.target_id;
                     if !receipt_only && !supersession_observed {
                         return Err(format!(
@@ -1869,6 +1906,7 @@ fn validate_live_source_item(
                 MigrationPhase::SourceSuperseded => {
                     if item.action != "copy_to_shared_and_supersede"
                         || row.revision != item.source_revision + 3
+                        || !superseded_validity_matches_plan(row, item)
                         || row.superseded_by != item.target_id
                     {
                         return Err(format!(
@@ -2469,6 +2507,79 @@ fn maybe_mutate_reclassification_after_plan_validation(
     Ok(())
 }
 
+fn maybe_mutate_valid_until_after_plan_validation(
+    scans: &[StoreScan],
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let source_id = match race_hook.as_ref() {
+        Some(CorpusRaceHook::MutateValidUntilAfterPlanValidation { source_id }) => {
+            source_id.clone()
+        }
+        _ => return Ok(()),
+    };
+    let scan = scans
+        .iter()
+        .find(|scan| scan.raw_row(&source_id).is_some())
+        .ok_or_else(|| format!("race hook cannot find valid_until row {source_id}"))?;
+    let logical_path = scan
+        .spec
+        .addressed_path
+        .as_deref()
+        .ok_or_else(|| "race hook valid_until store has no addressed path".to_string())?;
+    race_hook.take();
+    let conn = Connection::open(logical_path).map_err(|error| error.to_string())?;
+    let changed = conn
+        .execute(
+            "UPDATE memories SET valid_until = ?1 WHERE id = ?2",
+            rusqlite::params!["2026-12-31T23:59:59Z", source_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("race hook could not mutate valid_until".to_string());
+    }
+    Ok(())
+}
+
+fn maybe_mutate_copy_source_after_precheck(
+    source_scan: &StoreScan,
+    item: &PlanItem,
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let source_id = match race_hook.as_ref() {
+        Some(CorpusRaceHook::MutateCopySourceAfterPrecheck { source_id })
+            if source_id == &item.source_id =>
+        {
+            source_id.clone()
+        }
+        _ => return Ok(()),
+    };
+    let logical_path = source_scan
+        .spec
+        .addressed_path
+        .as_deref()
+        .ok_or_else(|| "race hook copy source has no addressed path".to_string())?;
+    race_hook.take();
+    let mut store = MemoryStore::open_existing_read_write(&logical_path.display().to_string())
+        .map_err(|error| error.to_string())?;
+    let vector = vec![0.83_f32; 1024];
+    let changed = store
+        .update_enrichment_fields(
+            &source_id,
+            Some("post-precheck generated summary"),
+            Some(&vector),
+            None,
+            None,
+            item.source_revision,
+        )
+        .map_err(|error| error.to_string())?;
+    if !changed {
+        return Err(format!(
+            "race hook could not mutate copy source {source_id}"
+        ));
+    }
+    Ok(())
+}
+
 fn apply_reclassification(
     scan: &StoreScan,
     item: &PlanItem,
@@ -2510,24 +2621,24 @@ fn apply_reclassification(
     }
     let metadata =
         metadata_with_receipt(&source_row, receipt_value(item, plan_id, "reclassified"))?;
-    let expected_fingerprint = plan_row_fingerprint_from_item(item);
-    let vector_table_present = scan.vector_table_present;
+    let frozen_row = scan
+        .raw_row(&item.source_id)
+        .ok_or_else(|| format!("planned source row {} is missing", item.source_id))?;
+    let expected = ExpectedMemoryState::from_entry(
+        &memory_entry_from_raw(frozen_row),
+        frozen_row.superseded_by.as_deref(),
+    );
     verify_opened_apply_store(&store, logical_path, "reclassification")?;
     verify_backups_before_source_mutation(retained_backups, race_hook)?;
     let changed = store
-        .update_with_revision_if_current(
+        .update_with_revision_if_expected_state(
             &entry.id,
             &entry.text,
             &entry.summary,
             &entry.source,
             &metadata,
             entry.vector.as_deref(),
-            entry.revision,
-            |current, superseded_by| {
-                let mut current = raw_from_entry(current);
-                current.superseded_by = superseded_by.map(str::to_string);
-                plan_row_fingerprint(&current, vector_table_present) == expected_fingerprint
-            },
+            &expected,
         )
         .map_err(|error| error.to_string())?;
     verify_retained_backups(retained_backups)?;
@@ -2562,6 +2673,25 @@ fn apply_reclassification(
         outcome: "reclassified".to_string(),
         phases: vec!["reclassified".to_string()],
     })
+}
+
+fn compensate_inserted_target(
+    target_store: &mut MemoryStore,
+    target_id: &str,
+    expected: Option<&ExpectedMemoryState>,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let deleted = target_store
+        .delete_if_expected_state(target_id, expected)
+        .map_err(|error| format!("target compensation failed for {target_id}: {error}"))?;
+    if !deleted {
+        return Err(format!(
+            "target compensation refused because deterministic occupant {target_id} changed"
+        ));
+    }
+    Ok(())
 }
 
 fn apply_copy_and_supersede(
@@ -2659,8 +2789,10 @@ fn apply_copy_and_supersede(
         } else {
             0
         };
+    let expected_supersession_is_proven =
+        initial_supersession.as_deref() == Some(target_id) && source_receipt.is_some();
     if source_entry.revision != expected_source_revision
-        || source_row.content_sha256() != item.source_content_sha256
+        || !source_content_matches_plan(&source_row, item, expected_supersession_is_proven)
         || source_row.vector_fingerprint(source_scan.vector_table_present) != item.source_vector
     {
         return Err(format!(
@@ -2668,7 +2800,16 @@ fn apply_copy_and_supersede(
             item.source_store_ref, item.source_id
         ));
     }
+    let frozen_source = source_scan
+        .raw_row(&item.source_id)
+        .ok_or_else(|| format!("planned source row {} is missing", item.source_id))?;
+    let expected_source = ExpectedMemoryState::from_entry(
+        &memory_entry_from_raw(frozen_source),
+        frozen_source.superseded_by.as_deref(),
+    );
+    maybe_mutate_copy_source_after_precheck(source_scan, item, race_hook)?;
     let mut phases = Vec::new();
+    let mut inserted_target_expected = None;
 
     if let Some(target_entry) = target_store
         .get_with_options(target_id, true)
@@ -2705,12 +2846,13 @@ fn apply_copy_and_supersede(
             metadata_with_receipt(&source_row, receipt_value(item, plan_id, "target_copied"))?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         verify_retained_backups(retained_backups)?;
-        match target_store
+        let inserted = match target_store
             .insert_if_absent(&target_entry)
             .map_err(|error| error.to_string())?
         {
-            InsertMemoryResult::Inserted | InsertMemoryResult::Existing => {}
-        }
+            InsertMemoryResult::Inserted => true,
+            InsertMemoryResult::Existing => false,
+        };
         verify_retained_backups(retained_backups)?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         let verified_target = target_store
@@ -2733,6 +2875,12 @@ fn apply_copy_and_supersede(
             return Err(
                 "target insert produced a mismatched deterministic occupant or vector".to_string(),
             );
+        }
+        if inserted {
+            inserted_target_expected = Some(ExpectedMemoryState::from_entry(
+                &verified_target,
+                verified_target_row.superseded_by.as_deref(),
+            ));
         }
         phases.push("target_copied".to_string());
     }
@@ -2769,23 +2917,47 @@ fn apply_copy_and_supersede(
             &source_row,
             receipt_value(item, plan_id, "source_receipted"),
         )?;
-        let expected_revision = source_entry.revision;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         verify_backups_before_source_mutation(retained_backups, race_hook)?;
-        if !source_store
-            .update_with_revision(
+        let source_update = source_store
+            .update_with_revision_if_expected_state(
                 &source_entry.id,
                 &source_entry.text,
                 &source_entry.summary,
                 &source_entry.source,
                 &metadata,
                 source_entry.vector.as_deref(),
-                expected_revision,
+                &expected_source,
             )
-            .map_err(|error| error.to_string())?
-        {
+            .map_err(|error| error.to_string());
+        let source_changed = match source_update {
+            Ok(changed) => changed,
+            Err(error) => {
+                compensate_inserted_target(
+                    &mut target_store,
+                    target_id,
+                    inserted_target_expected.as_ref(),
+                )?;
+                verify_retained_backups(retained_backups)?;
+                verify_copy_store_identities(
+                    &source_store,
+                    source_path,
+                    &target_store,
+                    target_path,
+                )?;
+                return Err(error);
+            }
+        };
+        if !source_changed {
+            compensate_inserted_target(
+                &mut target_store,
+                target_id,
+                inserted_target_expected.as_ref(),
+            )?;
+            verify_retained_backups(retained_backups)?;
+            verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
             return Err(format!(
-                "source receipt revision CAS failed for {}:{}",
+                "source fingerprint changed before source receipt for {}:{}",
                 item.source_store_ref, item.source_id
             ));
         }
@@ -2862,15 +3034,16 @@ fn apply_copy_and_supersede(
         )?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         verify_backups_before_source_mutation(retained_backups, race_hook)?;
+        let expected_final_source = ExpectedMemoryState::from_entry(&source_entry, Some(target_id));
         if !source_store
-            .update_with_revision(
+            .update_with_revision_if_expected_state(
                 &source_entry.id,
                 &source_entry.text,
                 &source_entry.summary,
                 &source_entry.source,
                 &metadata,
                 source_entry.vector.as_deref(),
-                source_entry.revision,
+                &expected_final_source,
             )
             .map_err(|error| error.to_string())?
         {
@@ -3912,6 +4085,7 @@ fn apply_plan_internal(
     validate_plan(&current_scans, plan)?;
     let scans = current_scans.as_slice();
     maybe_mutate_reclassification_after_plan_validation(scans, &mut race_hook)?;
+    maybe_mutate_valid_until_after_plan_validation(scans, &mut race_hook)?;
     if !plan.items.is_empty()
         && plan
             .items
@@ -4402,6 +4576,7 @@ mod tests {
             normalized_path: source.normalized_path(),
             source_revision: source.revision,
             source_content_sha256: source.content_sha256(),
+            source_valid_until: source.valid_until.clone(),
             source_superseded_by: source.superseded_by.clone(),
             source_vector: source.vector_fingerprint(false),
             replay_identity: replay_identity.clone(),
@@ -4660,6 +4835,7 @@ mod tests {
             normalized_path: "/wiki/candidate".to_string(),
             source_revision: 1,
             source_content_sha256: candidate.content_sha256(),
+            source_valid_until: candidate.valid_until.clone(),
             source_superseded_by: None,
             source_vector: candidate.vector_fingerprint(false),
             replay_identity: "replay".to_string(),
@@ -5379,6 +5555,114 @@ mod tests {
             plan.items[0].source_vector
         );
         assert!(parse_migration_receipt(row).unwrap().is_none());
+    }
+
+    #[test]
+    fn post_validation_valid_until_drift_cannot_commit_a_reclassification_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let shared_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &shared_path,
+            &[fixture_entry(
+                "source",
+                "/wiki/reclassification-valid-until-race",
+                shared_metadata(),
+            )],
+        );
+        let mut scans = vec![fixture_scan(LogicalStore::SharedWiki, &shared_path)];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        create_or_verify_backup(
+            &scans[0],
+            &backup_dir,
+            vec![LogicalStore::SharedWiki.reference().to_string()],
+            &scans[0].fingerprint().unwrap(),
+        )
+        .unwrap();
+
+        let error = apply_plan_with_race_hook(
+            &scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::MutateValidUntilAfterPlanValidation {
+                source_id: "source".to_string(),
+            },
+        )
+        .expect_err("same-revision valid_until drift must invalidate reclassification");
+
+        assert!(
+            error.contains("source fingerprint changed during reclassification"),
+            "{error}"
+        );
+        let current = fixture_scan(LogicalStore::SharedWiki, &shared_path);
+        let row = current.raw_row("source").unwrap();
+        assert_eq!(row.revision, 1);
+        assert_eq!(row.valid_until.as_deref(), Some("2026-12-31T23:59:59Z"));
+        assert!(parse_migration_receipt(row).unwrap().is_none());
+        assert_ne!(
+            scans[0].row_digest, current.row_digest,
+            "valid_until must participate in plan and backup row evidence"
+        );
+        assert!(validate_plan(std::slice::from_ref(&current), &plan).is_err());
+    }
+
+    #[test]
+    fn post_precheck_copy_enrichment_rolls_back_the_new_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry_with_vector(
+                "source",
+                "/wiki/copy-enrichment-race",
+                shared_metadata(),
+                vec![0.11; 1024],
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+        let item = &plan.items[0];
+        let target_id = item.target_id.as_deref().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        let error = apply_plan_with_race_hook(
+            &scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::MutateCopySourceAfterPrecheck {
+                source_id: "source".to_string(),
+            },
+        )
+        .expect_err("post-precheck source drift must reject copy and compensate target");
+
+        assert!(error.contains("source fingerprint changed"), "{error}");
+        let mut current = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut current);
+        let source = current[0].raw_row("source").unwrap();
+        assert_eq!(source.revision, 1);
+        assert_eq!(source.summary, "post-precheck generated summary");
+        assert!(parse_migration_receipt(source).unwrap().is_none());
+        assert!(source.superseded_by.is_none());
+        assert!(
+            current[1].raw_row(target_id).is_none(),
+            "a stale target inserted by the rejected attempt must be removed"
+        );
+        assert!(
+            validate_plan(&current, &plan).is_err(),
+            "the old plan must not replay against the enriched source"
+        );
     }
 
     #[test]

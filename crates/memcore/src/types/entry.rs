@@ -399,6 +399,60 @@ pub struct MemoryEntry {
     pub tier: String,
 }
 
+/// Complete caller-frozen state used by invariant-bearing CAS operations.
+///
+/// Fields are private and the only constructor snapshots a full memory entry,
+/// so callers cannot accidentally omit a generated field, lifecycle field, or
+/// vector when defining the expected state. Exposure/use counters are
+/// deliberately excluded because they can change independently of content;
+/// recall count and query diversity remain bound because Wiki plans freeze them.
+#[derive(Debug, Clone)]
+pub struct ExpectedMemoryState {
+    entry: MemoryEntry,
+    superseded_by: Option<String>,
+}
+
+impl ExpectedMemoryState {
+    pub fn from_entry(entry: &MemoryEntry, superseded_by: Option<&str>) -> Self {
+        Self {
+            entry: entry.clone(),
+            superseded_by: superseded_by.map(str::to_string),
+        }
+    }
+
+    pub(crate) fn revision(&self) -> i64 {
+        self.entry.revision
+    }
+
+    pub(crate) fn matches(&self, current: &MemoryEntry, superseded_by: Option<&str>) -> bool {
+        let expected = &self.entry;
+        expected.id == current.id
+            && expected.path == current.path
+            && expected.summary == current.summary
+            && expected.text == current.text
+            && expected.importance.to_bits() == current.importance.to_bits()
+            && expected.timestamp == current.timestamp
+            && expected.valid_from == current.valid_from
+            && expected.valid_until == current.valid_until
+            && expected.category == current.category
+            && expected.topic == current.topic
+            && expected.keywords == current.keywords
+            && expected.entities == current.entities
+            && expected.source == current.source
+            && expected.scope == current.scope
+            && expected.archived == current.archived
+            && expected.revision == current.revision
+            && expected.vector == current.vector
+            && expected.retention_policy == current.retention_policy
+            && expected.domain == current.domain
+            && expected.metadata == current.metadata
+            && expected.recall_count == current.recall_count
+            && expected.query_diversity == current.query_diversity
+            && expected.tier == current.tier
+            && self.superseded_by.as_deref() == superseded_by
+    }
+}
+
 impl MemoryEntry {
     pub fn is_wiki(&self) -> bool {
         self.category.eq_ignore_ascii_case("wiki")

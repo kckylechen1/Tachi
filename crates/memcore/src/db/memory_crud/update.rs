@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde_json::{Map, Value};
 
 use crate::error::MemoryError;
-use crate::types::{MemoryEntry, MemorySource};
+use crate::types::{ExpectedMemoryState, MemorySource};
 
 use super::now_utc_iso;
 
@@ -78,14 +78,10 @@ pub fn update_with_revision(
     Ok(updated)
 }
 
-/// Revision update whose caller-supplied full-state guard is evaluated after
+/// Revision update whose typed complete-state snapshot is evaluated after
 /// `BEGIN IMMEDIATE` and against the same writer snapshot as the update.
-///
-/// This is intentionally narrower than exposing a transaction: callers can
-/// inspect the complete hydrated memory plus its supersession state, then
-/// either allow the ordinary revision update or fail closed with zero writes.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn update_with_revision_if_current<F>(
+pub(crate) fn update_with_revision_if_expected_state(
     conn: &mut Connection,
     id: &str,
     new_text: &str,
@@ -93,12 +89,8 @@ pub(crate) fn update_with_revision_if_current<F>(
     new_source: &str,
     new_metadata: &str,
     new_vec: Option<&[u8]>,
-    expected_revision: i64,
-    current_guard: F,
-) -> Result<bool, MemoryError>
-where
-    F: Fn(&MemoryEntry, Option<&str>) -> bool,
-{
+    expected: &ExpectedMemoryState,
+) -> Result<bool, MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let ids = vec![id.to_string()];
     let mut current = super::fetch_by_ids(&tx, &ids, true)?;
@@ -114,7 +106,7 @@ where
         )
         .optional()?
         .flatten();
-    if current.revision != expected_revision || !current_guard(&current, superseded_by.as_deref()) {
+    if !expected.matches(&current, superseded_by.as_deref()) {
         tx.commit()?;
         return Ok(false);
     }
@@ -126,7 +118,7 @@ where
         new_source,
         new_metadata,
         new_vec,
-        expected_revision,
+        expected.revision(),
     )?;
     tx.commit()?;
     Ok(updated)
