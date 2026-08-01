@@ -476,6 +476,22 @@ enum MigrationBoundary {
     SourceSuperseded,
 }
 
+/// Deterministic fault-injection points for the apply safety tests.
+///
+/// These hooks model a local process replacing a protected directory entry at
+/// the exact boundary that the production code must defend.  They are kept
+/// typed and internal so production callers can only run with `None`.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum CorpusRaceHook {
+    ReplaceBackupTempWithNormalFile,
+    ReplaceManifestTempWithNormalFile,
+    SwapOpenedStorePath {
+        store: LogicalStore,
+        replacement_path: PathBuf,
+    },
+}
+
 #[derive(Debug, Clone)]
 struct MigrationInterruption {
     source_id: Option<String>,
@@ -2223,6 +2239,47 @@ fn open_apply_store(scan: &StoreScan) -> Result<MemoryStore, String> {
     MemoryStore::open_existing_read_write(&path).map_err(|error| error.to_string())
 }
 
+fn verify_opened_apply_store(
+    store: &MemoryStore,
+    logical_path: &Path,
+    role: &str,
+) -> Result<(), String> {
+    store
+        .verify_opened_physical_db_identity(logical_path)
+        .map_err(|error| format!("{role} store detached from logical path: {error}"))
+}
+
+fn verify_copy_store_identities(
+    source_store: &MemoryStore,
+    source_path: &Path,
+    target_store: &MemoryStore,
+    target_path: &Path,
+) -> Result<(), String> {
+    verify_opened_apply_store(source_store, source_path, "source")?;
+    verify_opened_apply_store(target_store, target_path, "target")
+}
+
+fn maybe_swap_opened_store_path(
+    race_hook: &mut Option<CorpusRaceHook>,
+    store: LogicalStore,
+    logical_path: &Path,
+) -> Result<(), String> {
+    let replacement_path = match race_hook.as_ref() {
+        Some(CorpusRaceHook::SwapOpenedStorePath {
+            store: hook_store,
+            replacement_path,
+        }) if *hook_store == store => replacement_path.clone(),
+        _ => return Ok(()),
+    };
+    race_hook.take();
+    atomic_exchange_paths(logical_path, &replacement_path).map_err(|error| {
+        format!(
+            "cannot inject opened-store path replacement for {}: {error}",
+            logical_path.display()
+        )
+    })
+}
+
 fn apply_reclassification(
     scan: &StoreScan,
     item: &PlanItem,
@@ -2230,6 +2287,12 @@ fn apply_reclassification(
 ) -> Result<MigrationOutcome, String> {
     check_authority(scan, None)?;
     let mut store = open_apply_store(scan)?;
+    let logical_path = scan
+        .spec
+        .addressed_path
+        .as_deref()
+        .ok_or_else(|| "reclassification store has no addressed path".to_string())?;
+    verify_opened_apply_store(&store, logical_path, "reclassification")?;
     let entry = store
         .get_with_options(&item.source_id, true)
         .map_err(|error| error.to_string())?
@@ -2254,6 +2317,7 @@ fn apply_reclassification(
     }
     let metadata =
         metadata_with_receipt(&source_row, receipt_value(item, plan_id, "reclassified"))?;
+    verify_opened_apply_store(&store, logical_path, "reclassification")?;
     let changed = store
         .update_with_revision(
             &entry.id,
@@ -2265,6 +2329,7 @@ fn apply_reclassification(
             entry.revision,
         )
         .map_err(|error| error.to_string())?;
+    verify_opened_apply_store(&store, logical_path, "reclassification")?;
     if !changed {
         return Err(format!(
             "source revision CAS failed for {}:{}",
@@ -2288,6 +2353,7 @@ fn apply_copy_and_supersede(
     item: &PlanItem,
     plan_id: &str,
     interruption: &mut Option<MigrationInterruption>,
+    race_hook: &mut Option<CorpusRaceHook>,
 ) -> Result<MigrationOutcome, String> {
     let target_path = target_scan
         .spec
@@ -2313,6 +2379,9 @@ fn apply_copy_and_supersede(
     }
     let mut source_store = open_apply_store(source_scan)?;
     let mut target_store = open_apply_store(target_scan)?;
+    maybe_swap_opened_store_path(race_hook, source_scan.spec.logical_store, source_path)?;
+    maybe_swap_opened_store_path(race_hook, target_scan.spec.logical_store, target_path)?;
+    verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     let mut source_entry = source_store
         .get_with_options(&item.source_id, true)
         .map_err(|error| error.to_string())?
@@ -2416,12 +2485,14 @@ fn apply_copy_and_supersede(
         target_entry.id = target_id.to_string();
         target_entry.metadata =
             metadata_with_receipt(&source_row, receipt_value(item, plan_id, "target_copied"))?;
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         match target_store
             .insert_if_absent(&target_entry)
             .map_err(|error| error.to_string())?
         {
             InsertMemoryResult::Inserted | InsertMemoryResult::Existing => {}
         }
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         let verified_target = target_store
             .get_with_options(target_id, true)
             .map_err(|error| error.to_string())?
@@ -2445,6 +2516,7 @@ fn apply_copy_and_supersede(
         }
         phases.push("target_copied".to_string());
     }
+    verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     maybe_interrupt(interruption, item, MigrationBoundary::TargetCopied)?;
 
     let current_supersession = source_store
@@ -2458,6 +2530,7 @@ fn apply_copy_and_supersede(
         ));
     }
     if current_supersession.as_deref() == Some(target_id) && source_superseded_receipted {
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         phases.push("source_superseded".to_string());
         return Ok(MigrationOutcome {
             source_store_ref: item.source_store_ref.clone(),
@@ -2476,6 +2549,7 @@ fn apply_copy_and_supersede(
             receipt_value(item, plan_id, "source_receipted"),
         )?;
         let expected_revision = source_entry.revision;
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         if !source_store
             .update_with_revision(
                 &source_entry.id,
@@ -2493,6 +2567,7 @@ fn apply_copy_and_supersede(
                 item.source_store_ref, item.source_id
             ));
         }
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         source_entry = source_store
             .get_with_options(&item.source_id, true)
             .map_err(|error| error.to_string())?
@@ -2504,6 +2579,7 @@ fn apply_copy_and_supersede(
             return Err("source receipt was not durably recorded".to_string());
         }
         phases.push("source_receipted".to_string());
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         maybe_interrupt(interruption, item, MigrationBoundary::SourceReceipted)?;
     }
 
@@ -2513,6 +2589,7 @@ fn apply_copy_and_supersede(
         .flatten();
     if current_supersession.is_none() {
         let expected_revision = source_entry.revision;
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         if !source_store
             .supersede_memory_if_revision(&source_entry.id, target_id, expected_revision)
             .map_err(|error| error.to_string())?
@@ -2528,6 +2605,7 @@ fn apply_copy_and_supersede(
                 ));
             }
         }
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     }
     let observed = source_store
         .supersession_target(&item.source_id)
@@ -2539,6 +2617,7 @@ fn apply_copy_and_supersede(
             item.source_store_ref, item.source_id
         ));
     }
+    verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     maybe_interrupt(interruption, item, MigrationBoundary::SourceSuperseded)?;
 
     source_entry = source_store
@@ -2556,6 +2635,7 @@ fn apply_copy_and_supersede(
             &final_source_row,
             receipt_value(item, plan_id, "source_superseded"),
         )?;
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         if !source_store
             .update_with_revision(
                 &source_entry.id,
@@ -2587,6 +2667,7 @@ fn apply_copy_and_supersede(
                 ));
             }
         }
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     }
     let final_source = source_store
         .get_with_options(&item.source_id, true)
@@ -2607,6 +2688,7 @@ fn apply_copy_and_supersede(
             item.source_store_ref, item.source_id
         ));
     }
+    verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     phases.push("source_superseded".to_string());
     Ok(MigrationOutcome {
         source_store_ref: item.source_store_ref.clone(),
@@ -2715,6 +2797,129 @@ fn open_file_no_follow(
     options.open(path)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedFileIdentity {
+    #[cfg(unix)]
+    Unix { device: u64, inode: u64 },
+    #[cfg(windows)]
+    Windows { volume: u32, index: u64 },
+    #[cfg(not(any(unix, windows)))]
+    Unsupported,
+}
+
+fn retained_file_identity(metadata: &std::fs::Metadata) -> Result<RetainedFileIdentity, String> {
+    if !metadata.file_type().is_file() {
+        return Err("protected Wiki corpus object is not a regular file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let device = metadata.dev();
+        let inode = metadata.ino();
+        if device == 0 || inode == 0 {
+            return Err("protected Wiki corpus object has no stable Unix identity".to_string());
+        }
+        return Ok(RetainedFileIdentity::Unix { device, inode });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let volume = metadata.volume_serial_number().ok_or_else(|| {
+            "protected Wiki corpus object has no Windows volume identity".to_string()
+        })?;
+        let index = metadata.file_index().ok_or_else(|| {
+            "protected Wiki corpus object has no Windows file identity".to_string()
+        })?;
+        return Ok(RetainedFileIdentity::Windows { volume, index });
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        Err("protected Wiki corpus writes require stable filesystem identity".to_string())
+    }
+}
+
+struct RetainedPathFile {
+    file: File,
+    identity: RetainedFileIdentity,
+}
+
+impl RetainedPathFile {
+    fn from_file(path: &Path, file: File) -> Result<Self, String> {
+        let identity = retained_file_identity(&file.metadata().map_err(|error| {
+            format!(
+                "cannot inspect retained protected path {}: {error}",
+                path.display()
+            )
+        })?)?;
+        Ok(Self { file, identity })
+    }
+
+    fn open(path: &Path, read: bool, write: bool, create_new: bool) -> Result<Self, String> {
+        let file = open_file_no_follow(path, read, write, create_new)
+            .map_err(|error| format!("cannot open protected path {}: {error}", path.display()))?;
+        Self::from_file(path, file)
+    }
+
+    fn verify_path(&self, path: &Path) -> Result<(), String> {
+        let metadata = regular_non_symlink_metadata(path)?;
+        let current = retained_file_identity(&metadata)?;
+        if current != self.identity {
+            return Err(format!(
+                "protected Wiki corpus path identity changed after reservation: {}",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactRacePoint {
+    Backup,
+    Manifest,
+}
+
+fn maybe_replace_reserved_artifact(
+    path: &Path,
+    point: ArtifactRacePoint,
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    let should_replace = matches!(
+        (race_hook.as_ref(), point),
+        (
+            Some(CorpusRaceHook::ReplaceBackupTempWithNormalFile),
+            ArtifactRacePoint::Backup
+        ) | (
+            Some(CorpusRaceHook::ReplaceManifestTempWithNormalFile),
+            ArtifactRacePoint::Manifest
+        )
+    );
+    if !should_replace {
+        return Ok(());
+    }
+    race_hook.take();
+    fs::remove_file(path).map_err(|error| {
+        format!(
+            "cannot inject protected artifact replacement at {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut replacement = open_file_no_follow(path, false, true, true).map_err(|error| {
+        format!(
+            "cannot inject ordinary protected artifact replacement at {}: {error}",
+            path.display()
+        )
+    })?;
+    replacement
+        .write_all(b"ordinary-file-race-replacement")
+        .map_err(|error| format!("cannot write race replacement: {error}"))?;
+    replacement
+        .sync_all()
+        .map_err(|error| format!("cannot sync race replacement: {error}"))?;
+    Ok(())
+}
+
 fn read_file_no_follow(path: &Path) -> Result<Vec<u8>, String> {
     let mut file = open_file_no_follow(path, true, false, false)
         .map_err(|error| format!("cannot read protected path {}: {error}", path.display()))?;
@@ -2794,17 +2999,83 @@ fn atomic_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-fn write_private_artifact(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Ok(_) = fs::symlink_metadata(path) {
-        regular_non_symlink_metadata(path)?;
-        let existing = read_file_no_follow(path)?;
-        if existing != bytes {
-            return Err(format!(
-                "protected artifact {} already exists with different content",
-                path.display()
-            ));
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+fn atomic_exchange_paths(left: &Path, right: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let left = CString::new(left.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in left swap path")
+    })?;
+    let right = CString::new(right.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in right swap path")
+    })?;
+    let rc = unsafe {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP)
         }
-        return Ok(());
+        #[cfg(target_os = "linux")]
+        {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                left.as_ptr(),
+                libc::AT_FDCWD,
+                right.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        }
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+fn atomic_exchange_paths(_left: &Path, _right: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic path exchange is unavailable on this platform",
+    ))
+}
+
+fn verify_retained_artifact_bytes(
+    retained: &RetainedPathFile,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), String> {
+    retained.verify_path(path)?;
+    let installed = read_file_no_follow(path)?;
+    retained.verify_path(path)?;
+    if installed != bytes {
+        return Err(format!(
+            "protected artifact {} failed post-install byte verification",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn verify_existing_artifact_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    regular_non_symlink_metadata(path)?;
+    let retained = RetainedPathFile::open(path, true, false, false)?;
+    verify_retained_artifact_bytes(&retained, path, bytes)
+}
+
+fn write_private_artifact_with_hook(
+    path: &Path,
+    bytes: &[u8],
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    if fs::symlink_metadata(path).is_ok() {
+        return verify_existing_artifact_bytes(path, bytes).map_err(|error| {
+            format!(
+                "protected artifact {} already exists with different or unstable content: {error}",
+                path.display()
+            )
+        });
     }
 
     let temporary = path.with_extension(format!(
@@ -2813,23 +3084,29 @@ fn write_private_artifact(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .and_then(|extension| extension.to_str())
             .unwrap_or("artifact")
     ));
-    match open_file_no_follow(&temporary, true, true, true) {
-        Ok(mut file) => {
-            file.write_all(bytes)
+    let retained = match open_file_no_follow(&temporary, true, true, true) {
+        Ok(file) => {
+            let mut retained = RetainedPathFile::from_file(&temporary, file)?;
+            retained
+                .file
+                .write_all(bytes)
                 .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
-            file.sync_all()
+            retained
+                .file
+                .sync_all()
                 .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
-            drop(file);
+            retained
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             regular_non_symlink_metadata(&temporary)?;
-            let existing = read_file_no_follow(&temporary)?;
-            if existing != bytes {
-                return Err(format!(
-                    "protected artifact reservation {} contains different content",
+            let retained = RetainedPathFile::open(&temporary, true, true, false)?;
+            verify_retained_artifact_bytes(&retained, &temporary, bytes).map_err(|error| {
+                format!(
+                    "protected artifact reservation {} contains different or unstable content: {error}",
                     temporary.display()
-                ));
-            }
+                )
+            })?;
+            retained
         }
         Err(error) => {
             return Err(format!(
@@ -2837,21 +3114,26 @@ fn write_private_artifact(path: &Path, bytes: &[u8]) -> Result<(), String> {
                 temporary.display()
             ));
         }
-    }
+    };
+
+    maybe_replace_reserved_artifact(&temporary, ArtifactRacePoint::Manifest, race_hook)?;
+    retained.verify_path(&temporary)?;
 
     match atomic_noreplace(&temporary, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            retained.file.sync_all().map_err(|error| {
+                format!("cannot sync installed artifact {}: {error}", path.display())
+            })?;
+            verify_retained_artifact_bytes(&retained, path, bytes)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            regular_non_symlink_metadata(path)?;
-            let existing = read_file_no_follow(path)?;
-            if existing == bytes {
-                Ok(())
-            } else {
-                Err(format!(
-                    "protected artifact {} belongs to different content",
+            retained.verify_path(&temporary)?;
+            verify_existing_artifact_bytes(path, bytes).map_err(|error| {
+                format!(
+                    "protected artifact {} belongs to different or unstable content: {error}",
                     path.display()
-                ))
-            }
+                )
+            })
         }
         Err(error) => Err(format!(
             "cannot atomically reserve protected artifact {}: {error}",
@@ -2933,11 +3215,42 @@ fn verify_backup(
     })
 }
 
+#[cfg(test)]
 fn create_or_verify_backup(
     source: &StoreScan,
     backup_dir: &Path,
     logical_store_refs: Vec<String>,
     expected: &PlanStoreFingerprint,
+) -> Result<BackupReceipt, String> {
+    let mut race_hook = None;
+    create_or_verify_backup_with_hook(
+        source,
+        backup_dir,
+        logical_store_refs,
+        expected,
+        &mut race_hook,
+    )
+}
+
+fn verify_retained_backup(
+    retained: &RetainedPathFile,
+    source: &StoreScan,
+    backup_path: &Path,
+    logical_store_refs: Vec<String>,
+    expected: &PlanStoreFingerprint,
+) -> Result<BackupReceipt, String> {
+    retained.verify_path(backup_path)?;
+    let receipt = verify_backup(source, backup_path, logical_store_refs, expected)?;
+    retained.verify_path(backup_path)?;
+    Ok(receipt)
+}
+
+fn create_or_verify_backup_with_hook(
+    source: &StoreScan,
+    backup_dir: &Path,
+    logical_store_refs: Vec<String>,
+    expected: &PlanStoreFingerprint,
+    race_hook: &mut Option<CorpusRaceHook>,
 ) -> Result<BackupReceipt, String> {
     regular_directory_metadata(backup_dir)?;
     let backup_dir = fs::canonicalize(backup_dir)
@@ -2962,25 +3275,37 @@ fn create_or_verify_backup(
     }
 
     let temporary = backup_path.with_extension("db.tmp");
-    match fs::symlink_metadata(&temporary) {
+    let retained = match fs::symlink_metadata(&temporary) {
         Ok(_) => {
             regular_non_symlink_metadata(&temporary)?;
-            verify_backup(source, &temporary, logical_store_refs.clone(), expected)?;
+            let retained = RetainedPathFile::open(&temporary, true, true, false)?;
+            verify_retained_backup(
+                &retained,
+                source,
+                &temporary,
+                logical_store_refs.clone(),
+                expected,
+            )?;
+            retained
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let reservation =
                 open_file_no_follow(&temporary, true, true, true).map_err(|error| {
                     format!("cannot reserve backup {}: {error}", temporary.display())
                 })?;
-            drop(reservation);
+            let retained = RetainedPathFile::from_file(&temporary, reservation)?;
+            maybe_replace_reserved_artifact(&temporary, ArtifactRacePoint::Backup, race_hook)?;
+            retained.verify_path(&temporary)?;
             let source_conn = open_preview_connection(Path::new(&source_physical.open_path))
                 .map_err(|error| format!("cannot open backup source: {error}"))?;
+            retained.verify_path(&temporary)?;
             let temporary_open_path = canonical_parent_open_path(&temporary)?;
             let mut destination = open_sqlite_no_follow(
                 &temporary_open_path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
             )
             .map_err(|error| format!("cannot create backup {}: {error}", temporary.display()))?;
+            retained.verify_path(&temporary)?;
             {
                 let backup = rusqlite::backup::Backup::new(&source_conn, &mut destination)
                     .map_err(|error| format!("cannot initialize SQLite backup: {error}"))?;
@@ -2989,7 +3314,18 @@ fn create_or_verify_backup(
                     .map_err(|error| format!("SQLite backup failed: {error}"))?;
             }
             drop(destination);
-            verify_backup(source, &temporary, logical_store_refs.clone(), expected)?;
+            retained
+                .file
+                .sync_all()
+                .map_err(|error| format!("cannot sync backup {}: {error}", temporary.display()))?;
+            verify_retained_backup(
+                &retained,
+                source,
+                &temporary,
+                logical_store_refs.clone(),
+                expected,
+            )?;
+            retained
         }
         Err(error) => {
             return Err(format!(
@@ -2997,11 +3333,19 @@ fn create_or_verify_backup(
                 temporary.display()
             ));
         }
-    }
+    };
 
+    retained.verify_path(&temporary)?;
     match atomic_noreplace(&temporary, &backup_path) {
-        Ok(()) => verify_backup(source, &backup_path, logical_store_refs, expected),
+        Ok(()) => verify_retained_backup(
+            &retained,
+            source,
+            &backup_path,
+            logical_store_refs,
+            expected,
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            retained.verify_path(&temporary)?;
             verify_backup(source, &backup_path, logical_store_refs, expected)
         }
         Err(error) => Err(format!(
@@ -3011,7 +3355,17 @@ fn create_or_verify_backup(
     }
 }
 
+#[cfg(test)]
 fn write_manifest_if_needed(path: &Path, manifest: &BackupManifest) -> Result<(), String> {
+    let mut race_hook = None;
+    write_manifest_if_needed_with_hook(path, manifest, &mut race_hook)
+}
+
+fn write_manifest_if_needed_with_hook(
+    path: &Path,
+    manifest: &BackupManifest,
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
     let value = serde_json::to_value(manifest).map_err(|error| error.to_string())?;
     let bytes = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
     if fs::symlink_metadata(path).is_ok() {
@@ -3027,7 +3381,7 @@ fn write_manifest_if_needed(path: &Path, manifest: &BackupManifest) -> Result<()
         }
         return Ok(());
     }
-    write_private_artifact(path, &bytes)
+    write_private_artifact_with_hook(path, &bytes, race_hook)
 }
 
 fn read_manifest_if_present(path: &Path) -> Result<Option<BackupManifest>, String> {
@@ -3088,7 +3442,7 @@ fn apply_plan(
     plan: &WikiCorpusPlan,
     backup_dir: &Path,
 ) -> Result<(BackupManifest, Vec<MigrationOutcome>), String> {
-    apply_plan_internal(scans, plan, backup_dir, None)
+    apply_plan_internal(scans, plan, backup_dir, None, None)
 }
 
 fn apply_plan_internal(
@@ -3096,6 +3450,7 @@ fn apply_plan_internal(
     plan: &WikiCorpusPlan,
     backup_dir: &Path,
     mut interruption: Option<MigrationInterruption>,
+    mut race_hook: Option<CorpusRaceHook>,
 ) -> Result<(BackupManifest, Vec<MigrationOutcome>), String> {
     regular_directory_metadata(backup_dir)?;
     let backup_dir = fs::canonicalize(backup_dir)
@@ -3137,7 +3492,7 @@ fn apply_plan_internal(
                     })
                     .collect(),
             };
-            write_manifest_if_needed(&final_path, &completed)?;
+            write_manifest_if_needed_with_hook(&final_path, &completed, &mut race_hook)?;
             completed
         } else {
             return Err("completed Wiki corpus state has no backup manifest evidence".to_string());
@@ -3157,7 +3512,7 @@ fn apply_plan_internal(
             migration_receipts: Vec::new(),
         };
         let manifest_path = backup_dir.join("wiki-corpus-v1-manifest.json");
-        write_manifest_if_needed(&manifest_path, &manifest)?;
+        write_manifest_if_needed_with_hook(&manifest_path, &manifest, &mut race_hook)?;
         return Ok((manifest, Vec::new()));
     }
 
@@ -3190,11 +3545,12 @@ fn apply_plan_internal(
                     source.spec.logical_store.reference()
                 )
             })?;
-        receipts.push(create_or_verify_backup(
+        receipts.push(create_or_verify_backup_with_hook(
             source,
-            backup_dir,
+            &backup_dir,
             logical_refs,
             expected,
+            &mut race_hook,
         )?);
     }
     receipts.sort_by(|left, right| left.source_physical_id.cmp(&right.source_physical_id));
@@ -3211,7 +3567,7 @@ fn apply_plan_internal(
             .map(|item| receipt_value(item, &plan.plan_id, "planned"))
             .collect(),
     };
-    write_manifest_if_needed(&manifest_path, &initial_manifest)?;
+    write_manifest_if_needed_with_hook(&manifest_path, &initial_manifest, &mut race_hook)?;
 
     let mut outcomes = Vec::new();
     for item in &plan.items {
@@ -3221,7 +3577,14 @@ fn apply_plan_internal(
         } else {
             let source = find_scan(scans, &item.source_store_ref)?;
             let target = find_scan(scans, &item.target_store_ref)?;
-            apply_copy_and_supersede(source, target, item, &plan.plan_id, &mut interruption)?
+            apply_copy_and_supersede(
+                source,
+                target,
+                item,
+                &plan.plan_id,
+                &mut interruption,
+                &mut race_hook,
+            )?
         };
         outcomes.push(outcome);
     }
@@ -3254,7 +3617,7 @@ fn apply_plan_internal(
     // The initial manifest remains the deterministic evidence of all verified
     // backups. The separate final receipt makes an interrupted run explicit.
     let final_path = backup_dir.join("wiki-corpus-v1-apply-receipt.json");
-    write_manifest_if_needed(&final_path, &final_manifest)?;
+    write_manifest_if_needed_with_hook(&final_path, &final_manifest, &mut race_hook)?;
     Ok((final_manifest, outcomes))
 }
 
@@ -3265,7 +3628,17 @@ fn apply_plan_with_interruption(
     backup_dir: &Path,
     interruption: MigrationInterruption,
 ) -> Result<(BackupManifest, Vec<MigrationOutcome>), String> {
-    apply_plan_internal(scans, plan, backup_dir, Some(interruption))
+    apply_plan_internal(scans, plan, backup_dir, Some(interruption), None)
+}
+
+#[cfg(test)]
+fn apply_plan_with_race_hook(
+    scans: &[StoreScan],
+    plan: &WikiCorpusPlan,
+    backup_dir: &Path,
+    race_hook: CorpusRaceHook,
+) -> Result<(BackupManifest, Vec<MigrationOutcome>), String> {
+    apply_plan_internal(scans, plan, backup_dir, None, Some(race_hook))
 }
 
 pub(crate) fn run_wiki_corpus_command(
@@ -4078,6 +4451,133 @@ mod tests {
         let error = write_manifest_if_needed(&manifest_path, &manifest).unwrap_err();
         assert!(error.contains("regular non-symlink"));
         assert!(!manifest_victim.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_file_replacement_of_reserved_backup_or_manifest_fails_before_db_mutation() {
+        for race_hook in [
+            CorpusRaceHook::ReplaceBackupTempWithNormalFile,
+            CorpusRaceHook::ReplaceManifestTempWithNormalFile,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let source_path = directory.path().join("legacy.db");
+            let target_path = directory.path().join("shared.db");
+            create_current_fixture(
+                &source_path,
+                &[fixture_entry(
+                    "source",
+                    "/wiki/artifact-race",
+                    shared_metadata(),
+                )],
+            );
+            create_current_fixture(&target_path, &[]);
+            let mut scans = vec![
+                fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+                fixture_scan(LogicalStore::SharedWiki, &target_path),
+            ];
+            classify_scans(&mut scans);
+            let plan = build_plan(&scans).unwrap();
+            let source_before = db_snapshot_fingerprint(&db_snapshot(&source_path));
+            let target_before = db_snapshot_fingerprint(&db_snapshot(&target_path));
+            let backup_dir = directory.path().join("backups");
+            fs::create_dir(&backup_dir).unwrap();
+
+            let error = apply_plan_with_race_hook(&scans, &plan, &backup_dir, race_hook)
+                .expect_err("ordinary-file replacement must fail closed");
+
+            assert!(
+                error.contains("identity changed after reservation"),
+                "{error}"
+            );
+            assert_eq!(
+                db_snapshot_fingerprint(&db_snapshot(&source_path)),
+                source_before
+            );
+            assert_eq!(
+                db_snapshot_fingerprint(&db_snapshot(&target_path)),
+                target_before
+            );
+            assert!(fixture_scan(LogicalStore::SharedWiki, &target_path)
+                .raw_row(plan.items[0].target_id.as_deref().unwrap())
+                .is_none());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn opened_source_or_target_path_swap_fails_before_first_write() {
+        for swapped_store in [LogicalStore::LegacyGlobal, LogicalStore::SharedWiki] {
+            let directory = tempfile::tempdir().unwrap();
+            let source_path = directory.path().join("legacy.db");
+            let target_path = directory.path().join("shared.db");
+            create_current_fixture(
+                &source_path,
+                &[fixture_entry(
+                    "source",
+                    "/wiki/opened-store-race",
+                    shared_metadata(),
+                )],
+            );
+            create_current_fixture(&target_path, &[]);
+            let replacement_path = directory.path().join("replacement.db");
+            create_current_fixture(
+                &replacement_path,
+                &[fixture_entry(
+                    "replacement",
+                    "/wiki/replacement",
+                    json!({"kind": "replacement"}),
+                )],
+            );
+            let mut scans = vec![
+                fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+                fixture_scan(LogicalStore::SharedWiki, &target_path),
+            ];
+            classify_scans(&mut scans);
+            let plan = build_plan(&scans).unwrap();
+            let target_id = plan.items[0].target_id.as_deref().unwrap().to_string();
+            let backup_dir = directory.path().join("backups");
+            fs::create_dir(&backup_dir).unwrap();
+
+            let error = apply_plan_with_race_hook(
+                &scans,
+                &plan,
+                &backup_dir,
+                CorpusRaceHook::SwapOpenedStorePath {
+                    store: swapped_store,
+                    replacement_path: replacement_path.clone(),
+                },
+            )
+            .expect_err("detached opened store must fail before the first write");
+
+            assert!(error.contains("detached from logical path"), "{error}");
+            let original_source_path = if swapped_store == LogicalStore::LegacyGlobal {
+                &replacement_path
+            } else {
+                &source_path
+            };
+            let original_target_path = if swapped_store == LogicalStore::SharedWiki {
+                &replacement_path
+            } else {
+                &target_path
+            };
+            let source_after = fixture_scan(LogicalStore::LegacyGlobal, original_source_path);
+            let source_row = source_after.raw_row("source").unwrap();
+            assert_eq!(source_row.revision, 1);
+            assert!(parse_migration_receipt(source_row).unwrap().is_none());
+            assert_eq!(source_row.superseded_by, None);
+            assert!(fixture_scan(LogicalStore::SharedWiki, original_target_path)
+                .raw_row(&target_id)
+                .is_none());
+            let replaced_logical_path = if swapped_store == LogicalStore::LegacyGlobal {
+                &source_path
+            } else {
+                &target_path
+            };
+            assert!(fixture_scan(swapped_store, replaced_logical_path)
+                .raw_row("replacement")
+                .is_some());
+        }
     }
 
     #[test]
