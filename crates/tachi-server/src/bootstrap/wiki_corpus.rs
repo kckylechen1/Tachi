@@ -18,12 +18,13 @@ use crate::tool_params::{
 };
 use memcore::db::migrations::{read_schema_version, EXPECTED_SCHEMA_VERSION};
 use memcore::{InsertMemoryResult, MemoryEntry, MemoryStore};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +33,7 @@ use std::time::Duration;
 pub(crate) const WIKI_CORPUS_CONFIRMATION_TOKEN: &str = "MIGRATE_WIKI_CORPUS_V1";
 const REPORT_VERSION: &str = "wiki_corpus_migration_v1";
 const RECEIPT_KEY: &str = "wiki_corpus_migration";
+const RECEIPT_VERSION: u32 = 2;
 static PREVIEW_SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A read-only SQLite handle backed by a private filesystem snapshot.
@@ -332,6 +334,7 @@ struct PlanRowFingerprint {
     revision: i64,
     content_sha256: String,
     superseded_by: Option<String>,
+    vector: VectorFingerprint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -342,7 +345,40 @@ struct PlanStoreFingerprint {
     schema: u32,
     total_memory_rows: usize,
     row_digest: String,
+    vector_table_present: bool,
     rows: Vec<PlanRowFingerprint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct VectorFingerprint {
+    table_present: bool,
+    row_present: bool,
+    dimensions: Option<usize>,
+    sha256: Option<String>,
+}
+
+impl VectorFingerprint {
+    fn absent(table_present: bool) -> Self {
+        Self {
+            table_present,
+            row_present: false,
+            dimensions: None,
+            sha256: None,
+        }
+    }
+
+    fn from_vector(table_present: bool, vector: Option<&[f32]>) -> Self {
+        let Some(vector) = vector else {
+            return Self::absent(table_present);
+        };
+        let bytes = memcore::db::serialize_f32(vector);
+        Self {
+            table_present,
+            row_present: true,
+            dimensions: Some(vector.len()),
+            sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -355,6 +391,8 @@ struct PlanItem {
     normalized_path: String,
     source_revision: i64,
     source_content_sha256: String,
+    source_superseded_by: Option<String>,
+    source_vector: VectorFingerprint,
     replay_identity: String,
     target_store_ref: String,
     target_physical_id: String,
@@ -381,6 +419,7 @@ struct BackupReceipt {
     total_memory_rows: usize,
     source_row_digest: String,
     backup_row_digest: String,
+    vector_table_present: bool,
     source_identity_verified: bool,
     backup_identity_verified: bool,
     quick_check: String,
@@ -406,6 +445,72 @@ struct MigrationOutcome {
     action: String,
     outcome: String,
     phases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MigrationPhase {
+    Planned,
+    TargetCopied,
+    SourceReceipted,
+    SourceSuperseded,
+    Reclassified,
+}
+
+impl MigrationPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::TargetCopied => "target_copied",
+            Self::SourceReceipted => "source_receipted",
+            Self::SourceSuperseded => "source_superseded",
+            Self::Reclassified => "reclassified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationBoundary {
+    TargetCopied,
+    SourceReceipted,
+    SourceSuperseded,
+}
+
+#[derive(Debug, Clone)]
+struct MigrationInterruption {
+    source_id: Option<String>,
+    boundary: MigrationBoundary,
+}
+
+fn maybe_interrupt(
+    interruption: &mut Option<MigrationInterruption>,
+    item: &PlanItem,
+    boundary: MigrationBoundary,
+) -> Result<(), String> {
+    let matches = interruption.as_ref().is_some_and(|pending| {
+        pending.boundary == boundary
+            && pending
+                .source_id
+                .as_deref()
+                .is_none_or(|source_id| source_id == item.source_id)
+    });
+    if matches {
+        interruption.take();
+        return Err(format!(
+            "simulated interruption after {:?} for {}:{}",
+            boundary, item.source_store_ref, item.source_id
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MigrationReceipt {
+    kind: String,
+    version: u32,
+    plan_id: String,
+    phase: MigrationPhase,
+    item: PlanItem,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -441,6 +546,7 @@ struct RawRow {
     retention_policy: Option<String>,
     domain: Option<String>,
     metadata: Value,
+    vector: Option<Vec<f32>>,
     recall_count: i64,
     query_diversity: i64,
     tier: String,
@@ -457,6 +563,7 @@ struct StoreScan {
     rows: Vec<RawRow>,
     report: StoreReport,
     row_digest: String,
+    vector_table_present: bool,
 }
 
 impl RawRow {
@@ -493,6 +600,10 @@ impl RawRow {
         digest_string(&serde_json::to_string(&canonicalize_value(&content)).unwrap_or_default())
     }
 
+    fn vector_fingerprint(&self, table_present: bool) -> VectorFingerprint {
+        VectorFingerprint::from_vector(table_present, self.vector.as_deref())
+    }
+
     fn migration_receipt(&self) -> Option<&Map<String, Value>> {
         self.metadata.get(RECEIPT_KEY).and_then(Value::as_object)
     }
@@ -506,6 +617,12 @@ impl StoreScan {
     fn fingerprint(&self) -> Option<PlanStoreFingerprint> {
         let physical = self.physical.as_ref()?;
         let schema = self.report.stored_schema?;
+        let mut rows = self
+            .rows
+            .iter()
+            .map(|row| plan_row_fingerprint(row, self.vector_table_present))
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.id.cmp(&right.id));
         Some(PlanStoreFingerprint {
             logical_store_ref: self.spec.logical_store.reference().to_string(),
             physical_id: physical.physical_id.clone(),
@@ -513,7 +630,8 @@ impl StoreScan {
             schema,
             total_memory_rows: self.report.counts.total_memory_rows,
             row_digest: self.row_digest.clone(),
-            rows: self.rows.iter().map(plan_row_fingerprint).collect(),
+            vector_table_present: self.vector_table_present,
+            rows,
         })
     }
 
@@ -553,7 +671,7 @@ fn read_optional_string(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Resu
     row.get(index)
 }
 
-fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize), String> {
+fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize, bool), String> {
     if !memcore::db::table_exists(conn, "memories").map_err(|e| e.to_string())? {
         return Err("memories table is missing".to_string());
     }
@@ -639,6 +757,7 @@ fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize), String> {
                 retention_policy: row.get(16)?,
                 domain: row.get(17)?,
                 metadata,
+                vector: None,
                 recall_count: row.get(19)?,
                 query_diversity: row.get(20)?,
                 tier: row.get(21)?,
@@ -653,16 +772,45 @@ fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize), String> {
     for row in mapped {
         rows.push(row.map_err(|e| e.to_string())?);
     }
+    let vector_table_present =
+        memcore::db::table_exists(conn, "memories_vec").map_err(|error| error.to_string())?;
+    if vector_table_present {
+        for row in &mut rows {
+            let blob = conn
+                .query_row(
+                    "SELECT embedding FROM memories_vec WHERE id = ?1",
+                    rusqlite::params![row.id],
+                    |result| result.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|error| format!("cannot read vector for {}: {error}", row.id))?;
+            if let Some(blob) = blob {
+                if blob.len() % 4 != 0 {
+                    return Err(format!(
+                        "vector for {} has invalid blob length {}",
+                        row.id,
+                        blob.len()
+                    ));
+                }
+                row.vector = Some(
+                    blob.chunks_exact(4)
+                        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                        .collect(),
+                );
+            }
+        }
+    }
     let count = rows.len();
-    Ok((rows, count))
+    Ok((rows, count, vector_table_present))
 }
 
-fn plan_row_fingerprint(row: &RawRow) -> PlanRowFingerprint {
+fn plan_row_fingerprint(row: &RawRow, vector_table_present: bool) -> PlanRowFingerprint {
     PlanRowFingerprint {
         id: row.id.clone(),
         revision: row.revision,
         content_sha256: row.content_sha256(),
         superseded_by: row.superseded_by.clone(),
+        vector: row.vector_fingerprint(vector_table_present),
     }
 }
 
@@ -679,10 +827,13 @@ fn row_digest_values(mut values: Vec<Value>) -> String {
     )
 }
 
-fn row_digest(rows: &[RawRow]) -> String {
+fn row_digest(rows: &[RawRow], vector_table_present: bool) -> String {
     row_digest_values(
         rows.iter()
-            .map(|row| serde_json::to_value(plan_row_fingerprint(row)).unwrap_or(Value::Null))
+            .map(|row| {
+                serde_json::to_value(plan_row_fingerprint(row, vector_table_present))
+                    .unwrap_or(Value::Null)
+            })
             .collect(),
     )
 }
@@ -750,7 +901,7 @@ fn memory_entry_from_raw(row: &RawRow) -> MemoryEntry {
         last_access: None,
         last_use_at: None,
         revision: row.revision,
-        vector: None,
+        vector: row.vector.clone(),
         retention_policy: row.retention_policy.clone(),
         domain: row.domain.clone(),
         metadata: row.metadata.clone(),
@@ -1198,6 +1349,7 @@ fn inventory_store(spec: StoreSpec) -> StoreScan {
         rows: Vec::new(),
         report,
         row_digest: String::new(),
+        vector_table_present: false,
     };
     let Some(addressed_path) = scan.spec.addressed_path.clone() else {
         scan.report.read_failure = Some(ReadFailure {
@@ -1261,7 +1413,7 @@ fn inventory_store(spec: StoreSpec) -> StoreScan {
         }
     };
     scan.report.stored_schema = Some(stored_schema);
-    let (rows, _) = match load_rows(&conn) {
+    let (rows, _, vector_table_present) = match load_rows(&conn) {
         Ok(result) => result,
         Err(error) => {
             let kind = classify_open_failure(&error);
@@ -1276,7 +1428,8 @@ fn inventory_store(spec: StoreSpec) -> StoreScan {
         }
     };
     scan.rows = rows;
-    scan.row_digest = row_digest(&scan.rows);
+    scan.vector_table_present = vector_table_present;
+    scan.row_digest = row_digest(&scan.rows, vector_table_present);
     scan.physical = Some(physical);
     scan
 }
@@ -1325,70 +1478,108 @@ fn find_scan<'a>(scans: &'a [StoreScan], reference: &str) -> Result<&'a StoreSca
 }
 
 fn plan_item_material(item: &PlanItem) -> String {
-    format!(
-        "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-        item.action,
-        item.source_store_ref,
-        item.source_physical_id,
-        item.source_id,
-        item.source_path,
-        item.normalized_path,
-        item.source_revision,
-        item.source_content_sha256,
-        item.replay_identity,
-        item.target_store_ref,
-        item.target_id.as_deref().unwrap_or_default(),
-    )
+    serde_json::to_string(&canonicalize_value(
+        &serde_json::to_value(item).unwrap_or(Value::Null),
+    ))
+    .unwrap_or_default()
 }
 
-fn build_plan(scans: &[StoreScan]) -> Result<WikiCorpusPlan, String> {
-    let target = find_scan(scans, LogicalStore::SharedWiki.reference())?;
-    let target_physical_id = target
+fn replay_identity_for(
+    source_store_ref: &str,
+    source_physical_id: &str,
+    row: &RawRow,
+    vector_table_present: bool,
+) -> String {
+    let material = json!({
+        "version": "wiki-corpus-replay-v2",
+        "source_store_ref": source_store_ref,
+        "source_physical_id": source_physical_id,
+        "source_id": row.id,
+        "source_path": row.path,
+        "normalized_path": row.normalized_path(),
+        "source_revision": row.revision,
+        "source_content_sha256": row.content_sha256(),
+        "source_superseded_by": row.superseded_by,
+        "source_vector": row.vector_fingerprint(vector_table_present),
+    });
+    digest_string(&serde_json::to_string(&canonicalize_value(&material)).unwrap_or_default())
+}
+
+fn build_plan_item(source: &StoreScan, row: &RawRow, target: &StoreScan) -> PlanItem {
+    let source_store_ref = source.spec.logical_store.reference().to_string();
+    let source_physical_id = source
         .physical
         .as_ref()
         .map(|physical| physical.physical_id.clone())
         .unwrap_or_default();
+    let replay_identity = replay_identity_for(
+        &source_store_ref,
+        &source_physical_id,
+        row,
+        source.vector_table_present,
+    );
+    let is_shared_source = source.spec.logical_store == LogicalStore::SharedWiki;
+    PlanItem {
+        action: if is_shared_source {
+            "reclassify_in_place".to_string()
+        } else {
+            "copy_to_shared_and_supersede".to_string()
+        },
+        source_store_ref,
+        source_physical_id,
+        source_id: row.id.clone(),
+        source_path: row.path.clone(),
+        normalized_path: row.normalized_path(),
+        source_revision: row.revision,
+        source_content_sha256: row.content_sha256(),
+        source_superseded_by: row.superseded_by.clone(),
+        source_vector: row.vector_fingerprint(source.vector_table_present),
+        replay_identity: replay_identity.clone(),
+        target_store_ref: LogicalStore::SharedWiki.reference().to_string(),
+        target_physical_id: target
+            .physical
+            .as_ref()
+            .map(|physical| physical.physical_id.clone())
+            .unwrap_or_default(),
+        target_id: (!is_shared_source).then(|| format!("wiki-corpus:{replay_identity}")),
+    }
+}
+
+fn plan_id_for(
+    version: &str,
+    store_fingerprints: &[PlanStoreFingerprint],
+    items: &[PlanItem],
+) -> String {
+    let mut fingerprints = store_fingerprints.to_vec();
+    fingerprints.sort_by(|left, right| left.logical_store_ref.cmp(&right.logical_store_ref));
+    let mut items = items.to_vec();
+    items.sort_by(|left, right| {
+        left.source_store_ref
+            .cmp(&right.source_store_ref)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+            .then_with(|| left.replay_identity.cmp(&right.replay_identity))
+    });
+    let material = json!({
+        "version": version,
+        "store_fingerprints": fingerprints,
+        "items": items,
+    });
+    digest_string(&serde_json::to_string(&canonicalize_value(&material)).unwrap_or_default())
+}
+
+fn build_plan(scans: &[StoreScan]) -> Result<WikiCorpusPlan, String> {
+    let target = find_scan(scans, LogicalStore::SharedWiki.reference())?;
     let mut items = Vec::new();
     for scan in scans {
-        let Some(source_physical) = scan.physical.as_ref() else {
+        if scan.physical.is_none() {
             continue;
-        };
+        }
         for row in scan
             .rows
             .iter()
             .filter(|row| row.classification == Some(CorpusClassification::SharedCandidate))
         {
-            let source_ref = scan.spec.logical_store.reference().to_string();
-            let material = format!(
-                "wiki-corpus-replay-v1\0{}\0{}\0{}\0{}\0{}\0{}",
-                source_ref,
-                source_physical.physical_id,
-                row.id,
-                row.revision,
-                row.normalized_path(),
-                row.content_sha256(),
-            );
-            let replay_identity = digest_string(&material);
-            let target_id = (scan.spec.logical_store != LogicalStore::SharedWiki)
-                .then(|| format!("wiki-corpus:{replay_identity}"));
-            items.push(PlanItem {
-                action: if scan.spec.logical_store == LogicalStore::SharedWiki {
-                    "reclassify_in_place".to_string()
-                } else {
-                    "copy_to_shared_and_supersede".to_string()
-                },
-                source_store_ref: source_ref,
-                source_physical_id: source_physical.physical_id.clone(),
-                source_id: row.id.clone(),
-                source_path: row.path.clone(),
-                normalized_path: row.normalized_path(),
-                source_revision: row.revision,
-                source_content_sha256: row.content_sha256(),
-                replay_identity,
-                target_store_ref: LogicalStore::SharedWiki.reference().to_string(),
-                target_physical_id: target_physical_id.clone(),
-                target_id,
-            });
+            items.push(build_plan_item(scan, row, target));
         }
     }
     items.sort_by(|left, right| {
@@ -1397,17 +1588,11 @@ fn build_plan(scans: &[StoreScan]) -> Result<WikiCorpusPlan, String> {
             .then_with(|| left.source_id.cmp(&right.source_id))
             .then_with(|| left.replay_identity.cmp(&right.replay_identity))
     });
-    let plan_id = digest_string(
-        &items
-            .iter()
-            .map(plan_item_material)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
     let store_fingerprints = scans
         .iter()
         .filter_map(StoreScan::fingerprint)
         .collect::<Vec<_>>();
+    let plan_id = plan_id_for(REPORT_VERSION, &store_fingerprints, &items);
     Ok(WikiCorpusPlan {
         version: REPORT_VERSION.to_string(),
         plan_id,
@@ -1417,42 +1602,48 @@ fn build_plan(scans: &[StoreScan]) -> Result<WikiCorpusPlan, String> {
 }
 
 fn receipt_value(item: &PlanItem, plan_id: &str, phase: &str) -> Value {
-    json!({
-        "kind": RECEIPT_KEY,
-        "version": 1,
-        "plan_id": plan_id,
-        "phase": phase,
-        "classification": CorpusClassification::SharedCandidate.as_str(),
-        "replay_identity": item.replay_identity,
-        "source_store_ref": item.source_store_ref,
-        "source_physical_id": item.source_physical_id,
-        "source_id": item.source_id,
-        "source_revision": item.source_revision,
-        "source_content_sha256": item.source_content_sha256,
-        "target_store_ref": item.target_store_ref,
-        "target_id": item.target_id,
+    let phase = match phase {
+        "planned" => MigrationPhase::Planned,
+        "target_copied" => MigrationPhase::TargetCopied,
+        "source_receipted" => MigrationPhase::SourceReceipted,
+        "source_superseded" => MigrationPhase::SourceSuperseded,
+        "reclassified" => MigrationPhase::Reclassified,
+        other => panic!("unsupported Wiki corpus migration phase {other}"),
+    };
+    serde_json::to_value(MigrationReceipt {
+        kind: RECEIPT_KEY.to_string(),
+        version: RECEIPT_VERSION,
+        plan_id: plan_id.to_string(),
+        phase,
+        item: item.clone(),
     })
+    .expect("Wiki corpus migration receipt is serializable")
+}
+
+fn parse_migration_receipt(row: &RawRow) -> Result<Option<MigrationReceipt>, String> {
+    let Some(receipt) = row.metadata.get(RECEIPT_KEY) else {
+        return Ok(None);
+    };
+    let receipt: MigrationReceipt = serde_json::from_value(receipt.clone()).map_err(|error| {
+        format!(
+            "invalid Wiki corpus migration receipt on {}: {error}",
+            row.id
+        )
+    })?;
+    if receipt.kind != RECEIPT_KEY || receipt.version != RECEIPT_VERSION {
+        return Err(format!(
+            "unsupported Wiki corpus migration receipt on {}",
+            row.id
+        ));
+    }
+    Ok(Some(receipt))
 }
 
 fn receipt_matches(row: &RawRow, item: &PlanItem, plan_id: &str, phases: &[&str]) -> bool {
-    let Some(receipt) = row.migration_receipt() else {
+    let Ok(Some(receipt)) = parse_migration_receipt(row) else {
         return false;
     };
-    let string_field = |key: &str| receipt.get(key).and_then(Value::as_str);
-    let number_field = |key: &str| receipt.get(key).and_then(Value::as_i64);
-    string_field("kind") == Some(RECEIPT_KEY)
-        && number_field("version") == Some(1)
-        && string_field("plan_id") == Some(plan_id)
-        && string_field("classification") == Some(CorpusClassification::SharedCandidate.as_str())
-        && string_field("replay_identity") == Some(item.replay_identity.as_str())
-        && string_field("source_store_ref") == Some(item.source_store_ref.as_str())
-        && string_field("source_physical_id") == Some(item.source_physical_id.as_str())
-        && string_field("source_id") == Some(item.source_id.as_str())
-        && number_field("source_revision") == Some(item.source_revision)
-        && string_field("source_content_sha256") == Some(item.source_content_sha256.as_str())
-        && string_field("target_store_ref") == Some(item.target_store_ref.as_str())
-        && receipt.get("target_id").and_then(Value::as_str) == item.target_id.as_deref()
-        && string_field("phase").is_some_and(|phase| phases.contains(&phase))
+    receipt.plan_id == plan_id && receipt.item == *item && phases.contains(&receipt.phase.as_str())
 }
 
 fn metadata_with_receipt(row: &RawRow, receipt: Value) -> Result<Value, String> {
@@ -1477,7 +1668,14 @@ fn validate_target_occupant(
     let Some(occupant) = target.raw_row(target_id) else {
         return Ok(());
     };
+    let target_vector = occupant.vector_fingerprint(target.vector_table_present);
+    let vector_matches = if source.vector_fingerprint(true).row_present {
+        target_vector == source.vector_fingerprint(target.vector_table_present)
+    } else {
+        !target_vector.row_present
+    };
     if occupant.content_sha256() != source.content_sha256()
+        || !vector_matches
         || !receipt_matches(occupant, item, plan_id, &["target_copied"])
     {
         return Err(format!(
@@ -1488,13 +1686,389 @@ fn validate_target_occupant(
     Ok(())
 }
 
+fn plan_row_fingerprint_from_item(item: &PlanItem) -> PlanRowFingerprint {
+    PlanRowFingerprint {
+        id: item.source_id.clone(),
+        revision: item.source_revision,
+        content_sha256: item.source_content_sha256.clone(),
+        superseded_by: item.source_superseded_by.clone(),
+        vector: item.source_vector.clone(),
+    }
+}
+
+fn expected_item_for_live_source(
+    source: &StoreScan,
+    row: &RawRow,
+    target: &StoreScan,
+    source_revision: i64,
+    source_superseded_by: Option<String>,
+) -> PlanItem {
+    let mut expected = build_plan_item(source, row, target);
+    expected.source_revision = source_revision;
+    expected.source_superseded_by = source_superseded_by.clone();
+    let mut identity_row = row.clone();
+    identity_row.revision = source_revision;
+    identity_row.superseded_by = source_superseded_by;
+    expected.replay_identity = replay_identity_for(
+        &expected.source_store_ref,
+        &expected.source_physical_id,
+        &identity_row,
+        source.vector_table_present,
+    );
+    if expected.action == "copy_to_shared_and_supersede" {
+        expected.target_id = Some(format!("wiki-corpus:{}", expected.replay_identity));
+    }
+    expected
+}
+
+fn validate_live_source_item(
+    item: &PlanItem,
+    plan_id: &str,
+    source: &StoreScan,
+    row: &RawRow,
+    target: &StoreScan,
+    receipt: Option<&MigrationReceipt>,
+) -> Result<(), String> {
+    let source_physical = source.physical.as_ref().ok_or_else(|| {
+        format!(
+            "source store {} has no physical identity",
+            item.source_store_ref
+        )
+    })?;
+    let target_physical = target
+        .physical
+        .as_ref()
+        .ok_or_else(|| "logical shared target has no physical identity".to_string())?;
+    let expected = expected_item_for_live_source(
+        source,
+        row,
+        target,
+        item.source_revision,
+        item.source_superseded_by.clone(),
+    );
+    if item != &expected {
+        return Err(format!(
+            "Wiki corpus plan item for {}:{} does not match the canonical item rederived from the current source",
+            item.source_store_ref, item.source_id
+        ));
+    }
+    if item.source_physical_id != source_physical.physical_id
+        || item.target_physical_id != target_physical.physical_id
+    {
+        return Err(format!(
+            "Wiki corpus plan item for {}:{} has stale physical identity",
+            item.source_store_ref, item.source_id
+        ));
+    }
+    if row.vector_fingerprint(source.vector_table_present) != item.source_vector {
+        return Err(format!(
+            "Wiki corpus source vector state changed for {}:{}",
+            item.source_store_ref, item.source_id
+        ));
+    }
+    if item.source_vector.row_present && !target.vector_table_present {
+        return Err(format!(
+            "target {} cannot preserve the source vector for {}:{}",
+            item.target_store_ref, item.source_store_ref, item.source_id
+        ));
+    }
+
+    match receipt {
+        None => {
+            if row.revision != item.source_revision
+                || row.superseded_by != item.source_superseded_by
+            {
+                return Err(format!(
+                    "source revision/lifecycle changed after preview for {}:{}",
+                    item.source_store_ref, item.source_id
+                ));
+            }
+        }
+        Some(receipt) => {
+            if receipt.plan_id != plan_id || receipt.item != *item {
+                return Err(format!(
+                    "Wiki corpus migration receipt does not match supplied plan for {}:{}",
+                    item.source_store_ref, item.source_id
+                ));
+            }
+            match receipt.phase {
+                MigrationPhase::Reclassified => {
+                    if row.revision != item.source_revision + 1
+                        || row.superseded_by != item.source_superseded_by
+                    {
+                        return Err(format!(
+                            "Wiki corpus migration state is inconsistent for {}:{}",
+                            item.source_store_ref, item.source_id
+                        ));
+                    }
+                }
+                MigrationPhase::SourceReceipted => {
+                    let receipt_only = row.revision == item.source_revision + 1
+                        && row.superseded_by == item.source_superseded_by;
+                    let supersession_observed = row.revision == item.source_revision + 2
+                        && row.superseded_by == item.target_id;
+                    if !receipt_only && !supersession_observed {
+                        return Err(format!(
+                            "Wiki corpus migration state is inconsistent for {}:{}",
+                            item.source_store_ref, item.source_id
+                        ));
+                    }
+                }
+                MigrationPhase::SourceSuperseded => {
+                    if item.action != "copy_to_shared_and_supersede"
+                        || row.revision != item.source_revision + 3
+                        || row.superseded_by != item.target_id
+                    {
+                        return Err(format!(
+                            "Wiki corpus source_superseded state is not proven for {}:{}",
+                            item.source_store_ref, item.source_id
+                        ));
+                    }
+                }
+                MigrationPhase::Planned | MigrationPhase::TargetCopied => {
+                    return Err(format!(
+                        "invalid source migration phase for {}:{}",
+                        item.source_store_ref, item.source_id
+                    ));
+                }
+            }
+        }
+    }
+
+    if item.action == "copy_to_shared_and_supersede"
+        && row.superseded_by.is_some()
+        && row.superseded_by != item.target_id
+    {
+        return Err(format!(
+            "source row {}:{} is already superseded by another target",
+            item.source_store_ref, item.source_id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_target_receipt(
+    item: &PlanItem,
+    plan_id: &str,
+    target: &StoreScan,
+    row: &RawRow,
+    source: &StoreScan,
+    source_row: &RawRow,
+) -> Result<(), String> {
+    let receipt = parse_migration_receipt(row)?
+        .ok_or_else(|| format!("target {} has no migration receipt", row.id))?;
+    if receipt.plan_id != plan_id
+        || receipt.phase != MigrationPhase::TargetCopied
+        || receipt.item != *item
+        || item.target_store_ref != target.spec.logical_store.reference()
+        || item.target_id.as_deref() != Some(row.id.as_str())
+    {
+        return Err(format!(
+            "target migration receipt does not match supplied plan for {}",
+            row.id
+        ));
+    }
+    validate_live_source_item(
+        item,
+        plan_id,
+        source,
+        source_row,
+        target,
+        parse_migration_receipt(source_row)?.as_ref(),
+    )?;
+    if row.content_sha256() != item.source_content_sha256 {
+        return Err(format!(
+            "target {} content does not match its source",
+            row.id
+        ));
+    }
+    let target_vector = row.vector_fingerprint(target.vector_table_present);
+    if item.source_vector.row_present {
+        if target_vector != item.source_vector {
+            return Err(format!("target {} vector was not preserved", row.id));
+        }
+    } else if target_vector.row_present {
+        return Err(format!("target {} has an unexpected vector", row.id));
+    }
+    if row.revision != item.source_revision || row.superseded_by.is_some() {
+        return Err(format!(
+            "target {} lifecycle state is not canonical",
+            row.id
+        ));
+    }
+    Ok(())
+}
+
+fn rederive_items(scans: &[StoreScan], plan_id: &str) -> Result<Vec<PlanItem>, String> {
+    let target = find_scan(scans, LogicalStore::SharedWiki.reference())?;
+    let mut items = BTreeMap::<String, PlanItem>::new();
+    for scan in scans {
+        for row in &scan.rows {
+            let receipt = parse_migration_receipt(row)?;
+            let is_target_receipt = receipt.as_ref().is_some_and(|receipt| {
+                receipt.phase == MigrationPhase::TargetCopied
+                    && receipt.item.target_store_ref == scan.spec.logical_store.reference()
+                    && receipt.item.target_id.as_deref() == Some(row.id.as_str())
+                    && receipt.item.source_store_ref != scan.spec.logical_store.reference()
+            });
+            let is_source_receipt = receipt.as_ref().is_some_and(|receipt| {
+                receipt.item.source_store_ref == scan.spec.logical_store.reference()
+                    && receipt.item.source_id == row.id
+            });
+            if receipt.is_none() && row.classification.is_none() {
+                continue;
+            }
+            if receipt.is_some()
+                && !is_target_receipt
+                && !is_source_receipt
+                && row.classification != Some(CorpusClassification::SharedCandidate)
+            {
+                return Err(format!(
+                    "migration receipt is attached to a non-candidate row {}",
+                    row.id
+                ));
+            }
+            if receipt.is_none()
+                && row.classification != Some(CorpusClassification::SharedCandidate)
+            {
+                continue;
+            }
+            let item = if let Some(receipt) = receipt.as_ref() {
+                if receipt.plan_id != plan_id {
+                    return Err(format!(
+                        "migration receipt on {} belongs to a different plan",
+                        row.id
+                    ));
+                }
+                let item = &receipt.item;
+                if item.source_store_ref == scan.spec.logical_store.reference()
+                    && item.source_id == row.id
+                {
+                    let source = scan;
+                    validate_live_source_item(item, plan_id, source, row, target, Some(receipt))?;
+                    item.clone()
+                } else if receipt.phase == MigrationPhase::TargetCopied
+                    && item.target_store_ref == scan.spec.logical_store.reference()
+                    && item.target_id.as_deref() == Some(row.id.as_str())
+                {
+                    let source = find_scan(scans, &item.source_store_ref)?;
+                    let source_row = source.raw_row(&item.source_id).ok_or_else(|| {
+                        format!(
+                            "target receipt {} references missing source {}:{}",
+                            row.id, item.source_store_ref, item.source_id
+                        )
+                    })?;
+                    validate_target_receipt(item, plan_id, scan, row, source, source_row)?;
+                    item.clone()
+                } else {
+                    return Err(format!(
+                        "migration receipt on {} is not bound to its physical row",
+                        row.id
+                    ));
+                }
+            } else {
+                let item = build_plan_item(scan, row, target);
+                validate_live_source_item(&item, plan_id, scan, row, target, None)?;
+                item
+            };
+            let key = plan_item_material(&item);
+            if let Some(existing) = items.insert(key, item.clone()) {
+                if existing != item {
+                    return Err(
+                        "current Wiki corpus state rederives conflicting plan items".to_string()
+                    );
+                }
+            }
+        }
+    }
+    Ok(items.into_values().collect())
+}
+
+fn rederive_original_store_fingerprint(
+    scans: &[StoreScan],
+    scan: &StoreScan,
+    plan_id: &str,
+) -> Result<PlanStoreFingerprint, String> {
+    let target = find_scan(scans, LogicalStore::SharedWiki.reference())?;
+    let mut rows = Vec::new();
+    for row in &scan.rows {
+        if let Some(receipt) = parse_migration_receipt(row)? {
+            if receipt.plan_id != plan_id {
+                return Err(format!(
+                    "migration receipt on {} belongs to another plan",
+                    row.id
+                ));
+            }
+            let item = &receipt.item;
+            if receipt.phase == MigrationPhase::TargetCopied
+                && item.target_store_ref == scan.spec.logical_store.reference()
+                && item.target_id.as_deref() == Some(row.id.as_str())
+                && item.source_store_ref != scan.spec.logical_store.reference()
+            {
+                let source = find_scan(scans, &item.source_store_ref)?;
+                let source_row = source.raw_row(&item.source_id).ok_or_else(|| {
+                    format!("target receipt {} references missing source", row.id)
+                })?;
+                validate_target_receipt(item, plan_id, scan, row, source, source_row)?;
+                continue;
+            }
+            if item.source_store_ref == scan.spec.logical_store.reference()
+                && item.source_id == row.id
+            {
+                validate_live_source_item(item, plan_id, scan, row, target, Some(&receipt))?;
+                rows.push(plan_row_fingerprint_from_item(item));
+                continue;
+            }
+            return Err(format!(
+                "migration receipt on {} is not in this store's source set",
+                row.id
+            ));
+        }
+        rows.push(plan_row_fingerprint(row, scan.vector_table_present));
+    }
+    rows.sort_by(|left, right| left.id.cmp(&right.id));
+    let row_digest = row_digest_values(
+        rows.iter()
+            .map(|row| serde_json::to_value(row).unwrap_or(Value::Null))
+            .collect(),
+    );
+    let physical = scan.physical.as_ref().ok_or_else(|| {
+        format!(
+            "store {} has no physical identity",
+            scan.spec.logical_store.reference()
+        )
+    })?;
+    let schema = scan.report.stored_schema.ok_or_else(|| {
+        format!(
+            "store {} has no schema",
+            scan.spec.logical_store.reference()
+        )
+    })?;
+    Ok(PlanStoreFingerprint {
+        logical_store_ref: scan.spec.logical_store.reference().to_string(),
+        physical_id: physical.physical_id.clone(),
+        canonical_path: physical.canonical_path.clone(),
+        schema,
+        total_memory_rows: rows.len(),
+        row_digest,
+        vector_table_present: scan.vector_table_present,
+        rows,
+    })
+}
+
 fn validate_store_fingerprints(scans: &[StoreScan], plan: &WikiCorpusPlan) -> Result<(), String> {
     let mut expected = plan.store_fingerprints.clone();
     expected.sort_by(|left, right| left.logical_store_ref.cmp(&right.logical_store_ref));
-    let mut current = scans
-        .iter()
-        .filter_map(StoreScan::fingerprint)
-        .collect::<Vec<_>>();
+    let mut current = Vec::new();
+    for scan in scans {
+        if scan.physical.is_some() {
+            current.push(rederive_original_store_fingerprint(
+                scans,
+                scan,
+                &plan.plan_id,
+            )?);
+        }
+    }
     current.sort_by(|left, right| left.logical_store_ref.cmp(&right.logical_store_ref));
     if expected.len() != current.len() {
         return Err("Wiki corpus store fingerprint set changed since preview".to_string());
@@ -1505,6 +2079,7 @@ fn validate_store_fingerprints(scans: &[StoreScan], plan: &WikiCorpusPlan) -> Re
             || expected_store.physical_id != current_store.physical_id
             || expected_store.canonical_path != current_store.canonical_path
             || expected_store.schema != current_store.schema
+            || expected_store.vector_table_present != current_store.vector_table_present
         {
             return Err(format!(
                 "Wiki corpus store identity or schema changed since preview for {}",
@@ -1512,57 +2087,6 @@ fn validate_store_fingerprints(scans: &[StoreScan], plan: &WikiCorpusPlan) -> Re
             ));
         }
 
-        let scan = find_scan(scans, &expected_store.logical_store_ref)?;
-        let expected_rows = expected_store
-            .rows
-            .iter()
-            .map(|row| (row.id.as_str(), row))
-            .collect::<BTreeMap<_, _>>();
-        let mut normalized_rows = BTreeMap::<String, PlanRowFingerprint>::new();
-        for row in &scan.rows {
-            if let Some(expected_row) = expected_rows.get(row.id.as_str()) {
-                let source_item = plan.items.iter().find(|item| {
-                    item.source_store_ref == expected_store.logical_store_ref
-                        && item.source_id == row.id
-                        && receipt_matches(
-                            row,
-                            item,
-                            &plan.plan_id,
-                            &["reclassified", "source_superseded"],
-                        )
-                });
-                if let Some(item) = source_item {
-                    if row.content_sha256() != item.source_content_sha256 {
-                        return Err(format!(
-                            "completed Wiki corpus source content changed for {}:{}",
-                            expected_store.logical_store_ref, row.id
-                        ));
-                    }
-                    normalized_rows.insert(row.id.clone(), (*expected_row).clone());
-                } else {
-                    normalized_rows.insert(row.id.clone(), plan_row_fingerprint(row));
-                }
-            } else {
-                let target_item = plan.items.iter().find(|item| {
-                    item.target_store_ref == expected_store.logical_store_ref
-                        && item.target_id.as_deref() == Some(row.id.as_str())
-                        && receipt_matches(row, item, &plan.plan_id, &["target_copied"])
-                });
-                if target_item.is_none() {
-                    normalized_rows.insert(row.id.clone(), plan_row_fingerprint(row));
-                }
-            }
-        }
-        if expected_rows.len() != normalized_rows.len()
-            || expected_rows
-                .iter()
-                .any(|(id, expected_row)| normalized_rows.get(*id) != Some(expected_row))
-        {
-            return Err(format!(
-                "Wiki corpus row fingerprint changed since preview for {}",
-                expected_store.logical_store_ref
-            ));
-        }
         if expected_store.total_memory_rows != expected_store.rows.len()
             || expected_store.row_digest
                 != row_digest_values(
@@ -1578,6 +2102,12 @@ fn validate_store_fingerprints(scans: &[StoreScan], plan: &WikiCorpusPlan) -> Re
                 expected_store.logical_store_ref
             ));
         }
+        if current_store != expected_store {
+            return Err(format!(
+                "Wiki corpus row or vector fingerprint changed since preview for {}",
+                expected_store.logical_store_ref
+            ));
+        }
     }
     Ok(())
 }
@@ -1589,124 +2119,28 @@ fn validate_plan(scans: &[StoreScan], plan: &WikiCorpusPlan) -> Result<(), Strin
             plan.version
         ));
     }
-    let expected_plan_id = digest_string(
-        &plan
-            .items
-            .iter()
-            .map(plan_item_material)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
+    let expected_plan_id = plan_id_for(&plan.version, &plan.store_fingerprints, &plan.items);
     if expected_plan_id != plan.plan_id {
-        return Err("Wiki corpus plan id does not match its deterministic items".to_string());
+        return Err("Wiki corpus plan id does not match its canonical contents".to_string());
     }
     validate_store_fingerprints(scans, plan)?;
-    let shared = find_scan(scans, LogicalStore::SharedWiki.reference())?;
-    for item in &plan.items {
-        let source = find_scan(scans, &item.source_store_ref)?;
-        let source_physical = source.physical.as_ref().ok_or_else(|| {
-            format!(
-                "source store {} has no physical identity",
-                item.source_store_ref
-            )
-        })?;
-        if source_physical.physical_id != item.source_physical_id {
-            return Err(format!(
-                "source physical identity changed for {}:{}",
-                item.source_store_ref, item.source_id
-            ));
-        }
-        let row = source.raw_row(&item.source_id).ok_or_else(|| {
-            format!(
-                "source row {}:{} is missing",
-                item.source_store_ref, item.source_id
-            )
-        })?;
-        let completed = match item.action.as_str() {
-            "reclassify_in_place" => receipt_matches(row, item, &plan.plan_id, &["reclassified"]),
-            "copy_to_shared_and_supersede" => {
-                receipt_matches(row, item, &plan.plan_id, &["source_superseded"])
-                    && item
-                        .target_id
-                        .as_deref()
-                        .is_some_and(|target_id| row.is_superseded_by(target_id))
-            }
-            other => return Err(format!("unknown Wiki corpus plan action '{other}'")),
-        };
-        if completed && row.content_sha256() != item.source_content_sha256 {
-            return Err(format!(
-                "completed Wiki corpus source content changed for {}:{}",
-                item.source_store_ref, item.source_id
-            ));
-        }
-        if !completed
-            && item.action == "copy_to_shared_and_supersede"
-            && row.superseded_by.is_some()
-            && row.superseded_by.as_deref() != item.target_id.as_deref()
-        {
-            return Err(format!(
-                "source row {}:{} is already superseded by another target",
-                item.source_store_ref, item.source_id
-            ));
-        }
-        let target_proven = if item.action == "copy_to_shared_and_supersede" {
-            if let Some(target_id) = item.target_id.as_deref() {
-                let proven = shared.raw_row(target_id).is_some();
-                if proven {
-                    validate_target_occupant(item, &plan.plan_id, row, shared)?;
-                }
-                proven
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if !completed
-            && (row.revision != item.source_revision
-                || row.content_sha256() != item.source_content_sha256
-                || (row.classification != Some(CorpusClassification::SharedCandidate)
-                    && !target_proven))
-        {
-            return Err(format!(
-                "source revision/content changed after preview for {}:{}; refusing apply",
-                item.source_store_ref, item.source_id
-            ));
-        }
-        if item.target_store_ref != LogicalStore::SharedWiki.reference() {
-            return Err(format!(
-                "unsupported target store '{}'",
-                item.target_store_ref
-            ));
-        }
-        if item.target_physical_id
-            != shared
-                .physical
-                .as_ref()
-                .map(|physical| physical.physical_id.clone())
-                .unwrap_or_default()
-        {
-            return Err("logical shared Wiki physical identity changed since preview".to_string());
-        }
-        if item.action == "copy_to_shared_and_supersede" {
-            if item.target_physical_id == item.source_physical_id {
-                return Err(
-                    "source and logical shared target resolve to the same physical database"
-                        .to_string(),
-                );
-            }
-        }
-        if item.action == "copy_to_shared_and_supersede" && !target_proven {
-            validate_target_occupant(item, &plan.plan_id, row, shared)?;
-        }
+    let mut expected_items = rederive_items(scans, &plan.plan_id)?;
+    let mut supplied_items = plan.items.clone();
+    expected_items.sort_by_key(plan_item_material);
+    supplied_items.sort_by_key(plan_item_material);
+    if expected_items != supplied_items {
+        return Err(
+            "supplied Wiki corpus plan items do not match canonical rederivation from current stores"
+                .to_string(),
+        );
     }
     Ok(())
 }
 
 fn load_plan(path: &Path) -> Result<WikiCorpusPlan, String> {
-    let raw = fs::read_to_string(path)
-        .map_err(|error| format!("cannot read Wiki corpus plan {}: {error}", path.display()))?;
-    let value: Value = serde_json::from_str(&raw)
+    regular_non_symlink_metadata(path)?;
+    let raw = read_file_no_follow(path)?;
+    let value: Value = serde_json::from_slice(&raw)
         .map_err(|error| format!("Wiki corpus plan {} is not JSON: {error}", path.display()))?;
     if let Some(plan) = value.get("plan") {
         serde_json::from_value(plan.clone())
@@ -1853,6 +2287,7 @@ fn apply_copy_and_supersede(
     target_scan: &StoreScan,
     item: &PlanItem,
     plan_id: &str,
+    interruption: &mut Option<MigrationInterruption>,
 ) -> Result<MigrationOutcome, String> {
     let target_path = target_scan
         .spec
@@ -1870,6 +2305,12 @@ fn apply_copy_and_supersede(
         .target_id
         .as_deref()
         .ok_or_else(|| "copy plan item has no deterministic target id".to_string())?;
+    if item.source_vector.row_present && !target_scan.vector_table_present {
+        return Err(format!(
+            "target {} cannot preserve the source vector for {}:{}",
+            item.target_store_ref, item.source_store_ref, item.source_id
+        ));
+    }
     let mut source_store = open_apply_store(source_scan)?;
     let mut target_store = open_apply_store(target_scan)?;
     let mut source_entry = source_store
@@ -1877,10 +2318,63 @@ fn apply_copy_and_supersede(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("source row {} disappeared during apply", item.source_id))?;
     let source_row = raw_from_entry(&source_entry);
-    let source_receipted = receipt_matches(&source_row, item, plan_id, &["source_superseded"]);
-    if !source_receipted
-        && (source_entry.revision != item.source_revision
-            || source_row.content_sha256() != item.source_content_sha256)
+    let source_receipt = parse_migration_receipt(&source_row)?;
+    if let Some(receipt) = source_receipt.as_ref() {
+        if receipt.plan_id != plan_id || receipt.item != *item {
+            return Err(format!(
+                "source migration receipt does not match supplied plan for {}:{}",
+                item.source_store_ref, item.source_id
+            ));
+        }
+        if !matches!(
+            receipt.phase,
+            MigrationPhase::SourceReceipted | MigrationPhase::SourceSuperseded
+        ) {
+            return Err(format!(
+                "invalid source migration phase for {}:{}",
+                item.source_store_ref, item.source_id
+            ));
+        }
+    }
+    let source_receipted = source_receipt.is_some();
+    let source_superseded_receipted = source_receipt
+        .as_ref()
+        .is_some_and(|receipt| receipt.phase == MigrationPhase::SourceSuperseded);
+    let initial_supersession = source_store
+        .supersession_target(&source_entry.id)
+        .map_err(|error| error.to_string())?
+        .flatten();
+    if initial_supersession
+        .as_deref()
+        .is_some_and(|id| id != target_id)
+    {
+        return Err(format!(
+            "source row {}:{} is already superseded by another target (observed {}, expected {})",
+            item.source_store_ref,
+            item.source_id,
+            initial_supersession.as_deref().unwrap_or("<none>"),
+            target_id
+        ));
+    }
+    if source_superseded_receipted && initial_supersession.is_none() {
+        return Err(format!(
+            "source {}:{} claims source_superseded without durable supersession",
+            item.source_store_ref, item.source_id
+        ));
+    }
+    let expected_source_revision = item.source_revision
+        + if source_superseded_receipted {
+            3
+        } else if initial_supersession.is_some() {
+            2
+        } else if source_receipted {
+            1
+        } else {
+            0
+        };
+    if source_entry.revision != expected_source_revision
+        || source_row.content_sha256() != item.source_content_sha256
+        || source_row.vector_fingerprint(source_scan.vector_table_present) != item.source_vector
     {
         return Err(format!(
             "source revision/content changed during apply for {}:{}",
@@ -1895,14 +2389,29 @@ fn apply_copy_and_supersede(
     {
         let target_row = raw_from_entry(&target_entry);
         if target_row.content_sha256() != item.source_content_sha256
+            || target_entry.revision != item.source_revision
             || !receipt_matches(&target_row, item, plan_id, &["target_copied"])
+            || if item.source_vector.row_present {
+                target_row.vector_fingerprint(target_scan.vector_table_present)
+                    != item.source_vector
+            } else {
+                target_row
+                    .vector_fingerprint(target_scan.vector_table_present)
+                    .row_present
+            }
         {
             return Err(format!(
-                "deterministic target occupant collision: {target_id} content or receipt mismatch"
+                "deterministic target occupant collision: {target_id} content, vector, lifecycle, or receipt mismatch"
             ));
         }
         phases.push("target_copied".to_string());
     } else {
+        if source_receipted {
+            return Err(format!(
+                "source receipt exists without deterministic target {} for {}:{}",
+                target_id, item.source_store_ref, item.source_id
+            ));
+        }
         let mut target_entry = source_entry.clone();
         target_entry.id = target_id.to_string();
         target_entry.metadata =
@@ -1919,20 +2428,36 @@ fn apply_copy_and_supersede(
             .ok_or_else(|| "target insert did not produce a readable row".to_string())?;
         let verified_target_row = raw_from_entry(&verified_target);
         if verified_target_row.content_sha256() != item.source_content_sha256
+            || verified_target.revision != item.source_revision
             || !receipt_matches(&verified_target_row, item, plan_id, &["target_copied"])
+            || if item.source_vector.row_present {
+                verified_target_row.vector_fingerprint(target_scan.vector_table_present)
+                    != item.source_vector
+            } else {
+                verified_target_row
+                    .vector_fingerprint(target_scan.vector_table_present)
+                    .row_present
+            }
         {
-            return Err("target insert produced a mismatched deterministic occupant".to_string());
+            return Err(
+                "target insert produced a mismatched deterministic occupant or vector".to_string(),
+            );
         }
         phases.push("target_copied".to_string());
     }
+    maybe_interrupt(interruption, item, MigrationBoundary::TargetCopied)?;
 
-    if source_store
+    let current_supersession = source_store
         .supersession_target(&source_entry.id)
         .map_err(|error| error.to_string())?
-        .flatten()
-        .as_deref()
-        == Some(target_id)
-    {
+        .flatten();
+    if current_supersession.as_deref() == Some(target_id) && !source_receipted {
+        return Err(format!(
+            "source {}:{} is superseded without a durable source receipt",
+            item.source_store_ref, item.source_id
+        ));
+    }
+    if current_supersession.as_deref() == Some(target_id) && source_superseded_receipted {
         phases.push("source_superseded".to_string());
         return Ok(MigrationOutcome {
             source_store_ref: item.source_store_ref.clone(),
@@ -1948,7 +2473,7 @@ fn apply_copy_and_supersede(
     if !source_receipted {
         let metadata = metadata_with_receipt(
             &source_row,
-            receipt_value(item, plan_id, "source_superseded"),
+            receipt_value(item, plan_id, "source_receipted"),
         )?;
         let expected_revision = source_entry.revision;
         if !source_store
@@ -1972,30 +2497,117 @@ fn apply_copy_and_supersede(
             .get_with_options(&item.source_id, true)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "source disappeared after source receipt".to_string())?;
+        let source_receipt_row = raw_from_entry(&source_entry);
+        if !receipt_matches(&source_receipt_row, item, plan_id, &["source_receipted"])
+            || source_entry.revision != item.source_revision + 1
+        {
+            return Err("source receipt was not durably recorded".to_string());
+        }
         phases.push("source_receipted".to_string());
+        maybe_interrupt(interruption, item, MigrationBoundary::SourceReceipted)?;
     }
-    let expected_revision = source_entry.revision;
-    if !source_store
-        .supersede_memory_if_revision(&source_entry.id, target_id, expected_revision)
+
+    let current_supersession = source_store
+        .supersession_target(&source_entry.id)
         .map_err(|error| error.to_string())?
-    {
-        if source_store
+        .flatten();
+    if current_supersession.is_none() {
+        let expected_revision = source_entry.revision;
+        if !source_store
+            .supersede_memory_if_revision(&source_entry.id, target_id, expected_revision)
+            .map_err(|error| error.to_string())?
+        {
+            let observed = source_store
+                .supersession_target(&item.source_id)
+                .map_err(|error| error.to_string())?
+                .flatten();
+            if observed.as_deref() != Some(target_id) {
+                return Err(format!(
+                    "source supersession revision CAS failed for {}:{}",
+                    item.source_store_ref, item.source_id
+                ));
+            }
+        }
+    }
+    let observed = source_store
+        .supersession_target(&item.source_id)
+        .map_err(|error| error.to_string())?
+        .flatten();
+    if observed.as_deref() != Some(target_id) {
+        return Err(format!(
+            "source supersession was not durably recorded for {}:{}",
+            item.source_store_ref, item.source_id
+        ));
+    }
+    maybe_interrupt(interruption, item, MigrationBoundary::SourceSuperseded)?;
+
+    source_entry = source_store
+        .get_with_options(&item.source_id, true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "source disappeared after supersession".to_string())?;
+    let final_source_row = raw_from_entry(&source_entry);
+    let final_receipt = parse_migration_receipt(&final_source_row)?;
+    if !final_receipt.as_ref().is_some_and(|receipt| {
+        receipt.plan_id == plan_id
+            && receipt.item == *item
+            && receipt.phase == MigrationPhase::SourceSuperseded
+    }) {
+        let metadata = metadata_with_receipt(
+            &final_source_row,
+            receipt_value(item, plan_id, "source_superseded"),
+        )?;
+        if !source_store
+            .update_with_revision(
+                &source_entry.id,
+                &source_entry.text,
+                &source_entry.summary,
+                &source_entry.source,
+                &metadata,
+                source_entry.vector.as_deref(),
+                source_entry.revision,
+            )
+            .map_err(|error| error.to_string())?
+        {
+            let reread = source_store
+                .get_with_options(&item.source_id, true)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "source disappeared while finalizing receipt".to_string())?;
+            let reread_row = raw_from_entry(&reread);
+            if !receipt_matches(&reread_row, item, plan_id, &["source_superseded"])
+                || source_store
+                    .supersession_target(&item.source_id)
+                    .map_err(|error| error.to_string())?
+                    .flatten()
+                    .as_deref()
+                    != Some(target_id)
+            {
+                return Err(format!(
+                    "source superseded receipt revision CAS failed for {}:{}",
+                    item.source_store_ref, item.source_id
+                ));
+            }
+        }
+    }
+    let final_source = source_store
+        .get_with_options(&item.source_id, true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "source disappeared after final receipt".to_string())?;
+    let final_row = raw_from_entry(&final_source);
+    if !receipt_matches(&final_row, item, plan_id, &["source_superseded"])
+        || final_source.revision != item.source_revision + 3
+        || source_store
             .supersession_target(&item.source_id)
             .map_err(|error| error.to_string())?
             .flatten()
             .as_deref()
-            == Some(target_id)
-        {
-            phases.push("source_superseded".to_string());
-        } else {
-            return Err(format!(
-                "source supersession revision CAS failed for {}:{}",
-                item.source_store_ref, item.source_id
-            ));
-        }
-    } else {
-        phases.push("source_superseded".to_string());
+            != Some(target_id)
+    {
+        return Err(format!(
+            "source superseded state was not durably reconciled for {}:{}",
+            item.source_store_ref, item.source_id
+        ));
     }
+    phases.push("source_superseded".to_string());
     Ok(MigrationOutcome {
         source_store_ref: item.source_store_ref.clone(),
         source_id: item.source_id.clone(),
@@ -2028,6 +2640,7 @@ fn raw_from_entry(entry: &MemoryEntry) -> RawRow {
         retention_policy: entry.retention_policy.clone(),
         domain: entry.domain.clone(),
         metadata: entry.metadata.clone(),
+        vector: entry.vector.clone(),
         recall_count: entry.recall_count,
         query_diversity: entry.query_diversity,
         tier: entry.tier.clone(),
@@ -2054,15 +2667,210 @@ fn quick_check(conn: &Connection) -> Result<String, String> {
     }
 }
 
+fn regular_non_symlink_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "cannot inspect protected Wiki corpus path {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(format!(
+            "protected Wiki corpus path {} must be a regular non-symlink file",
+            path.display()
+        ));
+    }
+    Ok(metadata)
+}
+
+fn regular_directory_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "cannot inspect backup directory {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(format!(
+            "backup directory {} must be a regular non-symlink directory",
+            path.display()
+        ));
+    }
+    Ok(metadata)
+}
+
+fn open_file_no_follow(
+    path: &Path,
+    read: bool,
+    write: bool,
+    create_new: bool,
+) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(read).write(write).create_new(create_new);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+fn read_file_no_follow(path: &Path) -> Result<Vec<u8>, String> {
+    let mut file = open_file_no_follow(path, true, false, false)
+        .map_err(|error| format!("cannot read protected path {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read protected path {}: {error}", path.display()))?;
+    Ok(bytes)
+}
+
+fn open_sqlite_no_follow(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)
+}
+
+fn canonical_parent_open_path(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("protected SQLite path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("protected SQLite path has no file name: {}", path.display()))?;
+    Ok(fs::canonicalize(parent)
+        .map_err(|error| format!("cannot canonicalize protected SQLite parent: {error}"))?
+        .join(file_name))
+}
+
+/// Rename a completed private artifact into its deterministic name without
+/// replacing an entry that another process may have reserved. macOS and Linux
+/// provide the required kernel primitive; the hard-link fallback is also
+/// exclusive and is only used on platforms without either primitive.
+fn atomic_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source path")
+        })?;
+        let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target path")
+        })?;
+        let rc = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source path")
+        })?;
+        let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target path")
+        })?;
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        fs::hard_link(from, to)?;
+        fs::remove_file(from)
+    }
+}
+
+fn write_private_artifact(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Ok(_) = fs::symlink_metadata(path) {
+        regular_non_symlink_metadata(path)?;
+        let existing = read_file_no_follow(path)?;
+        if existing != bytes {
+            return Err(format!(
+                "protected artifact {} already exists with different content",
+                path.display()
+            ));
+        }
+        return Ok(());
+    }
+
+    let temporary = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("artifact")
+    ));
+    match open_file_no_follow(&temporary, true, true, true) {
+        Ok(mut file) => {
+            file.write_all(bytes)
+                .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
+            file.sync_all()
+                .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
+            drop(file);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            regular_non_symlink_metadata(&temporary)?;
+            let existing = read_file_no_follow(&temporary)?;
+            if existing != bytes {
+                return Err(format!(
+                    "protected artifact reservation {} contains different content",
+                    temporary.display()
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(format!(
+                "cannot reserve protected artifact {}: {error}",
+                temporary.display()
+            ));
+        }
+    }
+
+    match atomic_noreplace(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            regular_non_symlink_metadata(path)?;
+            let existing = read_file_no_follow(path)?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err(format!(
+                    "protected artifact {} belongs to different content",
+                    path.display()
+                ))
+            }
+        }
+        Err(error) => Err(format!(
+            "cannot atomically reserve protected artifact {}: {error}",
+            path.display()
+        )),
+    }
+}
+
 fn verify_backup(
     source: &StoreScan,
     backup_path: &Path,
     logical_store_refs: Vec<String>,
+    expected: &PlanStoreFingerprint,
 ) -> Result<BackupReceipt, String> {
     let source_physical = source
         .physical
         .as_ref()
         .ok_or_else(|| "backup source has no physical identity".to_string())?;
+    regular_non_symlink_metadata(backup_path)?;
     let backup_inventory = classify_paths([backup_path.to_path_buf()]);
     if let Some(unresolved) = backup_inventory.unresolved_paths.first() {
         return Err(format!(
@@ -2076,25 +2884,14 @@ fn verify_backup(
         .into_iter()
         .next()
         .ok_or_else(|| "backup has no physical identity".to_string())?;
-    let backup_metadata = fs::symlink_metadata(backup_path).map_err(|error| {
-        format!(
-            "cannot inspect backup path {}: {error}",
-            backup_path.display()
-        )
-    })?;
-    if !backup_metadata.file_type().is_file() || backup_metadata.file_type().is_symlink() {
-        return Err(format!(
-            "backup path {} is not a regular non-symlink file",
-            backup_path.display()
-        ));
-    }
     if backup_physical.physical_id == source_physical.physical_id {
         return Err(format!(
             "backup path {} resolves to the source physical database",
             backup_path.display()
         ));
     }
-    let conn = open_read_only_connection(Path::new(&backup_physical.open_path))
+    let backup_open_path = canonical_parent_open_path(Path::new(&backup_physical.open_path))?;
+    let conn = open_sqlite_no_follow(&backup_open_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| error.to_string())?;
     let schema = read_schema_version(&conn).map_err(|error| error.to_string())?;
     if schema != EXPECTED_SCHEMA_VERSION {
@@ -2105,14 +2902,13 @@ fn verify_backup(
             EXPECTED_SCHEMA_VERSION
         ));
     }
-    // Apply-only validation: preview never reaches this normal current-schema
-    // MemoryStore open.
-    MemoryStore::open_read_only(&backup_path.display().to_string())
-        .map_err(|error| format!("backup current-schema validation failed: {error}"))?;
     let quick_check = quick_check(&conn)?;
-    let (rows, _) = load_rows(&conn)?;
-    let backup_digest = row_digest(&rows);
-    if rows.len() != source.report.counts.total_memory_rows || backup_digest != source.row_digest {
+    let (rows, _, vector_table_present) = load_rows(&conn)?;
+    let backup_digest = row_digest(&rows, vector_table_present);
+    if rows.len() != expected.total_memory_rows
+        || backup_digest != expected.row_digest
+        || vector_table_present != expected.vector_table_present
+    {
         return Err(format!(
             "backup {} row evidence mismatch",
             backup_path.display()
@@ -2127,8 +2923,9 @@ fn verify_backup(
         backup_physical_id: backup_physical.physical_id,
         schema,
         total_memory_rows: rows.len(),
-        source_row_digest: source.row_digest.clone(),
+        source_row_digest: expected.row_digest.clone(),
         backup_row_digest: backup_digest,
+        vector_table_present,
         source_identity_verified: true,
         backup_identity_verified: true,
         quick_check,
@@ -2140,32 +2937,87 @@ fn create_or_verify_backup(
     source: &StoreScan,
     backup_dir: &Path,
     logical_store_refs: Vec<String>,
+    expected: &PlanStoreFingerprint,
 ) -> Result<BackupReceipt, String> {
+    regular_directory_metadata(backup_dir)?;
+    let backup_dir = fs::canonicalize(backup_dir)
+        .map_err(|error| format!("cannot canonicalize backup directory: {error}"))?;
     let source_physical = source
         .physical
         .as_ref()
         .ok_or_else(|| "backup source has no physical identity".to_string())?;
     let backup_path = backup_dir.join(backup_file_name(&source_physical.physical_id));
-    if !backup_path.exists() {
-        let source_conn = open_preview_connection(Path::new(&source_physical.open_path))
-            .map_err(|error| format!("cannot open backup source: {error}"))?;
-        let mut destination = Connection::open(&backup_path)
-            .map_err(|error| format!("cannot create backup {}: {error}", backup_path.display()))?;
-        let backup = rusqlite::backup::Backup::new(&source_conn, &mut destination)
-            .map_err(|error| format!("cannot initialize SQLite backup: {error}"))?;
-        backup
-            .run_to_completion(128, Duration::from_millis(100), None)
-            .map_err(|error| format!("SQLite backup failed: {error}"))?;
+    if fs::symlink_metadata(&backup_path).is_ok() {
+        return verify_backup(source, &backup_path, logical_store_refs, expected);
     }
-    verify_backup(source, &backup_path, logical_store_refs)
+
+    if source.row_digest != expected.row_digest
+        || source.report.counts.total_memory_rows != expected.total_memory_rows
+        || source.vector_table_present != expected.vector_table_present
+    {
+        return Err(format!(
+            "cannot create original backup for {} after source state changed",
+            source.spec.logical_store.reference()
+        ));
+    }
+
+    let temporary = backup_path.with_extension("db.tmp");
+    match fs::symlink_metadata(&temporary) {
+        Ok(_) => {
+            regular_non_symlink_metadata(&temporary)?;
+            verify_backup(source, &temporary, logical_store_refs.clone(), expected)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let reservation =
+                open_file_no_follow(&temporary, true, true, true).map_err(|error| {
+                    format!("cannot reserve backup {}: {error}", temporary.display())
+                })?;
+            drop(reservation);
+            let source_conn = open_preview_connection(Path::new(&source_physical.open_path))
+                .map_err(|error| format!("cannot open backup source: {error}"))?;
+            let temporary_open_path = canonical_parent_open_path(&temporary)?;
+            let mut destination = open_sqlite_no_follow(
+                &temporary_open_path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            )
+            .map_err(|error| format!("cannot create backup {}: {error}", temporary.display()))?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source_conn, &mut destination)
+                    .map_err(|error| format!("cannot initialize SQLite backup: {error}"))?;
+                backup
+                    .run_to_completion(128, Duration::from_millis(100), None)
+                    .map_err(|error| format!("SQLite backup failed: {error}"))?;
+            }
+            drop(destination);
+            verify_backup(source, &temporary, logical_store_refs.clone(), expected)?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect backup reservation {}: {error}",
+                temporary.display()
+            ));
+        }
+    }
+
+    match atomic_noreplace(&temporary, &backup_path) {
+        Ok(()) => verify_backup(source, &backup_path, logical_store_refs, expected),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            verify_backup(source, &backup_path, logical_store_refs, expected)
+        }
+        Err(error) => Err(format!(
+            "cannot atomically reserve backup {}: {error}",
+            backup_path.display()
+        )),
+    }
 }
 
 fn write_manifest_if_needed(path: &Path, manifest: &BackupManifest) -> Result<(), String> {
     let value = serde_json::to_value(manifest).map_err(|error| error.to_string())?;
-    if path.exists() {
-        let existing = fs::read_to_string(path)
-            .map_err(|error| format!("cannot read existing backup manifest: {error}"))?;
-        let existing_value: Value = serde_json::from_str(&existing)
+    let bytes = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
+    if fs::symlink_metadata(path).is_ok() {
+        regular_non_symlink_metadata(path)?;
+        let existing = read_file_no_follow(path)?;
+        let existing_value: Value = serde_json::from_slice(&existing)
             .map_err(|error| format!("existing backup manifest is invalid: {error}"))?;
         if existing_value != value {
             return Err(format!(
@@ -2175,16 +3027,24 @@ fn write_manifest_if_needed(path: &Path, manifest: &BackupManifest) -> Result<()
         }
         return Ok(());
     }
-    let temporary = path.with_extension("json.tmp");
-    if temporary.exists() {
-        return Err(format!(
-            "backup manifest temporary path already exists: {}",
-            temporary.display()
-        ));
+    write_private_artifact(path, &bytes)
+}
+
+fn read_manifest_if_present(path: &Path) -> Result<Option<BackupManifest>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            regular_non_symlink_metadata(path)?;
+            let bytes = read_file_no_follow(path)?;
+            serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+                format!("invalid Wiki corpus manifest {}: {error}", path.display())
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "cannot inspect Wiki corpus manifest {}: {error}",
+            path.display()
+        )),
     }
-    let bytes = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
-    fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    fs::rename(&temporary, path).map_err(|error| error.to_string())
 }
 
 fn plan_item_completed(scans: &[StoreScan], plan: &WikiCorpusPlan, item: &PlanItem) -> bool {
@@ -2228,6 +3088,18 @@ fn apply_plan(
     plan: &WikiCorpusPlan,
     backup_dir: &Path,
 ) -> Result<(BackupManifest, Vec<MigrationOutcome>), String> {
+    apply_plan_internal(scans, plan, backup_dir, None)
+}
+
+fn apply_plan_internal(
+    scans: &[StoreScan],
+    plan: &WikiCorpusPlan,
+    backup_dir: &Path,
+    mut interruption: Option<MigrationInterruption>,
+) -> Result<(BackupManifest, Vec<MigrationOutcome>), String> {
+    regular_directory_metadata(backup_dir)?;
+    let backup_dir = fs::canonicalize(backup_dir)
+        .map_err(|error| format!("cannot canonicalize backup directory: {error}"))?;
     validate_apply_inventory(scans)?;
     validate_plan(scans, plan)?;
     if !plan.items.is_empty()
@@ -2238,13 +3110,9 @@ fn apply_plan(
     {
         let final_path = backup_dir.join("wiki-corpus-v1-apply-receipt.json");
         let initial_path = backup_dir.join("wiki-corpus-v1-manifest.json");
-        let manifest = if final_path.exists() {
-            let raw = fs::read_to_string(&final_path).map_err(|error| error.to_string())?;
-            serde_json::from_str::<BackupManifest>(&raw).map_err(|error| error.to_string())?
-        } else {
-            let raw = fs::read_to_string(&initial_path).map_err(|error| error.to_string())?;
-            let initial =
-                serde_json::from_str::<BackupManifest>(&raw).map_err(|error| error.to_string())?;
+        let manifest = if let Some(final_manifest) = read_manifest_if_present(&final_path)? {
+            final_manifest
+        } else if let Some(initial) = read_manifest_if_present(&initial_path)? {
             if initial.plan_id != plan.plan_id {
                 return Err(
                     "existing backup manifest belongs to a different completed plan".to_string(),
@@ -2271,6 +3139,8 @@ fn apply_plan(
             };
             write_manifest_if_needed(&final_path, &completed)?;
             completed
+        } else {
+            return Err("completed Wiki corpus state has no backup manifest evidence".to_string());
         };
         if manifest.plan_id != plan.plan_id || manifest.status != "apply_completed" {
             return Err("existing apply receipt does not match the completed plan".to_string());
@@ -2308,7 +3178,24 @@ fn apply_plan(
         logical_refs.sort();
         logical_refs.dedup();
         check_authority(source, None)?;
-        receipts.push(create_or_verify_backup(source, backup_dir, logical_refs)?);
+        let expected = plan
+            .store_fingerprints
+            .iter()
+            .find(|fingerprint| {
+                fingerprint.logical_store_ref == source.spec.logical_store.reference()
+            })
+            .ok_or_else(|| {
+                format!(
+                    "plan has no original backup evidence for {}",
+                    source.spec.logical_store.reference()
+                )
+            })?;
+        receipts.push(create_or_verify_backup(
+            source,
+            backup_dir,
+            logical_refs,
+            expected,
+        )?);
     }
     receipts.sort_by(|left, right| left.source_physical_id.cmp(&right.source_physical_id));
     let manifest_path = backup_dir.join("wiki-corpus-v1-manifest.json");
@@ -2334,7 +3221,7 @@ fn apply_plan(
         } else {
             let source = find_scan(scans, &item.source_store_ref)?;
             let target = find_scan(scans, &item.target_store_ref)?;
-            apply_copy_and_supersede(source, target, item, &plan.plan_id)?
+            apply_copy_and_supersede(source, target, item, &plan.plan_id, &mut interruption)?
         };
         outcomes.push(outcome);
     }
@@ -2371,6 +3258,16 @@ fn apply_plan(
     Ok((final_manifest, outcomes))
 }
 
+#[cfg(test)]
+fn apply_plan_with_interruption(
+    scans: &[StoreScan],
+    plan: &WikiCorpusPlan,
+    backup_dir: &Path,
+    interruption: MigrationInterruption,
+) -> Result<(BackupManifest, Vec<MigrationOutcome>), String> {
+    apply_plan_internal(scans, plan, backup_dir, Some(interruption))
+}
+
 pub(crate) fn run_wiki_corpus_command(
     apply: bool,
     confirm: Option<String>,
@@ -2394,7 +3291,7 @@ pub(crate) fn run_wiki_corpus_command(
         let backup_dir = backup_dir
             .as_deref()
             .ok_or_else(|| "apply requires explicit --backup-dir".to_string())?;
-        if !backup_dir.is_dir() {
+        if regular_directory_metadata(backup_dir).is_err() {
             return Err(format!(
                 "apply requires an existing backup directory: {}",
                 backup_dir.display()
@@ -2494,6 +3391,17 @@ mod tests {
         for entry in entries {
             store.upsert(entry).unwrap();
         }
+    }
+
+    fn fixture_entry_with_vector(
+        id: &str,
+        path: &str,
+        metadata: Value,
+        vector: Vec<f32>,
+    ) -> MemoryEntry {
+        let mut entry = fixture_entry(id, path, metadata);
+        entry.vector = Some(vector);
+        entry
     }
 
     fn db_snapshot(path: &Path) -> BTreeMap<String, Vec<u8>> {
@@ -2603,14 +3511,12 @@ mod tests {
     }
 
     fn item_for(source: &RawRow) -> PlanItem {
-        let replay_identity = digest_string(&format!(
-            "wiki-corpus-replay-v1\0{}\0unix:source\0{}\0{}\0{}\0{}",
+        let replay_identity = replay_identity_for(
             LogicalStore::LegacyGlobal.reference(),
-            source.id,
-            source.revision,
-            source.normalized_path(),
-            source.content_sha256(),
-        ));
+            "unix:source",
+            source,
+            false,
+        );
         PlanItem {
             action: "copy_to_shared_and_supersede".to_string(),
             source_store_ref: LogicalStore::LegacyGlobal.reference().to_string(),
@@ -2620,6 +3526,8 @@ mod tests {
             normalized_path: source.normalized_path(),
             source_revision: source.revision,
             source_content_sha256: source.content_sha256(),
+            source_superseded_by: source.superseded_by.clone(),
+            source_vector: source.vector_fingerprint(false),
             replay_identity: replay_identity.clone(),
             target_store_ref: LogicalStore::SharedWiki.reference().to_string(),
             target_physical_id: "unix:target".to_string(),
@@ -2653,6 +3561,7 @@ mod tests {
             retention_policy: Some("permanent".to_string()),
             domain: Some("wiki".to_string()),
             metadata,
+            vector: None,
             recall_count: 0,
             query_diversity: 0,
             tier: "raw".to_string(),
@@ -2854,6 +3763,7 @@ mod tests {
                 rows: Vec::new(),
             },
             row_digest: String::new(),
+            vector_table_present: false,
         }
     }
 
@@ -2874,6 +3784,8 @@ mod tests {
             normalized_path: "/wiki/candidate".to_string(),
             source_revision: 1,
             source_content_sha256: candidate.content_sha256(),
+            source_superseded_by: None,
+            source_vector: candidate.vector_fingerprint(false),
             replay_identity: "replay".to_string(),
             target_store_ref: LogicalStore::SharedWiki.reference().to_string(),
             target_physical_id: "unix:3:4".to_string(),
@@ -3009,6 +3921,18 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         let item = &plan.items[0];
         let target_id = item.target_id.as_deref().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        for scan in &initial_scans {
+            let expected = scan.fingerprint().unwrap();
+            create_or_verify_backup(
+                scan,
+                &backup_dir,
+                vec![scan.spec.logical_store.reference().to_string()],
+                &expected,
+            )
+            .unwrap();
+        }
 
         let mut target_store =
             MemoryStore::open_existing_read_write(&target_path.display().to_string()).unwrap();
@@ -3022,8 +3946,6 @@ mod tests {
         target_store.insert_if_absent(&target_entry).unwrap();
         drop(target_store);
 
-        let backup_dir = directory.path().join("backups");
-        fs::create_dir(&backup_dir).unwrap();
         let mut resumed_scans = vec![
             fixture_scan(LogicalStore::LegacyGlobal, &source_path),
             fixture_scan(LogicalStore::SharedWiki, &target_path),
@@ -3065,5 +3987,463 @@ mod tests {
         assert_eq!(db_snapshot(&source_path), source_bytes);
         assert_eq!(db_snapshot(&target_path), target_bytes);
         assert_eq!(directory_snapshot(&backup_dir), backup_bytes);
+    }
+
+    #[test]
+    fn supplied_plan_rejects_unkeyed_tamper_after_canonical_rederivation() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry("source", "/wiki/tamper", shared_metadata())],
+        );
+        create_current_fixture(&target_path, &[]);
+
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+        validate_plan(&scans, &plan).unwrap();
+
+        let mut tampered = plan.clone();
+        tampered.items[0].target_id = Some("wiki-corpus:forged-target".to_string());
+        // This is the legacy unkeyed digest an attacker could recompute after
+        // editing the serialized item. The current validator must still
+        // rederive the item and the complete plan from live stores.
+        tampered.plan_id = digest_string(
+            &tampered
+                .items
+                .iter()
+                .map(plan_item_material)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+
+        let error = validate_plan(&scans, &tampered).unwrap_err();
+        assert!(error.contains("canonical") || error.contains("rederivation"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_and_manifest_reservations_reject_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry("source", "/wiki/backup", shared_metadata())],
+        );
+        let source = fixture_scan(LogicalStore::LegacyGlobal, &source_path);
+        let expected = source.fingerprint().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let backup_path = backup_dir.join(backup_file_name(
+            &source.physical.as_ref().unwrap().physical_id,
+        ));
+        let backup_victim = directory.path().join("backup-victim");
+        symlink(&backup_victim, &backup_path).unwrap();
+
+        let error = create_or_verify_backup(
+            &source,
+            &backup_dir,
+            vec![LogicalStore::LegacyGlobal.reference().to_string()],
+            &expected,
+        )
+        .unwrap_err();
+        assert!(error.contains("regular non-symlink"));
+        assert!(!backup_victim.exists());
+
+        let manifest_path = backup_dir.join("wiki-corpus-v1-manifest.json");
+        let manifest_victim = directory.path().join("manifest-victim");
+        let manifest = BackupManifest {
+            version: REPORT_VERSION.to_string(),
+            status: "backups_verified".to_string(),
+            plan_id: "plan".to_string(),
+            backup_directory: backup_dir.display().to_string(),
+            receipts: Vec::new(),
+            migration_receipts: Vec::new(),
+        };
+        symlink(&manifest_victim, &manifest_path).unwrap();
+        let error = write_manifest_if_needed(&manifest_path, &manifest).unwrap_err();
+        assert!(error.contains("regular non-symlink"));
+        assert!(!manifest_victim.exists());
+
+        let temporary = manifest_path.with_extension("json.tmp");
+        symlink(&manifest_victim, &temporary).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        let error = write_manifest_if_needed(&manifest_path, &manifest).unwrap_err();
+        assert!(error.contains("regular non-symlink"));
+        assert!(!manifest_victim.exists());
+    }
+
+    #[test]
+    fn vector_state_is_preserved_or_apply_refuses_without_target_capability() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("vector-source.db");
+        let target_path = directory.path().join("no-vector-target.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry_with_vector(
+                "vector-source",
+                "/wiki/vector",
+                shared_metadata(),
+                vec![0.25; 1024],
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let target_conn = Connection::open(&target_path).unwrap();
+        target_conn.execute("DROP TABLE memories_vec", []).unwrap();
+        drop(target_conn);
+
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut scans);
+        assert!(scans[0].vector_table_present);
+        assert!(!scans[1].vector_table_present);
+        let plan = build_plan(&scans).unwrap();
+        let error = validate_plan(&scans, &plan).unwrap_err();
+        assert!(error.contains("cannot preserve the source vector"));
+        assert_eq!(scans[1].rows.len(), 0);
+    }
+
+    #[test]
+    fn vector_copy_preserves_the_source_embedding_in_the_target_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("vector-source.db");
+        let target_path = directory.path().join("vector-target.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry_with_vector(
+                "vector-source",
+                "/wiki/vector-copy",
+                shared_metadata(),
+                vec![0.125; 1024],
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        apply_plan(&scans, &plan, &backup_dir).unwrap();
+
+        let mut after_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut after_scans);
+        let item = &plan.items[0];
+        let target_row = after_scans[1]
+            .raw_row(item.target_id.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(
+            target_row.vector_fingerprint(after_scans[1].vector_table_present),
+            item.source_vector
+        );
+    }
+
+    #[test]
+    fn vector_mutation_without_memory_revision_invalidates_plan_fingerprint() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("vector-source.db");
+        let target_path = directory.path().join("vector-target.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry_with_vector(
+                "vector-source",
+                "/wiki/vector-mutation",
+                shared_metadata(),
+                vec![0.25; 1024],
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+
+        memcore::db::register_sqlite_vec();
+        let source_conn = Connection::open(&source_path).unwrap();
+        source_conn
+            .execute(
+                "UPDATE memories_vec SET embedding = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    memcore::db::serialize_f32(&vec![0.75; 1024]),
+                    "vector-source"
+                ],
+            )
+            .unwrap();
+        drop(source_conn);
+
+        let mut changed_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut changed_scans);
+        let error = validate_plan(&changed_scans, &plan).unwrap_err();
+        assert!(error.contains("fingerprint") || error.contains("vector"));
+    }
+
+    #[test]
+    fn interrupted_copy_boundaries_reconcile_and_rerun_idempotently() {
+        for boundary in [
+            MigrationBoundary::TargetCopied,
+            MigrationBoundary::SourceReceipted,
+            MigrationBoundary::SourceSuperseded,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let source_path = directory.path().join("legacy.db");
+            let target_path = directory.path().join("shared.db");
+            create_current_fixture(
+                &source_path,
+                &[fixture_entry("source", "/wiki/crash", shared_metadata())],
+            );
+            create_current_fixture(&target_path, &[]);
+            let mut initial_scans = vec![
+                fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+                fixture_scan(LogicalStore::SharedWiki, &target_path),
+            ];
+            classify_scans(&mut initial_scans);
+            let plan = build_plan(&initial_scans).unwrap();
+            let backup_dir = directory.path().join("backups");
+            fs::create_dir(&backup_dir).unwrap();
+            let interruption = MigrationInterruption {
+                source_id: Some("source".to_string()),
+                boundary,
+            };
+            let error =
+                apply_plan_with_interruption(&initial_scans, &plan, &backup_dir, interruption)
+                    .unwrap_err();
+            assert!(error.contains("simulated interruption"));
+
+            let mut partial_scans = vec![
+                fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+                fixture_scan(LogicalStore::SharedWiki, &target_path),
+            ];
+            classify_scans(&mut partial_scans);
+            let source_row = partial_scans[0].raw_row("source").unwrap();
+            let target_id = plan.items[0].target_id.as_deref().unwrap();
+            let target_row = partial_scans[1].raw_row(target_id).unwrap();
+            assert_eq!(
+                parse_migration_receipt(target_row).unwrap().unwrap().phase,
+                MigrationPhase::TargetCopied
+            );
+            match boundary {
+                MigrationBoundary::TargetCopied => {
+                    assert!(parse_migration_receipt(source_row).unwrap().is_none());
+                    assert_eq!(source_row.superseded_by, None);
+                }
+                MigrationBoundary::SourceReceipted => {
+                    assert_eq!(
+                        parse_migration_receipt(source_row).unwrap().unwrap().phase,
+                        MigrationPhase::SourceReceipted
+                    );
+                    assert_eq!(source_row.superseded_by, None);
+                }
+                MigrationBoundary::SourceSuperseded => {
+                    assert_eq!(
+                        parse_migration_receipt(source_row).unwrap().unwrap().phase,
+                        MigrationPhase::SourceReceipted
+                    );
+                    assert_eq!(source_row.superseded_by.as_deref(), Some(target_id));
+                }
+            }
+
+            let mut resumed_scans = vec![
+                fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+                fixture_scan(LogicalStore::SharedWiki, &target_path),
+            ];
+            classify_scans(&mut resumed_scans);
+            let (_, outcomes) = apply_plan(&resumed_scans, &plan, &backup_dir).unwrap();
+            assert_eq!(outcomes.len(), 1);
+            assert!(outcomes[0]
+                .phases
+                .contains(&"source_superseded".to_string()));
+
+            let mut replay_scans = vec![
+                fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+                fixture_scan(LogicalStore::SharedWiki, &target_path),
+            ];
+            classify_scans(&mut replay_scans);
+            let (_, replay_outcomes) = apply_plan(&replay_scans, &plan, &backup_dir).unwrap();
+            assert_eq!(replay_outcomes[0].outcome, "existing_no_op");
+        }
+    }
+
+    #[test]
+    fn completed_first_item_and_failed_second_item_resume_from_original_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        let mut first_entry = fixture_entry("a", "/wiki/partial-a", shared_metadata());
+        first_entry.summary = "partial first summary".to_string();
+        first_entry.text = "partial first text".to_string();
+        let mut second_entry = fixture_entry("b", "/wiki/partial-b", shared_metadata());
+        second_entry.summary = "partial second summary".to_string();
+        second_entry.text = "partial second text".to_string();
+        create_current_fixture(&source_path, &[first_entry, second_entry]);
+        create_current_fixture(&target_path, &[]);
+        let mut initial_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut initial_scans);
+        let plan = build_plan(&initial_scans).unwrap();
+        assert_eq!(plan.items.len(), 2);
+        let second = plan
+            .items
+            .iter()
+            .find(|item| item.source_id == "b")
+            .unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let error = apply_plan_with_interruption(
+            &initial_scans,
+            &plan,
+            &backup_dir,
+            MigrationInterruption {
+                source_id: Some(second.source_id.clone()),
+                boundary: MigrationBoundary::TargetCopied,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("simulated interruption"), "{error}");
+        let backup_path = backup_dir.join(backup_file_name(
+            &initial_scans[0].physical.as_ref().unwrap().physical_id,
+        ));
+        let backup_before_resume = db_snapshot(&backup_path);
+
+        let mut partial_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut partial_scans);
+        let first = plan
+            .items
+            .iter()
+            .find(|item| item.source_id == "a")
+            .unwrap();
+        let first_row = partial_scans[0].raw_row(&first.source_id).unwrap();
+        assert_eq!(
+            parse_migration_receipt(first_row).unwrap().unwrap().phase,
+            MigrationPhase::SourceSuperseded
+        );
+        let second_row = partial_scans[0].raw_row(&second.source_id).unwrap();
+        assert!(parse_migration_receipt(second_row).unwrap().is_none());
+
+        let mut resumed_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut resumed_scans);
+        let (_, outcomes) = apply_plan(&resumed_scans, &plan, &backup_dir).unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes
+            .iter()
+            .all(|outcome| { outcome.phases.contains(&"source_superseded".to_string()) }));
+        assert_eq!(db_snapshot(&backup_path), backup_before_resume);
+
+        let mut final_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut final_scans);
+        let (_, replay_outcomes) = apply_plan(&final_scans, &plan, &backup_dir).unwrap();
+        assert!(replay_outcomes
+            .iter()
+            .all(|outcome| outcome.outcome == "existing_no_op"));
+    }
+
+    #[test]
+    fn command_boundary_uses_three_physical_stores_and_replays_the_same_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let global_path = directory.path().join("global.db");
+        let project_path = directory.path().join("project.db");
+        let app_home = directory.path().join("home");
+        let shared_path = app_home.join("projects/wiki/memory.db");
+        fs::create_dir_all(shared_path.parent().unwrap()).unwrap();
+        create_current_fixture(
+            &global_path,
+            &[fixture_entry("global", "/wiki/global", shared_metadata())],
+        );
+        create_current_fixture(
+            &project_path,
+            &[fixture_entry("project", "/wiki/project", shared_metadata())],
+        );
+        create_current_fixture(
+            &shared_path,
+            &[fixture_entry("shared", "/wiki/shared", shared_metadata())],
+        );
+
+        let preview = run_wiki_corpus_command(
+            false,
+            None,
+            None,
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+        assert_eq!(preview.mode, "preview");
+        assert_eq!(preview.stores.len(), 3);
+        let plan = preview.plan.clone().unwrap();
+        assert_eq!(plan.store_fingerprints.len(), 3);
+        let physical_ids = plan
+            .store_fingerprints
+            .iter()
+            .map(|fingerprint| fingerprint.physical_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(physical_ids.len(), 3);
+
+        let plan_path = directory.path().join("plan.json");
+        fs::write(
+            &plan_path,
+            serde_json::to_vec_pretty(&json!({"plan": plan})).unwrap(),
+        )
+        .unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let applied = run_wiki_corpus_command(
+            true,
+            Some(WIKI_CORPUS_CONFIRMATION_TOKEN.to_string()),
+            Some(backup_dir.clone()),
+            Some(plan_path.clone()),
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+        assert_eq!(applied.mode, "apply");
+        assert_eq!(applied.stores.len(), 3);
+        assert_eq!(applied.migration_outcomes.len(), 3);
+
+        let replay = run_wiki_corpus_command(
+            true,
+            Some(WIKI_CORPUS_CONFIRMATION_TOKEN.to_string()),
+            Some(backup_dir),
+            Some(plan_path),
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+        assert_eq!(replay.migration_outcomes.len(), 3);
+        assert!(replay
+            .migration_outcomes
+            .iter()
+            .all(|outcome| outcome.outcome == "existing_no_op"));
     }
 }
