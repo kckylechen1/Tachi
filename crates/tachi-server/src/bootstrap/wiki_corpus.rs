@@ -4077,11 +4077,27 @@ fn plan_item_completed(scans: &[StoreScan], plan: &WikiCorpusPlan, item: &PlanIt
     match item.action.as_str() {
         "reclassify_in_place" => receipt_matches(row, item, &plan.plan_id, &["reclassified"]),
         "copy_to_shared_and_supersede" => {
-            receipt_matches(row, item, &plan.plan_id, &["source_superseded"])
-                && item
-                    .target_id
-                    .as_deref()
-                    .is_some_and(|target_id| row.is_superseded_by(target_id))
+            let Some(target_id) = item.target_id.as_deref() else {
+                return false;
+            };
+            if !receipt_matches(row, item, &plan.plan_id, &["source_superseded"])
+                || !row.is_superseded_by(target_id)
+            {
+                return false;
+            }
+
+            // The source receipt and immutable supersession edge are not
+            // sufficient no-op evidence: the deterministic target must still
+            // be present and canonical. `canonical_target_matches_plan`
+            // intentionally ignores mutable enrichment while binding the
+            // target receipt, copy identity, and active lifecycle.
+            let Ok(target) = find_scan(scans, &item.target_store_ref) else {
+                return false;
+            };
+            let Some(target_row) = target.raw_row(target_id) else {
+                return false;
+            };
+            canonical_target_matches_plan(target_row, item, &plan.plan_id)
         }
         _ => false,
     }
@@ -5159,6 +5175,72 @@ mod tests {
         assert_eq!(db_snapshot(&source_path), source_bytes);
         assert_eq!(db_snapshot(&target_path), target_bytes);
         assert_eq!(directory_snapshot(&backup_dir), backup_bytes);
+    }
+
+    #[test]
+    fn completed_supersession_replay_rejects_missing_deterministic_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry(
+                "source",
+                "/wiki/missing-target",
+                shared_metadata(),
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+
+        let mut initial_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut initial_scans);
+        let plan = build_plan(&initial_scans).unwrap();
+        let target_id = plan.items[0].target_id.clone().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        apply_plan(&initial_scans, &plan, &backup_dir).unwrap();
+
+        // Simulate a foreign writer; migration paths do not issue hard deletes.
+        let target_connection = Connection::open(&target_path).unwrap();
+        assert_eq!(
+            target_connection
+                .execute(
+                    "DELETE FROM memories WHERE id = ?1",
+                    rusqlite::params![target_id],
+                )
+                .unwrap(),
+            1
+        );
+        drop(target_connection);
+
+        let mut replay_scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut replay_scans);
+        let error = apply_plan(&replay_scans, &plan, &backup_dir)
+            .expect_err("a completed source with a missing target must not be a no-op");
+        assert!(
+            error.contains("deterministic target") || error.contains("source receipt"),
+            "{error}"
+        );
+
+        let source = fixture_scan(LogicalStore::LegacyGlobal, &source_path);
+        let source_row = source.raw_row("source").unwrap();
+        assert_eq!(
+            source_row.superseded_by.as_deref(),
+            Some(target_id.as_str())
+        );
+        assert_eq!(
+            parse_migration_receipt(source_row).unwrap().unwrap().phase,
+            MigrationPhase::SourceSuperseded
+        );
+        assert!(fixture_scan(LogicalStore::SharedWiki, &target_path)
+            .raw_row(&target_id)
+            .is_none());
     }
 
     #[test]
