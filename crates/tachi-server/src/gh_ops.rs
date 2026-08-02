@@ -67,6 +67,11 @@ pub(crate) struct GhApiContext {
 }
 
 impl GhApiContext {
+    /// `#[cfg(any(feature = "contract-leaves", test))]`: the production caller
+    /// is `resolve_gh_api_context` below, gated per #1564 with the approver
+    /// gate that consumes it; `for_test` keeps this reachable — and the
+    /// empty-credential refusal covered — in a default `cfg(test)` build.
+    #[cfg(any(feature = "contract-leaves", test))]
     fn new(gh_path: String, token: String) -> Result<Self, String> {
         if token.trim().is_empty() {
             return Err(
@@ -94,6 +99,11 @@ impl GhApiContext {
 /// Resolve the executable and explicit credential once for a security-sensitive
 /// GitHub probe. A caller must retain the returned context for the complete
 /// issuance or revalidation round; resolving a new one is a new round.
+///
+/// `#[cfg(feature = "contract-leaves")]`: its only caller is
+/// `approver_authority::GhApproverAuthorityProbe::new`, gated per #1564 with
+/// the `governed_precedent_establishment` module at the top of that chain.
+#[cfg(feature = "contract-leaves")]
 pub(crate) fn resolve_gh_api_context(server: &MemoryServer) -> Result<GhApiContext, String> {
     let gh_path = resolve_gh_path()?;
     let token = resolve_gh_token(server)?.unwrap_or_default();
@@ -102,6 +112,9 @@ pub(crate) fn resolve_gh_api_context(server: &MemoryServer) -> Result<GhApiConte
 
 /// Build the same hardened `gh api` command used elsewhere, but from an
 /// already-pinned context so no later request can splice in another token.
+///
+/// Ungated: the approver probe's request builders call this on every probe,
+/// including in this crate's default-feature tests.
 pub(crate) fn gh_api_command_for_context(context: &GhApiContext, args: &[&str]) -> Command {
     let mut cmd = build_gh_command_for_resolved_credential(&context.gh_path, Some(context.token()));
     cmd.arg("api");

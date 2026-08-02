@@ -180,6 +180,45 @@ pub(crate) fn supersede_with_metadata_if_expected_state(
     Ok(updated)
 }
 
+/// Atomically restore an exact archived occupant to the active lifecycle while
+/// replacing its migration metadata. This is the inverse of
+/// [`archive_with_metadata_if_expected_state`]: the caller proves the complete
+/// current state of the row it read, and the lifecycle flip plus the metadata
+/// rewrite land in one transaction, so no reader can observe a row that is
+/// active with stale provenance (or the reverse). A mismatch performs zero
+/// writes and returns `Ok(false)`.
+pub(crate) fn restore_with_metadata_if_expected_state(
+    conn: &mut Connection,
+    id: &str,
+    new_metadata: &str,
+    expected: &ExpectedMemoryState,
+) -> Result<bool, MemoryError> {
+    super::refuse_reserved_rem_operation_mutation(id, "restored")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !expected_state_matches_within_tx(&tx, id, expected)? {
+        tx.commit()?;
+        return Ok(false);
+    }
+    let incoming_metadata = serde_json::from_str(new_metadata)?;
+    let metadata = super::merge_ordinary_reserved_metadata(&tx, id, &incoming_metadata)?;
+    let metadata_json = serde_json::to_string(&metadata)?;
+    let now = now_utc_iso();
+    // `archived = 1 AND superseded_by IS NULL` is redundant with the expected
+    // state above and kept deliberately: restoring a row that is not archived,
+    // or that a concurrent writer has superseded, must never be a silent no-op
+    // reported as success.
+    tx.execute(
+        "UPDATE memories
+         SET metadata = ?1, archived = 0, updated_at = ?2,
+             revision = revision + 1
+         WHERE id = ?3 AND revision = ?4 AND archived = 1 AND superseded_by IS NULL",
+        params![metadata_json, now, id, expected.revision()],
+    )?;
+    let updated = tx.changes() == 1;
+    tx.commit()?;
+    Ok(updated)
+}
+
 /// Atomically mark an exact deterministic occupant non-canonical while
 /// replacing its migration metadata. The row remains durable for audit.
 pub(crate) fn archive_with_metadata_if_expected_state(

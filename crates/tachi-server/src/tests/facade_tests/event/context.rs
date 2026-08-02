@@ -247,3 +247,61 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
     );
     assert!(a2a_json.get("feedback").is_none());
 }
+
+/// tachi#1561 (L4): `tachi_event(action='context')` emits its `memories`
+/// array verbatim — the `is_projection` predicates further down only build the
+/// extra typed arrays and never gate the dump — while `path_prefix` is
+/// caller-controlled. So a context call scoped anywhere outside the projection
+/// namespaces used to walk raw rows, bodies included, straight into the
+/// response. Discriminator: on the pre-fix code the internal row and its body
+/// are both present.
+#[tokio::test]
+async fn tachi_event_context_does_not_dump_internal_rows_for_an_arbitrary_prefix() {
+    let server = make_server();
+
+    server
+        .with_global_store(|store| {
+            let mut cache = make_entry("foundry:recall-cache:context-leak");
+            cache.path = "/scratch/leak/recall-cache/context".to_string();
+            cache.text = "internal recall-cache body that must never reach a reader".to_string();
+            cache.summary = "internal recall-cache row".to_string();
+            cache.topic = "recall_rerank_cache".to_string();
+            cache.source = memcore::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+            cache.metadata = json!({ "cache_key": memcore::FOUNDRY_RECALL_CACHE_SOURCE });
+            store.upsert(&cache).map_err(|e| e.to_string())?;
+
+            let mut ordinary = make_entry("context-ordinary");
+            ordinary.path = "/scratch/leak/ordinary".to_string();
+            ordinary.text = "ordinary user-facing body".to_string();
+            store.upsert(&ordinary).map_err(|e| e.to_string())
+        })
+        .expect("seed context leak fixtures");
+
+    let mut context = tachi_event_params("context");
+    context.path_prefix = Some("/scratch/leak".to_string());
+    let body = crate::event_ops::handle_tachi_event(&server, context)
+        .await
+        .expect("context with an explicit path_prefix");
+    let parsed: Value = serde_json::from_str(&body).expect("context JSON");
+    let memories = parsed["memories"]
+        .as_array()
+        .cloned()
+        .expect("memories array");
+
+    assert!(
+        memories
+            .iter()
+            .any(|row| row["id"] == json!("context-ordinary")),
+        "an ordinary row under the requested prefix must still be returned: {body}"
+    );
+    assert!(
+        !memories
+            .iter()
+            .any(|row| row["id"] == json!("foundry:recall-cache:context-leak")),
+        "internal row leaked through tachi_event context: {body}"
+    );
+    assert!(
+        !body.contains("must never reach a reader"),
+        "internal row body leaked through tachi_event context: {body}"
+    );
+}

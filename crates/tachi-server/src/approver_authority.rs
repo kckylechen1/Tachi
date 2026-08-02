@@ -79,14 +79,27 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use tachi_params::{
-    resolve_verified_approver, revalidate_approval, ApprovalReceiptV1, ApprovalTargetV1,
     ApproverAuthorityProbe, ApproverAuthorizationPolicyV1, AuthorityDenialV1, AuthorizedTeamV1,
-    CallerAssertedContextV1, CredentialContextV1, CurrentApprovalContextV1, RepoFactsV1,
-    RepoPermissionLevelV1, RepoPermissionV1, RepoRevisionV1, TeamMembershipProbeV1,
-    TeamMembershipV1, TeamRoleV1, VerifiedPrincipalV1,
+    CredentialContextV1, RepoFactsV1, RepoPermissionLevelV1, RepoPermissionV1, RepoRevisionV1,
+    TeamMembershipProbeV1, TeamMembershipV1, TeamRoleV1, VerifiedPrincipalV1,
 };
 
-use crate::gh_ops::{gh_api_command_for_context, gh_redact, resolve_gh_api_context, GhApiContext};
+// #1564: inside this crate the choke-point entry points below are the only
+// consumers of the names in the two gated imports. Their sole caller,
+// `governed_precedent_establishment`, is itself gated behind
+// `contract-leaves`, so the entry points are gated the same way rather than
+// deleted — which leaves these imports unused in a default build unless they
+// carry the same gate. `resolve_verified_approver`/`ApprovalTargetV1`/
+// `CallerAssertedContextV1` are additionally named by this module's own
+// `tests`, so those three survive under `test` as well.
+#[cfg(any(feature = "contract-leaves", test))]
+use tachi_params::{resolve_verified_approver, ApprovalTargetV1, CallerAssertedContextV1};
+#[cfg(feature = "contract-leaves")]
+use tachi_params::{revalidate_approval, ApprovalReceiptV1, CurrentApprovalContextV1};
+
+#[cfg(feature = "contract-leaves")]
+use crate::gh_ops::resolve_gh_api_context;
+use crate::gh_ops::{gh_api_command_for_context, gh_redact, GhApiContext};
 use crate::MemoryServer;
 
 /// Wall-clock ceiling for a single GitHub probe. Without it there is no
@@ -277,6 +290,13 @@ impl<'a> GhApproverAuthorityProbe<'a> {
     /// server_state::{..., MemoryServer, ...}`), so a wider visibility here
     /// would be unreachable from outside the crate anyway and trips
     /// the rustc `private_interfaces` lint.
+    ///
+    /// `#[cfg(feature = "contract-leaves")]`: the only callers are the two
+    /// choke-point entry points at the bottom of this file, gated per #1564
+    /// with the `governed_precedent_establishment` module that calls them.
+    /// The probe itself stays ungated — `with_context_resolver` builds it in
+    /// this module's tests, which is where its behaviour is covered.
+    #[cfg(feature = "contract-leaves")]
     pub(crate) fn new(server: &'a MemoryServer) -> Self {
         Self {
             server,
@@ -717,12 +737,15 @@ pub fn build_policy(
 /// `pub(crate)`, so a wider visibility would be unreachable from outside the
 /// crate and trips the rustc `private_interfaces` lint.
 ///
-/// `#[allow(dead_code)]`: this is one of the two genuinely uncalled
-/// choke-point entry points in this module (see "Not wired yet" above) —
-/// #1077's establishment/overturn transition is the intended production
-/// caller, not yet built. Same shape as
-/// `lesson_forge_ops::storage::persist_pending_lesson_candidate`. Flagged
-/// here rather than silently suppressed at the module level.
+/// `#[cfg(feature = "contract-leaves")]`: #1077's establishment/overturn
+/// transition (`governed_precedent_establishment`) is the only caller of the
+/// four choke-point entry points in this module, and #1564 gated that module
+/// pending owner disposition. Gating these behind the same feature keeps the
+/// reviewed gate in the tree instead of deleting it, and keeps it compiling
+/// with its caller. Same shape as
+/// `lesson_forge_ops::storage::persist_pending_lesson_candidate`. Gated here
+/// rather than silently suppressed at the module level.
+#[cfg(feature = "contract-leaves")]
 pub(crate) fn authorize_governed_mutation_with_probe<P: ApproverAuthorityProbe + ?Sized>(
     probe: &P,
     policy: &ApproverAuthorizationPolicyV1,
@@ -732,6 +755,7 @@ pub(crate) fn authorize_governed_mutation_with_probe<P: ApproverAuthorityProbe +
     resolve_verified_approver(probe, policy, target, caller_asserted, chrono::Utc::now())
 }
 
+#[cfg(feature = "contract-leaves")]
 pub(crate) fn authorize_governed_mutation(
     server: &MemoryServer,
     policy: &ApproverAuthorizationPolicyV1,
@@ -753,8 +777,9 @@ pub(crate) fn authorize_governed_mutation(
 /// `pub(crate)`, so a wider visibility would be unreachable from outside the
 /// crate and trips the rustc `private_interfaces` lint.
 ///
-/// `#[allow(dead_code)]`: the other of the two genuinely uncalled
+/// `#[cfg(feature = "contract-leaves")]`: gated with the rest of the
 /// choke-point entry points — see [`authorize_governed_mutation`]'s note.
+#[cfg(feature = "contract-leaves")]
 pub(crate) fn revalidate_governed_mutation_with_probe<P: ApproverAuthorityProbe + ?Sized>(
     probe: &P,
     policy: &ApproverAuthorizationPolicyV1,
@@ -764,6 +789,7 @@ pub(crate) fn revalidate_governed_mutation_with_probe<P: ApproverAuthorityProbe 
     revalidate_approval(probe, policy, receipt, current, chrono::Utc::now())
 }
 
+#[cfg(feature = "contract-leaves")]
 pub(crate) fn revalidate_governed_mutation(
     server: &MemoryServer,
     policy: &ApproverAuthorizationPolicyV1,

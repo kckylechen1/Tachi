@@ -14,11 +14,24 @@
 //! validate/enrich/#1041-write-affinity treatment every other memory entry
 //! gets.
 
+// `LESSON_CANDIDATE_DOMAIN` below is a live containment-gate value read by
+// `memory_search_ops::search_memory::filters::is_lesson_candidate_entry`
+// regardless of whether anything in this file ever writes a row carrying
+// it, so it stays ungated. Everything else in this file — the one writer
+// (`persist_pending_lesson_candidate`) and its private helpers — is gated
+// per #1564 pending owner disposition (verified dead: `pub(crate)`, zero
+// production callers, only this file's own tests call it). Owning
+// contract: #1073/lesson_forge.
+#[cfg(feature = "contract-leaves")]
 use serde_json::{json, Value};
 
+#[cfg(feature = "contract-leaves")]
 use crate::memory_search_ops::save_eval_memory;
+#[cfg(feature = "contract-leaves")]
 use crate::tool_params::SaveMemoryParams;
+#[cfg(feature = "contract-leaves")]
 use crate::MemoryServer;
+#[cfg(feature = "contract-leaves")]
 use tachi_params::LessonCandidateV1;
 
 pub(crate) const LESSON_CANDIDATE_DOMAIN: &str = "lesson_candidate";
@@ -37,6 +50,7 @@ pub(crate) const LESSON_CANDIDATE_DOMAIN: &str = "lesson_candidate";
 /// all three carry identical redactions. Same discipline as
 /// `precedent_ops::scrub_ruling`, which exists for the identical reason
 /// (see that function's doc, `precedent_ops.rs:164-170`).
+#[cfg(feature = "contract-leaves")]
 fn scrub_candidate(candidate: &LessonCandidateV1) -> (LessonCandidateV1, usize) {
     let mut scrubbed = candidate.clone();
     let mut redactions = 0usize;
@@ -55,6 +69,7 @@ fn scrub_candidate(candidate: &LessonCandidateV1) -> (LessonCandidateV1, usize) 
     (scrubbed, redactions)
 }
 
+#[cfg(feature = "contract-leaves")]
 fn render_body(candidate: &LessonCandidateV1) -> String {
     let mut lines = vec![format!(
         "Lesson candidate ({}) — pending",
@@ -95,6 +110,7 @@ fn render_body(candidate: &LessonCandidateV1) -> String {
 /// `candidate` must already be scrubbed (see `scrub_candidate`); `redactions`
 /// is surfaced so a scrubbed row is visibly marked, matching the eval-record
 /// convention (`complete_ops::eval_record`) and `precedent_ops::build_metadata`.
+#[cfg(feature = "contract-leaves")]
 fn build_metadata(candidate: &LessonCandidateV1, redactions: usize) -> Value {
     let mut map = serde_json::Map::new();
     map.insert("kind".to_string(), json!("lesson_candidate"));
@@ -158,6 +174,7 @@ fn build_metadata(candidate: &LessonCandidateV1, redactions: usize) -> Value {
     Value::Object(map)
 }
 
+#[cfg(feature = "contract-leaves")]
 fn summary_line(candidate: &LessonCandidateV1, max: usize) -> String {
     let prefix = "[lesson-candidate] ";
     let mut s = format!("{prefix}{}", candidate.situation);
@@ -168,6 +185,7 @@ fn summary_line(candidate: &LessonCandidateV1, max: usize) -> String {
     s
 }
 
+#[cfg(feature = "contract-leaves")]
 fn extract_persisted_id(saved: &Value) -> Result<String, String> {
     saved
         .get("id")
@@ -182,6 +200,7 @@ fn extract_persisted_id(saved: &Value) -> Result<String, String> {
 /// fed back into `SaveMemoryParams.project` (see
 /// `persist_pending_lesson_candidate`'s doc for why those two are kept
 /// deliberately separate).
+#[cfg(feature = "contract-leaves")]
 fn project_path_segment(project: Option<&str>) -> String {
     let raw = project
         .map(str::trim)
@@ -229,6 +248,7 @@ fn project_path_segment(project: Option<&str>) -> String {
 /// does NOT do") is the intended production caller. Flagged here rather
 /// than silently suppressed at the module level.
 #[allow(dead_code)]
+#[cfg(feature = "contract-leaves")]
 pub(crate) async fn persist_pending_lesson_candidate(
     server: &MemoryServer,
     project: Option<&str>,
@@ -295,7 +315,7 @@ pub(crate) async fn persist_pending_lesson_candidate(
     extract_persisted_id(&saved)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "contract-leaves"))]
 mod tests {
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;

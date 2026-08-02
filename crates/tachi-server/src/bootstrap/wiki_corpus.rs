@@ -31,9 +31,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(crate) const WIKI_CORPUS_CONFIRMATION_TOKEN: &str = "MIGRATE_WIKI_CORPUS_V1";
+/// Separate token from `WIKI_CORPUS_CONFIRMATION_TOKEN` on purpose: a
+/// copy-pasted apply command must never be able to trigger a repair write.
+pub(crate) const WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN: &str =
+    "REPAIR_WIKI_CORPUS_SIBLING_DAMAGE_V1";
 const REPORT_VERSION: &str = "wiki_corpus_migration_v1";
+const REPAIR_REPORT_VERSION: &str = "wiki_corpus_sibling_repair_v1";
 const RECEIPT_KEY: &str = "wiki_corpus_migration";
 const RECEIPT_VERSION: u32 = 2;
+/// History key holding every sibling-damage repair applied to a row. The
+/// migration receipt itself is restored to the canonical `target_copied`
+/// terminal state so that every existing completion predicate keeps its exact
+/// meaning; the replaced receipt is preserved here instead of being erased.
+const REPAIR_RECEIPT_KEY: &str = "wiki_corpus_sibling_repair";
+const REPAIR_RECEIPT_VERSION: u32 = 1;
+const REPAIR_PHASE: &str = "sibling_damage_repaired";
 static PREVIEW_SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A read-only SQLite handle backed by a private filesystem snapshot.
@@ -619,6 +631,62 @@ pub(crate) struct WikiCorpusReport {
     backup_manifest: Option<BackupManifest>,
     migration_outcomes: Vec<MigrationOutcome>,
     warnings: Vec<String>,
+    /// Present only in the sibling-damage repair modes, so the JSON shape of
+    /// preview and apply is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sibling_repair: Option<SiblingRepairReport>,
+}
+
+/// One inspected row that could carry the sibling-race damage signature.
+///
+/// `outcome` is `repairable` in the dry run, and `repaired`/`skipped`/`failed`
+/// in the confirmed run: `failed` is a row whose signature matched (it was
+/// `repairable`) but whose compensation transaction did not land, with
+/// `failure_reason` carrying why. `skipped_reasons` is empty exactly when the
+/// full signature matched; every unmatched clause is reported verbatim so an
+/// operator can see why a damaged-looking row was deliberately left alone.
+#[derive(Debug, Clone, Serialize)]
+struct SiblingRepairRow {
+    store_ref: String,
+    id: String,
+    path: String,
+    outcome: String,
+    observed_receipt_phase: Option<String>,
+    observed_archived: bool,
+    observed_superseded_by: Option<String>,
+    observed_copy_identity_sha256: String,
+    expected_receipt_phase: String,
+    expected_archived: bool,
+    expected_copy_identity_sha256: Option<String>,
+    plan_id: Option<String>,
+    source_store_ref: Option<String>,
+    source_id: Option<String>,
+    skipped_reasons: Vec<String>,
+    failure_reason: Option<String>,
+}
+
+/// A confirmed run never discards a partially completed report: each row's
+/// repair is its own atomic, idempotent transaction (see
+/// `repair_sibling_damaged_target`), so a row that fails to compensate is
+/// recorded as `failed` in `rows`/`errors` instead of unwinding the rows
+/// already repaired. `had_failures` is the caller-facing summary bit; the CLI
+/// layer has no exit-code convention for a partially failed report today, so
+/// this field -- not the process exit code -- is the operator-visible signal
+/// that a re-run is needed.
+#[derive(Debug, Clone, Serialize)]
+struct SiblingRepairReport {
+    version: String,
+    confirmed: bool,
+    backup_directory: Option<String>,
+    inspected_rows: usize,
+    repairable: usize,
+    repaired: usize,
+    skipped: usize,
+    failed: usize,
+    had_failures: bool,
+    backups: Vec<BackupReceipt>,
+    rows: Vec<SiblingRepairRow>,
+    errors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3070,6 +3138,45 @@ fn canonical_target_matches_plan(row: &RawRow, item: &PlanItem, plan_id: &str) -
         && row.superseded_by.is_none()
 }
 
+/// Describe why [`canonical_target_matches_plan`] rejected a deterministic
+/// target: the observed and expected `receipt phase / lifecycle / copy
+/// identity` triple. Pure formatting — the decision stays in the predicate.
+fn target_mismatch_diagnosis(row: &RawRow, item: &PlanItem, plan_id: &str) -> String {
+    let receipt = parse_migration_receipt(row);
+    let observed_phase = match &receipt {
+        Ok(Some(receipt)) if receipt.plan_id == plan_id && receipt.item == *item => {
+            receipt.phase.as_str().to_string()
+        }
+        Ok(Some(receipt)) if receipt.plan_id == plan_id => {
+            format!("{} bound to another plan item", receipt.phase.as_str())
+        }
+        Ok(Some(receipt)) => format!("{} of plan {}", receipt.phase.as_str(), receipt.plan_id),
+        Ok(None) => "<absent>".to_string(),
+        Err(error) => format!("<unreadable: {error}>"),
+    };
+    let sibling_damage_shape = matches!(
+        &receipt,
+        Ok(Some(receipt))
+            if receipt.phase == MigrationPhase::TargetNoncanonical
+                && receipt.plan_id == plan_id
+                && receipt.item == *item
+    ) && row.archived
+        && row.copy_identity_sha256() == item.source_copy_identity_sha256;
+    let hint = if sibling_damage_shape {
+        "; this is the sibling-race damage shape — `tachi wiki corpus --repair-sibling-damage` reports whether it is repairable"
+    } else {
+        ""
+    };
+    format!(
+        "observed receipt_phase={observed_phase} archived={} superseded_by={} copy_identity={}; \
+         expected receipt_phase=target_copied archived=false superseded_by=<none> copy_identity={}{hint}",
+        row.archived,
+        row.superseded_by.as_deref().unwrap_or("<none>"),
+        row.copy_identity_sha256(),
+        item.source_copy_identity_sha256,
+    )
+}
+
 /// Snapshot-independent proof that this copy item is already complete.
 ///
 /// `apply_copy_and_supersede` reads the source row, its migration receipt and
@@ -3173,6 +3280,553 @@ fn reconcile_target_noncanonical(
     Err(format!(
         "deterministic target {target_id} kept changing during noncanonical reconciliation"
     ))
+}
+
+/// The proven sibling-race damage signature for one deterministic target row.
+///
+/// It is derived entirely from the row's own migration receipt plus its source
+/// row, so the repair needs no plan file: the receipt carries the frozen
+/// `PlanItem` and `plan_id` that produced the damage.
+#[derive(Debug, Clone)]
+struct SiblingDamageSignature {
+    item: PlanItem,
+    plan_id: String,
+    replaced_receipt: Value,
+}
+
+enum SiblingDamageAssessment {
+    /// Every clause of the signature matched; the row can be compensated.
+    Repairable(Box<SiblingDamageSignature>),
+    /// At least one clause did not match. The row is reported, never touched.
+    Skipped(Vec<String>),
+}
+
+/// Rows worth assessing at all: a migration receipt plus either an archived
+/// lifecycle or a `target_noncanonical` phase. Healthy canonical targets
+/// (`archived = 0` + `target_copied`) and healthy superseded sources
+/// (`archived = 0` + `source_superseded`) are never inspected.
+fn is_sibling_damage_candidate(row: &RawRow) -> bool {
+    if row.metadata.get(RECEIPT_KEY).is_none() {
+        return false;
+    }
+    if row.archived {
+        return true;
+    }
+    matches!(
+        parse_migration_receipt(row),
+        Ok(Some(receipt)) if receipt.phase == MigrationPhase::TargetNoncanonical
+    )
+}
+
+/// Decide whether `target_row` carries the exact terminal damage a sibling
+/// race used to leave behind:
+///
+/// * the row is archived, unsuperseded, and carries a `target_noncanonical`
+///   receipt whose plan/item identity fields are complete and bind this row,
+/// * the row's immutable copy identity still equals the receipt item's,
+/// * the receipt item's source row exists, is superseded **by this row**, and
+///   carries a `source_superseded` receipt for the same plan and item.
+///
+/// Anything else is reported with every failed clause and left untouched:
+/// under-repairing is recoverable, resurrecting the wrong row is not.
+///
+/// Deliberately absent from this signature: `PlanItem.source_physical_id` /
+/// `target_physical_id`. Those are `unix:{device}:{inode}` (see
+/// `physical_db_identity.rs`), and restoring a store from a backup -- the
+/// legitimate route back to this exact damage -- gives the restored file a
+/// new inode. Binding the repair signature to physical identity would turn
+/// every ordinary backup-restore into a false refusal; the row/plan/item
+/// identity and content-binding clauses above are what actually distinguish
+/// this damaged row from any other, so physical identity adds no
+/// discriminating power here.
+fn assess_sibling_damage(
+    target_store_ref: &str,
+    target_row: &RawRow,
+    source_lookup: impl FnOnce(&PlanItem) -> Result<Option<RawRow>, String>,
+) -> SiblingDamageAssessment {
+    let mut reasons = Vec::new();
+    let receipt = match parse_migration_receipt(target_row) {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => {
+            return SiblingDamageAssessment::Skipped(vec![
+                "row carries no Wiki corpus migration receipt".to_string(),
+            ])
+        }
+        Err(error) => return SiblingDamageAssessment::Skipped(vec![error]),
+    };
+    if receipt.phase != MigrationPhase::TargetNoncanonical {
+        reasons.push(format!(
+            "receipt phase is {}, not target_noncanonical",
+            receipt.phase.as_str()
+        ));
+    }
+    if !target_row.archived {
+        reasons.push("row is not archived".to_string());
+    }
+    if let Some(superseded_by) = target_row.superseded_by.as_deref() {
+        reasons.push(format!("row is itself superseded by {superseded_by}"));
+    }
+    let item = &receipt.item;
+    if receipt.plan_id.is_empty() {
+        reasons.push("receipt has no plan id".to_string());
+    }
+    if item.action != "copy_to_shared_and_supersede" {
+        reasons.push(format!(
+            "receipt item action is {}, not copy_to_shared_and_supersede",
+            item.action
+        ));
+    }
+    if item.target_store_ref != target_store_ref
+        || item.target_id.as_deref() != Some(target_row.id.as_str())
+    {
+        reasons.push(format!(
+            "receipt item target identity {}:{} does not bind this row",
+            item.target_store_ref,
+            item.target_id.as_deref().unwrap_or("<none>")
+        ));
+    }
+    if item.source_id.is_empty()
+        || item.source_store_ref.is_empty()
+        || item.source_copy_identity_sha256.is_empty()
+    {
+        reasons.push("receipt item source identity fields are incomplete".to_string());
+    }
+    if item.source_store_ref == target_store_ref {
+        reasons.push("receipt item source and target are the same logical store".to_string());
+    }
+    if target_row.copy_identity_sha256() != item.source_copy_identity_sha256 {
+        reasons.push(format!(
+            "row copy identity {} does not match the receipt item's {}",
+            target_row.copy_identity_sha256(),
+            item.source_copy_identity_sha256
+        ));
+    }
+    match source_lookup(item) {
+        Err(error) => reasons.push(error),
+        Ok(None) => reasons.push(format!(
+            "receipt item source row {}:{} is absent",
+            item.source_store_ref, item.source_id
+        )),
+        Ok(Some(source_row)) => {
+            if !source_row.is_superseded_by(&target_row.id) {
+                reasons.push(format!(
+                    "source {}:{} is superseded by {}, not by this row",
+                    item.source_store_ref,
+                    item.source_id,
+                    source_row.superseded_by.as_deref().unwrap_or("<nothing>")
+                ));
+            }
+            if !receipt_matches(&source_row, item, &receipt.plan_id, &["source_superseded"]) {
+                reasons.push(format!(
+                    "source {}:{} does not carry a source_superseded receipt for the same plan item",
+                    item.source_store_ref, item.source_id
+                ));
+            }
+        }
+    }
+    if !reasons.is_empty() {
+        return SiblingDamageAssessment::Skipped(reasons);
+    }
+    let replaced_receipt = match target_row.metadata.get(RECEIPT_KEY) {
+        Some(value) => value.clone(),
+        None => {
+            return SiblingDamageAssessment::Skipped(vec![
+                "row lost its migration receipt while it was being assessed".to_string(),
+            ])
+        }
+    };
+    SiblingDamageAssessment::Repairable(Box::new(SiblingDamageSignature {
+        item: item.clone(),
+        plan_id: receipt.plan_id.clone(),
+        replaced_receipt,
+    }))
+}
+
+/// Look a receipt item's source row up in the current inventory.
+fn inventory_source_lookup(scans: &[StoreScan], item: &PlanItem) -> Result<Option<RawRow>, String> {
+    let source = find_scan(scans, &item.source_store_ref).map_err(|_| {
+        format!(
+            "receipt item source store {} is not in this inventory",
+            item.source_store_ref
+        )
+    })?;
+    Ok(source.raw_row(&item.source_id).cloned())
+}
+
+/// Read a receipt item's source row directly from its opened store, including
+/// its supersession edge, so the repair decision is taken on fresh state.
+fn store_source_lookup(
+    source_store: &MemoryStore,
+    item: &PlanItem,
+) -> Result<Option<RawRow>, String> {
+    let Some(entry) = source_store
+        .get_with_options(&item.source_id, true)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let mut row = raw_from_entry(&entry);
+    row.superseded_by = source_store
+        .supersession_target(&item.source_id)
+        .map_err(|error| error.to_string())?
+        .flatten();
+    Ok(Some(row))
+}
+
+fn sibling_repair_row(
+    scan: &StoreScan,
+    row: &RawRow,
+    outcome: &str,
+    signature: Option<&SiblingDamageSignature>,
+    skipped_reasons: Vec<String>,
+) -> SiblingRepairRow {
+    let receipt = parse_migration_receipt(row).ok().flatten();
+    let item = signature
+        .map(|signature| &signature.item)
+        .or_else(|| receipt.as_ref().map(|receipt| &receipt.item));
+    SiblingRepairRow {
+        store_ref: scan.spec.logical_store.reference().to_string(),
+        id: row.id.clone(),
+        path: row.path.clone(),
+        outcome: outcome.to_string(),
+        observed_receipt_phase: receipt
+            .as_ref()
+            .map(|receipt| receipt.phase.as_str().to_string()),
+        observed_archived: row.archived,
+        observed_superseded_by: row.superseded_by.clone(),
+        observed_copy_identity_sha256: row.copy_identity_sha256(),
+        expected_receipt_phase: MigrationPhase::TargetNoncanonical.as_str().to_string(),
+        expected_archived: true,
+        expected_copy_identity_sha256: item.map(|item| item.source_copy_identity_sha256.clone()),
+        plan_id: signature
+            .map(|signature| signature.plan_id.clone())
+            .or_else(|| receipt.as_ref().map(|receipt| receipt.plan_id.clone())),
+        source_store_ref: item.map(|item| item.source_store_ref.clone()),
+        source_id: item.map(|item| item.source_id.clone()),
+        skipped_reasons,
+        failure_reason: None,
+    }
+}
+
+/// Metadata for the compensated row.
+///
+/// The migration receipt is restored to the byte-identical `target_copied`
+/// value a clean migration would have written, because every completion
+/// predicate (`canonical_target_matches_plan`, `plan_item_completed`,
+/// `validate_target_receipt`) is defined against exactly that phase. The
+/// replaced `target_noncanonical` receipt is appended to a separate repair
+/// history key instead of being erased.
+fn metadata_with_repaired_receipt(
+    row: &RawRow,
+    signature: &SiblingDamageSignature,
+) -> Result<Value, String> {
+    let mut metadata = row
+        .metadata
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "repair requires object-shaped metadata".to_string())?;
+    let record = json!({
+        "kind": REPAIR_RECEIPT_KEY,
+        "version": REPAIR_RECEIPT_VERSION,
+        "phase": REPAIR_PHASE,
+        "plan_id": signature.plan_id,
+        "target_store_ref": signature.item.target_store_ref,
+        "target_id": signature.item.target_id,
+        "source_store_ref": signature.item.source_store_ref,
+        "source_id": signature.item.source_id,
+        "restored_phase": MigrationPhase::TargetCopied.as_str(),
+        "replaced_receipt": signature.replaced_receipt,
+    });
+    let mut history = match metadata.get(REPAIR_RECEIPT_KEY) {
+        Some(Value::Array(existing)) => existing.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    history.push(record);
+    metadata.insert(REPAIR_RECEIPT_KEY.to_string(), Value::Array(history));
+    metadata.insert(
+        RECEIPT_KEY.to_string(),
+        receipt_value(&signature.item, &signature.plan_id, "target_copied"),
+    );
+    Ok(Value::Object(metadata))
+}
+
+/// Compensate one damaged target under a complete-state CAS.
+///
+/// The signature is re-proven against a fresh read of the target row and its
+/// source inside the retry loop, and the un-archive plus the receipt rewrite
+/// land in a single transaction, so a concurrent writer either loses the CAS
+/// (retry) or changes the state away from the signature (refusal). The row is
+/// re-read afterwards and must satisfy `canonical_target_matches_plan`.
+fn repair_sibling_damaged_target(
+    target_scan: &StoreScan,
+    source_scan: &StoreScan,
+    signature: &SiblingDamageSignature,
+    retained_backups: &[RetainedBackup],
+) -> Result<(), String> {
+    let target_id = signature
+        .item
+        .target_id
+        .as_deref()
+        .ok_or_else(|| "repairable signature without a deterministic target id".to_string())?;
+    let target_path = target_scan
+        .spec
+        .addressed_path
+        .as_ref()
+        .ok_or_else(|| "repair target has no addressed path".to_string())?;
+    let source_path = source_scan
+        .spec
+        .addressed_path
+        .as_ref()
+        .ok_or_else(|| "repair source has no addressed path".to_string())?;
+    check_authority(target_scan, Some(source_path))?;
+    check_authority(source_scan, Some(target_path))?;
+    let mut target_store = open_apply_store(target_scan)?;
+    let source_store = open_apply_store(source_scan)?;
+    verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+
+    for _ in 0..3 {
+        verify_retained_backups(retained_backups)?;
+        let entry = target_store
+            .get_with_options(target_id, true)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("damaged target {target_id} disappeared before repair"))?;
+        let mut row = raw_from_entry(&entry);
+        row.superseded_by = target_store
+            .supersession_target(target_id)
+            .map_err(|error| error.to_string())?
+            .flatten();
+        let fresh =
+            assess_sibling_damage(target_scan.spec.logical_store.reference(), &row, |item| {
+                store_source_lookup(&source_store, item)
+            });
+        let fresh = match fresh {
+            SiblingDamageAssessment::Repairable(fresh) => fresh,
+            SiblingDamageAssessment::Skipped(reasons) => {
+                return Err(format!(
+                    "damaged target {target_id} no longer matches the repair signature: {}",
+                    reasons.join("; ")
+                ))
+            }
+        };
+        if fresh.item != signature.item || fresh.plan_id != signature.plan_id {
+            return Err(format!(
+                "damaged target {target_id} changed migration provenance before repair"
+            ));
+        }
+        let metadata = metadata_with_repaired_receipt(&row, &fresh)?;
+        let expected = ExpectedMemoryState::from_entry(&entry, row.superseded_by.as_deref());
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        verify_retained_backups(retained_backups)?;
+        if !target_store
+            .restore_with_metadata_if_expected_state(target_id, &metadata, &expected)
+            .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
+        let restored = target_store
+            .get_with_options(target_id, true)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("repaired target {target_id} disappeared after repair"))?;
+        let mut restored_row = raw_from_entry(&restored);
+        restored_row.superseded_by = target_store
+            .supersession_target(target_id)
+            .map_err(|error| error.to_string())?
+            .flatten();
+        if !canonical_target_matches_plan(&restored_row, &signature.item, &signature.plan_id) {
+            return Err(format!(
+                "repair of {target_id} did not produce the canonical migrated target"
+            ));
+        }
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        verify_retained_backups(retained_backups)?;
+        return Ok(());
+    }
+    Err(format!(
+        "damaged target {target_id} kept changing during sibling-damage repair"
+    ))
+}
+
+/// Repair backups are named per physical store *and* per captured state: a
+/// migration backup of the same store is a different file, and a later repair
+/// run captures its own snapshot instead of failing to verify an older one
+/// against the state it no longer describes.
+fn repair_backup_file_name(physical_id: &str, row_digest: &str) -> String {
+    format!(
+        "wiki-corpus-repair-v1-{}-{}.db",
+        digest_string(physical_id),
+        row_digest
+    )
+}
+
+/// Back up every physical store the repair is about to mutate.
+///
+/// The expected evidence is the store's *current* fingerprint (the repair has
+/// no plan), and the file name is repair-specific so an existing migration
+/// backup of a different state is never mistaken for this one.
+fn retain_repair_backups(
+    scans: &[StoreScan],
+    mutated_store_refs: &BTreeSet<String>,
+    backup_dir: &Path,
+) -> Result<Vec<RetainedBackup>, String> {
+    let mut groups = BTreeMap::<String, (Vec<String>, &StoreScan)>::new();
+    for scan in scans
+        .iter()
+        .filter(|scan| mutated_store_refs.contains(scan.spec.logical_store.reference()))
+    {
+        let Some(physical) = scan.physical.as_ref() else {
+            return Err(format!(
+                "repair refuses store {} without physical identity",
+                scan.spec.logical_store.reference()
+            ));
+        };
+        let entry = groups
+            .entry(physical.physical_id.clone())
+            .or_insert_with(|| (Vec::new(), scan));
+        entry
+            .0
+            .push(scan.spec.logical_store.reference().to_string());
+    }
+    let mut backups = Vec::new();
+    for (physical_id, (mut logical_refs, source)) in groups {
+        logical_refs.sort();
+        logical_refs.dedup();
+        check_authority(source, None)?;
+        let expected = source.fingerprint().ok_or_else(|| {
+            format!(
+                "repair cannot fingerprint {} before backup",
+                source.spec.logical_store.reference()
+            )
+        })?;
+        let mut race_hook = None;
+        backups.push(create_or_verify_backup_with_hook(
+            source,
+            backup_dir,
+            &repair_backup_file_name(&physical_id, &expected.row_digest),
+            logical_refs,
+            &expected,
+            &mut race_hook,
+        )?);
+    }
+    backups.sort_by(|left, right| {
+        left.receipt
+            .source_physical_id
+            .cmp(&right.receipt.source_physical_id)
+    });
+    verify_retained_backups(&backups)?;
+    Ok(backups)
+}
+
+/// Assess (and, when confirmed, compensate) every sibling-damaged row.
+///
+/// A confirmed run never discards a partially completed report: each row's
+/// repair is its own atomic, idempotent transaction (see
+/// `repair_sibling_damaged_target`), so a row whose compensation fails is
+/// recorded as `failed` -- with its reason in both that row and the
+/// top-level `errors` -- instead of unwinding the rows already repaired
+/// earlier in the same run. Setup failures that happen before any row is
+/// touched (the backup directory itself cannot be created or verified) are
+/// still returned as `Err`: at that point there is no partial repair to
+/// report.
+fn repair_sibling_damage(
+    scans: &[StoreScan],
+    backup_dir: Option<&Path>,
+) -> Result<SiblingRepairReport, String> {
+    let mut rows = Vec::new();
+    let mut repairs = Vec::new();
+    for (index, scan) in scans.iter().enumerate() {
+        for row in &scan.rows {
+            if !is_sibling_damage_candidate(row) {
+                continue;
+            }
+            match assess_sibling_damage(scan.spec.logical_store.reference(), row, |item| {
+                inventory_source_lookup(scans, item)
+            }) {
+                SiblingDamageAssessment::Repairable(signature) => {
+                    rows.push(sibling_repair_row(
+                        scan,
+                        row,
+                        "repairable",
+                        Some(&*signature),
+                        Vec::new(),
+                    ));
+                    repairs.push((index, rows.len() - 1, signature));
+                }
+                SiblingDamageAssessment::Skipped(reasons) => {
+                    rows.push(sibling_repair_row(scan, row, "skipped", None, reasons));
+                }
+            }
+        }
+    }
+    let repairable = repairs.len();
+    let mut report = SiblingRepairReport {
+        version: REPAIR_REPORT_VERSION.to_string(),
+        confirmed: backup_dir.is_some(),
+        backup_directory: backup_dir.map(|dir| dir.display().to_string()),
+        inspected_rows: rows.len(),
+        repairable,
+        repaired: 0,
+        skipped: rows.len() - repairable,
+        failed: 0,
+        had_failures: false,
+        backups: Vec::new(),
+        rows,
+        errors: Vec::new(),
+    };
+    let Some(backup_dir) = backup_dir else {
+        return Ok(report);
+    };
+    if repairs.is_empty() {
+        return Ok(report);
+    }
+
+    let mutated_store_refs = repairs
+        .iter()
+        .map(|(index, _, _)| scans[*index].spec.logical_store.reference().to_string())
+        .collect::<BTreeSet<_>>();
+    let retained_backups = retain_repair_backups(scans, &mutated_store_refs, backup_dir)?;
+    for (index, row_index, signature) in &repairs {
+        let target_scan = &scans[*index];
+        let store_ref = report.rows[*row_index].store_ref.clone();
+        let id = report.rows[*row_index].id.clone();
+        let outcome = find_scan(scans, &signature.item.source_store_ref).and_then(|source_scan| {
+            repair_sibling_damaged_target(target_scan, source_scan, signature, &retained_backups)
+        });
+        match outcome {
+            Ok(()) => {
+                report.rows[*row_index].outcome = "repaired".to_string();
+                report.repaired += 1;
+            }
+            Err(error) => {
+                report.errors.push(format!("{store_ref}:{id}: {error}"));
+                report.rows[*row_index].outcome = "failed".to_string();
+                report.rows[*row_index].failure_reason = Some(error);
+            }
+        }
+    }
+    report.failed = report
+        .rows
+        .iter()
+        .filter(|row| row.outcome == "failed")
+        .count();
+    report.had_failures = report.failed > 0;
+    // The final integrity check is orthogonal to any individual row's
+    // outcome (it detects a backup file tampered with mid-run, not a row
+    // that failed to compensate), so it folds into `errors` too instead of
+    // discarding a report whose row outcomes are otherwise trustworthy.
+    match verify_retained_backups(&retained_backups) {
+        Ok(()) => {
+            report.backups = retained_backups
+                .iter()
+                .map(|backup| backup.receipt.clone())
+                .collect();
+        }
+        Err(error) => {
+            report.errors.push(error);
+            report.had_failures = true;
+        }
+    }
+    Ok(report)
 }
 
 fn apply_copy_and_supersede(
@@ -3307,7 +3961,8 @@ fn apply_copy_and_supersede(
             .flatten();
         if !canonical_target_matches_plan(&target_row, item, plan_id) {
             return Err(format!(
-                "deterministic target occupant collision: {target_id} immutable identity, lifecycle, or receipt mismatch"
+                "deterministic target occupant collision: {target_id} immutable identity, lifecycle, or receipt mismatch ({})",
+                target_mismatch_diagnosis(&target_row, item, plan_id)
             ));
         }
         phases.push("target_copied".to_string());
@@ -3342,9 +3997,10 @@ fn apply_copy_and_supersede(
             .map_err(|error| error.to_string())?
             .flatten();
         if !canonical_target_matches_plan(&verified_target_row, item, plan_id) {
-            return Err(
-                "target insert produced a mismatched immutable occupant or receipt".to_string(),
-            );
+            return Err(format!(
+                "target insert produced a mismatched immutable occupant or receipt ({})",
+                target_mismatch_diagnosis(&verified_target_row, item, plan_id)
+            ));
         }
         phases.push("target_copied".to_string());
     }
@@ -4090,10 +4746,16 @@ fn create_or_verify_backup(
     logical_store_refs: Vec<String>,
     expected: &PlanStoreFingerprint,
 ) -> Result<BackupReceipt, String> {
+    let physical_id = source
+        .physical
+        .as_ref()
+        .map(|physical| physical.physical_id.clone())
+        .unwrap_or_default();
     let mut race_hook = None;
     create_or_verify_backup_with_hook(
         source,
         backup_dir,
+        &backup_file_name(&physical_id),
         logical_store_refs,
         expected,
         &mut race_hook,
@@ -4192,6 +4854,7 @@ fn verify_retained_backup(
 fn create_or_verify_backup_with_hook(
     source: &StoreScan,
     backup_dir: &Path,
+    backup_file_name: &str,
     logical_store_refs: Vec<String>,
     expected: &PlanStoreFingerprint,
     race_hook: &mut Option<CorpusRaceHook>,
@@ -4203,7 +4866,7 @@ fn create_or_verify_backup_with_hook(
         .physical
         .as_ref()
         .ok_or_else(|| "backup source has no physical identity".to_string())?;
-    let backup_path = backup_dir.join(backup_file_name(&source_physical.physical_id));
+    let backup_path = backup_dir.join(backup_file_name);
     if fs::symlink_metadata(&backup_path).is_ok() {
         regular_non_symlink_metadata(&backup_path)?;
         let retained = RetainedPathFile::open(&backup_path, true, false, false)?;
@@ -4438,7 +5101,7 @@ fn retain_plan_backups(
     }
 
     let mut backups = Vec::new();
-    for (_physical_id, (mut logical_refs, source)) in groups {
+    for (physical_id, (mut logical_refs, source)) in groups {
         logical_refs.sort();
         logical_refs.dedup();
         check_authority(source, None)?;
@@ -4457,6 +5120,7 @@ fn retain_plan_backups(
         backups.push(create_or_verify_backup_with_hook(
             source,
             backup_dir,
+            &backup_file_name(&physical_id),
             logical_refs,
             expected,
             race_hook,
@@ -4780,6 +5444,7 @@ fn run_wiki_corpus_command_internal(
             backup_manifest: None,
             migration_outcomes: Vec::new(),
             warnings,
+            sibling_repair: None,
         });
     }
     let plan = match plan_path {
@@ -4799,6 +5464,132 @@ fn run_wiki_corpus_command_internal(
         backup_manifest: Some(backup_manifest),
         migration_outcomes,
         warnings,
+        sibling_repair: None,
+    })
+}
+
+/// `tachi wiki corpus --repair-sibling-damage`.
+///
+/// In-band compensation for the terminal state the sibling-worker race used to
+/// leave behind: a deterministic target archived with a `target_noncanonical`
+/// receipt whose source row is already superseded by it, which the user read
+/// surface (`archived = 0 AND superseded_by IS NULL`) hides and which every
+/// later apply dead-ends on with an occupant collision.
+///
+/// It is its own confirmed mode with its own token, and without `--confirm` it
+/// is a pure dry run that opens no store for writing.
+///
+/// Trust boundary: the repair signature is judged entirely against the
+/// `wiki_corpus_migration` receipt metadata written under `RECEIPT_KEY`, and
+/// that key is not in memcore's reserved-metadata list (`memory_crud.rs`'s
+/// `RESERVED_REFERENCE_KEYS` / `RESERVED_REM_KEY` / `RESERVED_WIKI_LOG_KEY`),
+/// so an ordinary memory write can set it. That does not hand a forger any
+/// new capability by itself -- forging a convincing repair still requires
+/// planting an id-bound `target_noncanonical` receipt on an archived,
+/// unsuperseded row *and* a matching `source_superseded` receipt plus a live
+/// supersession edge on the row it names as source, in two separate stores,
+/// consistent with each other. But this is the first verb in this module
+/// that *un-archives a row* on the strength of that metadata alone, so it is
+/// the first place that consistency is worth spelling out rather than
+/// assuming.
+pub(crate) fn run_wiki_corpus_sibling_repair_command(
+    apply: bool,
+    confirm: Option<String>,
+    backup_dir: Option<PathBuf>,
+    plan_path: Option<PathBuf>,
+    global_db: &Path,
+    project_db: Option<&Path>,
+    app_home: &Path,
+) -> Result<WikiCorpusReport, String> {
+    if apply {
+        return Err(
+            "--repair-sibling-damage is its own confirmed mode and cannot be combined with --apply"
+                .to_string(),
+        );
+    }
+    if plan_path.is_some() {
+        return Err(
+            "--repair-sibling-damage does not take --plan; each repair is derived from the damaged row's own migration receipt"
+                .to_string(),
+        );
+    }
+    let confirmed = match confirm.as_deref() {
+        None => {
+            if backup_dir.is_some() {
+                return Err(format!(
+                    "--backup-dir requires --confirm {}",
+                    WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN
+                ));
+            }
+            false
+        }
+        Some(token) if token == WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN => true,
+        Some(_) => {
+            return Err(format!(
+                "sibling-damage repair requires exact --confirm {}",
+                WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN
+            ))
+        }
+    };
+    let backup_dir = if confirmed {
+        let backup_dir = backup_dir
+            .ok_or_else(|| "sibling-damage repair requires explicit --backup-dir".to_string())?;
+        if regular_directory_metadata(&backup_dir).is_err() {
+            return Err(format!(
+                "sibling-damage repair requires an existing backup directory: {}",
+                backup_dir.display()
+            ));
+        }
+        Some(backup_dir)
+    } else {
+        None
+    };
+
+    let mut scans = store_specs(global_db, project_db, app_home)
+        .into_iter()
+        .map(inventory_store)
+        .collect::<Vec<_>>();
+    finalize_classifications(&mut scans);
+    for scan in scans.iter_mut() {
+        refresh_report(scan);
+    }
+    let warnings = scans
+        .iter()
+        .filter_map(|scan| {
+            scan.report
+                .read_failure
+                .as_ref()
+                .map(|failure| format!("{}: {}", scan.report.logical_store_ref, failure.message))
+        })
+        .collect::<Vec<_>>();
+
+    let repair = if confirmed {
+        validate_apply_inventory(&scans)?;
+        let current = reinventory_apply_scans(&scans);
+        validate_apply_inventory(&current)?;
+        let repair = repair_sibling_damage(&current, backup_dir.as_deref())?;
+        // Report the healed inventory, not the damaged snapshot the run started
+        // from, so `stores` and the report agree with each other.
+        scans = reinventory_apply_scans(&current);
+        repair
+    } else {
+        repair_sibling_damage(&scans, None)?
+    };
+
+    Ok(WikiCorpusReport {
+        version: REPORT_VERSION.to_string(),
+        mode: if confirmed {
+            "sibling_repair".to_string()
+        } else {
+            "sibling_repair_preview".to_string()
+        },
+        apply: confirmed,
+        stores: scans.into_iter().map(|scan| scan.report).collect(),
+        plan: None,
+        backup_manifest: None,
+        migration_outcomes: Vec::new(),
+        warnings,
+        sibling_repair: Some(repair),
     })
 }
 
@@ -5750,6 +6541,7 @@ mod tests {
             let error = create_or_verify_backup_with_hook(
                 &source,
                 &backup_dir,
+                &backup_file_name(&source.physical.as_ref().unwrap().physical_id),
                 vec![LogicalStore::LegacyGlobal.reference().to_string()],
                 &expected,
                 &mut race_hook,
@@ -7160,5 +7952,553 @@ mod tests {
             .migration_outcomes
             .iter()
             .all(|outcome| outcome.outcome == "existing_no_op"));
+    }
+
+    /// Put a completed migration into the exact terminal state the sibling
+    /// race used to leave behind: the canonical target is archived and carries
+    /// a `target_noncanonical` receipt while its source keeps the supersession
+    /// edge and the `source_superseded` receipt.
+    fn damage_completed_target_as_sibling_race(
+        target_path: &Path,
+        target_id: &str,
+        item: &PlanItem,
+        plan_id: &str,
+    ) {
+        let mut target_store =
+            MemoryStore::open_existing_read_write(&target_path.display().to_string()).unwrap();
+        reconcile_target_noncanonical(&mut target_store, target_id, item, plan_id).unwrap();
+        let damaged = target_store
+            .get_with_options(target_id, true)
+            .unwrap()
+            .unwrap();
+        assert!(
+            damaged.archived,
+            "the damage fixture must archive the target"
+        );
+    }
+
+    fn user_facing_ids(target_path: &Path, page_path: &str) -> Vec<String> {
+        let store =
+            MemoryStore::open_existing_read_write(&target_path.display().to_string()).unwrap();
+        store
+            .list_user_facing_wiki_entries(page_path, 10, false)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    fn corpus_scans(source_path: &Path, target_path: &Path) -> Vec<StoreScan> {
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, source_path),
+            fixture_scan(LogicalStore::SharedWiki, target_path),
+        ];
+        classify_scans(&mut scans);
+        scans
+    }
+
+    #[test]
+    fn sibling_race_damaged_target_is_repaired_back_onto_the_read_surface() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        let page_path = "/wiki/sibling-damage-repair";
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry_with_vector(
+                "source",
+                page_path,
+                shared_metadata(),
+                vec![0.11; 1024],
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let scans = corpus_scans(&source_path, &target_path);
+        let plan = build_plan(&scans).unwrap();
+        let item = plan.items[0].clone();
+        let target_id = item.target_id.clone().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let (_, outcomes) = apply_plan(&scans, &plan, &backup_dir).unwrap();
+        assert_eq!(outcomes[0].outcome, "copied_and_superseded");
+        assert_eq!(
+            user_facing_ids(&target_path, page_path),
+            vec![target_id.clone()]
+        );
+
+        damage_completed_target_as_sibling_race(&target_path, &target_id, &item, &plan.plan_id);
+        let damaged = corpus_scans(&source_path, &target_path);
+        let damaged_target = damaged[1].raw_row(&target_id).unwrap();
+        assert!(damaged_target.archived);
+        assert_eq!(
+            parse_migration_receipt(damaged_target)
+                .unwrap()
+                .unwrap()
+                .phase,
+            MigrationPhase::TargetNoncanonical
+        );
+        assert!(
+            user_facing_ids(&target_path, page_path).is_empty(),
+            "the damaged page must be invisible to every reader before the repair"
+        );
+
+        // The dead end this repair exists for, with its upgraded diagnosis.
+        let error = apply_plan(&damaged, &plan, &backup_dir)
+            .expect_err("a damaged target must still dead-end the migration");
+        assert!(
+            error.contains("deterministic target occupant collision"),
+            "{error}"
+        );
+        assert!(
+            error.contains("observed receipt_phase=target_noncanonical archived=true"),
+            "{error}"
+        );
+        assert!(
+            error.contains("expected receipt_phase=target_copied archived=false"),
+            "{error}"
+        );
+        assert!(error.contains("--repair-sibling-damage"), "{error}");
+
+        let repair_dir = directory.path().join("repair-backups");
+        fs::create_dir(&repair_dir).unwrap();
+        let report = repair_sibling_damage(&damaged, Some(&repair_dir)).unwrap();
+        assert_eq!(report.inspected_rows, 1);
+        assert_eq!(report.repairable, 1);
+        assert_eq!(report.repaired, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.rows[0].outcome, "repaired");
+        assert!(report.rows[0].skipped_reasons.is_empty());
+        assert_eq!(
+            report.backups.len(),
+            1,
+            "the mutated store must be backed up"
+        );
+
+        let healed = corpus_scans(&source_path, &target_path);
+        let target = healed[1].raw_row(&target_id).unwrap();
+        assert!(!target.archived);
+        assert!(target.superseded_by.is_none());
+        assert_eq!(
+            parse_migration_receipt(target).unwrap().unwrap().phase,
+            MigrationPhase::TargetCopied,
+            "the repaired row must hold the canonical terminal receipt"
+        );
+        let history = target
+            .metadata
+            .get(REPAIR_RECEIPT_KEY)
+            .and_then(Value::as_array)
+            .expect("the repair history must be preserved");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["phase"], json!(REPAIR_PHASE));
+        assert_eq!(
+            history[0]["replaced_receipt"]["phase"],
+            json!("target_noncanonical"),
+            "the replaced receipt must be kept verbatim instead of erased"
+        );
+        assert_eq!(
+            user_facing_ids(&target_path, page_path),
+            vec![target_id.clone()],
+            "the repaired page must be back on the user-facing read surface"
+        );
+
+        let (_, replay) = apply_plan(&healed, &plan, &backup_dir)
+            .expect("apply must converge on the repaired state instead of colliding");
+        assert_eq!(replay[0].outcome, "existing_no_op");
+    }
+
+    #[test]
+    fn foreign_source_supersession_is_reported_but_never_repaired() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry(
+                "source",
+                "/wiki/foreign-supersession-not-repairable",
+                shared_metadata(),
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let scans = corpus_scans(&source_path, &target_path);
+        let plan = build_plan(&scans).unwrap();
+        let target_id = plan.items[0].target_id.clone().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        apply_plan_with_race_hook(
+            &scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::ForeignSupersedeSourceBeforeAtomicTransition {
+                source_id: "source".to_string(),
+            },
+        )
+        .expect_err("foreign source supersession must win atomically");
+        // The hook installs a hard-delete assertion trigger; the surrounding
+        // test fixture drops it exactly like the reconciliation test does.
+        remove_memory_hard_delete_guard(&target_path);
+
+        let current = corpus_scans(&source_path, &target_path);
+        let damaged_target = current[1].raw_row(&target_id).unwrap();
+        assert!(damaged_target.archived);
+        assert_eq!(
+            parse_migration_receipt(damaged_target)
+                .unwrap()
+                .unwrap()
+                .phase,
+            MigrationPhase::TargetNoncanonical
+        );
+        let target_revision = damaged_target.revision;
+
+        let repair_dir = directory.path().join("repair-backups");
+        fs::create_dir(&repair_dir).unwrap();
+        let report = repair_sibling_damage(&current, Some(&repair_dir)).unwrap();
+        assert_eq!(report.inspected_rows, 1);
+        assert_eq!(report.repairable, 0);
+        assert_eq!(report.repaired, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.rows[0].outcome, "skipped");
+        assert!(
+            report.rows[0]
+                .skipped_reasons
+                .iter()
+                .any(|reason| reason.contains("is superseded by foreign-wiki-target")),
+            "{:?}",
+            report.rows[0].skipped_reasons
+        );
+        assert!(
+            report.rows[0]
+                .skipped_reasons
+                .iter()
+                .any(|reason| reason.contains("does not carry a source_superseded receipt")),
+            "{:?}",
+            report.rows[0].skipped_reasons
+        );
+        assert!(
+            report.backups.is_empty(),
+            "a run with nothing to repair must not touch the backup directory"
+        );
+        assert!(directory_snapshot(&repair_dir).is_empty());
+
+        let after = corpus_scans(&source_path, &target_path);
+        let untouched = after[1].raw_row(&target_id).unwrap();
+        assert_eq!(untouched.revision, target_revision);
+        assert!(untouched.archived);
+        assert_eq!(
+            parse_migration_receipt(untouched).unwrap().unwrap().phase,
+            MigrationPhase::TargetNoncanonical
+        );
+    }
+
+    #[test]
+    fn archived_target_without_the_noncanonical_receipt_is_reported_not_repaired() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry(
+                "source",
+                "/wiki/archived-without-noncanonical-receipt",
+                shared_metadata(),
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let scans = corpus_scans(&source_path, &target_path);
+        let plan = build_plan(&scans).unwrap();
+        let target_id = plan.items[0].target_id.clone().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        apply_plan(&scans, &plan, &backup_dir).unwrap();
+
+        // Archive the canonical target while leaving its `target_copied`
+        // receipt in place: archived, but not the sibling-race signature.
+        let mut target_store =
+            MemoryStore::open_existing_read_write(&target_path.display().to_string()).unwrap();
+        let entry = target_store
+            .get_with_options(&target_id, true)
+            .unwrap()
+            .unwrap();
+        let metadata = entry.metadata.clone();
+        let expected = ExpectedMemoryState::from_entry(&entry, None);
+        assert!(target_store
+            .archive_with_metadata_if_expected_state(&target_id, &metadata, &expected)
+            .unwrap());
+        drop(target_store);
+
+        let current = corpus_scans(&source_path, &target_path);
+        let revision = current[1].raw_row(&target_id).unwrap().revision;
+        let repair_dir = directory.path().join("repair-backups");
+        fs::create_dir(&repair_dir).unwrap();
+        let report = repair_sibling_damage(&current, Some(&repair_dir)).unwrap();
+        assert_eq!(report.inspected_rows, 1);
+        assert_eq!(report.repairable, 0);
+        assert_eq!(report.repaired, 0);
+        assert_eq!(report.rows[0].outcome, "skipped");
+        assert_eq!(
+            report.rows[0].observed_receipt_phase.as_deref(),
+            Some("target_copied")
+        );
+        assert!(
+            report.rows[0]
+                .skipped_reasons
+                .iter()
+                .any(|reason| reason
+                    .contains("receipt phase is target_copied, not target_noncanonical")),
+            "{:?}",
+            report.rows[0].skipped_reasons
+        );
+
+        let after = corpus_scans(&source_path, &target_path);
+        let untouched = after[1].raw_row(&target_id).unwrap();
+        assert_eq!(untouched.revision, revision);
+        assert!(untouched.archived);
+    }
+
+    #[test]
+    fn copy_identity_drift_is_reported_but_never_repaired() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        let page_path = "/wiki/copy-identity-drift";
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry("source", page_path, shared_metadata())],
+        );
+        create_current_fixture(&target_path, &[]);
+        let scans = corpus_scans(&source_path, &target_path);
+        let plan = build_plan(&scans).unwrap();
+        let item = plan.items[0].clone();
+        let target_id = item.target_id.clone().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        apply_plan(&scans, &plan, &backup_dir).unwrap();
+
+        damage_completed_target_as_sibling_race(&target_path, &target_id, &item, &plan.plan_id);
+
+        // Every other clause of the repair signature now matches; drift the
+        // target's text directly (a foreign writer, not the repair
+        // machinery) so its copy identity stops matching the receipt's
+        // captured source identity. This is the clause that binds the row to
+        // *this content*, not merely to this row's shape, and it is the one
+        // future refactors of `copy_identity_sha256` are most likely to
+        // silently break.
+        let target_connection = Connection::open(&target_path).unwrap();
+        assert_eq!(
+            target_connection
+                .execute(
+                    "UPDATE memories SET text = ?1 WHERE id = ?2",
+                    rusqlite::params!["drifted after the receipt was captured", target_id],
+                )
+                .unwrap(),
+            1
+        );
+        drop(target_connection);
+
+        let current = corpus_scans(&source_path, &target_path);
+        let damaged_target = current[1].raw_row(&target_id).unwrap();
+        assert!(damaged_target.archived);
+        let target_revision = damaged_target.revision;
+
+        let repair_dir = directory.path().join("repair-backups");
+        fs::create_dir(&repair_dir).unwrap();
+        let report = repair_sibling_damage(&current, Some(&repair_dir)).unwrap();
+        assert_eq!(report.inspected_rows, 1);
+        assert_eq!(report.repairable, 0);
+        assert_eq!(report.repaired, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.rows[0].outcome, "skipped");
+        assert!(
+            report.rows[0]
+                .skipped_reasons
+                .iter()
+                .any(|reason| reason.contains("does not match the receipt item's")),
+            "{:?}",
+            report.rows[0].skipped_reasons
+        );
+        assert!(
+            report.backups.is_empty(),
+            "a run with nothing to repair must not touch the backup directory"
+        );
+        assert!(directory_snapshot(&repair_dir).is_empty());
+
+        let after = corpus_scans(&source_path, &target_path);
+        let untouched = after[1].raw_row(&target_id).unwrap();
+        assert_eq!(untouched.revision, target_revision);
+        assert!(untouched.archived);
+        assert_eq!(
+            parse_migration_receipt(untouched).unwrap().unwrap().phase,
+            MigrationPhase::TargetNoncanonical,
+            "an unrepaired row must keep the damage signature intact for a later, correct repair"
+        );
+    }
+
+    #[test]
+    fn sibling_repair_command_dry_runs_before_it_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let global_path = directory.path().join("global.db");
+        let project_path = directory.path().join("project.db");
+        let app_home = directory.path().join("home");
+        let shared_path = app_home.join("projects/wiki/memory.db");
+        let page_path = "/wiki/global-repair";
+        fs::create_dir_all(shared_path.parent().unwrap()).unwrap();
+        create_current_fixture(
+            &global_path,
+            &[fixture_entry("global", page_path, shared_metadata())],
+        );
+        create_current_fixture(&project_path, &[]);
+        create_current_fixture(&shared_path, &[]);
+
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let applied = run_wiki_corpus_command(
+            true,
+            Some(WIKI_CORPUS_CONFIRMATION_TOKEN.to_string()),
+            Some(backup_dir.clone()),
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+        let plan = applied.plan.clone().unwrap();
+        let item = plan.items[0].clone();
+        let target_id = item.target_id.clone().unwrap();
+        damage_completed_target_as_sibling_race(&shared_path, &target_id, &item, &plan.plan_id);
+
+        let repair_dir = directory.path().join("repair-backups");
+        fs::create_dir(&repair_dir).unwrap();
+        let before = db_snapshot_fingerprint(&db_snapshot(&shared_path));
+
+        let refused = run_wiki_corpus_sibling_repair_command(
+            true,
+            Some(WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN.to_string()),
+            Some(repair_dir.clone()),
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .expect_err("repair must refuse to ride along with --apply");
+        assert!(
+            refused.contains("cannot be combined with --apply"),
+            "{refused}"
+        );
+        let refused = run_wiki_corpus_sibling_repair_command(
+            false,
+            Some("MIGRATE_WIKI_CORPUS_V1".to_string()),
+            Some(repair_dir.clone()),
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .expect_err("the apply token must not confirm a repair");
+        assert!(refused.contains("requires exact --confirm"), "{refused}");
+        let refused = run_wiki_corpus_sibling_repair_command(
+            false,
+            None,
+            Some(repair_dir.clone()),
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .expect_err("a backup directory without a token must not write");
+        assert!(
+            refused.contains("--backup-dir requires --confirm"),
+            "{refused}"
+        );
+        let refused = run_wiki_corpus_sibling_repair_command(
+            false,
+            Some(WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN.to_string()),
+            None,
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .expect_err("a confirmed repair without --backup-dir must not write");
+        assert!(
+            refused.contains("requires explicit --backup-dir"),
+            "{refused}"
+        );
+        let refused = run_wiki_corpus_sibling_repair_command(
+            false,
+            Some(WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN.to_string()),
+            Some(directory.path().join("does-not-exist")),
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .expect_err("a confirmed repair with a nonexistent backup directory must not write");
+        assert!(
+            refused.contains("requires an existing backup directory"),
+            "{refused}"
+        );
+
+        let preview = run_wiki_corpus_sibling_repair_command(
+            false,
+            None,
+            None,
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+        assert_eq!(preview.mode, "sibling_repair_preview");
+        assert!(!preview.apply);
+        let preview_repair = preview.sibling_repair.clone().unwrap();
+        assert!(!preview_repair.confirmed);
+        assert_eq!(preview_repair.repairable, 1);
+        assert_eq!(preview_repair.repaired, 0);
+        assert_eq!(preview_repair.rows[0].outcome, "repairable");
+        assert_eq!(preview_repair.rows[0].id, target_id);
+        assert!(preview_repair.backups.is_empty());
+        assert!(preview_repair.backup_directory.is_none());
+        assert_eq!(
+            db_snapshot_fingerprint(&db_snapshot(&shared_path)),
+            before,
+            "the dry run must not write a single byte"
+        );
+        assert!(directory_snapshot(&repair_dir).is_empty());
+        assert!(user_facing_ids(&shared_path, page_path).is_empty());
+
+        let repaired = run_wiki_corpus_sibling_repair_command(
+            false,
+            Some(WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN.to_string()),
+            Some(repair_dir.clone()),
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+        assert_eq!(repaired.mode, "sibling_repair");
+        assert!(repaired.apply);
+        let repaired_report = repaired.sibling_repair.clone().unwrap();
+        assert!(repaired_report.confirmed);
+        assert_eq!(repaired_report.repaired, 1);
+        assert_eq!(repaired_report.rows[0].outcome, "repaired");
+        assert_eq!(repaired_report.backups.len(), 1);
+        assert_eq!(user_facing_ids(&shared_path, page_path), vec![target_id]);
+
+        // A second confirmed run has nothing left to inspect.
+        let again = run_wiki_corpus_sibling_repair_command(
+            false,
+            Some(WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN.to_string()),
+            Some(repair_dir),
+            None,
+            &global_path,
+            Some(&project_path),
+            &app_home,
+        )
+        .unwrap();
+        let again = again.sibling_repair.clone().unwrap();
+        assert_eq!(again.inspected_rows, 0);
+        assert_eq!(again.repaired, 0);
     }
 }

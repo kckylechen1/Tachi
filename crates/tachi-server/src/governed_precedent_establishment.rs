@@ -1,3 +1,4 @@
+// Gated per #1564 pending owner disposition; owning contract: #1077.
 //! #1077 PR5 — governed, append-only precedent establishment.
 //!
 //! `precedent_candidate_ops` deliberately captures only pending candidate

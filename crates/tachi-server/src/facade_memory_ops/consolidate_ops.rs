@@ -81,10 +81,35 @@ impl ConsolidationExclusionReason {
     }
 }
 
+/// Placeholder emitted instead of an internal row's real id in the scope
+/// accounting samples (tachi#1561 L5). Constant, not per-row derived: a
+/// per-row token would still be a stable handle to a specific internal row.
+const REDACTED_INTERNAL_ID: &str = "<redacted:internal-row>";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConsolidationExclusion {
     id: String,
     reason: ConsolidationExclusionReason,
+    /// tachi#1561 (L5): `consolidate` scans by `path_prefix` and reports the
+    /// ids it declined to touch. That accounting is genuinely useful for
+    /// "why did this scan do nothing" — but for internal bookkeeping rows it
+    /// was an id-level enumeration oracle: a caller could point `consolidate`
+    /// at any prefix and read back the exact ids of wiki `_log` entries,
+    /// reserved `wiki-rem:` operation drafts, recall-cache rows and anchors,
+    /// which the read surfaces are meant to withhold. Counting them is
+    /// harmless; naming them is the leak, so the id is redacted while
+    /// `count`/`by_reason` stay exact.
+    redact_id: bool,
+}
+
+impl ConsolidationExclusion {
+    fn reported_id(&self) -> &str {
+        if self.redact_id {
+            REDACTED_INTERNAL_ID
+        } else {
+            self.id.as_str()
+        }
+    }
 }
 
 struct ConsolidationScope {
@@ -110,9 +135,11 @@ impl ConsolidationScope {
                 protection_reason(&entry)
             };
             if let Some(reason) = exclusion {
+                let redact_id = memcore::is_namespace_search_noise(&entry, Some(path_prefix));
                 exclusions.push(ConsolidationExclusion {
                     id: entry.id,
                     reason,
+                    redact_id,
                 });
             } else {
                 eligible.push(entry);
@@ -144,7 +171,7 @@ impl ConsolidationScope {
             .take(SCOPE_ACCOUNTING_SAMPLE_LIMIT)
             .map(|exclusion| {
                 json!({
-                    "id": exclusion.id,
+                    "id": exclusion.reported_id(),
                     "reason": exclusion.reason.as_str(),
                 })
             })

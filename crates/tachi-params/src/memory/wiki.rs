@@ -309,7 +309,6 @@ pub struct TachiWikiOrganizeParams {
     /// When true, report planned moves / frontmatter / task-sync changes
     /// WITHOUT touching the filesystem (no moves, no writes, no _index.md
     /// rebuild). Defaults to true (in preview mode).
-    #[serde(default)]
     #[schemars(default = "default_true")]
     pub dry_run: bool,
 }
@@ -319,6 +318,13 @@ impl<'de> Deserialize<'de> for TachiWikiOrganizeParams {
     where
         D: Deserializer<'de>,
     {
+        // `TachiWikiOrganizeParams` does not derive `Deserialize` (see the
+        // struct's `#[derive(...)]` above), so a `#[serde(default)]` on the
+        // struct field itself is inert — the real "omitted dry_run defaults
+        // to true" behavior lives entirely in this hand-written `WireParams`
+        // shim's `#[serde(default = "default_true")]` below. Regression
+        // coverage: `wiki_organize_omitted_dry_run_defaults_to_preview_at_handler_boundary`
+        // in `crates/tachi-server/src/tests/docs_tests/safety.rs`.
         #[derive(Deserialize)]
         struct WireParams {
             dir_path: String,

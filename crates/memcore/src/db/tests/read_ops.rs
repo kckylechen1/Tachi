@@ -414,6 +414,81 @@ fn user_facing_wiki_projection_excludes_rem_operations_even_with_lifecycle_all()
     );
 }
 
+/// tachi#1561 item 1: `is_namespace_search_noise` has always dropped anchor
+/// plumbing rows and every search query carries an `anchor:`-id exclusion, but
+/// the wiki-corpus projection did not — so anchors reached every surface built
+/// on `list_user_facing_wiki_entries` (browse, read, lint, obsidian export).
+/// Asserts both directions: anchors gone, ordinary wiki page still projected.
+#[test]
+fn user_facing_wiki_projection_excludes_anchor_rows() {
+    let mut conn = make_conn();
+
+    // This row must be excluded by its **id** alone, so its path has to stay
+    // an ordinary `/wiki` page — `ensure_anchor` cannot build it, because it
+    // also forces `/anchors/<kind>/<key>` and would move the row onto the
+    // path branch, leaving `id NOT GLOB 'anchor:*'` untested. Write it
+    // through the ordinary insert seam under a non-reserved id and then
+    // rename it, the same fixture shape this file already uses above to mint
+    // the reserved `WIKI_LOG` topic. Every other column is byte-for-byte what
+    // the normal write path produces, so the id is the only thing that can
+    // account for the row's absence from the projection.
+    let mut anchor_by_id = make_entry("anchor:issue:kckylechen1/tachi:1561", "anchor plumbing");
+    anchor_by_id.path = "/wiki/agent/tachi".to_string();
+    let mut seed_anchor_by_id = anchor_by_id.clone();
+    seed_anchor_by_id.id = "anchor-id-seed".to_string();
+    insert_if_absent(&mut conn, &seed_anchor_by_id, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET id = 'anchor:issue:kckylechen1/tachi:1561' \
+         WHERE id = 'anchor-id-seed'",
+        [],
+    )
+    .unwrap();
+
+    let mut anchor_by_path = make_entry("anchor-row-by-path", "anchor plumbing");
+    anchor_by_path.path = "/anchors/issue/kckylechen1/tachi:1561".to_string();
+    insert_if_absent(&mut conn, &anchor_by_path, false).unwrap();
+
+    let mut real = make_entry("wiki-anchor-control", "durable user-facing knowledge");
+    real.path = "/wiki/agent/real".to_string();
+    upsert(&mut conn, &real, false).unwrap();
+
+    // A `/wiki/anchors/...` page is NOT the `/anchors` namespace — the
+    // exclusion is rooted at the store root, not a substring match.
+    let mut about_anchors = make_entry("wiki-about-anchors", "a page about anchors");
+    about_anchors.path = "/wiki/anchors-explained".to_string();
+    upsert(&mut conn, &about_anchors, false).unwrap();
+
+    assert!(!crate::db::is_user_facing_wiki_entry(&anchor_by_id));
+    assert!(!crate::db::is_user_facing_wiki_entry(&anchor_by_path));
+    assert!(crate::db::is_user_facing_wiki_entry(&real));
+    assert!(crate::db::is_user_facing_wiki_entry(&about_anchors));
+
+    let wiki_ids = list_user_facing_wiki_entries(&conn, "/wiki", 10, false)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wiki_ids,
+        vec![
+            "wiki-anchor-control".to_string(),
+            "wiki-about-anchors".to_string(),
+        ],
+        "anchor ids must not reach the wiki corpus projection, \
+         and ordinary pages must survive it"
+    );
+
+    let all_ids = list_user_facing_wiki_entries(&conn, "/", 10, false)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    assert!(
+        !all_ids.iter().any(|id| id == "anchor-row-by-path"),
+        "the /anchors namespace must not reach the projection either: {all_ids:?}"
+    );
+}
+
 #[test]
 fn ordinary_draft_projection_can_update_non_rem_drafts_only() {
     let mut conn = make_conn();

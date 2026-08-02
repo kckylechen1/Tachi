@@ -50,6 +50,11 @@ pub mod agent_profile;
 // #1297 leaf 1. Portable-kernel, not admin-gated: it has no network, no `gh`,
 // no `Connection`, and a downstream consumer pinning this crate wants a
 // complete memcore. Schema delta: zero — assertions ride `tachi_events`.
+//
+// Gated per #1564 pending owner disposition (verified dead: exported but
+// zero functional references from tachi-server or elsewhere in this crate,
+// only its own tests reference it). Owning contract: #1297.
+#[cfg(feature = "contract-leaves")]
 pub mod current_truth;
 pub mod db;
 pub mod embed_config;
@@ -79,6 +84,7 @@ pub use agent_profile::{
     AgentProfileIdentity, AgentProfilePack, AgentProfileRule, AgentProfileSource,
     RenderedAgentProfile, AGENT_PROFILE_PACK_SCHEMA_VERSION,
 };
+#[cfg(feature = "contract-leaves")]
 pub use current_truth::{
     build_truth_assertion_event, classify_assertion, decode_truth_assertion, derive_action_queue,
     reduce_current_truth, truth_assertion_event_id, ActionItemV1, ActionKindV1, AssertionRefV1,
@@ -165,12 +171,12 @@ pub use foundry::{
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
-    is_handoff_entry, is_kanban_entry, is_namespace_search_noise, is_recall_cache_entry,
-    is_reserved_wiki_rem_id, is_wiki_entry, path_contains_recall_cache, path_in_namespace,
-    path_prefix_opts_into_continuity_projection, path_prefix_opts_into_recall_cache, surface_of,
-    surface_sql_clause, Surface, DOCS_SURFACE_SQL_WHERE, DOCS_SURFACE_SQL_WHERE_M,
-    FOUNDRY_RECALL_CACHE_SOURCE, RECALL_CACHE_SQL_WHERE, RECALL_CACHE_SQL_WHERE_M,
-    WIKI_REM_OPERATION_ID_PREFIX,
+    is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,
+    is_recall_cache_entry, is_reserved_wiki_rem_id, is_wiki_entry, path_contains_recall_cache,
+    path_in_namespace, path_prefix_opts_into_continuity_projection,
+    path_prefix_opts_into_recall_cache, surface_of, surface_sql_clause, Surface,
+    DOCS_SURFACE_SQL_WHERE, DOCS_SURFACE_SQL_WHERE_M, FOUNDRY_RECALL_CACHE_SOURCE,
+    RECALL_CACHE_SQL_WHERE, RECALL_CACHE_SQL_WHERE_M, WIKI_REM_OPERATION_ID_PREFIX,
 };
 pub use near_dup::{near_duplicate_raw_pairs, text_token_jaccard, NEAR_DUP_RAW_SCAN_CAP};
 pub use noise::{is_noise_text, should_skip_query};

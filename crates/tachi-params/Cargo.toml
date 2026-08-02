@@ -4,6 +4,14 @@ version = "1.9.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 
+# #1564 — gates verified-dead-code stacks (zero production callers) behind an
+# explicit, default-off feature instead of deleting them outright. Deletion
+# is an owner-per-stack call (#1564); this feature only makes each stack's
+# on/off state visible and testable, and keeps the default build
+# byte-identical to today.
+[features]
+contract-leaves = []
+
 [dependencies]
 memcore = { path = "../memcore" }
 chrono = { workspace = true }

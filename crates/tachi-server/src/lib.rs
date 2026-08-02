@@ -140,6 +140,10 @@ mod foundry_scheduler;
 mod gh_ops;
 mod gh_safe_merge;
 pub mod github_corpus_ops;
+// Gated per #1564 pending owner disposition (verified dead: zero production
+// callers, private mod, only its own tests reference it). Owning contract:
+// #1077 (governed precedent establishment).
+#[cfg(feature = "contract-leaves")]
 mod governed_precedent_establishment;
 mod handoff_ops;
 mod host_profile;

@@ -32,6 +32,15 @@ pub(crate) async fn handle_sync_memories(
         all_entries.extend(project_entries.into_iter().map(|e| (e, DbScope::Project)));
     }
 
+    // tachi#1561 (L7): `sync_memories` defaults to `path_prefix = "/"`, so a
+    // bare sync used to hand an agent every internal bookkeeping row in the
+    // store (wiki `_log`, `wiki-rem:` drafts, recall-cache, anchors,
+    // continuity projections) with full bodies. Filter with the same predicate
+    // search and `list_memories` use, passing the caller's prefix so the
+    // existing explicit opt-ins (`/recall-cache*`, `/kanban*`, `/handoff*`,
+    // projection prefixes) still resolve. Runs before the limit so bookkeeping
+    // rows cannot crowd out real changes.
+    all_entries.retain(|(entry, _)| crate::memory_ops::is_listable_row(entry, Some(path_prefix)));
     all_entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));
     all_entries.truncate(limit);
 

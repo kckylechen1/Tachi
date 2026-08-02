@@ -894,3 +894,45 @@ async fn wiki_lint_rejects_unknown_check_names() {
         "{error}"
     );
 }
+
+/// tachi#1561 (L6): `wiki_lint` is wiki-corpus hygiene, but its `path_prefix`
+/// went straight into `list_wiki_entries_for_plan` with no root check — so
+/// `path_prefix="/"` (or `/anchors`, `/user/affect`, ...) turned a lint call
+/// into a whole-store walker that reports id, path and timestamp for every row
+/// it touches. Clamp to the same knowledge roots `browse`/`read` accept, and
+/// fail loudly rather than silently narrowing to `/wiki` (a silent narrowing
+/// would make the report claim coverage it never had).
+#[tokio::test]
+async fn wiki_lint_clamps_path_prefix_to_the_knowledge_artifact_roots() {
+    let server = make_server();
+
+    let lint_params = |prefix: &str| WikiLintParams {
+        path_prefix: Some(prefix.to_string()),
+        checks: vec!["orphans".to_string()],
+        limit: 10,
+        stale_days: 90,
+        missing_edge_threshold: 0.85,
+        contradiction_threshold: 0.85,
+        include_skill_quality: false,
+        persist_stale: false,
+        project: None,
+    };
+
+    for out_of_root in ["/", "/anchors", "/user/affect", "/scratch"] {
+        let error = server
+            .wiki_lint(Parameters(lint_params(out_of_root)))
+            .await
+            .expect_err("out-of-root lint scope must fail closed");
+        assert!(
+            error.contains("invalid wiki_lint path_prefix"),
+            "prefix {out_of_root} must be rejected as a parameter error: {error}"
+        );
+    }
+
+    for in_root in ["/wiki", "/wiki/engineering", "/guide", "/guide/tachi"] {
+        server
+            .wiki_lint(Parameters(lint_params(in_root)))
+            .await
+            .unwrap_or_else(|error| panic!("{in_root} must stay lintable: {error}"));
+    }
+}

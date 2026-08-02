@@ -61,7 +61,10 @@ fn knowledge_artifact_root(path: &str) -> &'static str {
     }
 }
 
-fn is_public_knowledge_artifact_path(path: &str) -> bool {
+/// The two knowledge-artifact roots this crate is willing to project as
+/// wiki-corpus content. Shared with `lint` so its `path_prefix` clamp uses the
+/// same judgment `browse`/`read` already apply (tachi#1561 L6).
+pub(super) fn is_public_knowledge_artifact_path(path: &str) -> bool {
     path == "/wiki" || path.starts_with("/wiki/") || path == "/guide" || path.starts_with("/guide/")
 }
 

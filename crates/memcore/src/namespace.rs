@@ -52,11 +52,27 @@ pub const RECALL_CACHE_SQL_WHERE_M: &str = r#"
 
 /// SQL classifier for the user-facing Wiki corpus. Keep this aligned with
 /// [`is_user_facing_wiki_entry`].
+///
+/// The anchor terms (`id GLOB 'anchor:*'`, `path = '/anchors'`, `path GLOB
+/// '/anchors/*'`) are the negation of `vector_backfill::ANCHOR_SQL_WHERE` and
+/// are spelled out inline because Rust `const` string concatenation is
+/// literal-only (`concat!` takes literals, not const idents). They are
+/// deliberately **case-sensitive** `GLOB`, not `lower(id) GLOB`, so they match
+/// [`is_anchor_entry`]'s `id.starts_with("anchor:")` byte-for-byte — the same
+/// case-sensitivity `vector_backfill`'s
+/// `anchor_membership_is_case_sensitive_like_the_rust_classifier` freezes.
+/// (Contrast the `wiki-rem:` term above, which *is* `lower(...)`-folded
+/// because [`is_reserved_wiki_rem_id`] is ASCII-case-insensitive by design.)
+/// `namespace::tests::anchor_sql_and_rust_classifiers_agree` asserts the two
+/// sides cannot drift.
 pub const USER_FACING_WIKI_SQL_WHERE: &str = r#"
     path != '/wiki/_log'
     AND path NOT GLOB '/wiki/_log/*'
     AND lower(topic) != 'wiki_log'
     AND lower(id) NOT GLOB 'wiki-rem:*'
+    AND id NOT GLOB 'anchor:*'
+    AND path != '/anchors'
+    AND path NOT GLOB '/anchors/*'
     AND lower(id) != 'foundry_recall_rerank_cache'
     AND lower(id) NOT GLOB 'foundry:recall-cache:*'
     AND path NOT GLOB '*/recall-cache'
@@ -76,6 +92,9 @@ pub const USER_FACING_WIKI_SQL_WHERE_M: &str = r#"
     AND m.path NOT GLOB '/wiki/_log/*'
     AND lower(m.topic) != 'wiki_log'
     AND lower(m.id) NOT GLOB 'wiki-rem:*'
+    AND m.id NOT GLOB 'anchor:*'
+    AND m.path != '/anchors'
+    AND m.path NOT GLOB '/anchors/*'
     AND lower(m.id) != 'foundry_recall_rerank_cache'
     AND lower(m.id) NOT GLOB 'foundry:recall-cache:*'
     AND m.path NOT GLOB '*/recall-cache'
@@ -161,10 +180,22 @@ pub fn is_wiki_log_entry(entry: &MemoryEntry) -> bool {
         || metadata_bool_or_one(entry, "wiki_log")
 }
 
+/// Rust counterpart of [`USER_FACING_WIKI_SQL_WHERE`]. Every internal class the
+/// SQL predicate excludes must be excluded here too, or a row filtered out of
+/// the SQL projection can still walk back in through a Rust-side `.filter()`
+/// (and vice versa).
+///
+/// tachi#1561: anchors were the drifted class — [`is_namespace_search_noise`]
+/// has always dropped them unconditionally and every search query carries an
+/// `anchor:`-id exclusion, but this classifier and its SQL mirror did not, so
+/// wiki-corpus read surfaces (`list_user_facing_wiki_entries` and everything
+/// built on it: browse, read, lint, obsidian export) still projected anchor
+/// plumbing rows.
 pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
     !is_reserved_wiki_rem_id(&entry.id)
         && !is_wiki_log_entry(entry)
         && !is_recall_cache_entry(entry)
+        && !is_anchor_entry(entry)
 }
 
 pub fn is_wiki_entry(entry: &MemoryEntry) -> bool {
@@ -377,6 +408,45 @@ pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>)
         || is_reserved_wiki_rem_id(&entry.id)
 }
 
+/// Whether `entry` is bookkeeping the store itself owns — never content a
+/// caller who already knows the id should be able to fetch verbatim.
+///
+/// tachi#1561 wave2 follow-up: `get`/id-addressed reads initially reused
+/// [`is_namespace_search_noise`] wholesale (same predicate `search` filters
+/// candidates through), but that predicate also drops kanban cards, handoff
+/// notes, and continuity projections whenever the caller passes no
+/// `path_prefix` — and an id-addressed lookup has no `path_prefix` to opt
+/// back in with. Those three classes are the owner's own content (kanban
+/// board state, session handoffs, continuity-projection snapshots); they are
+/// only noise on *listing/search* surfaces where nothing asked for them by
+/// name. Withholding them from a precise `get(id)` is over-tightening: the
+/// leak this closes is "searchable without being asked for", not "must never
+/// be retrievable by the id the caller already holds".
+///
+/// So the two predicates split by **surface**, not by strictness:
+///
+/// - [`is_namespace_search_noise`] answers "should this row surface in a
+///   listing/search result the caller did not address by id" — wide, and
+///   deliberately excludes the owner's own projection-shaped content unless
+///   the query's `path_prefix` opts back in.
+/// - `is_internal_only_row` answers "is this a row the store's internal
+///   machinery would never want handed back to *any* id-addressed caller" —
+///   narrow, and covers only rows nothing outside the store's own storage
+///   layer ever produced on purpose: Wiki REM recovery drafts, the Wiki
+///   operation log, the recall-rerank cache, and anchor plumbing rows. It
+///   takes no `path_prefix` because there is no opt-in shape for an
+///   id-addressed read — the id itself is the address.
+///
+/// `readable_entry` in `tachi-server`'s `get` surface is the current caller;
+/// any future id-addressed read surface should reach for this, not
+/// [`is_namespace_search_noise`].
+pub fn is_internal_only_row(entry: &MemoryEntry) -> bool {
+    is_wiki_log_entry(entry)
+        || is_reserved_wiki_rem_id(&entry.id)
+        || is_recall_cache_entry(entry)
+        || is_anchor_entry(entry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +507,160 @@ mod tests {
             "unscoped search must treat reserved wiki-rem ids as noise, \
              not surface unreviewed draft bodies"
         );
+    }
+
+    /// Evaluate a wiki-corpus SQL classifier over `entries` in a throwaway
+    /// in-memory table, returning the ids the predicate keeps. `qualified`
+    /// picks [`USER_FACING_WIKI_SQL_WHERE_M`] over
+    /// [`USER_FACING_WIKI_SQL_WHERE`] — both forms must classify identically,
+    /// and both must match the Rust classifier.
+    fn wiki_sql_kept_ids(entries: &[MemoryEntry], qualified: bool) -> Vec<String> {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                 id TEXT PRIMARY KEY,
+                 path TEXT NOT NULL,
+                 topic TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 metadata TEXT NOT NULL
+             );",
+        )
+        .expect("create classifier fixture table");
+        {
+            let mut stmt = conn
+                .prepare(
+                    "INSERT INTO memories (id, path, topic, source, metadata)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )
+                .expect("prepare fixture insert");
+            for entry in entries {
+                stmt.execute(rusqlite::params![
+                    entry.id,
+                    entry.path,
+                    entry.topic,
+                    entry.source,
+                    entry.metadata.to_string(),
+                ])
+                .expect("insert classifier fixture row");
+            }
+        }
+        let sql = if qualified {
+            format!(
+                "SELECT m.id FROM memories AS m
+                 WHERE ({USER_FACING_WIKI_SQL_WHERE_M}) ORDER BY m.id"
+            )
+        } else {
+            format!(
+                "SELECT id FROM memories
+                 WHERE ({USER_FACING_WIKI_SQL_WHERE}) ORDER BY id"
+            )
+        };
+        let mut stmt = conn.prepare(&sql).expect("prepare wiki classifier");
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .expect("run wiki classifier")
+            .collect::<Result<Vec<String>, _>>()
+            .expect("collect wiki classifier rows")
+    }
+
+    /// tachi#1561 item 1: anchor plumbing rows must be classified internal by
+    /// *every* wiki/search classifier, not just [`is_namespace_search_noise`].
+    /// Before this fix the two SQL predicates and
+    /// [`is_user_facing_wiki_entry`] all kept them, so `/wiki`-scoped read
+    /// surfaces projected anchor rows verbatim.
+    #[test]
+    fn anchor_sql_and_rust_classifiers_agree() {
+        let rows = vec![
+            // Anchor by id, parked under a wiki path — the exact leak shape.
+            fixture_entry(
+                "anchor:issue:kckylechen1/tachi:773",
+                "/wiki/agent/tachi",
+                "anchor plumbing row",
+            ),
+            // Anchor by path.
+            fixture_entry(
+                "6f1c0a2e-anchor-by-path",
+                "/anchors/issue/kckylechen1/tachi:773",
+                "anchor plumbing row",
+            ),
+            // Anchor namespace root itself.
+            fixture_entry("anchors-root", "/anchors", "anchor namespace root"),
+            // Ordinary user-facing wiki page.
+            fixture_entry(
+                "d290f1ee-6c54-4b01-90e6-d701748f0851",
+                "/wiki/xxx",
+                "ordinary user-facing wiki content",
+            ),
+            // Near-miss: `anchor`-shaped text that is NOT the anchor
+            // namespace. Must stay user-facing on both sides.
+            fixture_entry(
+                "anchorage-notes",
+                "/wiki/anchors-explained",
+                "a page about anchors, not an anchor",
+            ),
+        ];
+
+        for entry in &rows[..3] {
+            assert!(
+                is_anchor_entry(entry),
+                "fixture must be an anchor: {entry:?}"
+            );
+            assert!(
+                is_namespace_search_noise(entry, None),
+                "anchors are unconditional search noise: {entry:?}"
+            );
+            assert!(
+                is_namespace_search_noise(entry, Some("/wiki")),
+                "a wiki-scoped read must not opt back into anchors: {entry:?}"
+            );
+            assert!(
+                !is_user_facing_wiki_entry(entry),
+                "anchors must not be user-facing wiki corpus: {entry:?}"
+            );
+        }
+        for entry in &rows[3..] {
+            assert!(
+                !is_anchor_entry(entry),
+                "fixture must not be an anchor: {entry:?}"
+            );
+            assert!(
+                is_user_facing_wiki_entry(entry),
+                "the anchor exclusion must not eat ordinary wiki rows: {entry:?}"
+            );
+        }
+
+        let expected = rows[3..]
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            wiki_sql_kept_ids(&rows, false),
+            expected,
+            "USER_FACING_WIKI_SQL_WHERE must agree with is_user_facing_wiki_entry"
+        );
+        assert_eq!(
+            wiki_sql_kept_ids(&rows, true),
+            expected,
+            "USER_FACING_WIKI_SQL_WHERE_M must agree with is_user_facing_wiki_entry"
+        );
+    }
+
+    /// The anchor terms are case-sensitive `GLOB`, matching
+    /// `is_anchor_entry`'s `starts_with("anchor:")` — an `Anchor:`-cased id is
+    /// *not* an anchor on either side. Frozen so nobody "hardens" one side
+    /// into `lower(id)` without the other.
+    #[test]
+    fn anchor_membership_is_case_sensitive_on_both_sides() {
+        let rows = vec![fixture_entry(
+            "Anchor:Not-The-Reserved-Namespace",
+            "/wiki/general/mixed-case",
+            "mixed-case id is not an anchor",
+        )];
+        assert!(!is_anchor_entry(&rows[0]));
+        assert!(is_user_facing_wiki_entry(&rows[0]));
+        assert_eq!(wiki_sql_kept_ids(&rows, false), vec![rows[0].id.clone()]);
+        assert_eq!(wiki_sql_kept_ids(&rows, true), vec![rows[0].id.clone()]);
     }
 
     #[test]
