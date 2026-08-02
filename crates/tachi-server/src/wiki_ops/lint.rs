@@ -80,7 +80,27 @@ pub(crate) async fn handle_wiki_lint(
             VALID_CHECKS.join(", ")
         ));
     }
-    let path_prefix = params.path_prefix.as_deref().unwrap_or("/wiki");
+    // tachi#1561 (L6): `wiki_lint` is a wiki-corpus hygiene tool, but its
+    // `path_prefix` was passed straight to `list_wiki_entries_for_plan` with
+    // no root check — `path_prefix="/"` (or `/anchors`, `/user/affect`, ...)
+    // turned it into a whole-store walker that reports ids, paths and
+    // timestamps for every row it touches. Clamp to the same two knowledge
+    // roots `browse`/`read` accept (`is_public_knowledge_artifact_path`), and
+    // reject anything else as a parameter error rather than silently
+    // rewriting it to `/wiki` — a silently-narrowed scope would make a lint
+    // report claim coverage it never had.
+    let path_prefix = params
+        .path_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|prefix| !prefix.is_empty())
+        .unwrap_or("/wiki");
+    if !is_public_knowledge_artifact_path(path_prefix) {
+        return Err(format!(
+            "invalid wiki_lint path_prefix '{path_prefix}'; must be inside a knowledge \
+             artifact root (/wiki or /guide)"
+        ));
+    }
     let limit = params.limit.max(1).min(500);
     let stale_cutoff = Utc::now() - ChronoDuration::days(params.stale_days as i64);
     let plan = match params.project.as_deref() {

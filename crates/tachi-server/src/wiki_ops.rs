@@ -46,6 +46,7 @@ mod tests;
 use self::provenance::{
     attach_wiki_provenance, preferred_wiki_references, wiki_entry_matches_lifecycle_scope,
 };
+use self::search::is_public_knowledge_artifact_path;
 use self::similarity::{contradiction_score, parse_rfc3339_utc, token_cosine_similarity};
 use self::store::{
     entry_shares_normalized_entity, find_related_by_entities, is_ordinary_related_wiki_entry,

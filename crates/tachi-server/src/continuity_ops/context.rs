@@ -162,6 +162,20 @@ fn build_continuity_context_inner(
 
     for prefix in prefixes {
         for entry in list_projection_memories(server, &target, &prefix, limit)? {
+            // tachi#1561 (L4): the `memories` array below is emitted verbatim
+            // — the `is_projection` filters further down only build the extra
+            // typed arrays, they never gate the dump. `params.path_prefix` is
+            // caller-controlled, so `tachi_event(action='context',
+            // path_prefix='/')` walked the whole store into the response.
+            // Filter with the same predicate search/list use, scoped to the
+            // prefix this row was listed under: for the default projection
+            // prefixes `path_prefix_opts_into_continuity_projection` opts the
+            // projections back in (they are exactly what this surface exists
+            // to return), while wiki `_log` / `wiki-rem:` / recall-cache /
+            // anchor / kanban / handoff rows stay out under any prefix.
+            if memcore::is_namespace_search_noise(&entry, Some(prefix.as_str())) {
+                continue;
+            }
             if seen_ids.iter().any(|id| id == &entry.id) {
                 continue;
             }

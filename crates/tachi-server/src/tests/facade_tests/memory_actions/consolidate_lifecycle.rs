@@ -2967,3 +2967,75 @@ async fn consolidate_propose_near_dup_merge_for_chinese_cross_path_twins() {
         "Chinese cross-path twins must surface near_dup_merge: {parsed}"
     );
 }
+
+/// tachi#1561 (L5): scope accounting names the rows it declined to touch. For
+/// ordinary protected rows that is the point of the report; for internal
+/// bookkeeping rows it was an id-level enumeration oracle — point `consolidate`
+/// at a prefix and read back the exact ids of rows every read surface is
+/// supposed to withhold. Counts and `by_reason` must stay exact (a scan that
+/// silently under-reports is worse than one that redacts), only the id is
+/// withheld, and only for internal rows.
+#[tokio::test]
+async fn consolidate_scope_accounting_redacts_internal_row_ids_only() {
+    let server = make_server();
+
+    let mut cache = make_entry("foundry:recall-cache:consolidate-leak");
+    cache.path = "/scope/leak/recall-cache/entry".to_string();
+    cache.topic = "recall_rerank_cache".to_string();
+    cache.source = memcore::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+    cache.metadata = json!({ "cache_key": memcore::FOUNDRY_RECALL_CACHE_SOURCE });
+    cache.retention_policy = Some("durable".to_string());
+
+    let mut ordinary = make_entry("scope-leak-ordinary-protected");
+    ordinary.path = "/scope/leak/ordinary".to_string();
+    ordinary.retention_policy = Some("durable".to_string());
+
+    server
+        .with_global_store(|store| {
+            store.upsert(&cache).map_err(|e| e.to_string())?;
+            store.upsert(&ordinary).map_err(|e| e.to_string())
+        })
+        .expect("seed scope accounting fixtures");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scope/leak".to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+        .await
+        .expect("propose");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    let accounting = &parsed["scope_accounting"]["expected_exclusions"];
+
+    assert_eq!(
+        accounting["count"],
+        json!(2),
+        "both protected rows must still be counted: {parsed}"
+    );
+    assert_eq!(
+        accounting["by_reason"]["retention_policy"],
+        json!(2),
+        "redaction must not disturb the reason census: {parsed}"
+    );
+
+    let samples = accounting["samples"]
+        .as_array()
+        .cloned()
+        .expect("samples array");
+    assert!(
+        samples.iter().any(|sample| {
+            sample["id"] == json!("scope-leak-ordinary-protected")
+                && sample["reason"] == json!("retention_policy")
+        }),
+        "ordinary protected rows must still be named: {parsed}"
+    );
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample["id"] == json!("<redacted:internal-row>")),
+        "the internal row must still occupy a sample slot, redacted: {parsed}"
+    );
+    assert!(
+        !body.contains("foundry:recall-cache:consolidate-leak"),
+        "internal row id leaked through consolidate scope accounting: {body}"
+    );
+}

@@ -8,6 +8,48 @@ use memcore::{GcConfig, MemoryEntry, MemoryStore};
 use serde_json::json;
 use std::collections::HashMap;
 
+/// tachi#1561 (L1/L3): `get` is an id-addressed read surface and carried no
+/// namespace filter at all — any internal bookkeeping row (wiki `_log`,
+/// reserved `wiki-rem:` operation drafts, recall-cache rows, anchors) came
+/// back with its full body as long as the caller knew the id.
+///
+/// The rejection reuses [`memcore::is_internal_only_row`] — deliberately
+/// **not** [`memcore::is_namespace_search_noise`], which `search` filters
+/// candidates through. That predicate is scoped to "should this row surface
+/// in an unaddressed listing/search", so at `path_prefix = None` it also
+/// drops kanban cards, handoff notes, and continuity-projection rows — the
+/// owner's own content, not internal bookkeeping — because an id-addressed
+/// `get` has no `path_prefix` to opt back in with. Applying it here would
+/// make "fetch the kanban card whose id I already have" indistinguishable
+/// from a leak. `is_internal_only_row` covers only rows the store's own
+/// storage layer produced (Wiki REM drafts, the Wiki operation log, the
+/// recall-rerank cache, anchor plumbing) — never something a caller who
+/// already holds the id should be denied.
+///
+/// A rejected row is dropped, **not** reported: the caller sees the ordinary
+/// per-store miss and, at the end of the chain, the existing
+/// `{"error": "Memory not found"}` shape. No new error kind, and no way to
+/// tell "absent" from "present but withheld".
+fn readable_entry(entry: Option<MemoryEntry>) -> Option<MemoryEntry> {
+    entry.filter(|entry| !memcore::is_internal_only_row(entry))
+}
+
+/// tachi#1561 (L2/L7): server-side list surfaces (`list_memories` here,
+/// `sync_memories` in `pipeline_ops::sync`) return raw `list_by_path` rows.
+/// They filter through the same namespace predicate search uses, passing the
+/// caller's `path_prefix` so every existing explicit opt-in survives:
+/// `/recall-cache*` (see `memcore::path_prefix_opts_into_recall_cache`, and
+/// its server-side mirror `recall_cache_recall_opted_in`), `/kanban*`,
+/// `/handoff*`, and the continuity-projection prefixes. Scoped browsing keeps
+/// working; unscoped listing stops dumping bookkeeping rows.
+///
+/// The `retain` call stays at each site (the surfaces differ in how they
+/// obtain the prefix and in what they wrap the entry in); only the predicate
+/// is shared, so there is still exactly one definition of "listable".
+pub(crate) fn is_listable_row(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
+    !memcore::is_namespace_search_noise(entry, path_prefix)
+}
+
 pub(crate) async fn handle_get_memory(
     server: &MemoryServer,
     params: GetMemoryParams,
@@ -25,7 +67,7 @@ pub(crate) async fn handle_get_memory(
                 })
         })?;
 
-        if let Some(entry) = project_entry {
+        if let Some(entry) = readable_entry(project_entry) {
             return serde_json::to_string(&slim_entry_with_enrichment(
                 server,
                 &entry,
@@ -41,7 +83,7 @@ pub(crate) async fn handle_get_memory(
                 .map_err(|e| format!("Failed to get memory from project DB: {}", e))
         })?;
 
-        if let Some(entry) = project_entry {
+        if let Some(entry) = readable_entry(project_entry) {
             return serde_json::to_string(&slim_entry_with_enrichment(
                 server,
                 &entry,
@@ -67,7 +109,7 @@ pub(crate) async fn handle_get_memory(
                             })
                     })?;
 
-                if let Some(entry) = project_entry {
+                if let Some(entry) = readable_entry(project_entry) {
                     return serde_json::to_string(&slim_entry_with_enrichment(
                         server,
                         &entry,
@@ -86,7 +128,7 @@ pub(crate) async fn handle_get_memory(
             .map_err(|e| format!("Failed to get memory from global DB: {}", e))
     })?;
 
-    match global_entry {
+    match readable_entry(global_entry) {
         Some(entry) => serde_json::to_string(&slim_entry_with_enrichment(
             server,
             &entry,
@@ -126,6 +168,10 @@ pub(crate) async fn handle_list_memories(
                 })
         })?;
         combined_entries.extend(project_entries.into_iter().map(|e| (e, DbScope::Project)));
+        // tachi#1561 (L2): drop internal rows *before* the limit, so a prefix
+        // dense in bookkeeping rows cannot starve the caller's budget.
+        combined_entries
+            .retain(|(entry, _)| is_listable_row(entry, Some(params.path_prefix.as_str())));
         combined_entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));
         combined_entries.truncate(params.limit);
         let slim: Vec<serde_json::Value> = combined_entries
@@ -151,6 +197,8 @@ pub(crate) async fn handle_list_memories(
         combined_entries.extend(project_entries.into_iter().map(|e| (e, DbScope::Project)));
     }
 
+    // tachi#1561 (L2): see the note in the named-project branch above.
+    combined_entries.retain(|(entry, _)| is_listable_row(entry, Some(params.path_prefix.as_str())));
     combined_entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));
     combined_entries.truncate(params.limit);
 
