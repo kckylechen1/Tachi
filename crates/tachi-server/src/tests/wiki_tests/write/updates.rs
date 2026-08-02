@@ -16,9 +16,23 @@ fn raw_memory_connection_cannot_promote_rows_into_trusted_namespaces() {
         ("precedent-domain", "UPDATE memories SET domain = 'precedent' WHERE id = 'precedent-domain'"),
         ("recall-cache-topic", "UPDATE memories SET topic = 'recall_rerank_cache' WHERE id = 'recall-cache-topic'"),
     ];
+    // Each case needs its own body. `make_entry` gives every row the same
+    // text, and memcore's write-time near-duplicate merge (token-Jaccard
+    // > 0.9, `memcore::db::memory_crud::merge_into_jaccard_candidate`) folds
+    // identical bodies into the first row, stamping the other ten
+    // `superseded_by` before this test ever runs. `MemoryStore::get` still
+    // returns superseded rows, so the assertions below stayed green while
+    // ten of the eleven raw-SQL promotion attacks were aimed at dead rows —
+    // i.e. the trust boundary was only ever exercised once. Distinct bodies
+    // keep all eleven rows live so each attack hits a real classifier-bearing
+    // row.
     let entries = cases
         .iter()
-        .map(|(id, _)| make_entry(id))
+        .map(|(id, _)| {
+            let mut entry = make_entry(id);
+            entry.text = format!("classifier attack case {id}");
+            entry
+        })
         .collect::<Vec<_>>();
     let (server, _home) = seed_wiki_project_entries(entries);
 

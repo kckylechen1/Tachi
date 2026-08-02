@@ -447,6 +447,52 @@ fn shell_params(action: &str) -> TachiShellParams {
     }
 }
 
+/// Fixture invariant: every row a test asked to seed is still a live row.
+///
+/// memcore's write path runs near-duplicate consolidation
+/// (`memcore::db::memory_crud::merge_into_jaccard_candidate`; any FTS
+/// candidate with token-Jaccard above 0.9). Every entry [`make_entry`] builds
+/// carries the *same* body — the literal `"test memory"` — so seeding N such
+/// entries merges rows 2..N into row 1 and stamps each of them
+/// `superseded_by` at write time. The dead rows still exist and
+/// `MemoryStore::get` still returns them, so a test can seed eleven rows,
+/// operate on ten corpses, and pass anyway.
+///
+/// Fail here, at the seed, instead of downstream where the damage only
+/// surfaces as a count assertion nobody can explain — or, worse, does not
+/// surface at all. A fixture that wants several live rows must give each
+/// entry its own body.
+fn assert_seeded_rows_are_live(store: &MemoryStore, entries: &[MemoryEntry]) {
+    let mut dead = Vec::new();
+    for entry in entries {
+        let (archived, superseded_by) = store
+            .connection()
+            .query_row(
+                "SELECT archived, superseded_by FROM memories WHERE id = ?1",
+                params![entry.id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap_or_else(|error| panic!("seeded fixture row {} must exist: {error}", entry.id));
+        if let Some(winner) = superseded_by {
+            dead.push(format!("{} (superseded_by {winner})", entry.id));
+        } else if archived != 0 {
+            dead.push(format!("{} (archived)", entry.id));
+        }
+    }
+    assert!(
+        dead.is_empty(),
+        "fixture seeded {} rows but {} are already dead at write time: {}.\n\
+         memcore folded them into a near-duplicate (token-Jaccard > 0.9, \
+         memcore::db::memory_crud::merge_into_jaccard_candidate). Every row make_entry \
+         produces shares the body \"test memory\", so only the first survives; the rest are \
+         still readable via MemoryStore::get, which is how this hides. Give each seeded \
+         entry a distinct `text` before asserting anything about these rows.",
+        entries.len(),
+        dead.len(),
+        dead.join(", "),
+    );
+}
+
 fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHomeGuard) {
     ensure_test_env();
     let temp_home = TempHomeGuard::new();
@@ -468,6 +514,7 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
                 store.upsert(entry).expect("seed wiki project entry");
             }
         }
+        assert_seeded_rows_are_live(&store, &entries);
     }
     seed_pre_v23_wiki_reference_metadata(&wiki_db, &entries);
     let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
