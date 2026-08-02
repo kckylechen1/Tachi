@@ -120,12 +120,16 @@ pub use memory_crud::{
     normalize_for_write, record_enrichment_failure, record_memory_use, release_event_claim,
     restore_archived_if_revision, search_fts, search_symbolic_candidates, search_vec,
     set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
-    symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
-    update_enrichment_fields, update_with_revision, AccessEventDensity, AccessEventKind,
-    IdlessUpsertResult, InsertMemoryResult, ValidatedReferenceMutation, MAX_REFERENCE_BYTES,
-    MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES,
-    MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
+    supersede_memory_if_revision, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
+    try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
+    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, ValidatedReferenceMutation,
+    MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES,
+    MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+};
+pub(crate) use memory_crud::{
+    archive_with_metadata_if_expected_state, supersede_with_metadata_if_expected_state,
+    update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
 /// function's own doc for when a hand-built fixture is legitimate.

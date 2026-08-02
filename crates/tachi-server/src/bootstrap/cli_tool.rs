@@ -231,6 +231,25 @@ pub(super) async fn run_cli_command(
                     .map_err(std::io::Error::other)?;
                 print_pretty_json(&result)
             }
+            tachi_bootstrap::cli::WikiAction::Corpus {
+                apply,
+                confirm,
+                backup_dir,
+                plan,
+            } => {
+                let report = super::wiki_corpus::run_wiki_corpus_command(
+                    apply,
+                    confirm,
+                    backup_dir,
+                    plan,
+                    db_path,
+                    project_db_path.map(PathBuf::as_path),
+                    app_home,
+                )
+                .map_err(std::io::Error::other)?;
+                let report = serde_json::to_value(report).map_err(std::io::Error::other)?;
+                print_pretty_json(&report)
+            }
         },
         Commands::Remember {
             text,

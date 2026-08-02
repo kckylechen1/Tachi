@@ -817,16 +817,27 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "Codex 5.5 local agent, body read 2026-07-30",
         },
-        sites: &[Site {
-            symbol: "enrichment_sql_failure_rolls_back_field_and_receipt_together",
-            trigger: "FAIL_ENRICHMENT_FIELD_RECEIPT_CAS",
-            ddl: "b134e245f67c7163",
-            occurrences: 1,
-        }],
+        sites: &[
+            Site {
+                symbol: "enrichment_sql_failure_rolls_back_field_and_receipt_together",
+                trigger: "FAIL_ENRICHMENT_FIELD_RECEIPT_CAS",
+                ddl: "b134e245f67c7163",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "typed_noncanonical_transition_archives_without_hard_delete",
+                trigger: "NO_HARD_DELETE",
+                ddl: "d4b5b7c7036c68da",
+                occurrences: 1,
+            },
+        ],
         reason: "enrichment_sql_failure_rolls_back_field_and_receipt_together \
                  installs its trigger on the direct rusqlite Connection \
                  returned by make_conn, then drives update_enrichment_fields \
                  on that same unguarded connection. Body read 2026-07-30. \
+                 typed_noncanonical_transition_archives_without_hard_delete \
+                 installs its trigger on the direct rusqlite Connection \
+                 returned by make_conn. Body read 2026-08-01. \
                  This file also contains unrelated MemoryStore doorway tests, \
                  so NoStoreDoorwayInFile cannot prove the exemption.",
     },
@@ -942,6 +953,33 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  doorway doc points fixture authors at. Re-derived: this file \
                  names no store doorway at all, so the trigger cannot be \
                  reaching a guarded connection from here.",
+    },
+    Exemption {
+        path: "crates/tachi-server/src/bootstrap/wiki_corpus.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Luna, bodies read 2026-08-01",
+        },
+        sites: &[
+            Site {
+                symbol: "maybe_inject_copy_after_receipt_prepared",
+                trigger: "WIKI_CORPUS_NO_HARD_DELETE",
+                ddl: "ffd56ed2b7788f70",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "remove_memory_hard_delete_guard",
+                trigger: "WIKI_CORPUS_NO_HARD_DELETE",
+                ddl: "b59c6c444efa524c",
+                occurrences: 1,
+            },
+        ],
+        reason: "maybe_inject_copy_after_receipt_prepared installs the hard-delete \
+                 sentinel through a second direct rusqlite::Connection::open(target_path), \
+                 and remove_memory_hard_delete_guard removes it through a second \
+                 direct rusqlite::Connection::open(path). These test-fixture sites \
+                 use an unrestricted/file connection to install or remove the sentinel; \
+                 they are not #1443 false-failure injection through guarded \
+                 MemoryStore::connection. Bodies read 2026-08-01.",
     },
     Exemption {
         path: "crates/tachi-server/src/mcp_pool/proxy.rs",

@@ -88,6 +88,19 @@ impl MemoryStore {
         db::supersede_memory(&self.conn, id, superseded_by)
     }
 
+    /// Mark a memory as superseded only when its inspected revision is still
+    /// current. This keeps migration lifecycle edges revision-CAS protected.
+    pub fn supersede_memory_if_revision(
+        &self,
+        id: &str,
+        superseded_by: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::supersede_memory_if_revision(&self.conn, id, superseded_by, expected_revision)
+    }
+
     /// Run retention-based garbage collection on growing tables.
     /// Thresholds are driven by `GcConfig` (replaces previously hardcoded literals).
     pub fn gc_tables(&mut self, cfg: &GcConfig) -> Result<serde_json::Value, MemoryError> {
