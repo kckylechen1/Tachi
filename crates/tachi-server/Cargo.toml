@@ -27,6 +27,13 @@ description = "Tachi server — full product runtime (MemCore + operator surface
 [features]
 default = ["full"]
 
+# #1564 — gates verified-dead-code stacks (zero production callers) behind an
+# explicit, default-off feature instead of deleting them outright. Deletion
+# is an owner-per-stack call (#1564); this feature only makes each stack's
+# on/off state visible and testable, and keeps `default` byte-identical to
+# today. NOT part of `full`/`portable` — orthogonal axis.
+contract-leaves = []
+
 # Everything that exists today. Keep this list == the set of operator crates so
 # the default build is unchanged.
 full = [

@@ -35,7 +35,10 @@ use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::{canonical_json_sha256, sha256_hex, SourceKindV1};
+use crate::SourceKindV1;
+// Used only by the closure-boundary stack below (gated per #1564).
+#[cfg(feature = "contract-leaves")]
+use crate::{canonical_json_sha256, sha256_hex};
 
 // ─── §7: KnowledgeArtifactV1 lifecycle/authority vocabulary ────────────────
 
@@ -825,7 +828,12 @@ pub fn build_candidate_knowledge_artifact_fields(
 }
 
 // ─── §7.1 closure boundary: ClosureProposalV1 / ClosureApprovalReceiptV1 ──
+//
+// Gated per #1564 pending owner disposition (verified dead: zero
+// production callers anywhere in the workspace; only this file's own
+// tests construct these types). Owning contract: #1072 §7.1.
 
+#[cfg(feature = "contract-leaves")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClosureLifecycleV1 {
@@ -834,6 +842,7 @@ pub enum ClosureLifecycleV1 {
     Applied,
 }
 
+#[cfg(feature = "contract-leaves")]
 impl ClosureLifecycleV1 {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -844,6 +853,7 @@ impl ClosureLifecycleV1 {
     }
 }
 
+#[cfg(feature = "contract-leaves")]
 impl fmt::Display for ClosureLifecycleV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -858,6 +868,7 @@ impl fmt::Display for ClosureLifecycleV1 {
 /// write active wiki, or post GitHub") is enforced *structurally*: a
 /// function with this signature cannot reach any of those side effects, not
 /// merely by convention.
+#[cfg(feature = "contract-leaves")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosureProposalV1 {
     pub proposal_id: String,
@@ -881,6 +892,7 @@ pub struct ClosureProposalV1 {
     pub captured_at: String,
 }
 
+#[cfg(feature = "contract-leaves")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosureApprovalReceiptV1 {
     pub proposal_id: String,
@@ -891,6 +903,7 @@ pub struct ClosureApprovalReceiptV1 {
     pub decided_at: String,
 }
 
+#[cfg(feature = "contract-leaves")]
 fn closure_proposal_hash_basis(
     issue_ref: &str,
     wiki_title: &str,
@@ -916,6 +929,7 @@ fn closure_proposal_hash_basis(
 /// closure-synthesis producer that would need the raw `ClosureCandidate`
 /// stage (see module doc); `propose_closure` IS the explicit "submit for
 /// review" action.
+#[cfg(feature = "contract-leaves")]
 #[allow(clippy::too_many_arguments)]
 pub fn build_closure_proposal(
     proposal_id: String,
@@ -957,6 +971,7 @@ pub fn build_closure_proposal(
     })
 }
 
+#[cfg(feature = "contract-leaves")]
 fn recompute_proposal_hash(proposal: &ClosureProposalV1) -> Result<String, String> {
     let basis = closure_proposal_hash_basis(
         &proposal.issue_ref,
@@ -981,6 +996,7 @@ fn recompute_proposal_hash(proposal: &ClosureProposalV1) -> Result<String, Strin
 /// `flow_id`) — the drift check is then skipped, since there is nothing
 /// mutable to have drifted; the tamper check on the proposal itself still
 /// runs unconditionally.
+#[cfg(feature = "contract-leaves")]
 pub fn check_closure_apply_preconditions(
     proposal: &ClosureProposalV1,
     receipt: &ClosureApprovalReceiptV1,
@@ -1503,7 +1519,10 @@ mod tests {
     }
 
     // ─── closure boundary (RED case 5/6) ───────────────────────────────
+    // Gated per #1564 pending owner disposition (verified dead: only
+    // this test module exercises these types). Owning contract: #1072 §7.1.
 
+    #[cfg(feature = "contract-leaves")]
     fn sample_proposal() -> ClosureProposalV1 {
         build_closure_proposal(
             "proposal-1".to_string(),
@@ -1521,6 +1540,7 @@ mod tests {
         .expect("build proposal")
     }
 
+    #[cfg(feature = "contract-leaves")]
     #[test]
     fn build_closure_proposal_is_pure_and_starts_pending_approval() {
         let proposal = sample_proposal();
@@ -1533,6 +1553,7 @@ mod tests {
         assert_eq!(proposal.proposal_hash, proposal_again.proposal_hash);
     }
 
+    #[cfg(feature = "contract-leaves")]
     fn approve(proposal: &ClosureProposalV1) -> ClosureApprovalReceiptV1 {
         ClosureApprovalReceiptV1 {
             proposal_id: proposal.proposal_id.clone(),
@@ -1544,6 +1565,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "contract-leaves")]
     #[test]
     fn apply_preconditions_pass_when_nothing_changed() {
         let proposal = sample_proposal();
@@ -1561,6 +1583,7 @@ mod tests {
         .is_ok());
     }
 
+    #[cfg(feature = "contract-leaves")]
     #[test]
     fn apply_preconditions_reject_changed_proposal_content_red_case_6a() {
         let proposal = sample_proposal();
@@ -1587,6 +1610,7 @@ mod tests {
         assert!(err.contains("cannot be replayed"), "err: {err}");
     }
 
+    #[cfg(feature = "contract-leaves")]
     #[test]
     fn apply_preconditions_reject_changed_source_snapshot_red_case_6b() {
         let proposal = sample_proposal();
@@ -1604,6 +1628,7 @@ mod tests {
         assert!(err.contains("cannot be replayed"), "err: {err}");
     }
 
+    #[cfg(feature = "contract-leaves")]
     #[test]
     fn apply_preconditions_reject_unapproved_or_mismatched_receipt() {
         let proposal = sample_proposal();
@@ -1616,6 +1641,7 @@ mod tests {
         assert!(check_closure_apply_preconditions(&proposal, &wrong_id, None).is_err());
     }
 
+    #[cfg(feature = "contract-leaves")]
     #[test]
     fn apply_preconditions_skip_source_drift_check_when_source_unresolvable() {
         // An explicit-text proposal with no flow_id has nothing mutable to
