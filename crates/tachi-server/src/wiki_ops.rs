@@ -5,10 +5,10 @@ use crate::network_safety::is_private_or_local_ip;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::shared_defs::slim_search_result;
 use crate::tool_params::{
-    build_evidence_refs_v1, derive_wiki_authority, derive_wiki_lifecycle,
-    derive_wiki_review_receipt, HybridWeightsParam, SearchMemoryParams, StoreRef,
-    TachiWikiIngestParams, WikiArtifactKindV1, WikiAuthorityV1, WikiBrowseParams, WikiLifecycleV1,
-    WikiLintParams, WikiReadPlan, WikiSearchParams, LOGICAL_SHARED_WIKI_PROJECT,
+    build_candidate_knowledge_artifact_fields, build_evidence_refs_v1,
+    derive_effective_knowledge_artifact, derive_wiki_lifecycle, derive_wiki_review_receipt,
+    HybridWeightsParam, SearchMemoryParams, StoreRef, TachiWikiIngestParams, WikiBrowseParams,
+    WikiLifecycleV1, WikiLintParams, WikiReadPlan, WikiSearchParams, LOGICAL_SHARED_WIKI_PROJECT,
 };
 use crate::utils::sanitize_safe_path_name;
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};

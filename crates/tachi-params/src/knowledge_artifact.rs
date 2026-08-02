@@ -30,7 +30,9 @@
 //!   worth of work.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 
 use crate::{canonical_json_sha256, sha256_hex, SourceKindV1};
@@ -58,6 +60,19 @@ impl WikiArtifactKindV1 {
 impl fmt::Display for WikiArtifactKindV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WikiArtifactKindV1 {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "draft" => Ok(Self::Draft),
+            "wiki" => Ok(Self::Wiki),
+            "guide" => Ok(Self::Guide),
+            other => Err(format!("invalid wiki artifact kind '{other}'")),
+        }
     }
 }
 
@@ -150,6 +165,126 @@ impl FromStr for WikiAuthorityV1 {
             other => Err(format!("invalid wiki authority '{other}'")),
         }
     }
+}
+
+/// Semantic applicability scope for a Wiki/guide artifact. This is
+/// intentionally independent from the physical database selected by
+/// `project=`. In particular, storage in the named `wiki` database does not
+/// imply either `Project` or `Shared`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WikiKnowledgeScopeV1 {
+    Project,
+    Shared,
+    Unspecified,
+}
+
+impl WikiKnowledgeScopeV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Shared => "shared",
+            Self::Unspecified => "unspecified",
+        }
+    }
+}
+
+impl fmt::Display for WikiKnowledgeScopeV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WikiKnowledgeScopeV1 {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "project" => Ok(Self::Project),
+            "shared" => Ok(Self::Shared),
+            "unspecified" => Ok(Self::Unspecified),
+            other => Err(format!("invalid wiki knowledge scope '{other}'")),
+        }
+    }
+}
+
+/// Closed, normalized applicability dimensions used by Wiki and guide
+/// readers. The singular wire keys `task_type` and `stage` are retained for
+/// compatibility with the existing guide metadata contract; every value is
+/// normalized to a sorted, deduplicated string array.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiApplicabilityV1 {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_type: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage: Vec<String>,
+}
+
+impl WikiApplicabilityV1 {
+    pub fn is_empty(&self) -> bool {
+        self.projects.is_empty()
+            && self.repos.is_empty()
+            && self.domains.is_empty()
+            && self.task_type.is_empty()
+            && self.profiles.is_empty()
+            && self.stage.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WikiApplicabilityStatusV1 {
+    Bounded,
+    Unspecified,
+    Malformed,
+}
+
+impl WikiApplicabilityStatusV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bounded => "bounded",
+            Self::Unspecified => "unspecified",
+            Self::Malformed => "malformed",
+        }
+    }
+}
+
+impl FromStr for WikiApplicabilityStatusV1 {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "bounded" => Ok(Self::Bounded),
+            "unspecified" => Ok(Self::Unspecified),
+            "malformed" => Ok(Self::Malformed),
+            other => Err(format!("invalid wiki applicability status '{other}'")),
+        }
+    }
+}
+
+/// One read-time representation shared by Wiki and guide producers/readers.
+/// `validation_issues` is deliberately explicit: malformed or legacy fields
+/// are never silently interpreted as universal applicability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveKnowledgeArtifactV1 {
+    pub artifact_kind: WikiArtifactKindV1,
+    pub knowledge_scope: WikiKnowledgeScopeV1,
+    pub origin_projects: Vec<String>,
+    pub applies_to: WikiApplicabilityV1,
+    pub applicability_status: WikiApplicabilityStatusV1,
+    pub known_exceptions: Vec<String>,
+    pub lifecycle: WikiLifecycleV1,
+    pub authority: WikiAuthorityV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,10 +440,388 @@ pub fn derive_wiki_authority(metadata: &serde_json::Value) -> WikiAuthorityV1 {
 /// exists so a future writer's receipt is honestly surfaced without another
 /// wire-shape change.
 pub fn derive_wiki_review_receipt(metadata: &serde_json::Value) -> Option<WikiReviewReceiptV1> {
-    metadata
+    let receipt = metadata
         .get("review_receipt")
         .cloned()
-        .and_then(|v| serde_json::from_value(v).ok())
+        .and_then(|v| serde_json::from_value::<WikiReviewReceiptV1>(v).ok())?;
+    if receipt.approver.trim().is_empty()
+        || !matches!(
+            receipt.decision.trim().to_ascii_lowercase().as_str(),
+            "approved" | "rejected"
+        )
+        || chrono::DateTime::parse_from_rfc3339(receipt.decided_at.trim()).is_err()
+    {
+        return None;
+    }
+    Some(receipt)
+}
+
+fn artifact_kind_from_path(path: &str) -> WikiArtifactKindV1 {
+    if path == "/guide" || path.starts_with("/guide/") {
+        WikiArtifactKindV1::Guide
+    } else if path == "/wiki/drafts" || path.starts_with("/wiki/drafts/") {
+        WikiArtifactKindV1::Draft
+    } else {
+        WikiArtifactKindV1::Wiki
+    }
+}
+
+fn normalize_string_array(value: &serde_json::Value) -> Result<Vec<String>, ()> {
+    let values = match value {
+        serde_json::Value::String(value) => vec![value.as_str()],
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| value.as_str().ok_or(()))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(()),
+    };
+    let normalized = values
+        .into_iter()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(normalized)
+}
+
+fn parse_optional_string_array(
+    metadata: &serde_json::Value,
+    key: &str,
+    validation_issues: &mut Vec<String>,
+) -> Vec<String> {
+    let Some(value) = metadata.get(key) else {
+        return Vec::new();
+    };
+    match normalize_string_array(value) {
+        Ok(values) => values,
+        Err(()) => {
+            validation_issues.push(format!("malformed_{key}"));
+            Vec::new()
+        }
+    }
+}
+
+fn derive_legacy_origin_projects(metadata: &serde_json::Value) -> Vec<String> {
+    for pointer in [
+        "/provenance/project",
+        "/provenance/context/project",
+        "/source_project",
+        "/repo",
+    ] {
+        if let Some(project) = metadata
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return vec![project.to_string()];
+        }
+    }
+    let Some(db_path) = metadata
+        .pointer("/provenance/db_path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Vec::new();
+    };
+    let path = Path::new(db_path);
+    let project = if path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == ".tachi")
+    {
+        path.parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+    } else {
+        path.parent().and_then(Path::file_name)
+    };
+    project
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "wiki" && *name != ".tachi")
+        .map(|name| vec![name.to_string()])
+        .unwrap_or_default()
+}
+
+fn parse_wiki_applicability(
+    metadata: &serde_json::Value,
+    validation_issues: &mut Vec<String>,
+) -> (WikiApplicabilityV1, WikiApplicabilityStatusV1) {
+    let Some(value) = metadata.get("applies_to") else {
+        return (
+            WikiApplicabilityV1::default(),
+            WikiApplicabilityStatusV1::Unspecified,
+        );
+    };
+    let Some(object) = value.as_object() else {
+        validation_issues.push("malformed_applies_to".to_string());
+        return (
+            WikiApplicabilityV1::default(),
+            WikiApplicabilityStatusV1::Malformed,
+        );
+    };
+    const KEYS: [&str; 6] = [
+        "projects",
+        "repos",
+        "domains",
+        "task_type",
+        "profiles",
+        "stage",
+    ];
+    if object.keys().any(|key| !KEYS.contains(&key.as_str())) {
+        validation_issues.push("malformed_applies_to".to_string());
+        return (
+            WikiApplicabilityV1::default(),
+            WikiApplicabilityStatusV1::Malformed,
+        );
+    }
+    let parse = |key: &str| -> Result<Vec<String>, ()> {
+        object
+            .get(key)
+            .map(normalize_string_array)
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
+    let applicability = (|| {
+        Ok::<_, ()>(WikiApplicabilityV1 {
+            projects: parse("projects")?,
+            repos: parse("repos")?,
+            domains: parse("domains")?,
+            task_type: parse("task_type")?,
+            profiles: parse("profiles")?,
+            stage: parse("stage")?,
+        })
+    })();
+    match applicability {
+        Ok(applicability) if applicability.is_empty() => {
+            (applicability, WikiApplicabilityStatusV1::Unspecified)
+        }
+        Ok(applicability) => (applicability, WikiApplicabilityStatusV1::Bounded),
+        Err(()) => {
+            validation_issues.push("malformed_applies_to".to_string());
+            (
+                WikiApplicabilityV1::default(),
+                WikiApplicabilityStatusV1::Malformed,
+            )
+        }
+    }
+}
+
+/// Project one stored Wiki/guide row into the single effective runtime
+/// representation. The physical store is intentionally not an input: it can
+/// prove where a row lives, but cannot prove where its advice applies.
+pub fn derive_effective_knowledge_artifact(
+    metadata: &serde_json::Value,
+    path: &str,
+    legacy_entry_scope: &str,
+) -> EffectiveKnowledgeArtifactV1 {
+    let mut validation_issues = Vec::new();
+
+    let artifact_kind = match metadata.get("artifact_kind") {
+        None => artifact_kind_from_path(path),
+        Some(value) => value
+            .as_str()
+            .and_then(|value| value.parse::<WikiArtifactKindV1>().ok())
+            .unwrap_or_else(|| {
+                validation_issues.push("malformed_artifact_kind".to_string());
+                artifact_kind_from_path(path)
+            }),
+    };
+
+    let mut lifecycle = derive_wiki_lifecycle(metadata, path);
+    if metadata.get("lifecycle").is_some_and(|value| {
+        value
+            .as_str()
+            .and_then(|value| value.parse::<WikiLifecycleV1>().ok())
+            .is_none()
+    }) {
+        lifecycle = WikiLifecycleV1::PendingReview;
+        validation_issues.push("malformed_lifecycle".to_string());
+    }
+    if metadata.get("lifecycle").is_none() && artifact_kind == WikiArtifactKindV1::Guide {
+        lifecycle = match metadata.get("status") {
+            None => WikiLifecycleV1::PendingReview,
+            Some(value) => value
+                .as_str()
+                .and_then(|value| value.parse::<WikiLifecycleV1>().ok())
+                .unwrap_or_else(|| {
+                    validation_issues.push("malformed_lifecycle".to_string());
+                    WikiLifecycleV1::PendingReview
+                }),
+        };
+    }
+
+    let authority = match metadata.get("authority") {
+        None => WikiAuthorityV1::Advisory,
+        Some(value) => value
+            .as_str()
+            .and_then(|value| value.parse::<WikiAuthorityV1>().ok())
+            .unwrap_or_else(|| {
+                validation_issues.push("malformed_authority".to_string());
+                WikiAuthorityV1::Advisory
+            }),
+    };
+
+    let knowledge_scope = match metadata.get("knowledge_scope") {
+        Some(value) => value
+            .as_str()
+            .and_then(|value| value.parse::<WikiKnowledgeScopeV1>().ok())
+            .unwrap_or_else(|| {
+                validation_issues.push("malformed_knowledge_scope".to_string());
+                WikiKnowledgeScopeV1::Unspecified
+            }),
+        None => {
+            let legacy_scope = metadata
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(legacy_entry_scope);
+            if legacy_scope.eq_ignore_ascii_case("project") {
+                WikiKnowledgeScopeV1::Project
+            } else {
+                validation_issues.push("legacy_scope_unresolved".to_string());
+                WikiKnowledgeScopeV1::Unspecified
+            }
+        }
+    };
+
+    let has_typed_origin_projects = metadata.get("origin_projects").is_some();
+    let mut origin_projects =
+        parse_optional_string_array(metadata, "origin_projects", &mut validation_issues);
+    if metadata.get("origin_projects").is_none() && origin_projects.is_empty() {
+        origin_projects = derive_legacy_origin_projects(metadata);
+        if !origin_projects.is_empty() {
+            validation_issues.push("legacy_origin_derived".to_string());
+        }
+    }
+    let known_exceptions =
+        parse_optional_string_array(metadata, "known_exceptions", &mut validation_issues);
+    let (applies_to, mut applicability_status) =
+        parse_wiki_applicability(metadata, &mut validation_issues);
+    let review_receipt = derive_wiki_review_receipt(metadata);
+    if metadata.get("review_receipt").is_some() && review_receipt.is_none() {
+        validation_issues.push("malformed_review_receipt".to_string());
+    }
+    if let Some(declared_status) = metadata.get("applicability_status") {
+        match declared_status
+            .as_str()
+            .and_then(|value| value.parse::<WikiApplicabilityStatusV1>().ok())
+        {
+            Some(WikiApplicabilityStatusV1::Malformed) => {
+                applicability_status = WikiApplicabilityStatusV1::Malformed;
+                validation_issues.push("malformed_applicability_status".to_string());
+            }
+            Some(_) => {}
+            None => {
+                applicability_status = WikiApplicabilityStatusV1::Malformed;
+                validation_issues.push("malformed_applicability_status".to_string());
+            }
+        }
+    }
+    if validation_issues
+        .iter()
+        .any(|issue| issue.starts_with("malformed_"))
+    {
+        lifecycle = WikiLifecycleV1::PendingReview;
+        applicability_status = WikiApplicabilityStatusV1::Malformed;
+    }
+    if knowledge_scope == WikiKnowledgeScopeV1::Shared
+        && applicability_status != WikiApplicabilityStatusV1::Malformed
+    {
+        if !has_typed_origin_projects {
+            validation_issues.push("shared_scope_missing_typed_origin".to_string());
+        }
+        if !has_typed_origin_projects
+            || origin_projects.is_empty()
+            || applicability_status == WikiApplicabilityStatusV1::Unspecified
+        {
+            applicability_status = WikiApplicabilityStatusV1::Unspecified;
+            validation_issues.push("shared_scope_not_bounded".to_string());
+        }
+    }
+    if knowledge_scope == WikiKnowledgeScopeV1::Shared && lifecycle == WikiLifecycleV1::Active {
+        let bounded = applicability_status == WikiApplicabilityStatusV1::Bounded;
+        let reviewed = metadata
+            .get("source_bundle_hash")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|hash| !hash.trim().is_empty())
+            && review_receipt
+                .is_some_and(|receipt| receipt.decision.eq_ignore_ascii_case("approved"));
+        if !bounded {
+            validation_issues.push("shared_active_without_bounded_applicability".to_string());
+        }
+        if !reviewed {
+            validation_issues.push("shared_active_without_review".to_string());
+        }
+        if !bounded || !reviewed {
+            lifecycle = WikiLifecycleV1::PendingReview;
+        }
+    }
+    validation_issues.sort();
+    validation_issues.dedup();
+
+    EffectiveKnowledgeArtifactV1 {
+        artifact_kind,
+        knowledge_scope,
+        origin_projects,
+        applies_to,
+        applicability_status,
+        known_exceptions,
+        lifecycle,
+        authority,
+        validation_issues,
+    }
+}
+
+/// Canonical fields for an unreviewed producer write. `requested_scope` is
+/// the semantic write request (`project`, `shared`, or the legacy alias
+/// `global`); physical database placement is deliberately absent.
+pub fn build_candidate_knowledge_artifact_fields(
+    path: &str,
+    requested_scope: &str,
+    proposal_metadata: &serde_json::Value,
+) -> serde_json::Value {
+    let artifact_kind = artifact_kind_from_path(path);
+    let authority = if artifact_kind == WikiArtifactKindV1::Guide {
+        WikiAuthorityV1::Playbook
+    } else {
+        WikiAuthorityV1::Advisory
+    };
+    let knowledge_scope = match requested_scope.trim().to_ascii_lowercase().as_str() {
+        "project" => WikiKnowledgeScopeV1::Project,
+        "global" | "shared" => WikiKnowledgeScopeV1::Shared,
+        _ => WikiKnowledgeScopeV1::Unspecified,
+    };
+    let mut validation_issues = Vec::new();
+    let origin_projects =
+        parse_optional_string_array(proposal_metadata, "origin_projects", &mut validation_issues);
+    let known_exceptions = parse_optional_string_array(
+        proposal_metadata,
+        "known_exceptions",
+        &mut validation_issues,
+    );
+    let (applies_to, applicability_status) =
+        parse_wiki_applicability(proposal_metadata, &mut validation_issues);
+    if knowledge_scope == WikiKnowledgeScopeV1::Shared
+        && (origin_projects.is_empty()
+            || applicability_status == WikiApplicabilityStatusV1::Unspecified)
+    {
+        validation_issues.push("shared_scope_not_bounded".to_string());
+    }
+    validation_issues.sort();
+    validation_issues.dedup();
+    serde_json::json!({
+        "artifact_kind": artifact_kind.as_str(),
+        "knowledge_scope": knowledge_scope.as_str(),
+        "origin_projects": origin_projects,
+        "applies_to": applies_to,
+        "applicability_status": applicability_status.as_str(),
+        "known_exceptions": known_exceptions,
+        "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
+        "authority": authority.as_str(),
+        "artifact_metadata_warnings": validation_issues,
+    })
 }
 
 // ─── §7.1 closure boundary: ClosureProposalV1 / ClosureApprovalReceiptV1 ──
@@ -567,6 +1080,314 @@ mod tests {
         let back: KnowledgeArtifactV1 = serde_json::from_str(&wire).expect("deserialize");
         assert_eq!(back, artifact);
         assert!(wire.contains("\"lifecycle\":\"active\""));
+    }
+
+    #[test]
+    fn effective_artifact_keeps_physical_wiki_placement_out_of_semantic_scope() {
+        let metadata = build_candidate_knowledge_artifact_fields(
+            "/wiki/engineering/review",
+            "global",
+            &serde_json::json!({
+                "origin_projects": ["Sigil"],
+                "applies_to": {"repos": ["Sigil", "Quant_Analyzer_2026"]},
+            }),
+        );
+        let effective =
+            derive_effective_knowledge_artifact(&metadata, "/wiki/engineering/review", "global");
+        assert_eq!(effective.knowledge_scope, WikiKnowledgeScopeV1::Shared);
+        assert_eq!(effective.origin_projects, vec!["Sigil"]);
+        assert_eq!(
+            effective.applies_to.repos,
+            vec!["Quant_Analyzer_2026", "Sigil"]
+        );
+        assert_eq!(
+            effective.applicability_status,
+            WikiApplicabilityStatusV1::Bounded
+        );
+        assert_eq!(effective.lifecycle, WikiLifecycleV1::PendingReview);
+    }
+
+    #[test]
+    fn legacy_global_scope_is_not_promoted_to_universal_shared_scope() {
+        let effective = derive_effective_knowledge_artifact(
+            &serde_json::json!({"scope": "global"}),
+            "/wiki/legacy",
+            "global",
+        );
+        assert_eq!(effective.knowledge_scope, WikiKnowledgeScopeV1::Unspecified);
+        assert_eq!(
+            effective.applicability_status,
+            WikiApplicabilityStatusV1::Unspecified
+        );
+        assert!(effective
+            .validation_issues
+            .contains(&"legacy_scope_unresolved".to_string()));
+    }
+
+    #[test]
+    fn legacy_origin_is_derived_from_provenance_without_widening_scope() {
+        let effective = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "scope": "project",
+                "provenance": {
+                    "db_path": "/work/Quant_Analyzer_2026/.tachi/memory.db"
+                }
+            }),
+            "/wiki/quant/lesson",
+            "project",
+        );
+        assert_eq!(effective.knowledge_scope, WikiKnowledgeScopeV1::Project);
+        assert_eq!(effective.origin_projects, vec!["Quant_Analyzer_2026"]);
+        assert!(effective
+            .validation_issues
+            .contains(&"legacy_origin_derived".to_string()));
+    }
+
+    #[test]
+    fn malformed_applicability_fails_closed() {
+        let effective = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "knowledge_scope": "shared",
+                "origin_projects": ["Sigil"],
+                "applies_to": {"repos": ["Sigil", 42]},
+            }),
+            "/wiki/engineering/review",
+            "global",
+        );
+        assert_eq!(
+            effective.applicability_status,
+            WikiApplicabilityStatusV1::Malformed
+        );
+        assert!(effective.applies_to.is_empty());
+        assert!(effective
+            .validation_issues
+            .contains(&"malformed_applies_to".to_string()));
+
+        let candidate = build_candidate_knowledge_artifact_fields(
+            "/guide/shared",
+            "shared",
+            &serde_json::json!({
+                "origin_projects": ["Sigil"],
+                "applies_to": {"repos": ["Sigil", 42]},
+            }),
+        );
+        let candidate_effective =
+            derive_effective_knowledge_artifact(&candidate, "/guide/shared", "global");
+        assert_eq!(
+            candidate_effective.applicability_status,
+            WikiApplicabilityStatusV1::Malformed
+        );
+    }
+
+    #[test]
+    fn malformed_typed_identity_fields_fail_closed() {
+        for (field, value, expected_issue) in [
+            (
+                "artifact_kind",
+                serde_json::json!(42),
+                "malformed_artifact_kind",
+            ),
+            (
+                "knowledge_scope",
+                serde_json::json!("not-a-scope"),
+                "malformed_knowledge_scope",
+            ),
+            (
+                "authority",
+                serde_json::json!({"forged": true}),
+                "malformed_authority",
+            ),
+        ] {
+            let mut metadata = serde_json::json!({
+                "artifact_kind": "guide",
+                "knowledge_scope": "project",
+                "lifecycle": "active",
+                "authority": "playbook",
+                "applies_to": {"repos": ["kckylechen1/tachi"]},
+            });
+            metadata[field] = value;
+
+            let effective =
+                derive_effective_knowledge_artifact(&metadata, "/guide/review", "project");
+            assert_eq!(
+                effective.lifecycle,
+                WikiLifecycleV1::PendingReview,
+                "RED: malformed {field} remained default-retrievable"
+            );
+            assert_eq!(
+                effective.applicability_status,
+                WikiApplicabilityStatusV1::Malformed,
+                "RED: malformed {field} retained applicable authority"
+            );
+            assert!(
+                effective
+                    .validation_issues
+                    .contains(&expected_issue.to_string()),
+                "missing validation issue for {field}: {:?}",
+                effective.validation_issues
+            );
+        }
+    }
+
+    #[test]
+    fn non_string_lifecycle_and_unreviewed_active_shared_fail_closed() {
+        let malformed = derive_effective_knowledge_artifact(
+            &serde_json::json!({"lifecycle": 42}),
+            "/wiki/malformed-lifecycle",
+            "project",
+        );
+        assert_eq!(malformed.lifecycle, WikiLifecycleV1::PendingReview);
+
+        let shared = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "knowledge_scope": "shared",
+                "origin_projects": ["Sigil"],
+                "applies_to": {"repos": ["Sigil", "Quant_Analyzer_2026"]},
+                "lifecycle": "active",
+                "authority": "advisory",
+            }),
+            "/wiki/shared-unreviewed",
+            "global",
+        );
+        assert_eq!(shared.lifecycle, WikiLifecycleV1::PendingReview);
+        assert!(shared
+            .validation_issues
+            .contains(&"shared_active_without_review".to_string()));
+    }
+
+    #[test]
+    fn malformed_review_receipt_cannot_activate_shared_knowledge() {
+        let shared = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "knowledge_scope": "shared",
+                "origin_projects": ["Sigil"],
+                "applies_to": {"repos": ["Sigil", "Quant_Analyzer_2026"]},
+                "lifecycle": "active",
+                "authority": "advisory",
+                "source_bundle_hash": "reviewed-source-bundle",
+                "review_receipt": {
+                    "approver": "",
+                    "decision": "approved",
+                    "decided_at": "not-a-date"
+                }
+            }),
+            "/wiki/shared-malformed-review",
+            "global",
+        );
+        assert_eq!(shared.lifecycle, WikiLifecycleV1::PendingReview);
+        assert!(shared
+            .validation_issues
+            .contains(&"malformed_review_receipt".to_string()));
+    }
+
+    #[test]
+    fn reviewed_but_unbounded_shared_knowledge_stays_pending() {
+        let shared = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "artifact_kind": "wiki",
+                "knowledge_scope": "shared",
+                "origin_projects": ["Sigil"],
+                "lifecycle": "active",
+                "authority": "advisory",
+                "source_bundle_hash": "reviewed-source-bundle",
+                "review_receipt": {
+                    "approver": "owner",
+                    "decision": "approved",
+                    "decided_at": "2026-07-31T00:00:00Z"
+                }
+            }),
+            "/wiki/shared-unbounded",
+            "global",
+        );
+        assert_eq!(
+            shared.lifecycle,
+            WikiLifecycleV1::PendingReview,
+            "RED: review approval activated shared knowledge without an applicability boundary"
+        );
+        assert_eq!(
+            shared.applicability_status,
+            WikiApplicabilityStatusV1::Unspecified
+        );
+        assert!(shared
+            .validation_issues
+            .contains(&"shared_active_without_bounded_applicability".to_string()));
+    }
+
+    #[test]
+    fn declared_malformed_applicability_status_fails_closed() {
+        let effective = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "artifact_kind": "wiki",
+                "knowledge_scope": "project",
+                "applies_to": {"repos": ["kckylechen1/tachi"]},
+                "applicability_status": "malformed",
+                "lifecycle": "active",
+                "authority": "advisory"
+            }),
+            "/wiki/project-malformed-status",
+            "project",
+        );
+        assert_eq!(
+            effective.lifecycle,
+            WikiLifecycleV1::PendingReview,
+            "RED: declared malformed applicability remained default-retrievable"
+        );
+        assert_eq!(
+            effective.applicability_status,
+            WikiApplicabilityStatusV1::Malformed
+        );
+        assert!(effective
+            .validation_issues
+            .contains(&"malformed_applicability_status".to_string()));
+    }
+
+    #[test]
+    fn shared_active_requires_typed_origin_not_legacy_provenance() {
+        let shared = derive_effective_knowledge_artifact(
+            &serde_json::json!({
+                "artifact_kind": "wiki",
+                "knowledge_scope": "shared",
+                "applies_to": {"repos": ["kckylechen1/tachi"]},
+                "lifecycle": "active",
+                "authority": "advisory",
+                "source_bundle_hash": "reviewed-source-bundle",
+                "review_receipt": {
+                    "approver": "owner",
+                    "decision": "approved",
+                    "decided_at": "2026-07-31T00:00:00Z"
+                },
+                "provenance": {
+                    "db_path": "/work/Sigil/.tachi/memory.db"
+                }
+            }),
+            "/wiki/shared-derived-origin",
+            "global",
+        );
+        assert_eq!(shared.origin_projects, vec!["Sigil"]);
+        assert_eq!(
+            shared.lifecycle,
+            WikiLifecycleV1::PendingReview,
+            "RED: legacy-derived origin activated typed shared knowledge"
+        );
+        assert_eq!(
+            shared.applicability_status,
+            WikiApplicabilityStatusV1::Unspecified
+        );
+        assert!(shared
+            .validation_issues
+            .contains(&"shared_scope_missing_typed_origin".to_string()));
+    }
+
+    #[test]
+    fn legacy_guide_without_typed_lifecycle_is_pending_and_advisory() {
+        let effective = derive_effective_knowledge_artifact(
+            &serde_json::json!({}),
+            "/guide/generated/review",
+            "global",
+        );
+        assert_eq!(effective.artifact_kind, WikiArtifactKindV1::Guide);
+        assert_eq!(effective.lifecycle, WikiLifecycleV1::PendingReview);
+        assert_eq!(effective.authority, WikiAuthorityV1::Advisory);
     }
 
     // ─── derive_wiki_lifecycle: truthful-retrieval gate (RED case 2) ──────

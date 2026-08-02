@@ -4,9 +4,15 @@ use super::*;
 
 /// Wiki category prefixes for quick lookup. Resolves short names to full paths.
 fn resolve_wiki_category(category: &str) -> String {
-    let trimmed = category.trim().trim_start_matches('/');
-    // Already a full wiki path
-    if trimmed.starts_with("wiki/") || trimmed.starts_with("wiki\\") {
+    let trimmed = category.trim().trim_start_matches('/').replace('\\', "/");
+    // Already a full Wiki or guide path.
+    if trimmed == "wiki"
+        || trimmed.starts_with("wiki/")
+        || trimmed.starts_with("wiki\\")
+        || trimmed == "guide"
+        || trimmed.starts_with("guide/")
+        || trimmed.starts_with("guide\\")
+    {
         return format!("/{}", trimmed);
     }
     // Short alias → full path
@@ -45,6 +51,33 @@ fn resolve_wiki_category(category: &str) -> String {
         "misc" => "/wiki/misc".to_string(),
         other => format!("/wiki/{}", other),
     }
+}
+
+fn knowledge_artifact_root(path: &str) -> &'static str {
+    if path == "/guide" || path.starts_with("/guide/") {
+        "/guide"
+    } else {
+        "/wiki"
+    }
+}
+
+fn is_public_knowledge_artifact_path(path: &str) -> bool {
+    path == "/wiki" || path.starts_with("/wiki/") || path == "/guide" || path.starts_with("/guide/")
+}
+
+fn list_public_knowledge_entries_for_plan(
+    server: &MemoryServer,
+    plan: &WikiReadPlan,
+    limit_per_root: usize,
+) -> Result<Vec<StoredWikiEntry>, String> {
+    let mut entries = list_wiki_entries_for_plan(server, plan, "/wiki", limit_per_root)?;
+    entries.extend(list_wiki_entries_for_plan(
+        server,
+        plan,
+        "/guide",
+        limit_per_root,
+    )?);
+    Ok(entries)
 }
 
 pub(crate) async fn handle_wiki_search(
@@ -92,8 +125,7 @@ pub(crate) async fn collect_wiki_search_value(
         .category
         .as_deref()
         .map(resolve_wiki_category)
-        .or_else(|| params.path_prefix.clone())
-        .or_else(|| Some("/wiki".to_string()));
+        .or_else(|| params.path_prefix.clone());
     let search_result = search_wiki_rows_for_plan(
         server,
         SearchMemoryParams {
@@ -184,6 +216,7 @@ pub(crate) async fn search_wiki_rows_for_plan(
         search_wiki_store_candidates(server, params, &stores, record_access).await?;
     candidates.retain(|candidate| {
         is_user_facing_wiki_entry(&candidate.result.entry)
+            && is_public_knowledge_artifact_path(&candidate.result.entry.path)
             && path_prefix.as_deref().is_none_or(|prefix| {
                 candidate.result.entry.path == prefix
                     || candidate
@@ -245,16 +278,7 @@ pub(crate) async fn search_wiki_rows_for_plan(
                 StoreRef::BoundProject | StoreRef::NamedProject { .. } => DbScope::Project,
             };
             let mut row = slim_search_result(&candidate.result, db_scope, include_metadata);
-            let lifecycle = derive_wiki_lifecycle(
-                &candidate.result.entry.metadata,
-                &candidate.result.entry.path,
-            );
-            attach_wiki_provenance(
-                &mut row,
-                &candidate.result.entry,
-                &candidate.store,
-                lifecycle,
-            );
+            attach_wiki_provenance(&mut row, &candidate.result.entry, &candidate.store);
             if let Some(recall_quality) = &candidate.recall_quality {
                 if let Some(object) = row.as_object_mut() {
                     object.insert("recall_quality".to_string(), recall_quality.clone());
@@ -374,7 +398,7 @@ pub(crate) fn collect_wiki_browse_value(
         None | Some("") => {
             let mut counts: BTreeMap<String, usize> = BTreeMap::new();
             let mut total = 0usize;
-            let all_entries = list_wiki_entries_for_plan(server, &plan, "/wiki", 5000)?;
+            let all_entries = list_public_knowledge_entries_for_plan(server, &plan, 5000)?;
 
             for stored in &all_entries {
                 let entry = &stored.entry;
@@ -409,7 +433,12 @@ pub(crate) fn collect_wiki_browse_value(
             let resolved_path = resolve_wiki_category(category);
             let limit = params.limit.max(1).min(500);
 
-            let entries = list_wiki_entries_for_plan(server, &plan, "/wiki", 5000)?;
+            let entries = list_wiki_entries_for_plan(
+                server,
+                &plan,
+                knowledge_artifact_root(&resolved_path),
+                5000,
+            )?;
             let resolved_prefix = format!("{resolved_path}/");
             let store_order = stores_for_wiki_plan(server, &plan);
             let mut per_store_entries = vec![Vec::<Value>::new(); store_order.len()];
@@ -421,8 +450,8 @@ pub(crate) fn collect_wiki_browse_value(
                 if !wiki_entry_matches_lifecycle_scope(&entry, requested_lifecycle)? {
                     continue;
                 }
-                let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
-                let authority = derive_wiki_authority(&entry.metadata);
+                let effective =
+                    derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
                 // #1072 fix-round (#1215 BUG 6): browse-category provenance
                 // was overclaimed — the PR description said read/search
                 // "expose ... revision, source refs, ... review receipt" but
@@ -442,8 +471,9 @@ pub(crate) fn collect_wiki_browse_value(
                     "summary": entry.summary,
                     "importance": entry.importance,
                     "revision": entry.revision,
-                    "lifecycle": lifecycle.as_str(),
-                    "authority": authority.as_str(),
+                    "lifecycle": effective.lifecycle.as_str(),
+                    "authority": effective.authority.as_str(),
+                    "effective_artifact": effective,
                     "references": preferred_wiki_references(&entry.metadata),
                     "review_receipt": review_receipt,
                     "store": stored.store,
@@ -568,8 +598,9 @@ pub(crate) fn collect_wiki_read_value_for_plan(
     path: &str,
     plan: &WikiReadPlan,
 ) -> Result<Value, String> {
-    let resolved = if path.trim().starts_with('/') {
-        let trimmed = path.trim().trim_end_matches('/');
+    let normalized = path.trim().replace('\\', "/");
+    let resolved = if normalized.starts_with('/') {
+        let trimmed = normalized.trim_end_matches('/');
         if trimmed.is_empty() {
             return Err(
                 "Wiki path cannot be root '/' — specify a concrete path like /wiki/my-topic"
@@ -581,7 +612,8 @@ pub(crate) fn collect_wiki_read_value_for_plan(
         resolve_wiki_category(path)
     };
 
-    let entries = list_wiki_entries_for_plan(server, plan, "/wiki", 5000)?;
+    let entries =
+        list_wiki_entries_for_plan(server, plan, knowledge_artifact_root(&resolved), 5000)?;
     let exact_matches = entries
         .iter()
         .filter(|entry| entry.entry.path == resolved)
@@ -617,8 +649,8 @@ pub(crate) fn collect_wiki_read_value_for_plan(
             // still show the caller it is not reviewed truth, even though
             // reading by an exact known path (unlike default search) is not
             // itself gated.
-            let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
-            let authority = derive_wiki_authority(&entry.metadata);
+            let effective =
+                derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
             let review_receipt = derive_wiki_review_receipt(&entry.metadata)
                 .and_then(|receipt| serde_json::to_value(receipt).ok())
                 .unwrap_or(Value::Null);
@@ -637,8 +669,9 @@ pub(crate) fn collect_wiki_read_value_for_plan(
                     "topic": entry.topic,
                     "timestamp": entry.timestamp,
                     "revision": entry.revision,
-                    "authority": authority.as_str(),
-                    "lifecycle": lifecycle.as_str(),
+                    "authority": effective.authority.as_str(),
+                    "lifecycle": effective.lifecycle.as_str(),
+                    "effective_artifact": effective,
                     "source_refs": entry.metadata.get("source_refs").cloned().unwrap_or_else(|| json!([])),
                     "evidence_refs_v1": entry.metadata.get("evidence_refs_v1").cloned().unwrap_or_else(|| json!([])),
                     "references": preferred_wiki_references(&entry.metadata),
@@ -659,6 +692,8 @@ pub(crate) fn collect_wiki_read_value_for_plan(
 
 fn wiki_read_candidate(entry: &StoredWikiEntry) -> Value {
     let stored = &entry.entry;
+    let effective =
+        derive_effective_knowledge_artifact(&stored.metadata, &stored.path, &stored.scope);
     json!({
         "id": stored.id,
         "path": stored.path,
@@ -669,5 +704,6 @@ fn wiki_read_candidate(entry: &StoredWikiEntry) -> Value {
         "topic": stored.topic,
         "timestamp": stored.timestamp,
         "store": entry.store,
+        "effective_artifact": effective,
     })
 }

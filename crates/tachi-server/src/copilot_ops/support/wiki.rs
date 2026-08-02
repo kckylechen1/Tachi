@@ -20,10 +20,9 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
     }
 }
 
-/// Builds the layer/scope/authority/lifecycle metadata stamped onto every
-/// `tachi_wiki_write` entry, with typed `evidence_refs_v1` as the canonical
-/// write shape (canon doc §7.1). Legacy `metadata.source_refs: string[]` remains
-/// a read fallback for existing entries but is not written here.
+/// Builds the canonical candidate artifact metadata stamped onto every
+/// `tachi_wiki_write` entry. Semantic scope comes only from the scope request;
+/// physical `project=` placement is intentionally not an input.
 ///
 /// Public `tachi_wiki_write` input cannot establish human review authority.
 /// Metadata and references are caller-controlled, so every write through this
@@ -31,49 +30,39 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
 /// References are retained only as provenance. A future approval flow must use
 /// a separate server-verified typed authority channel.
 ///
-/// `/wiki/drafts/...` stays `pending_review` unconditionally (the one
-/// draft-path convention this leaf's own writer is aware of;
-/// `foundry_runtime_ops::wiki_evolver`'s weekly REM synthesis writes drafts
-/// through a *different* path — `tachi_save` directly — and stamps its own
-/// `metadata.review_status = "pending"` marker after the fact; the read-side
-/// gate (`derive_wiki_lifecycle`) honors both origins).
+/// `/wiki/drafts/...` stays `pending_review` unconditionally; the REM evolver
+/// uses this same candidate seam and then records its workflow review marker.
 pub(in crate::copilot_ops) fn wiki_layer_metadata(
     path: &str,
     scope: &str,
-    project: Option<&str>,
     references: &[String],
+    proposal_metadata: &Value,
 ) -> Value {
     let is_guide = path == "/guide" || path.starts_with("/guide/");
     let layer = if is_guide { "guide" } else { "wiki" };
-    let scope = if project.is_some() || scope.eq_ignore_ascii_case("project") {
-        "project"
+    let candidate = build_candidate_knowledge_artifact_fields(path, scope, proposal_metadata);
+    let mut obj = candidate.as_object().cloned().unwrap_or_default();
+    let is_shared = obj
+        .get("knowledge_scope")
+        .and_then(Value::as_str)
+        .is_some_and(|scope| scope == "shared");
+    let legacy_scope = if is_shared {
+        "global".to_string()
     } else {
-        "global"
+        obj.get("knowledge_scope")
+            .and_then(Value::as_str)
+            .unwrap_or("unspecified")
+            .to_string()
     };
-    let authority = if is_guide {
-        WikiAuthorityV1::Playbook
-    } else {
-        WikiAuthorityV1::Advisory
-    };
-    let is_draft_path = path == "/wiki/drafts" || path.starts_with("/wiki/drafts/");
-    let lifecycle = WikiLifecycleV1::PendingReview;
-    let artifact_kind = if is_guide {
-        WikiArtifactKindV1::Guide
-    } else if is_draft_path {
-        WikiArtifactKindV1::Draft
-    } else {
-        WikiArtifactKindV1::Wiki
-    };
-    let mut obj = serde_json::Map::new();
     obj.insert("layer".to_string(), json!(layer));
-    obj.insert("scope".to_string(), json!(scope));
-    obj.insert("authority".to_string(), json!(authority.as_str()));
+    obj.insert("scope".to_string(), json!(legacy_scope));
     // Legacy field, kept for back-compat; nothing in this codebase reads
     // it today (confirmed by repo-wide grep), but it must stay truthful
     // rather than the old hardcoded "active" now that draft paths exist.
-    obj.insert("status".to_string(), json!(lifecycle.as_str()));
-    obj.insert("lifecycle".to_string(), json!(lifecycle.as_str()));
-    obj.insert("artifact_kind".to_string(), json!(artifact_kind.as_str()));
+    obj.insert(
+        "status".to_string(),
+        json!(WikiLifecycleV1::PendingReview.as_str()),
+    );
     obj.insert("source_ref".to_string(), json!(references.first().cloned()));
     Value::Object(obj)
 }
