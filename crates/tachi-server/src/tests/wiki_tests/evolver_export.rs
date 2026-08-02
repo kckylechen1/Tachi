@@ -1143,6 +1143,18 @@ fn wiki_export_ignores_a_claim_whose_output_directory_was_replaced() {
 fn wiki_export_preserves_names_the_unbounded_predecessor_could_write() {
     let writable_stems = ["a".repeat(250), "b".repeat(252)];
     let overlong_stem = "c".repeat(253);
+    // Each row needs its own body. `make_entry` hands every entry the same
+    // `"test memory"` text, and the write-time near-duplicate merge in
+    // `memcore::db::memory_crud::merge_into_jaccard_candidate` supersedes a new
+    // row whose text is >0.9 Jaccard-similar to a live one. Identical bodies
+    // therefore collapse the whole band into a single unsuperseded row, and the
+    // export — which reads `superseded_by IS NULL` — would then exercise one
+    // name instead of the band this test exists to pin.
+    let bodies = [
+        "Alder cartography note pinning the shortest writable band stem.",
+        "Basalt hydrology digest pinning the longest writable band stem.",
+        "Cinnabar telemetry ledger pinning the first unwritable band stem.",
+    ];
     let entries = writable_stems
         .iter()
         .chain(std::iter::once(&overlong_stem))
@@ -1152,6 +1164,7 @@ fn wiki_export_preserves_names_the_unbounded_predecessor_could_write() {
             entry.path = "/wiki/long-names".to_string();
             entry.topic = stem.clone();
             entry.summary = format!("Name band entry {index}");
+            entry.text = bodies[index].to_string();
             entry
         })
         .collect::<Vec<_>>();
@@ -1213,10 +1226,15 @@ fn wiki_export_bounds_generated_file_name_length() {
     first.path = "/wiki/long-names".to_string();
     first.topic = format!("{long_topic}-alpha");
     first.summary = "First long-topic entry".to_string();
+    // Distinct bodies, for the same reason as the name-band test above: equal
+    // text is merged as a near-duplicate at write time, and the superseded row
+    // never reaches the export at all.
+    first.text = "First long-topic body about alder cartography.".to_string();
     let mut second = make_entry("wiki-export-long-name-b");
     second.path = first.path.clone();
     second.topic = format!("{long_topic}-beta");
     second.summary = "Second long-topic entry".to_string();
+    second.text = "Second long-topic body about basalt hydrology.".to_string();
 
     let (server, _home) = seed_wiki_project_entries(vec![first, second]);
     let out_dir =
