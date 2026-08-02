@@ -34,6 +34,9 @@ pub(in crate::copilot_ops) fn compact_layer_rows(
                     row.get(key).cloned().unwrap_or(Value::Null),
                 );
             }
+            if let Some(store) = row.get("store").filter(|value| !value.is_null()) {
+                out.insert("store".to_string(), store.clone());
+            }
             out.insert(
                 "score".to_string(),
                 row.get("score")

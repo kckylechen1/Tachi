@@ -437,7 +437,7 @@ pub struct TachiWikiParams {
     pub scope: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Named project library under ~/.tachi/projects/<name>/tachi-memory.db. When set, wiki recall targets ONLY that library."
+        description = "Reads: set is named-only; omitted federates bound + shared. Writes: set selects destination; omitted uses default."
     )]
     pub project: Option<String>,
     #[serde(default)]

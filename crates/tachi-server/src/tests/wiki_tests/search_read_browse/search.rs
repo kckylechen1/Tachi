@@ -131,6 +131,7 @@ async fn tachi_wiki_search_supports_explicit_markdown_format() {
         .expect("tachi_wiki markdown search should succeed");
 
     assert!(response.starts_with("## Wiki search:"), "{response}");
+    assert!(response.contains("[store: named wiki]"), "{response}");
     assert!(
         response.contains("MarkdownFacadeWikiNeedle") || response.contains("markdown-search"),
         "{response}"

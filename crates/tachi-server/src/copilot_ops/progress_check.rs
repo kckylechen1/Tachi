@@ -30,7 +30,8 @@ pub(crate) async fn handle_tachi_progress_check(
         params.attempts.join(" ")
     );
     let top_k = crate::clamp_facade_top_k(params.top_k);
-    let mut wiki_rows = search_memory_rows(
+    let wiki_plan = WikiReadPlan::from_project(params.project.as_deref())?;
+    let wiki_rows = crate::wiki_ops::search_wiki_rows_for_plan(
         server,
         SearchMemoryParams {
             query: query.clone(),
@@ -55,19 +56,12 @@ pub(crate) async fn handle_tachi_progress_check(
             include_metadata: false,
             format: None,
         },
+        &wiki_plan,
+        None,
         false,
     )
-    .await?;
-    // #1072 fix-round (#1215 BUG 4): `tachi_unstick` fed raw `/wiki` rows
-    // (including unreviewed drafts) into the debug checklist synthesis with
-    // no lifecycle filtering — another named reasoning-context bypass. Gate
-    // to the default (active-only) scope.
-    crate::wiki_ops::apply_wiki_lifecycle_gate(
-        server,
-        params.project.as_deref(),
-        &mut wiki_rows,
-        None,
-    )?;
+    .await?
+    .rows;
     let debug_checklist = build_debug_checklist(&wiki_rows);
 
     let ask_codex_prompt = format!(

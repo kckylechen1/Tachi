@@ -349,64 +349,16 @@ pub(crate) async fn handle_tachi_wiki_search(
     server: &MemoryServer,
     params: WikiSearchParams,
 ) -> Result<String, String> {
-    let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
-    let top_k = crate::clamp_facade_top_k(params.top_k);
-    let project = params.project.clone();
-    let lifecycle_scope = params.lifecycle.clone();
-    let mut rows = search_memory_rows(
-        server,
-        SearchMemoryParams {
-            query: params.query.clone(),
-            query_vec: None,
-            top_k,
-            path_prefix: Some(path_prefix.clone()),
-            include_training: false,
-            include_archived: params.include_archived,
-            candidates_per_channel: top_k.max(20),
-            mmr_threshold: None,
-            graph_expand_hops: 1,
-            graph_relation_filter: None,
-            weights: params.weights.or(Some(HybridWeightsParam {
-                semantic: 0.48,
-                fts: 0.30,
-                symbolic: 0.20,
-                decay: 0.02,
-                use_rrf: true,
-            })),
-            context_symbols: Vec::new(),
-            agent_role: params.agent_role,
-            project: params.project,
-            domain: params.domain,
-            file_context: params.file_context,
-            error_context: params.error_context,
-            enable_rerank: false,
-            as_of: None,
-            include_metadata: false,
-            format: None,
-        },
-        false,
-    )
-    .await?;
-    crate::wiki_ops::filter_user_facing_wiki_rows(&mut rows);
-    // #1072 RED case 2: this is a second, independent search entry point
-    // (`tachi_wiki(action='search')`'s non-JSON branch and `tachi_wiki_search`)
-    // from `wiki_ops::search::collect_wiki_search_value` — both must gate
-    // pending/candidate drafts out of the default result set.
-    crate::wiki_ops::apply_wiki_lifecycle_gate(
-        server,
-        project.as_deref(),
-        &mut rows,
-        lifecycle_scope.as_deref(),
-    )?;
-
-    crate::wiki_ops::append_wiki_log(
-        server,
-        "search",
-        &format!("{} | {} result(s)", params.query, rows.len()),
-    );
+    let query = params.query.clone();
+    let value = crate::wiki_ops::collect_wiki_search_value(server, params).await?;
+    let rows = value
+        .get("results")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
 
     Ok(crate::agent_markdown::format_wiki_search(
-        &params.query,
+        &query,
         rows.len(),
         &serde_json::Value::Array(rows),
     ))

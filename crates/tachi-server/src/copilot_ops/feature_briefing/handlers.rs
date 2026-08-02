@@ -44,7 +44,8 @@ pub(crate) async fn handle_tachi_task_brief(
     params: TaskBriefParams,
 ) -> Result<String, String> {
     let top_k = crate::clamp_facade_top_k(params.top_k);
-    let mut wiki_rows = search_memory_rows(
+    let wiki_plan = WikiReadPlan::from_project(params.project.as_deref())?;
+    let wiki_rows = crate::wiki_ops::search_wiki_rows_for_plan(
         server,
         SearchMemoryParams {
             query: params.task.clone(),
@@ -69,20 +70,12 @@ pub(crate) async fn handle_tachi_task_brief(
             include_metadata: false,
             format: None,
         },
+        &wiki_plan,
+        None,
         false,
     )
-    .await?;
-    crate::wiki_ops::filter_user_facing_wiki_rows(&mut wiki_rows);
-    // #1072 fix-round (#1215 BUG 4): `tachi_task(action='brief')` fed raw
-    // `/wiki` rows (including unreviewed drafts) into `wiki_hits` and the
-    // debug checklist with no lifecycle filtering — another named
-    // reasoning-context bypass. Gate to the default (active-only) scope.
-    crate::wiki_ops::apply_wiki_lifecycle_gate(
-        server,
-        params.project.as_deref(),
-        &mut wiki_rows,
-        None,
-    )?;
+    .await?
+    .rows;
     let memory_rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -166,13 +159,14 @@ pub(crate) async fn handle_tachi_feature_briefing(
         crate::clamp_facade_top_k(params.top_k.unwrap_or(6))
     };
     let query = feature_briefing_query(params);
+    let wiki_plan = WikiReadPlan::from_project(params.project.as_deref())?;
     let project_work_record = project_work_records(params);
     let canonical_docs = canonical_doc_refs(params);
     let run_artifacts = feature_run_artifacts(params.flow_id.as_deref())?;
 
     let (board, wiki_rows, memory_rows, eval_rows) = tokio::join!(
         feature_board(server, params, top_k),
-        search_memory_rows(
+        crate::wiki_ops::search_wiki_rows_for_plan(
             server,
             SearchMemoryParams {
                 query: query.clone(),
@@ -188,7 +182,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
                 weights: None,
                 context_symbols: Vec::new(),
                 agent_role: params.agent_id.clone(),
-                project: None,
+                project: params.project.clone(),
                 domain: params.domain.clone(),
                 file_context: None,
                 error_context: None,
@@ -197,6 +191,8 @@ pub(crate) async fn handle_tachi_feature_briefing(
                 include_metadata: true,
                 format: None,
             },
+            &wiki_plan,
+            None,
             false,
         ),
         search_memory_rows(
@@ -254,19 +250,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
             !params.include_global,
         ),
     );
-    let mut wiki_rows = wiki_rows.unwrap_or_default();
-    // #1072 fix-round (#1215 BUG 4): `tachi_task(action='intake'/'plan'/
-    // 'doc_index'/...)` fed raw `/wiki` rows into `wiki_hits`/`doc_index`
-    // with no lifecycle filtering — another named reasoning-context bypass.
-    // Gate to the default (active-only) scope; a lookup failure degrades to
-    // "no wiki hits" rather than failing the whole briefing.
-    // `project: None` matches the wiki search call above (unscoped, same as
-    // `apply_wiki_lifecycle_gate`'s own "wiki" default lookup project).
-    if let Err(err) = crate::wiki_ops::apply_wiki_lifecycle_gate(server, None, &mut wiki_rows, None)
-    {
-        tracing::warn!("[feature_briefing] wiki lifecycle gate failed, dropping wiki hits: {err}");
-        wiki_rows.clear();
-    }
+    let wiki_rows = wiki_rows.map(|result| result.rows).unwrap_or_default();
     let memory_rows = memory_rows.unwrap_or_default();
     let eval_rows = eval_rows.unwrap_or_default();
 

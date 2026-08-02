@@ -148,4 +148,39 @@ async fn tachi_wiki_read_reports_path_collisions_instead_of_shadowing() {
         .iter()
         .any(|candidate| candidate["id"] == json!("wiki-collision-b")));
     assert!(read_json["entry"].is_null());
+
+    let markdown = server
+        .tachi_wiki(Parameters(TachiWikiParams {
+            action: "read".to_string(),
+            format: Some("markdown".to_string()),
+            query: None,
+            category: None,
+            lifecycle: None,
+            top_k: None,
+            limit: None,
+            title: None,
+            text: None,
+            path: Some("/wiki/agent/tachi".to_string()),
+            topic: None,
+            summary: None,
+            keywords: Vec::new(),
+            entities: Vec::new(),
+            references: Vec::new(),
+            importance: None,
+            scope: None,
+            project: None,
+            domain: None,
+            metadata: None,
+            force: false,
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
+        }))
+        .await
+        .expect("ambiguous markdown read should succeed");
+    assert_eq!(
+        markdown.matches("[store: named wiki]").count(),
+        2,
+        "{markdown}"
+    );
 }

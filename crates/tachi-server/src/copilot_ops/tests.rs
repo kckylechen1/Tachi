@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn compact_layer_rows_preserves_typed_wiki_store_identity() {
+    let store = json!({"kind": "bound_project"});
+    let compact = compact_layer_rows(
+        vec![json!({
+            "id": "wiki-row",
+            "path": "/wiki/example",
+            "store": store,
+        })],
+        1,
+        Some("wiki"),
+        None,
+    );
+
+    assert_eq!(compact[0]["store"], store);
+}
+
+#[test]
 fn compact_layer_rows_prefers_normalized_typed_references() {
     let rows = vec![json!({
         "id": "typed-row",

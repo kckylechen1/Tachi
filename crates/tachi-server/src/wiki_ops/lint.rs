@@ -11,6 +11,22 @@ fn default_checks() -> Vec<String> {
     ]
 }
 
+const VALID_CHECKS: [&str; 6] = [
+    "orphans",
+    "contradictions",
+    "stale",
+    "missing_edges",
+    "dirty_data",
+    "duplicates",
+];
+
+fn store_db_label(store_ref: &StoreRef) -> &'static str {
+    match store_ref {
+        StoreRef::LegacyGlobal => "global",
+        StoreRef::BoundProject | StoreRef::NamedProject { .. } => "project",
+    }
+}
+
 // ─── Wiki Lint ──────────────────────────────────────────────────────────────
 
 /// Count-only wiki hygiene for agent alerts/briefing — never runs skill-quality guards.
@@ -34,6 +50,7 @@ pub(crate) async fn wiki_hygiene_counts(
             // Hot path (every briefing/alerts call) — never a surprise
             // writer. See `WikiLintParams::persist_stale` doc.
             persist_stale: false,
+            project: None,
         },
     )
     .await?;
@@ -54,34 +71,23 @@ pub(crate) async fn handle_wiki_lint(
     } else {
         params.checks.clone()
     };
+    if let Some(unknown) = checks
+        .iter()
+        .find(|check| !VALID_CHECKS.contains(&check.as_str()))
+    {
+        return Err(format!(
+            "invalid wiki_lint check '{unknown}'; expected one of {}",
+            VALID_CHECKS.join(", ")
+        ));
+    }
     let path_prefix = params.path_prefix.as_deref().unwrap_or("/wiki");
     let limit = params.limit.max(1).min(500);
     let stale_cutoff = Utc::now() - ChronoDuration::days(params.stale_days as i64);
-
-    let mut nodes: Vec<(MemoryEntry, DbScope)> = Vec::new();
-    let global_entries = server.with_global_store_read(|store| {
-        store
-            .list_by_path(path_prefix, limit, false)
-            .map_err(|e| format!("wiki_lint global list: {e}"))
-    })?;
-    nodes.extend(
-        global_entries
-            .into_iter()
-            .map(|entry| (entry, DbScope::Global)),
-    );
-    if server.has_project_db() {
-        let project_entries = server.with_project_store_read(|store| {
-            store
-                .list_by_path(path_prefix, limit, false)
-                .map_err(|e| format!("wiki_lint project list: {e}"))
-        })?;
-        nodes.extend(
-            project_entries
-                .into_iter()
-                .map(|entry| (entry, DbScope::Project)),
-        );
-    }
-    nodes.retain(|(entry, _)| is_user_facing_wiki_entry(entry));
+    let plan = match params.project.as_deref() {
+        Some(project) => WikiReadPlan::from_project(Some(project))?,
+        None => WikiReadPlan::MigrationAudit,
+    };
+    let nodes = list_wiki_entries_for_plan(server, &plan, path_prefix, limit)?;
 
     let mut orphans = Vec::new();
     let mut stale_nodes = Vec::new();
@@ -89,30 +95,26 @@ pub(crate) async fn handle_wiki_lint(
     let mut missing_edge_hints = Vec::new();
     let mut dirty_data = Vec::new();
     let mut duplicates = Vec::new();
+    let mut stale_keys = HashSet::<(StoreRef, String)>::new();
 
-    let mut all_edges = Vec::<memcore::MemoryEdge>::new();
-    for (entry, scope) in &nodes {
-        let edges = if *scope == DbScope::Global {
-            server.with_global_store_read(|store| {
-                store
-                    .get_edges(&entry.id, "both", None)
-                    .map_err(|e| format!("wiki_lint get edges: {e}"))
-            })?
-        } else {
-            server.with_project_store_read(|store| {
-                store
-                    .get_edges(&entry.id, "both", None)
-                    .map_err(|e| format!("wiki_lint get edges: {e}"))
-            })?
-        };
+    let mut all_edges = Vec::<(StoreRef, memcore::MemoryEdge)>::new();
+    for node in &nodes {
+        let entry = &node.entry;
+        let store_ref = &node.store;
+        let edges = with_wiki_store_read(server, store_ref, |store| {
+            store
+                .get_edges(&entry.id, "both", None)
+                .map_err(|e| format!("wiki_lint get edges: {e}"))
+        })?;
         if checks.iter().any(|check| check == "orphans") && edges.is_empty() {
             orphans.push(json!({
                 "id": entry.id,
                 "path": entry.path,
-                "db": scope.as_str(),
+                "db": store_db_label(store_ref),
+                "store": store_ref,
             }));
         }
-        all_edges.extend(edges);
+        all_edges.extend(edges.into_iter().map(|edge| (store_ref.clone(), edge)));
         if checks.iter().any(|check| check == "stale") {
             if let Some(ts) = parse_rfc3339_utc(&entry.timestamp) {
                 if ts < stale_cutoff
@@ -125,9 +127,11 @@ pub(crate) async fn handle_wiki_lint(
                         "id": entry.id,
                         "path": entry.path,
                         "timestamp": entry.timestamp,
-                        "db": scope.as_str(),
+                        "db": store_db_label(store_ref),
+                        "store": store_ref,
                         "reason": "retention_age",
                     }));
+                    stale_keys.insert((store_ref.clone(), entry.id.clone()));
                 }
             }
         }
@@ -141,7 +145,8 @@ pub(crate) async fn handle_wiki_lint(
                 "id": entry.id,
                 "path": entry.path,
                 "issue": "think_tag_leak",
-                "db": scope.as_str(),
+                "db": store_db_label(store_ref),
+                "store": store_ref,
             }));
         }
     }
@@ -160,19 +165,17 @@ pub(crate) async fn handle_wiki_lint(
     // blob-SHA drift detection ("source revision drift, trusted-ref
     // changes") is a separate leaf's worth of work (needs #1002's
     // `CanonicalDocRefV1` resolver wired into wiki writes).
-    let mut semantic_stale_to_persist: Vec<(MemoryEntry, DbScope)> = Vec::new();
+    let mut semantic_stale_to_persist: Vec<(MemoryEntry, StoreRef)> = Vec::new();
     if checks.iter().any(|check| check == "stale") {
-        let already_stale: HashSet<String> = stale_nodes
-            .iter()
-            .filter_map(|node| node.get("id").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect();
-        for (entry, scope) in &nodes {
-            if already_stale.contains(entry.id.as_str()) {
+        for node in &nodes {
+            let entry = &node.entry;
+            let store_ref = &node.store;
+            if stale_keys.contains(&(store_ref.clone(), entry.id.clone())) {
                 continue;
             }
-            let contradicted_or_superseded = all_edges.iter().any(|edge| {
-                edge.target_id == entry.id
+            let contradicted_or_superseded = all_edges.iter().any(|(edge_store, edge)| {
+                edge_store == store_ref
+                    && edge.target_id == entry.id
                     && matches!(edge.relation.as_str(), "contradicts" | "supersedes")
             });
             if contradicted_or_superseded {
@@ -180,7 +183,8 @@ pub(crate) async fn handle_wiki_lint(
                     "id": entry.id,
                     "path": entry.path,
                     "timestamp": entry.timestamp,
-                    "db": scope.as_str(),
+                    "db": store_db_label(store_ref),
+                    "store": store_ref,
                     "reason": "semantic_stale_contradicted_or_superseded",
                 }));
                 // #1072 fix-round (#1215 BUG 6): "lint appends a diagnostic
@@ -197,13 +201,13 @@ pub(crate) async fn handle_wiki_lint(
                     && derive_wiki_lifecycle(&entry.metadata, &entry.path)
                         == WikiLifecycleV1::Active
                 {
-                    semantic_stale_to_persist.push((entry.clone(), *scope));
+                    semantic_stale_to_persist.push((entry.clone(), store_ref.clone()));
                 }
             }
         }
     }
     let mut stale_persist_errors: Vec<String> = Vec::new();
-    for (mut entry, scope) in semantic_stale_to_persist {
+    for (mut entry, store_ref) in semantic_stale_to_persist {
         let Some(obj) = entry.metadata.as_object_mut() else {
             continue;
         };
@@ -215,18 +219,11 @@ pub(crate) async fn handle_wiki_lint(
             "stale_reason".to_string(),
             json!("semantic_stale_contradicted_or_superseded"),
         );
-        let write_result = match scope {
-            DbScope::Global => server.with_global_store(|store| {
-                store
-                    .upsert(&entry)
-                    .map_err(|e| format!("wiki_lint stale persist (global): {e}"))
-            }),
-            DbScope::Project => server.with_project_store(|store| {
-                store
-                    .upsert(&entry)
-                    .map_err(|e| format!("wiki_lint stale persist (project): {e}"))
-            }),
-        };
+        let write_result = with_wiki_store(server, &store_ref, |store| {
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("wiki_lint stale persist: {e}"))
+        });
         if let Err(err) = write_result {
             tracing::warn!(
                 "wiki_lint persist_stale write failed for {}: {err}",
@@ -247,15 +244,20 @@ pub(crate) async fn handle_wiki_lint(
         let nodes_for_pairwise = &nodes[..nodes.len().min(PAIRWISE_NODE_CAP)];
         for i in 0..nodes_for_pairwise.len() {
             for j in (i + 1)..nodes_for_pairwise.len() {
-                let left = &nodes_for_pairwise[i].0;
-                let right = &nodes_for_pairwise[j].0;
-                if nodes_for_pairwise[i].1 != nodes_for_pairwise[j].1 {
+                let left = &nodes_for_pairwise[i].entry;
+                let right = &nodes_for_pairwise[j].entry;
+                let store_ref = &nodes_for_pairwise[i].store;
+                if store_ref != &nodes_for_pairwise[j].store {
                     continue;
                 }
                 let similarity = token_cosine_similarity(&left.text, &right.text);
                 if checks.iter().any(|check| check == "missing_edges")
                     && similarity > params.missing_edge_threshold
-                    && !relation_exists(&all_edges, &left.id, &right.id, None)
+                    && !all_edges.iter().any(|(edge_store, edge)| {
+                        edge_store == store_ref
+                            && ((edge.source_id == left.id && edge.target_id == right.id)
+                                || (edge.source_id == right.id && edge.target_id == left.id))
+                    })
                 {
                     missing_edge_hints.push(json!({
                         "left_id": left.id,
@@ -263,7 +265,8 @@ pub(crate) async fn handle_wiki_lint(
                         "left_path": left.path,
                         "right_path": right.path,
                         "similarity": similarity,
-                        "db": nodes_for_pairwise[i].1.as_str(),
+                        "db": store_db_label(store_ref),
+                        "store": store_ref,
                     }));
                 }
                 if checks.iter().any(|check| check == "duplicates") && similarity > 0.95 {
@@ -273,7 +276,8 @@ pub(crate) async fn handle_wiki_lint(
                         "left_path": left.path,
                         "right_path": right.path,
                         "similarity": similarity,
-                        "db": nodes_for_pairwise[i].1.as_str(),
+                        "db": store_db_label(store_ref),
+                        "store": store_ref,
                     }));
                 }
                 if checks.iter().any(|check| check == "contradictions") {
@@ -285,7 +289,8 @@ pub(crate) async fn handle_wiki_lint(
                             "left_path": left.path,
                             "right_path": right.path,
                             "score": contradiction,
-                            "db": nodes_for_pairwise[i].1.as_str(),
+                            "db": store_db_label(store_ref),
+                            "store": store_ref,
                         }));
                     }
                 }
@@ -306,6 +311,8 @@ pub(crate) async fn handle_wiki_lint(
 
     serde_json::to_string(&json!({
         "path_prefix": path_prefix,
+        "project": params.project,
+        "stores": stores_for_wiki_plan(server, &plan),
         "checks": checks,
         "orphans": orphans,
         "stale_nodes": stale_nodes,

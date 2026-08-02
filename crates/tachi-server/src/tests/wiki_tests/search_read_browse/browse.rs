@@ -22,7 +22,7 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
         .tachi_browse(Parameters(WikiBrowseParams {
             category: Some("engineering/debugging".to_string()),
             limit: 10,
-            project: "wiki".to_string(),
+            project: Some("wiki".to_string()),
             lifecycle: None,
         }))
         .await
@@ -35,6 +35,7 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
         response.contains("/wiki/engineering/debugging/beta"),
         "browse markdown should contain beta path"
     );
+    assert!(response.contains("[store: named wiki]"), "{response}");
 
     let log = server
         .with_named_project_store_read("wiki", |store| {
@@ -64,7 +65,7 @@ async fn wiki_browse_hides_recall_cache_entries() {
         .tachi_browse(Parameters(WikiBrowseParams {
             category: Some("engineering/debugging".to_string()),
             limit: 10,
-            project: "wiki".to_string(),
+            project: Some("wiki".to_string()),
             lifecycle: None,
         }))
         .await
@@ -95,7 +96,7 @@ async fn wiki_browse_large_limit_keeps_related_entries_empty() {
         .tachi_browse(Parameters(WikiBrowseParams {
             category: Some("engineering/scale".to_string()),
             limit: 21,
-            project: "wiki".to_string(),
+            project: Some("wiki".to_string()),
             lifecycle: None,
         }))
         .await
@@ -132,7 +133,7 @@ async fn wiki_browse_stats_derive_facets_from_real_paths_including_unlisted_pref
         WikiBrowseParams {
             category: None,
             limit: 50,
-            project: "wiki".to_string(),
+            project: Some("wiki".to_string()),
             lifecycle: None,
         },
     )

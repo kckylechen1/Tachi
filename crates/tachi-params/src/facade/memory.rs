@@ -100,10 +100,10 @@ pub struct TachiSearchParams {
     #[serde(default)]
     pub path_prefix: Option<String>,
 
-    /// Optional named project DB
+    /// Optional named project DB.
     #[serde(default)]
     #[schemars(
-        description = "Named project library under ~/.tachi/projects/<name>/tachi-memory.db. When set, search/save targets ONLY that library (not the daemon-bound workspace DB). Omit to use global + daemon-bound project DB."
+        description = "Wiki scope: set is named-only; omitted federates bound + shared. Other scopes: set targets only that library; omitted uses bound + global."
     )]
     pub project: Option<String>,
 

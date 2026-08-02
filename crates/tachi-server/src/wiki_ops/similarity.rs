@@ -66,17 +66,3 @@ pub(super) fn contradiction_score(a: &str, b: &str) -> f64 {
         0.0
     }
 }
-
-pub(super) fn relation_exists(
-    edges: &[memcore::MemoryEdge],
-    a: &str,
-    b: &str,
-    relation: Option<&str>,
-) -> bool {
-    edges.iter().any(|edge| {
-        let matches_nodes = (edge.source_id == a && edge.target_id == b)
-            || (edge.source_id == b && edge.target_id == a);
-        let matches_relation = relation.map(|rel| edge.relation == rel).unwrap_or(true);
-        matches_nodes && matches_relation
-    })
-}

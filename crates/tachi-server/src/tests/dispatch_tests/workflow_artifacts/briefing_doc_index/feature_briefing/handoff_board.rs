@@ -7,6 +7,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
+    crate::tests::register_logical_shared_wiki(&server);
     let runs_root = crate::dispatch_ops::runs_dir_for_server(&server);
     let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", &runs_root);
     let flow_id = "flow_20260608T000000Z_feature_briefing_test";
@@ -38,19 +39,22 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     )
     .expect("link feature briefing dispatch to its flow descriptor");
 
+    let mut wiki = make_entry("wiki-feature-briefing");
+    wiki.path = "/wiki/agent/tachi/feature-briefing".to_string();
+    wiki.summary = "Feature briefing should separate docs wiki and memory".to_string();
+    wiki.text = "FeatureBriefingNeedle durable wiki lesson for handoff board layering.".to_string();
+    wiki.category = "experience".to_string();
+    wiki.topic = "feature_briefing".to_string();
+    wiki.scope = "shared".to_string();
+    wiki.retention_policy = Some("permanent".to_string());
+    server
+        .with_named_project_store("wiki", |store| {
+            store.upsert(&wiki).map_err(|e| e.to_string())
+        })
+        .expect("seed shared wiki fixture");
+
     server
         .with_global_store(|store| {
-            let mut wiki = make_entry("wiki-feature-briefing");
-            wiki.path = "/wiki/agent/tachi/feature-briefing".to_string();
-            wiki.summary = "Feature briefing should separate docs wiki and memory".to_string();
-            wiki.text =
-                "FeatureBriefingNeedle durable wiki lesson for handoff board layering.".to_string();
-            wiki.category = "experience".to_string();
-            wiki.topic = "feature_briefing".to_string();
-            wiki.scope = "global".to_string();
-            wiki.retention_policy = Some("permanent".to_string());
-            store.upsert(&wiki).map_err(|e| e.to_string())?;
-
             let mut guide = make_entry("guide-feature-briefing-agent-review");
             guide.path = "/guide/global/workflows/agent-review".to_string();
             guide.summary = "AgentReview guide for review dispatch".to_string();

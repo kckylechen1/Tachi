@@ -351,6 +351,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
             contradiction_threshold: 0.6,
             include_skill_quality: true,
             persist_stale: false,
+            project: None,
         }))
         .await
         .expect("wiki_lint should succeed");
@@ -436,6 +437,90 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
 }
 
 #[tokio::test]
+async fn wiki_lint_explicit_named_store_is_strict_and_reports_store_identity() {
+    let server = make_server();
+    let db_path = server
+        .tachi_home_dir()
+        .join("projects")
+        .join("named-lint")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(db_path.parent().expect("named lint project parent"))
+        .expect("create named lint project parent");
+    drop(
+        MemoryStore::open(db_path.to_str().expect("utf8 named lint DB"))
+            .expect("create named lint DB"),
+    );
+    let manifest_path = server.tachi_home_dir().join("manifest.json");
+    let mut manifest = crate::manifest::Manifest::load_or_empty(&manifest_path);
+    manifest.dbs.push(crate::manifest::DbEntry {
+        path: db_path.display().to_string(),
+        role: crate::manifest::DbRole::Project,
+        owner: "test".to_string(),
+        schema_kind: "tachi".to_string(),
+        vec_enabled: true,
+        allow_write: true,
+        last_doctor_at: Utc::now().to_rfc3339(),
+        last_classification: "healthy".to_string(),
+        scope_hint: "project:named-lint".to_string(),
+        notes: String::new(),
+    });
+    manifest
+        .save(&manifest_path)
+        .expect("register named lint project");
+
+    let mut named = make_entry("wiki-lint-named-only");
+    named.path = "/wiki/lint/named-only".to_string();
+    named.metadata = json!({"lifecycle": "active"});
+    let mut global = make_entry("wiki-lint-global-decoy");
+    global.path = "/wiki/lint/global-decoy".to_string();
+    global.metadata = json!({"lifecycle": "active"});
+
+    server
+        .with_named_project_store("named-lint", |store| {
+            store.upsert(&named).map_err(|error| error.to_string())
+        })
+        .expect("seed named lint store");
+    server
+        .with_global_store(|store| store.upsert(&global).map_err(|error| error.to_string()))
+        .expect("seed global lint decoy");
+
+    let raw = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki/lint".to_string()),
+            checks: vec!["orphans".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: 0.85,
+            contradiction_threshold: 0.85,
+            include_skill_quality: false,
+            persist_stale: false,
+            project: Some("named-lint".to_string()),
+        }))
+        .await
+        .expect("lint named store");
+    let value: Value = serde_json::from_str(&raw).expect("lint JSON");
+    let orphans = value["orphans"].as_array().expect("orphans array");
+    assert!(
+        orphans
+            .iter()
+            .any(|row| row["id"] == json!("wiki-lint-named-only")),
+        "named-store fixture missing: {orphans:?}"
+    );
+    assert!(
+        orphans
+            .iter()
+            .all(|row| row["id"] != json!("wiki-lint-global-decoy")),
+        "RED: explicit named lint must not append global/workspace findings: {orphans:?}"
+    );
+    let named_row = orphans
+        .iter()
+        .find(|row| row["id"] == json!("wiki-lint-named-only"))
+        .expect("named lint row");
+    assert_eq!(named_row["store"]["kind"], json!("named_project"));
+    assert_eq!(named_row["store"]["project"], json!("named-lint"));
+}
+
+#[tokio::test]
 async fn wiki_lint_ignores_operation_log_rows() {
     let server = make_server();
     server
@@ -467,6 +552,7 @@ async fn wiki_lint_ignores_operation_log_rows() {
             contradiction_threshold: 0.6,
             include_skill_quality: false,
             persist_stale: false,
+            project: None,
         }))
         .await
         .expect("wiki_lint should succeed");
@@ -549,6 +635,7 @@ async fn wiki_lint_stale_check_ignores_retention_policy_for_contradicted_permane
             contradiction_threshold: 0.6,
             include_skill_quality: false,
             persist_stale: false,
+            project: None,
         }))
         .await
         .expect("wiki_lint should succeed");
@@ -654,6 +741,7 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
             contradiction_threshold: 0.6,
             include_skill_quality: false,
             persist_stale: true,
+            project: None,
         }))
         .await
         .expect("wiki_lint with persist_stale should succeed");
@@ -701,5 +789,106 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
     assert!(
         !search_markdown.contains("/wiki/test/persist-stale/target"),
         "GREEN: default-scope search must exclude the now-stale entry: {search_markdown}"
+    );
+}
+
+#[tokio::test]
+async fn wiki_lint_migration_audit_never_applies_edges_across_store_identity() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
+    let mut bound = make_entry("wiki-lint-cross-store-same-id");
+    bound.path = "/wiki/lint/cross-store/bound".to_string();
+    bound.metadata = json!({"lifecycle": "active"});
+    let mut global_target = make_entry("wiki-lint-cross-store-same-id");
+    global_target.path = "/wiki/lint/cross-store/global-target".to_string();
+    global_target.metadata = json!({"lifecycle": "active"});
+    let mut global_source = make_entry("wiki-lint-cross-store-source");
+    global_source.path = "/wiki/lint/cross-store/global-source".to_string();
+    global_source.metadata = json!({"lifecycle": "active"});
+
+    server
+        .with_project_store(|store| store.upsert(&bound).map_err(|error| error.to_string()))
+        .expect("seed bound same-id row");
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&global_target)
+                .map_err(|error| error.to_string())?;
+            store
+                .upsert(&global_source)
+                .map_err(|error| error.to_string())?;
+            store
+                .add_edge(&memcore::MemoryEdge {
+                    source_id: global_source.id.clone(),
+                    target_id: global_target.id.clone(),
+                    relation: "supersedes".to_string(),
+                    weight: 0.9,
+                    metadata: json!({"source": "test"}),
+                    created_at: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_to: None,
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed global edge");
+
+    server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki/lint/cross-store".to_string()),
+            checks: vec!["stale".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: 0.85,
+            contradiction_threshold: 0.85,
+            include_skill_quality: false,
+            persist_stale: true,
+            project: None,
+        }))
+        .await
+        .expect("migration audit lint");
+
+    let bound_after = server
+        .with_project_store_read(|store| {
+            store
+                .get("wiki-lint-cross-store-same-id")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read bound row")
+        .expect("bound row exists");
+    let global_after = server
+        .with_global_store_read(|store| {
+            store
+                .get("wiki-lint-cross-store-same-id")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read global row")
+        .expect("global row exists");
+    assert_eq!(bound_after.metadata["lifecycle"], json!("active"));
+    assert_eq!(
+        global_after.metadata["lifecycle"],
+        json!("stale"),
+        "the edge must affect only its own physical store"
+    );
+}
+
+#[tokio::test]
+async fn wiki_lint_rejects_unknown_check_names() {
+    let server = make_server();
+    let error = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki".to_string()),
+            checks: vec!["orphan".to_string()],
+            limit: 10,
+            stale_days: 90,
+            missing_edge_threshold: 0.85,
+            contradiction_threshold: 0.85,
+            include_skill_quality: false,
+            persist_stale: false,
+            project: None,
+        }))
+        .await
+        .expect_err("unknown check must fail closed");
+    assert!(
+        error.contains("invalid wiki_lint check 'orphan'"),
+        "{error}"
     );
 }

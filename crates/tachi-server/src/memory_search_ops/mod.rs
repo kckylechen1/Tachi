@@ -50,6 +50,9 @@ pub(crate) use search_memory::invalidate_recall_cache_after_write;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;
 pub(crate) use search_memory::search_memory_rows_with_recall_config;
+pub(crate) use search_memory::{
+    annotate_wiki_exact_token_matches, search_wiki_store_candidates, WikiStoreSearchCandidate,
+};
 #[cfg(test)]
 pub(crate) use search_memory::{
     RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,

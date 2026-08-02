@@ -17,12 +17,19 @@ use crate::memory_search_ops::search_helpers::{
     named_project_db_exists, normalize_search_relevance,
 };
 use crate::shared_defs::{slim_l0_rule, slim_search_result};
-use crate::tool_params::SearchMemoryParams;
+use crate::tool_params::{SearchMemoryParams, StoreRef};
 use crate::utils::{is_active_global_rule, parse_env_bool};
 use crate::{DbScope, MemoryServer};
 use serde_json::json;
 
 const MAX_CONTEXT_SYMBOLS: usize = 32;
+
+#[derive(Debug)]
+pub(crate) struct WikiStoreSearchCandidate {
+    pub(crate) result: memcore::SearchResult,
+    pub(crate) store: StoreRef,
+    pub(crate) recall_quality: Option<serde_json::Value>,
+}
 
 fn sandbox_role(params: &SearchMemoryParams) -> Option<&str> {
     params
@@ -84,6 +91,160 @@ fn recall_quality_for_project(
         .with_project_store_read(|store| Ok(recall_quality_from_store(store)))
         .ok()
         .flatten()
+}
+
+fn wiki_store_vec_available(server: &MemoryServer, store: &StoreRef) -> bool {
+    match store {
+        StoreRef::BoundProject => server.project_vec_available(),
+        StoreRef::NamedProject { project } => named_project_vec_available(server, project, None),
+        StoreRef::LegacyGlobal => server.global_vec_available(),
+    }
+}
+
+fn wiki_store_recall_quality(server: &MemoryServer, store: &StoreRef) -> Option<serde_json::Value> {
+    let read_quality =
+        |memory_store: &mut memcore::MemoryStore| Ok(recall_quality_from_store(memory_store));
+    match store {
+        StoreRef::BoundProject => server.with_project_store_read(read_quality),
+        StoreRef::NamedProject { project } => {
+            server.with_named_project_store_read(project, read_quality)
+        }
+        StoreRef::LegacyGlobal => server.with_global_store_read(read_quality),
+    }
+    .ok()
+    .flatten()
+}
+
+/// Search each physical Wiki store with an independent candidate budget.
+///
+/// This deliberately stops before cross-store ranking/truncation. Wiki owns
+/// lifecycle eligibility, so the caller must apply that gate before choosing
+/// the final top-k. Applying the ordinary memory-search top-k first lets one
+/// noisy store (or pending artifacts) starve eligible rows from another.
+pub(crate) async fn search_wiki_store_candidates(
+    server: &MemoryServer,
+    mut params: SearchMemoryParams,
+    stores: &[StoreRef],
+    record_access: bool,
+) -> Result<Vec<WikiStoreSearchCandidate>, String> {
+    params.query = query_with_context_symbols(&params.query, &params.context_symbols);
+    let per_store_budget = params.normalized_top_k();
+    params.top_k = per_store_budget;
+    params.candidates_per_channel = params.normalized_candidates_per_channel();
+
+    let mut embed_degraded = None;
+    let embedding_enabled = params.query_vec.is_none()
+        && !parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
+        && stores
+            .iter()
+            .any(|store| wiki_store_vec_available(server, store));
+    if embedding_enabled {
+        server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
+        let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
+        match server.llm.embed_voyage(&scrubbed_query, "query").await {
+            Ok(query_vec) => params.query_vec = Some(query_vec),
+            Err(error) => {
+                let reason = crate::memory_search_ops::recall_short_reason(&error);
+                eprintln!(
+                    "[wiki_search] query embedding failed, falling back to lexical-only search: {error}"
+                );
+                embed_degraded = Some(reason);
+            }
+        }
+    }
+
+    let sandbox_rules = match sandbox_role(&params) {
+        Some(role) => Some((role, load_sandbox_rules(server, role)?)),
+        None => None,
+    };
+    let mut candidates = Vec::new();
+    for store in stores {
+        let db_scope = match store {
+            StoreRef::LegacyGlobal => DbScope::Global,
+            StoreRef::BoundProject | StoreRef::NamedProject { .. } => DbScope::Project,
+        };
+        let results = match store {
+            StoreRef::BoundProject => with_project_search(
+                server,
+                &params,
+                record_access,
+                None,
+                "Wiki search failed in bound project DB",
+            )?,
+            StoreRef::NamedProject { project } => with_named_project_search(
+                server,
+                project,
+                None,
+                &params,
+                record_access,
+                None,
+                format!("Wiki search failed in named project DB '{project}'"),
+            )?,
+            StoreRef::LegacyGlobal => with_global_search(
+                server,
+                &params,
+                record_access,
+                None,
+                "Wiki search failed in legacy global DB",
+            )?,
+        };
+
+        let mut scoped = results
+            .into_iter()
+            .filter(|result| training_recall_opted_in(&params) || !is_training_seed(&result.entry))
+            .filter(|result| {
+                recall_cache_recall_opted_in(params.path_prefix.as_deref())
+                    || !memcore::is_recall_cache_entry(&result.entry)
+            })
+            .filter(|result| eval_recall_opted_in(&params) || !is_eval_entry(&result.entry))
+            .filter(|result| {
+                lesson_candidate_recall_opted_in(&params)
+                    || !is_lesson_candidate_entry(&result.entry)
+            })
+            .map(|result| (result, db_scope))
+            .collect::<Vec<_>>();
+        apply_guide_context_boosts(
+            &mut scoped,
+            params.file_context.as_deref(),
+            params.error_context.as_deref(),
+        );
+        let scoped = dedup_search_results(scoped, per_store_budget);
+        let store_quality = wiki_store_recall_quality(server, store);
+        let effective_quality = match embed_degraded.as_deref() {
+            Some(reason) => Some(crate::memory_search_ops::merge_lexical_only_marker(
+                store_quality,
+                reason,
+            )),
+            None => store_quality,
+        };
+
+        for (result, _) in scoped.into_iter().take(per_store_budget) {
+            if let Some((role, rules)) = &sandbox_rules {
+                let (allowed, matching_rule) =
+                    memcore::db::evaluate_sandbox_access(rules, role, &result.entry.path, "read");
+                if !allowed {
+                    tracing::debug!(
+                        role,
+                        path = %result.entry.path,
+                        store = ?store,
+                        matching_rule = ?matching_rule,
+                        "sandbox denied wiki search row"
+                    );
+                    continue;
+                }
+            }
+            candidates.push(WikiStoreSearchCandidate {
+                result,
+                store: store.clone(),
+                recall_quality: effective_quality.clone(),
+            });
+        }
+    }
+    Ok(candidates)
+}
+
+pub(crate) fn annotate_wiki_exact_token_matches(rows: &mut [serde_json::Value], query: &str) {
+    annotate_exact_token_matches(rows, query);
 }
 
 pub(super) fn query_with_context_symbols(query: &str, context_symbols: &[String]) -> String {
@@ -384,12 +545,16 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
         } else {
-            let inferred_project = infer_search_project(
-                &server.tachi_home_dir(),
-                &params.query,
-                params.domain.as_deref(),
-                &routing_config,
-            );
+            let inferred_project = if wiki_path_prefix {
+                None
+            } else {
+                infer_search_project(
+                    &server.tachi_home_dir(),
+                    &params.query,
+                    params.domain.as_deref(),
+                    &routing_config,
+                )
+            };
             let inferred_db_path = inferred_project
                 .as_deref()
                 .and_then(|name| server.resolve_server_named_project_db_path(name).ok());

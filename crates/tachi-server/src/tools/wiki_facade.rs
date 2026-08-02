@@ -126,7 +126,7 @@ pub(super) async fn handle_tachi_wiki_facade(
             let browse_params = WikiBrowseParams {
                 category: params.category.clone(),
                 limit: params.limit.unwrap_or(50),
-                project: params.project.clone().unwrap_or_else(|| "wiki".to_string()),
+                project: params.project.clone(),
                 lifecycle: params.lifecycle.clone(),
             };
             if wants_json_format(format.as_deref()) {
@@ -142,13 +142,13 @@ pub(super) async fn handle_tachi_wiki_facade(
                 .path
                 .clone()
                 .ok_or_else(|| "path is required when action='read'".to_string())?;
-            let project = params.project.clone().unwrap_or_else(|| "wiki".to_string());
+            let plan = WikiReadPlan::from_project(params.project.as_deref())?;
             if wants_json_format(format.as_deref()) {
-                let value = collect_wiki_read_value(server, &path, &project)?;
+                let value = collect_wiki_read_value_for_plan(server, &path, &plan)?;
                 serde_json::to_string(&value)
                     .map_err(|e| format!("serialize tachi_wiki read JSON: {e}"))
             } else {
-                handle_wiki_read(server, &path, &project)
+                handle_wiki_read_for_plan(server, &path, &plan)
             }
         }
         "write" => {

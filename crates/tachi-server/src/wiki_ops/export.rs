@@ -188,13 +188,15 @@ pub(crate) fn export_wiki_obsidian(
     project: &str,
     output: &Path,
 ) -> Result<Value, String> {
-    let (entries, _) = list_wiki_entries(server, project, 100_000)?;
+    let plan = WikiReadPlan::from_project(Some(project))?;
+    let entries = list_wiki_entries_for_plan(server, &plan, "/wiki", 100_000)?;
 
     std::fs::create_dir_all(output).map_err(|e| format!("create export dir: {e}"))?;
 
     let mut index: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     let mut exported = 0usize;
-    for entry in entries {
+    for stored in entries {
+        let entry = stored.entry;
         if entry.path == "/wiki/_log" {
             continue;
         }

@@ -113,3 +113,17 @@ mod tests {
         );
     }
 }
+#[test]
+fn format_search_sections_preserves_typed_wiki_store_identity() {
+    let rows = serde_json::json!([{
+        "topic": "wiki",
+        "summary": "Shared Wiki row",
+        "path": "/wiki/example",
+        "id": "wiki-row",
+        "store": {"kind": "named_project", "project": "wiki"},
+    }]);
+
+    let out = format_search_sections("q", &[("Wiki".to_string(), rows)]);
+
+    assert!(out.contains("[store: named wiki]"), "{out}");
+}

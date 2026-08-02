@@ -59,7 +59,9 @@ pub(super) fn list_related_candidates(
     project: &str,
     limit: usize,
 ) -> Result<Vec<MemoryEntry>, String> {
-    list_wiki_entries(server, project, limit).map(|(entries, _)| entries)
+    let plan = WikiReadPlan::NamedOnly(StoreRef::named(project));
+    list_wiki_entries_for_plan(server, &plan, "/wiki", limit)
+        .map(|entries| entries.into_iter().map(|entry| entry.entry).collect())
 }
 
 pub(super) fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
@@ -73,113 +75,117 @@ pub(super) fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
             .unwrap_or(false)
 }
 
-pub(crate) fn filter_user_facing_wiki_rows(rows: &mut Vec<Value>) {
-    rows.retain(|row| {
-        let path = row.get("path").and_then(Value::as_str).unwrap_or_default();
-        let source = row
-            .get("source")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        path != "/wiki/_log"
-            && !path.contains("/recall-cache/")
-            && source != "foundry_recall_rerank_cache"
-    });
+#[derive(Debug, Clone)]
+pub(crate) struct StoredWikiEntry {
+    pub(crate) entry: MemoryEntry,
+    pub(crate) store: StoreRef,
 }
 
-fn merge_wiki_store_entries(
-    merged: &mut Vec<MemoryEntry>,
-    seen: &mut HashSet<String>,
-    first_source: &mut &'static str,
-    store_label: &'static str,
-    entries: Vec<MemoryEntry>,
-    limit: usize,
-) {
-    for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
-        if merged.len() >= limit {
-            break;
-        }
-        if *first_source == "empty" {
-            *first_source = store_label;
-        }
-        if seen.insert(entry.id.clone()) {
-            merged.push(entry);
-        }
+fn same_store_path(server: &MemoryServer) -> bool {
+    let Some(bound) = server.project_db_path_buf() else {
+        return false;
+    };
+    let Ok(shared) = server.resolve_server_named_project_db_path(LOGICAL_SHARED_WIKI_PROJECT)
+    else {
+        return false;
+    };
+    if bound == shared {
+        return true;
     }
+    std::fs::canonicalize(bound)
+        .ok()
+        .zip(std::fs::canonicalize(shared).ok())
+        .is_some_and(|(bound, shared)| bound == shared)
 }
 
-pub(super) fn list_wiki_entries(
-    server: &MemoryServer,
-    project: &str,
-    limit: usize,
-) -> Result<(Vec<MemoryEntry>, &'static str), String> {
-    // Wiki entries can live in any of three stores: a named project DB
-    // (when the caller scopes to one), the active workspace project DB, or
-    // the global DB. We try named → project → global and merge the user-facing
-    // entries so `wiki_read` finds an entry no matter which store holds it.
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut merged: Vec<MemoryEntry> = Vec::new();
-    let mut first_source: &'static str = "empty";
-
-    // Try every store regardless of whether the previous one returned Ok:
-    // a named project store may exist but not contain the entry the caller
-    // is asking for (e.g. `project=wiki` resolves to `~/.tachi/projects/wiki`
-    // which holds a different wiki namespace), and we must fall through to
-    // the workspace project + global stores so the read still finds the
-    // entry. Entries are deduplicated by id and capped at `limit`.
-    if merged.len() < limit {
-        if let Ok(entries) = server.with_named_project_store_read(project, |store| {
-            store
-                .list_by_path("/wiki", limit, false)
-                .map_err(|e| format!("wiki list: {e}"))
-        }) {
-            merge_wiki_store_entries(
-                &mut merged,
-                &mut seen,
-                &mut first_source,
-                "named",
-                entries,
-                limit,
-            );
-        }
-    }
-    if merged.len() < limit {
-        if let Ok(entries) = server.with_project_store_read(|store| {
-            store
-                .list_by_path("/wiki", limit, false)
-                .map_err(|e| format!("wiki project list: {e}"))
-        }) {
-            merge_wiki_store_entries(
-                &mut merged,
-                &mut seen,
-                &mut first_source,
-                "project",
-                entries,
-                limit,
-            );
-        }
-    }
-    if merged.len() < limit {
-        match server.with_global_store_read(|store| {
-            store
-                .list_by_path("/wiki", limit, false)
-                .map_err(|e| format!("wiki fallback list: {e}"))
-        }) {
-            Ok(entries) => merge_wiki_store_entries(
-                &mut merged,
-                &mut seen,
-                &mut first_source,
-                "global",
-                entries,
-                limit,
-            ),
-            Err(global_err) => {
-                if merged.is_empty() {
-                    return Err(format!("wiki list: {global_err}"));
-                }
+pub(super) fn stores_for_wiki_plan(server: &MemoryServer, plan: &WikiReadPlan) -> Vec<StoreRef> {
+    match plan {
+        WikiReadPlan::NamedOnly(store) => vec![store.clone()],
+        WikiReadPlan::Federated => {
+            let mut stores = Vec::new();
+            if server.has_project_db() {
+                stores.push(StoreRef::BoundProject);
             }
+            if crate::memory_search_ops::named_project_db_exists(
+                server,
+                LOGICAL_SHARED_WIKI_PROJECT,
+            ) && !same_store_path(server)
+            {
+                stores.push(StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT));
+            }
+            stores
+        }
+        WikiReadPlan::ProjectOnly => server
+            .has_project_db()
+            .then_some(StoreRef::BoundProject)
+            .into_iter()
+            .collect(),
+        WikiReadPlan::SharedOnly => vec![StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT)],
+        WikiReadPlan::MigrationAudit | WikiReadPlan::GuideFederated => {
+            let mut stores = Vec::new();
+            if server.has_project_db() {
+                stores.push(StoreRef::BoundProject);
+            }
+            if crate::memory_search_ops::named_project_db_exists(
+                server,
+                LOGICAL_SHARED_WIKI_PROJECT,
+            ) && !same_store_path(server)
+            {
+                stores.push(StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT));
+            }
+            stores.push(StoreRef::LegacyGlobal);
+            stores
         }
     }
+}
 
-    merged.truncate(limit);
-    Ok((merged, first_source))
+pub(super) fn with_wiki_store_read<T>(
+    server: &MemoryServer,
+    store_ref: &StoreRef,
+    action: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    match store_ref {
+        StoreRef::BoundProject => server.with_project_store_read(action),
+        StoreRef::NamedProject { project } => server.with_named_project_store_read(project, action),
+        StoreRef::LegacyGlobal => server.with_global_store_read(action),
+    }
+}
+
+pub(super) fn with_wiki_store<T>(
+    server: &MemoryServer,
+    store_ref: &StoreRef,
+    action: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    match store_ref {
+        StoreRef::BoundProject => server.with_project_store(action),
+        StoreRef::NamedProject { project } => server.with_named_project_store(project, action),
+        StoreRef::LegacyGlobal => server.with_global_store(action),
+    }
+}
+
+pub(crate) fn list_wiki_entries_for_plan(
+    server: &MemoryServer,
+    plan: &WikiReadPlan,
+    path_prefix: &str,
+    limit: usize,
+) -> Result<Vec<StoredWikiEntry>, String> {
+    let mut entries = Vec::new();
+    for store_ref in stores_for_wiki_plan(server, plan) {
+        let listed = with_wiki_store_read(server, &store_ref, |store| {
+            store
+                .list_by_path(path_prefix, limit, false)
+                .map_err(|error| format!("wiki list: {error}"))
+        });
+        let listed = listed?;
+        entries.extend(
+            listed
+                .into_iter()
+                .filter(is_user_facing_wiki_entry)
+                .map(|entry| StoredWikiEntry {
+                    entry,
+                    store: store_ref.clone(),
+                }),
+        );
+    }
+    Ok(entries)
 }

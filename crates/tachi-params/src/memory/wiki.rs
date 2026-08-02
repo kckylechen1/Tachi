@@ -1,6 +1,6 @@
 use super::{default_limit, default_true, HybridWeightsParam};
 use rmcp::schemars::{self, JsonSchema};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 fn default_wiki_path_prefix() -> String {
     "/wiki".to_string()
@@ -42,16 +42,56 @@ fn default_contradiction_threshold() -> f64 {
     0.85
 }
 
-fn default_wiki_project() -> String {
-    "wiki".to_string()
-}
-
 fn default_wiki_search_top_k() -> usize {
     10
 }
 
 fn default_wiki_browse_limit() -> usize {
     50
+}
+
+pub const LOGICAL_SHARED_WIKI_PROJECT: &str = "wiki";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoreRef {
+    BoundProject,
+    NamedProject { project: String },
+    LegacyGlobal,
+}
+
+impl StoreRef {
+    pub fn named(project: impl Into<String>) -> Self {
+        Self::NamedProject {
+            project: project.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WikiReadPlan {
+    NamedOnly(StoreRef),
+    Federated,
+    ProjectOnly,
+    SharedOnly,
+    /// Hygiene/migration census over every existing Wiki-shaped store.
+    /// This is never a normal retrieval plan: legacy global remains an input
+    /// to migration, not an implicit source of reviewed shared knowledge.
+    MigrationAudit,
+    /// Feature-guide federation retains the established global playbook
+    /// authority in addition to bound + shared stores. It is not a `/wiki`
+    /// retrieval plan and must never be selected by Wiki search/read/browse.
+    GuideFederated,
+}
+
+impl WikiReadPlan {
+    pub fn from_project(project: Option<&str>) -> Result<Self, String> {
+        match project.map(str::trim) {
+            Some("") => Err("wiki project cannot be empty".to_string()),
+            Some(project) => Ok(Self::NamedOnly(StoreRef::named(project))),
+            None => Ok(Self::Federated),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -84,21 +124,14 @@ pub struct WikiLintParams {
     #[serde(default = "default_include_skill_quality")]
     pub include_skill_quality: bool,
 
-    /// #1072 fix-round (#1215): when true AND the `stale` check is running,
-    /// entries the semantic-staleness pass flags (targeted by a
-    /// `contradicts`/`supersedes` edge) get `metadata.lifecycle = "stale"`
-    /// persisted back to the store — not just reported as a diagnostic row.
-    /// Canon doc §7's required behavior is retrieval EXCLUSION, not a lint
-    /// finding a human has to act on separately; the cross-vendor review
-    /// flagged this gap explicitly ("lint appends a diagnostic row only;
-    /// persisted lifecycle stays active and retrievable"). Defaults to
-    /// `false` — `wiki_hygiene_counts` (called on every
-    /// `tachi_memory(briefing)`/`alerts` request) explicitly keeps this off
-    /// so a hot, high-frequency read path never becomes a surprise writer;
-    /// only an explicit `tachi_wiki(action='lint', persist_stale=true)` call
-    /// opts in.
+    /// Persist semantic-staleness findings as `lifecycle=stale`. Defaults off;
+    /// only an explicit lint call may turn this read path into a writer.
     #[serde(default)]
     pub persist_stale: bool,
+
+    /// Named-only lint target; omitted audits bound, shared, and legacy stores.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
@@ -205,7 +238,7 @@ pub struct WikiSearchParams {
     #[serde(default)]
     pub agent_role: Option<String>,
 
-    /// Optional named project DB.
+    /// Named-only Wiki store; omitted federates bound and shared stores.
     #[serde(default)]
     pub project: Option<String>,
 
@@ -246,15 +279,11 @@ pub struct WikiBrowseParams {
     #[serde(default = "default_wiki_browse_limit")]
     pub limit: usize,
 
-    /// Named project DB containing wiki memories (default: "wiki")
-    #[serde(default = "default_wiki_project")]
-    pub project: String,
+    /// Named-only Wiki store; omitted federates bound and shared stores.
+    #[serde(default)]
+    pub project: Option<String>,
 
-    /// #1072 explicit lifecycle scope. Omitted (default): only `active`
-    /// wiki/guide entries are returned (the truthful-retrieval gate). Pass
-    /// one of `candidate | pending_review | active | stale | superseded |
-    /// rejected` to browse that lifecycle explicitly, or `"all"` to disable
-    /// the gate entirely.
+    /// Lifecycle filter; omitted returns active only, `all` disables the gate.
     #[serde(default)]
     pub lifecycle: Option<String>,
 }
