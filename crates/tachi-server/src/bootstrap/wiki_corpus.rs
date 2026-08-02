@@ -550,6 +550,26 @@ enum CorpusRaceHook {
     ForeignSupersedeSourceBeforeAtomicTransition {
         source_id: String,
     },
+    /// A sibling worker applying the *same* deterministic plan item runs it to
+    /// completion (canonical target copy plus receipted supersession) while
+    /// this worker is mid-item.
+    SiblingWorkerCompletesItem {
+        source_id: String,
+        seam: SiblingCompletionSeam,
+    },
+}
+
+/// Which existing race seam a [`CorpusRaceHook::SiblingWorkerCompletesItem`]
+/// injection fires at. Both seams sit inside `apply_copy_and_supersede`, on
+/// either side of the deterministic target inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum SiblingCompletionSeam {
+    /// After this worker's source precheck, before it inspects the target.
+    AfterSourcePrecheck,
+    /// After this worker prepared its final receipt and expected transition
+    /// state, before it decides whether the atomic transition still applies.
+    AfterReceiptPrepared,
 }
 
 #[derive(Debug, Clone)]
@@ -2739,6 +2759,79 @@ fn maybe_mutate_copy_source_after_precheck(
     Ok(())
 }
 
+/// Run the whole plan item to completion the way a sibling worker applying the
+/// same deterministic plan would: claim the deterministic target with the
+/// `target_copied` receipt, then supersede the source with the
+/// `source_superseded` receipt. Both writes go through the same store seams the
+/// production path uses, with this plan's real `target_id`, so the store is
+/// left in exactly the state a concurrent operator run produces.
+fn maybe_complete_item_as_sibling_worker(
+    source_scan: &StoreScan,
+    target_scan: &StoreScan,
+    item: &PlanItem,
+    plan_id: &str,
+    target_id: &str,
+    seam: SiblingCompletionSeam,
+    race_hook: &mut Option<CorpusRaceHook>,
+) -> Result<(), String> {
+    match race_hook.as_ref() {
+        Some(CorpusRaceHook::SiblingWorkerCompletesItem {
+            source_id,
+            seam: hook_seam,
+        }) if source_id == &item.source_id && *hook_seam == seam => {}
+        _ => return Ok(()),
+    }
+    race_hook.take();
+    let source_path = source_scan
+        .spec
+        .addressed_path
+        .as_deref()
+        .ok_or_else(|| "race hook source has no addressed path".to_string())?;
+    let target_path = target_scan
+        .spec
+        .addressed_path
+        .as_deref()
+        .ok_or_else(|| "race hook target has no addressed path".to_string())?;
+    let mut source_store =
+        MemoryStore::open_existing_read_write(&source_path.display().to_string())
+            .map_err(|error| error.to_string())?;
+    let mut target_store =
+        MemoryStore::open_existing_read_write(&target_path.display().to_string())
+            .map_err(|error| error.to_string())?;
+    let source_entry = source_store
+        .get_with_options(&item.source_id, true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "race hook sibling source row disappeared".to_string())?;
+    let source_row = raw_from_entry(&source_entry);
+    let mut target_entry = source_entry.clone();
+    target_entry.id = target_id.to_string();
+    target_entry.metadata =
+        metadata_with_receipt(&source_row, receipt_value(item, plan_id, "target_copied"))?;
+    match target_store
+        .insert_if_absent(&target_entry)
+        .map_err(|error| error.to_string())?
+    {
+        InsertMemoryResult::Inserted | InsertMemoryResult::Existing => {}
+    }
+    let final_metadata = metadata_with_receipt(
+        &source_row,
+        receipt_value(item, plan_id, "source_superseded"),
+    )?;
+    let expected = ExpectedMemoryState::from_entry(&source_entry, None);
+    if !source_store
+        .supersede_with_metadata_if_expected_state(
+            &item.source_id,
+            target_id,
+            &final_metadata,
+            &expected,
+        )
+        .map_err(|error| error.to_string())?
+    {
+        return Err("race hook sibling worker could not supersede the source".to_string());
+    }
+    Ok(())
+}
+
 fn maybe_inject_copy_after_receipt_prepared(
     source_scan: &StoreScan,
     target_scan: &StoreScan,
@@ -2977,6 +3070,69 @@ fn canonical_target_matches_plan(row: &RawRow, item: &PlanItem, plan_id: &str) -
         && row.superseded_by.is_none()
 }
 
+/// Snapshot-independent proof that this copy item is already complete.
+///
+/// `apply_copy_and_supersede` reads the source row, its migration receipt and
+/// its supersession edge once, before it inspects the deterministic target. A
+/// sibling worker applying the same deterministic plan can complete the whole
+/// item inside that window, which leaves the snapshot claiming "no source
+/// receipt yet" while the store already holds the finished migration. Every
+/// completion decision taken after that read therefore re-reads the source row,
+/// its receipt and the target row here, and applies exactly the predicate
+/// [`plan_item_completed`] uses for `copy_to_shared_and_supersede` items.
+fn copy_item_completed_from_fresh_state(
+    source_store: &MemoryStore,
+    target_store: &MemoryStore,
+    item: &PlanItem,
+    plan_id: &str,
+    target_id: &str,
+) -> Result<bool, String> {
+    let Some(source_entry) = source_store
+        .get_with_options(&item.source_id, true)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    let mut source_row = raw_from_entry(&source_entry);
+    source_row.superseded_by = source_store
+        .supersession_target(&item.source_id)
+        .map_err(|error| error.to_string())?
+        .flatten();
+    if !receipt_matches(&source_row, item, plan_id, &["source_superseded"])
+        || !source_row.is_superseded_by(target_id)
+    {
+        return Ok(false);
+    }
+    let Some(target_entry) = target_store
+        .get_with_options(target_id, true)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    let mut target_row = raw_from_entry(&target_entry);
+    target_row.superseded_by = target_store
+        .supersession_target(target_id)
+        .map_err(|error| error.to_string())?
+        .flatten();
+    Ok(canonical_target_matches_plan(&target_row, item, plan_id))
+}
+
+fn copy_completed_no_op_outcome(
+    item: &PlanItem,
+    target_id: &str,
+    phases: Vec<String>,
+) -> MigrationOutcome {
+    MigrationOutcome {
+        source_store_ref: item.source_store_ref.clone(),
+        source_id: item.source_id.clone(),
+        target_store_ref: item.target_store_ref.clone(),
+        target_id: Some(target_id.to_string()),
+        action: item.action.clone(),
+        outcome: "existing_no_op".to_string(),
+        phases,
+    }
+}
+
 fn reconcile_target_noncanonical(
     target_store: &mut MemoryStore,
     target_id: &str,
@@ -3129,6 +3285,15 @@ fn apply_copy_and_supersede(
         ));
     }
     maybe_mutate_copy_source_after_precheck(source_scan, item, race_hook)?;
+    maybe_complete_item_as_sibling_worker(
+        source_scan,
+        target_scan,
+        item,
+        plan_id,
+        target_id,
+        SiblingCompletionSeam::AfterSourcePrecheck,
+        race_hook,
+    )?;
     let mut phases = Vec::new();
 
     if let Some(target_entry) = target_store
@@ -3186,23 +3351,18 @@ fn apply_copy_and_supersede(
     verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     maybe_interrupt(interruption, item, MigrationBoundary::TargetCopied)?;
 
-    let current_supersession = source_store
-        .supersession_target(&source_entry.id)
-        .map_err(|error| error.to_string())?
-        .flatten();
-    if current_supersession.as_deref() == Some(target_id) && source_superseded_receipted {
+    // Sibling-completion defence: `source_receipted` and
+    // `source_superseded_receipted` above were derived from the source snapshot
+    // taken before the target was inspected, so they report "not started" for
+    // work a sibling worker on the same deterministic plan has already
+    // finished. Decide completion from a fresh read of the source row, its
+    // receipt and the target row instead.
+    if copy_item_completed_from_fresh_state(&source_store, &target_store, item, plan_id, target_id)?
+    {
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
         verify_retained_backups(retained_backups)?;
         phases.push("source_superseded".to_string());
-        return Ok(MigrationOutcome {
-            source_store_ref: item.source_store_ref.clone(),
-            source_id: item.source_id.clone(),
-            target_store_ref: item.target_store_ref.clone(),
-            target_id: Some(target_id.to_string()),
-            action: item.action.clone(),
-            outcome: "existing_no_op".to_string(),
-            phases,
-        });
+        return Ok(copy_completed_no_op_outcome(item, target_id, phases));
     }
     let final_metadata = metadata_with_receipt(
         &source_row,
@@ -3211,6 +3371,15 @@ fn apply_copy_and_supersede(
     let expected_transition =
         ExpectedMemoryState::from_entry(&source_entry, initial_supersession.as_deref());
     maybe_inject_copy_after_receipt_prepared(source_scan, target_scan, item, target_id, race_hook)?;
+    maybe_complete_item_as_sibling_worker(
+        source_scan,
+        target_scan,
+        item,
+        plan_id,
+        target_id,
+        SiblingCompletionSeam::AfterReceiptPrepared,
+        race_hook,
+    )?;
     verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     verify_backups_before_source_mutation(retained_backups, race_hook)?;
 
@@ -3248,6 +3417,28 @@ fn apply_copy_and_supersede(
     };
 
     if !transitioned {
+        // Invariant, sibling-completion defence: the deterministic target may
+        // only be reconciled to noncanonical once a *fresh* read of the source
+        // proves it does not already carry a completed, receipted supersede
+        // onto this exact target. The transition above loses that CAS both when
+        // this worker's own snapshot went stale and when a sibling worker
+        // applying the same deterministic plan finished the item first;
+        // archiving the winner's canonical target here would remove the page
+        // from every user-facing read surface (`archived = 0 AND superseded_by
+        // IS NULL`) and dead-end every later apply on the occupant collision
+        // check above.
+        if copy_item_completed_from_fresh_state(
+            &source_store,
+            &target_store,
+            item,
+            plan_id,
+            target_id,
+        )? {
+            verify_retained_backups(retained_backups)?;
+            verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+            phases.push("source_superseded".to_string());
+            return Ok(copy_completed_no_op_outcome(item, target_id, phases));
+        }
         reconcile_target_noncanonical(&mut target_store, target_id, item, plan_id)?;
         verify_retained_backups(retained_backups)?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
@@ -6167,6 +6358,166 @@ mod tests {
                 .unwrap()
                 .revision,
             target_revision
+        );
+    }
+
+    /// Assert the state a losing worker must leave behind after a sibling
+    /// worker completed the same deterministic plan item: the winner's target
+    /// stays canonical and user-visible, the source keeps the winner's
+    /// supersession edge, and a later apply converges on the completed state
+    /// instead of dead-ending on the occupant collision check.
+    fn assert_sibling_completion_survived(
+        source_path: &Path,
+        target_path: &Path,
+        page_path: &str,
+        target_id: &str,
+        plan: &WikiCorpusPlan,
+        backup_dir: &Path,
+    ) {
+        let mut current = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, source_path),
+            fixture_scan(LogicalStore::SharedWiki, target_path),
+        ];
+        classify_scans(&mut current);
+        let source = current[0].raw_row("source").unwrap();
+        assert_eq!(source.superseded_by.as_deref(), Some(target_id));
+        assert_eq!(
+            parse_migration_receipt(source).unwrap().unwrap().phase,
+            MigrationPhase::SourceSuperseded
+        );
+        let target = current[1].raw_row(target_id).unwrap();
+        assert!(
+            !target.archived,
+            "the sibling worker's canonical target must not be archived by the loser"
+        );
+        assert!(target.superseded_by.is_none());
+        assert_eq!(
+            parse_migration_receipt(target).unwrap().unwrap().phase,
+            MigrationPhase::TargetCopied
+        );
+
+        // The user-facing Wiki read surface filters `archived = 0 AND
+        // superseded_by IS NULL`, so archiving the target would delete the page
+        // from every reader.
+        let target_store =
+            MemoryStore::open_existing_read_write(&target_path.display().to_string()).unwrap();
+        let visible = target_store
+            .list_user_facing_wiki_entries(page_path, 10, false)
+            .unwrap();
+        assert_eq!(
+            visible
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![target_id],
+            "the migrated page must stay on the user-facing read surface"
+        );
+        drop(target_store);
+
+        let (_, replay) = apply_plan(&current, plan, backup_dir)
+            .expect("replay must converge on the sibling-completed state");
+        assert_eq!(replay[0].outcome, "existing_no_op");
+    }
+
+    #[test]
+    fn sibling_worker_completion_before_target_precheck_is_adopted_not_archived() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry_with_vector(
+                "source",
+                "/wiki/sibling-worker-precheck-race",
+                shared_metadata(),
+                vec![0.11; 1024],
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+        let target_id = plan.items[0].target_id.clone().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        let (_, outcomes) = apply_plan_with_race_hook(
+            &scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::SiblingWorkerCompletesItem {
+                source_id: "source".to_string(),
+                seam: SiblingCompletionSeam::AfterSourcePrecheck,
+            },
+        )
+        .expect("a sibling-completed item must return the completed no-op, not an error");
+        assert_eq!(outcomes[0].outcome, "existing_no_op");
+        assert_eq!(
+            outcomes[0].phases,
+            vec!["target_copied".to_string(), "source_superseded".to_string()]
+        );
+
+        assert_sibling_completion_survived(
+            &source_path,
+            &target_path,
+            "/wiki/sibling-worker-precheck-race",
+            &target_id,
+            &plan,
+            &backup_dir,
+        );
+    }
+
+    #[test]
+    fn sibling_worker_completion_after_receipt_prep_is_adopted_not_archived() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry_with_vector(
+                "source",
+                "/wiki/sibling-worker-transition-race",
+                shared_metadata(),
+                vec![0.11; 1024],
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+        let target_id = plan.items[0].target_id.clone().unwrap();
+        let backup_dir = directory.path().join("backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        let (_, outcomes) = apply_plan_with_race_hook(
+            &scans,
+            &plan,
+            &backup_dir,
+            CorpusRaceHook::SiblingWorkerCompletesItem {
+                source_id: "source".to_string(),
+                seam: SiblingCompletionSeam::AfterReceiptPrepared,
+            },
+        )
+        .expect("losing the atomic transition to a sibling must not fail the item");
+        assert_eq!(outcomes[0].outcome, "existing_no_op");
+        assert_eq!(
+            outcomes[0].phases,
+            vec!["target_copied".to_string(), "source_superseded".to_string()]
+        );
+
+        assert_sibling_completion_survived(
+            &source_path,
+            &target_path,
+            "/wiki/sibling-worker-transition-race",
+            &target_id,
+            &plan,
+            &backup_dir,
         );
     }
 

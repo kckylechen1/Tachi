@@ -323,6 +323,361 @@ fn stale_or_receipt_only_enrichment_never_persists_a_receipt() {
     );
 }
 
+/// Seam guard: a whitespace-only summary must be classified as a non-write,
+/// matching what COALESCE(?1, summary) actually does for a real value — it
+/// must not silently erase the stored summary or stamp a bogus success.
+#[test]
+fn whitespace_only_summary_is_treated_as_non_write() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-blank-summary", "seam guard probe");
+    upsert(&mut conn, &entry, false).unwrap();
+
+    // First, a real summary write to establish a non-default stored value
+    // and a baseline enrichment status/timestamp. This call legitimately
+    // stamps status="summarized" and a last_success_at — that stamp is not
+    // what's under test below.
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("a real summary"),
+        None,
+        None,
+        None,
+        entry.revision,
+        None,
+        None,
+        None,
+    )
+    .unwrap());
+
+    let baseline_metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let baseline_metadata: serde_json::Value = serde_json::from_str(&baseline_metadata).unwrap();
+    assert_eq!(baseline_metadata["enrichment"]["status"], "summarized");
+    let baseline_last_success_at = baseline_metadata["enrichment"]["last_success_at"].clone();
+
+    // Then a whitespace-only summary must be a no-op: it must not clear the
+    // stored summary, and — because it touches no row — must not re-stamp
+    // the enrichment status or move last_success_at from the baseline above.
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("   "),
+        None,
+        None,
+        None,
+        entry.revision,
+        None,
+        None,
+        None,
+    )
+    .unwrap());
+
+    let (summary, metadata): (String, String) = conn
+        .query_row(
+            "SELECT summary, metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        summary, "a real summary",
+        "whitespace-only summary must not erase the stored summary"
+    );
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        metadata["enrichment"]["status"], "summarized",
+        "whitespace-only summary must not re-stamp enrichment status: {metadata:?}"
+    );
+    assert_eq!(
+        metadata["enrichment"]["last_success_at"], baseline_last_success_at,
+        "whitespace-only summary must not move last_success_at (no write occurred): {metadata:?}"
+    );
+}
+
+/// Seam guard: an empty keywords slice must be treated as a non-write,
+/// matching what COALESCE(?2, keywords) actually does — it must not
+/// silently erase the stored keywords.
+#[test]
+fn empty_keywords_slice_is_treated_as_non_write() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-blank-keywords", "seam guard probe");
+    upsert(&mut conn, &entry, false).unwrap();
+
+    let real_keywords = vec!["real-keyword".to_string()];
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        None,
+        None,
+        Some(&real_keywords),
+        None,
+        entry.revision,
+        None,
+        None,
+        None,
+    )
+    .unwrap());
+
+    let empty_keywords: Vec<String> = vec![];
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        None,
+        None,
+        Some(&empty_keywords),
+        None,
+        entry.revision,
+        None,
+        None,
+        None,
+    )
+    .unwrap());
+
+    let keywords: String = conn
+        .query_row(
+            "SELECT keywords FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        keywords.contains("real-keyword"),
+        "empty keywords slice must not erase the stored keywords: {keywords}"
+    );
+}
+
+/// Seam guard: a whitespace-only summary paired with a summary receipt must
+/// still be rejected as "receipt requires an accepted field" — normalizing
+/// to None before classification must not accidentally let a receipt slip
+/// through for a field that was never really written.
+#[test]
+fn whitespace_only_summary_with_receipt_is_rejected() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-blank-summary-receipt", "seam guard probe");
+    upsert(&mut conn, &entry, false).unwrap();
+    let receipt = r#"{"schema":"model-invocation-v1","attempt":"should-not-land"}"#;
+
+    let err = update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some(""),
+        None,
+        None,
+        None,
+        entry.revision,
+        Some(receipt),
+        None,
+        None,
+    )
+    .expect_err("whitespace-only summary with a receipt must be rejected");
+    assert!(err
+        .to_string()
+        .contains("receipt requires an accepted generated field"));
+}
+
+/// Seam guard (post-scrub normalization): a summary that is non-empty
+/// pre-scrub but scrubs down to "" (a closed reasoning block with no real
+/// content outside it) must be classified the same as an already-blank
+/// summary — a non-write that leaves the stored summary and enrichment
+/// status alone. This is the regression the pre-scrub-only normalization in
+/// an earlier revision missed: it filtered on the raw value, so this input
+/// sailed through classification as a write, then the scrub step downstream
+/// turned the SQL bind into "", erasing the stored summary.
+#[test]
+fn think_tag_only_summary_scrubs_to_non_write() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-think-only-summary", "seam guard probe");
+    upsert(&mut conn, &entry, false).unwrap();
+
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("a real summary"),
+        None,
+        None,
+        None,
+        entry.revision,
+        None,
+        None,
+        None,
+    )
+    .unwrap());
+
+    let baseline_metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let baseline_metadata: serde_json::Value = serde_json::from_str(&baseline_metadata).unwrap();
+    assert_eq!(baseline_metadata["enrichment"]["status"], "summarized");
+    let baseline_last_success_at = baseline_metadata["enrichment"]["last_success_at"].clone();
+
+    for think_only_input in [
+        "<think>reasoning</think>",
+        "<think>a</think><think>b</think>",
+        "  <think>x</think>  ",
+        "<THINK>up</THINK>",
+    ] {
+        assert!(
+            update_enrichment_fields(
+                &mut conn,
+                &entry.id,
+                Some(think_only_input),
+                None,
+                None,
+                None,
+                entry.revision,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+            "input {think_only_input:?} must be accepted as a non-write"
+        );
+
+        let (summary, metadata): (String, String) = conn
+            .query_row(
+                "SELECT summary, metadata FROM memories WHERE id = ?1",
+                params![&entry.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            summary, "a real summary",
+            "input {think_only_input:?} must not erase the stored summary once scrubbed"
+        );
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(
+            metadata["enrichment"]["status"], "summarized",
+            "input {think_only_input:?} must not re-stamp enrichment status: {metadata:?}"
+        );
+        assert_eq!(
+            metadata["enrichment"]["last_success_at"], baseline_last_success_at,
+            "input {think_only_input:?} must not move last_success_at (no write occurred): {metadata:?}"
+        );
+    }
+}
+
+/// Seam guard (B2, r3 review): a think-tag-only summary is not a
+/// caller-visible blank — the model produced substantive pre-scrub content,
+/// and the seam judged it empty only after scrubbing. A summary receipt
+/// paired with that input must be dropped together with the summary field
+/// rather than rejected, so a co-batched vector write still lands and no
+/// InvalidArg / sticky failed_stage results.
+#[test]
+fn think_tag_only_summary_with_receipt_drops_the_pair() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-think-only-summary-receipt", "seam guard probe");
+    upsert(&mut conn, &entry, false).unwrap();
+    let receipt = r#"{"schema":"model-invocation-v1","attempt":"should-be-dropped"}"#;
+    let vec_blob = serialize_f32(&vec![0.3_f32; 1024]);
+
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("<think>reasoning</think>"),
+        Some(&vec_blob),
+        None,
+        None,
+        entry.revision,
+        Some(receipt),
+        None,
+        None,
+    )
+    .expect("think-tag-only summary with a receipt must commit the co-batched vector write"));
+
+    let vec_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_vec WHERE id = ?1",
+            params![&entry.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        vec_rows, 1,
+        "co-batched vector write must land even though the summary receipt was dropped"
+    );
+
+    let (summary, metadata): (String, String) = conn
+        .query_row(
+            "SELECT summary, metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        summary, entry.summary,
+        "think-tag-only summary must not overwrite the stored summary"
+    );
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert!(
+        metadata
+            .pointer("/enrichment/invocations/summary")
+            .is_none(),
+        "dropped summary receipt must not land in invocations: {metadata:?}"
+    );
+    assert_eq!(
+        metadata["enrichment"]["status"], "embedded",
+        "status must reflect only the vector write, not a phantom summarized stage: {metadata:?}"
+    );
+    assert!(
+        metadata["enrichment"].get("failed_stage").is_none(),
+        "dropping a seam-normalized receipt must not mint a failed_stage: {metadata:?}"
+    );
+}
+
+/// Seam guard: mixed content (real text alongside a reasoning block) must
+/// still land as a real write of the scrubbed text, and receipt pairing
+/// must succeed against that scrubbed value — the scrub-before-normalize
+/// ordering must not collaterally reject legitimate summaries that happen
+/// to carry a think block.
+#[test]
+fn mixed_think_tag_and_real_content_summary_writes_scrubbed_text() {
+    let mut conn = make_conn();
+    let entry = make_entry("enrich-mixed-summary", "seam guard probe");
+    upsert(&mut conn, &entry, false).unwrap();
+    let receipt = r#"{"schema":"model-invocation-v1","attempt":"mixed-summary"}"#;
+
+    assert!(update_enrichment_fields(
+        &mut conn,
+        &entry.id,
+        Some("<think>x</think>real summary"),
+        None,
+        None,
+        None,
+        entry.revision,
+        Some(receipt),
+        None,
+        None,
+    )
+    .expect("mixed think-tag/real-content summary with matching receipt must commit"));
+
+    let (summary, metadata): (String, String) = conn
+        .query_row(
+            "SELECT summary, metadata FROM memories WHERE id = ?1",
+            params![&entry.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        summary, "real summary",
+        "stored summary must be the scrubbed text, not the raw input"
+    );
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        metadata["enrichment"]["invocations"]["summary"]["attempt"], "mixed-summary",
+        "receipt must pair against the scrubbed write: {metadata:?}"
+    );
+}
+
 #[test]
 fn enrichment_sql_failure_rolls_back_field_and_receipt_together() {
     let mut conn = make_conn();

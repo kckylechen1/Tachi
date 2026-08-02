@@ -91,7 +91,7 @@ pub use graph::{
     add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
     count_same_topic, get_contradiction_count, get_edges, get_edges_limited, get_superseded_ids,
     graph_expand, graph_expand_limited, invalidate_observation, list_observations_for_edge,
-    remove_edge, EdgeObservation, EdgeProvenance,
+    remove_edge, ConfirmedContradictionOutcome, EdgeObservation, EdgeProvenance,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{

@@ -284,7 +284,7 @@ fn update_with_revision_within_tx(
 pub fn update_enrichment_fields(
     conn: &mut Connection,
     id: &str,
-    new_summary: Option<&str>,
+    raw_summary: Option<&str>,
     new_vec: Option<&[u8]>,
     new_keywords: Option<&[String]>,
     new_entities: Option<&[String]>,
@@ -293,16 +293,56 @@ pub fn update_enrichment_fields(
     metadata_receipt: Option<&str>,
     keywords_receipt: Option<&str>,
 ) -> Result<bool, MemoryError> {
+    // Seam layer: scrub think-tags first, then normalize the scrubbed
+    // summary (and the empty keyword/entity slices) to None before
+    // classification. Order matters: the SQL below binds `clean_summary`,
+    // the post-scrub value, so the write-classification invariant this
+    // seam exists to uphold is that write classification, receipt pairing,
+    // and the SQL COALESCE effect all agree on that same post-scrub value.
+    // COALESCE only guards against NULL, so a summary that is non-empty
+    // pre-scrub but scrubs down to "" (e.g. `Some("<think>...</think>")`)
+    // would otherwise be classified as a real write, pass receipt pairing,
+    // and then bind an empty string that erases the stored summary while
+    // stamping a successful summarized status with no receipt.
+    // `raw_summary` (the as-received parameter) must not be consumed
+    // anywhere below this point — every downstream decision uses
+    // `clean_summary`.
+    let raw_summary_was_nonblank = raw_summary.is_some_and(|value| !value.trim().is_empty());
+    let clean_summary = raw_summary
+        .map(crate::noise::scrub_think_tags)
+        .filter(|value| !value.trim().is_empty());
+    let new_keywords = new_keywords.filter(|value| !value.is_empty());
+    let new_entities = new_entities.filter(|value| !value.is_empty());
+
+    // Seam-nulled summary: `raw_summary` was substantive pre-scrub (e.g. a
+    // think-tag-only model reply) but the seam normalized it down to
+    // nothing. The model ran and the seam judged its output empty, so this
+    // is not the caller-visible-blank case (that stays a hard InvalidArg
+    // below) -- a summary receipt for this stage is dropped together with
+    // the field instead of rejected, so co-batched vector/keyword writes
+    // still land and no sticky failed_stage is minted.
+    let summary_receipt = if raw_summary_was_nonblank
+        && clean_summary.is_none()
+        && summary_receipt.is_some()
+    {
+        eprintln!(
+                "[enrichment] discarded stale enrichment receipt for id={id}: summary seam-normalized to empty (think-tag-only input)"
+            );
+        None
+    } else {
+        summary_receipt
+    };
+
     let receipts = parse_enrichment_receipts(
         summary_receipt,
         metadata_receipt,
         keywords_receipt,
-        new_summary,
+        clean_summary.as_deref(),
         new_keywords,
         new_entities,
     )?;
 
-    if new_summary.is_none()
+    if clean_summary.is_none()
         && new_vec.is_none()
         && new_keywords.is_none()
         && new_entities.is_none()
@@ -313,7 +353,6 @@ pub fn update_enrichment_fields(
 
     let now = now_utc_iso();
     let tx = conn.transaction()?;
-    let clean_summary = new_summary.map(crate::noise::scrub_think_tags);
     let keywords_json = new_keywords.map(serde_json::to_string).transpose()?;
     let entities_json = new_entities.map(serde_json::to_string).transpose()?;
 
@@ -339,7 +378,7 @@ pub fn update_enrichment_fields(
 
     let status = match (
         new_vec.is_some(),
-        new_summary.is_some(),
+        clean_summary.is_some(),
         new_keywords.is_some() || new_entities.is_some(),
     ) {
         (true, true, true) => "embedded+summarized+metadata",
@@ -367,7 +406,7 @@ pub fn update_enrichment_fields(
     let failed_stage_resolved = match existing_failed_stage.as_deref() {
         None => true,
         Some("embedding") => new_vec.is_some(),
-        Some("summary") => new_summary.is_some(),
+        Some("summary") => clean_summary.is_some(),
         // Both metadata extraction and write-side keyword enrichment land in
         // the keywords/entities columns.
         Some("metadata") | Some("keywords") => new_keywords.is_some() || new_entities.is_some(),
@@ -431,7 +470,7 @@ pub fn update_enrichment_fields(
     // Keyword text becomes document content (not a MATCH expression), so FTS
     // operators inside keywords are not injection vectors. User queries still
     // go through `simple_query` / `simple_query_input` on the search path.
-    if new_summary.is_some() || new_keywords.is_some() || new_entities.is_some() {
+    if clean_summary.is_some() || new_keywords.is_some() || new_entities.is_some() {
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
         tx.execute(
             r#"INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
@@ -467,15 +506,20 @@ struct ParsedEnrichmentReceipts {
     keywords: Option<Value>,
 }
 
+/// Contract: `clean_summary` must be the post-scrub, normalized value --
+/// never the raw as-received summary. Passing the raw value here revives
+/// the pre-scrub/post-scrub split-decision bug (r2 root cause): receipt
+/// pairing would then be judged against different text than the SQL bind
+/// actually writes.
 fn parse_enrichment_receipts(
     summary: Option<&str>,
     metadata: Option<&str>,
     keywords: Option<&str>,
-    new_summary: Option<&str>,
+    clean_summary: Option<&str>,
     new_keywords: Option<&[String]>,
     new_entities: Option<&[String]>,
 ) -> Result<ParsedEnrichmentReceipts, MemoryError> {
-    let summary_writes = new_summary.is_some_and(|value| !value.trim().is_empty());
+    let summary_writes = clean_summary.is_some_and(|value| !value.trim().is_empty());
     let metadata_writes = new_keywords.is_some_and(|value| !value.is_empty())
         || new_entities.is_some_and(|value| !value.is_empty());
     let keywords_writes = new_keywords.is_some_and(|value| !value.is_empty());
