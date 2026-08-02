@@ -193,6 +193,35 @@ impl MemoryStore {
         })
     }
 
+    /// Atomically restore an exact archived occupant to the active lifecycle
+    /// and replace its migration metadata in the same transaction. Inverse of
+    /// [`MemoryStore::archive_with_metadata_if_expected_state`], used by the
+    /// Wiki corpus in-band repair of rows a sibling-worker race archived.
+    pub fn restore_with_metadata_if_expected_state(
+        &mut self,
+        id: &str,
+        new_metadata: &serde_json::Value,
+        expected: &ExpectedMemoryState,
+    ) -> Result<bool, MemoryError> {
+        if crate::namespace::is_reserved_wiki_rem_id(id) {
+            return Err(MemoryError::InvalidArg(format!(
+                "invariant: reserved REM operation {id} cannot be restored through a migration seam"
+            )));
+        }
+        let metadata_json = serde_json::to_string(new_metadata)?;
+        let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
+        db::retry_memory_locked("restore_with_metadata_if_expected_state", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
+            db::restore_with_metadata_if_expected_state(
+                &mut self.conn,
+                id,
+                &metadata_json,
+                expected,
+            )
+        })
+    }
+
     /// Update only enrichment fields (summary, vector, keywords, entities) with revision check.
     /// Returns false if revision mismatch (entry was updated since enrichment started).
     pub fn update_enrichment_fields(

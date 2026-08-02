@@ -236,16 +236,31 @@ pub(super) async fn run_cli_command(
                 confirm,
                 backup_dir,
                 plan,
+                repair_sibling_damage,
             } => {
-                let report = super::wiki_corpus::run_wiki_corpus_command(
-                    apply,
-                    confirm,
-                    backup_dir,
-                    plan,
-                    db_path,
-                    project_db_path.map(PathBuf::as_path),
-                    app_home,
-                )
+                // Both modes take the same flag set; the flag-combination
+                // policy lives with the migration code, not in this wiring.
+                let report = if repair_sibling_damage {
+                    super::wiki_corpus::run_wiki_corpus_sibling_repair_command(
+                        apply,
+                        confirm,
+                        backup_dir,
+                        plan,
+                        db_path,
+                        project_db_path.map(PathBuf::as_path),
+                        app_home,
+                    )
+                } else {
+                    super::wiki_corpus::run_wiki_corpus_command(
+                        apply,
+                        confirm,
+                        backup_dir,
+                        plan,
+                        db_path,
+                        project_db_path.map(PathBuf::as_path),
+                        app_home,
+                    )
+                }
                 .map_err(std::io::Error::other)?;
                 let report = serde_json::to_value(report).map_err(std::io::Error::other)?;
                 print_pretty_json(&report)

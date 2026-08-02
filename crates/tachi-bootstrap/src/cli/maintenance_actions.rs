@@ -685,6 +685,12 @@ pub enum WikiAction {
         /// Optional JSON preview plan to apply; source revisions are checked.
         #[arg(long, value_name = "PATH")]
         plan: Option<PathBuf>,
+        /// Repair rows a sibling-worker race left archived and non-canonical.
+        ///
+        /// Its own mode: without `--confirm` it only reports the exact damage
+        /// signature it found. It cannot be combined with `--apply`/`--plan`.
+        #[arg(long)]
+        repair_sibling_damage: bool,
     },
 }
 

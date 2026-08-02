@@ -13,6 +13,7 @@ fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
                 confirm: None,
                 backup_dir: None,
                 plan: None,
+                repair_sibling_damage: false,
             }
         })
     ));
@@ -38,10 +39,36 @@ fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
                 confirm: Some(confirm),
                 backup_dir: Some(backup_dir),
                 plan: Some(plan),
+                repair_sibling_damage: false,
             }
         }) if confirm == "MIGRATE_WIKI_CORPUS_V1"
             && backup_dir == std::path::Path::new("/tmp/wiki-backups")
             && plan == std::path::Path::new("/tmp/wiki-plan.json")
+    ));
+
+    let repair = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "corpus",
+        "--repair-sibling-damage",
+        "--confirm",
+        "REPAIR_WIKI_CORPUS_SIBLING_DAMAGE_V1",
+        "--backup-dir",
+        "/tmp/wiki-backups",
+    ])
+    .expect("wiki corpus sibling-damage repair flags should parse");
+    assert!(matches!(
+        repair.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Corpus {
+                apply: false,
+                confirm: Some(confirm),
+                backup_dir: Some(backup_dir),
+                plan: None,
+                repair_sibling_damage: true,
+            }
+        }) if confirm == "REPAIR_WIKI_CORPUS_SIBLING_DAMAGE_V1"
+            && backup_dir == std::path::Path::new("/tmp/wiki-backups")
     ));
 }
 

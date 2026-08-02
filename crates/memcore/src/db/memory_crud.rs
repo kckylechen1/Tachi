@@ -35,8 +35,8 @@ pub use search::{
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use update::{
-    archive_with_metadata_if_expected_state, supersede_with_metadata_if_expected_state,
-    update_with_revision_if_expected_state,
+    archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,
+    supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 pub use update::{
     record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,

@@ -128,8 +128,8 @@ pub use memory_crud::{
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use memory_crud::{
-    archive_with_metadata_if_expected_state, supersede_with_metadata_if_expected_state,
-    update_with_revision_if_expected_state,
+    archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,
+    supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
 /// function's own doc for when a hand-built fixture is legitimate.
