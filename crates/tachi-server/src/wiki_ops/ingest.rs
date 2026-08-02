@@ -1,9 +1,23 @@
 use super::*;
+use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Clone)]
 pub(super) struct ValidatedWikiIngestHttpUrl {
     pub(super) url: reqwest::Url,
+    pub(super) sanitized_source: String,
     pub(super) resolved_addrs: Option<Vec<SocketAddr>>,
+}
+
+struct WikiIngestSource {
+    content: String,
+    durable_source: String,
+}
+
+struct WikiIngestPostFetch {
+    content: String,
+    durable_source: String,
+    topic: Option<String>,
+    update_related: bool,
 }
 
 /// `tachi_home` is the caller's server-bound home directory
@@ -74,34 +88,119 @@ fn wiki_ingest_local_file_allowed(source_path: &Path, tachi_home: &Path) -> bool
         .any(|root| canonical_source.starts_with(root))
 }
 
-async fn source_for_path(tachi_home: &Path, source: &str) -> Result<String, String> {
+async fn source_for_path(tachi_home: &Path, source: String) -> Result<WikiIngestSource, String> {
     if source.starts_with("http://") || source.starts_with("https://") {
-        let validated = validate_wiki_ingest_http_url(source).await?;
+        let validated = validate_wiki_ingest_http_url(&source).await?;
         let client = wiki_ingest_http_client_for_url(&validated)?;
+        let durable_source = validated.sanitized_source.clone();
         let response = client
             .get(validated.url)
             .send()
             .await
-            .map_err(|e| format!("fetch source URL: {e}"))?;
+            .map_err(|e| format!("fetch source URL: {}", e.without_url()))?;
         if !response.status().is_success() {
             return Err(format!(
                 "fetch source URL failed with status {}",
                 response.status()
             ));
         }
-        read_limited_wiki_http_response(response).await
+        let content = read_limited_wiki_http_response(response).await?;
+        Ok(WikiIngestSource {
+            content,
+            durable_source,
+        })
     } else {
-        let path = Path::new(source);
+        let path = Path::new(&source);
         if !wiki_ingest_local_file_allowed(path, tachi_home) {
             return Err(
                 "local wiki ingest is restricted to the current workspace or TACHI_HOME; set TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE=1 to override"
                     .to_string(),
             );
         }
-        tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| format!("read source file: {e}"))
+        let content = read_limited_wiki_local_file(path).await?;
+        Ok(WikiIngestSource {
+            content,
+            durable_source: source,
+        })
     }
+}
+
+async fn read_limited_wiki_local_file(path: &Path) -> Result<String, String> {
+    // Check metadata before opening/allocating the body when the filesystem
+    // provides a trustworthy size. The bounded reader below remains mandatory
+    // because the file can grow or have an unknown size between these steps.
+    if tokio::fs::metadata(path)
+        .await
+        .ok()
+        .is_some_and(|metadata| metadata.len() > WIKI_INGEST_SOURCE_MAX_BYTES as u64)
+    {
+        return Err(format!(
+            "source file exceeds {} byte limit",
+            WIKI_INGEST_SOURCE_MAX_BYTES
+        ));
+    }
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("read source file: {e}"))?;
+    read_limited_wiki_reader(file, "source file").await
+}
+
+pub(super) async fn read_limited_wiki_reader<R>(
+    mut reader: R,
+    label: &str,
+) -> Result<String, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut body = Vec::new();
+    {
+        let mut limited = (&mut reader).take(WIKI_INGEST_SOURCE_MAX_BYTES as u64);
+        limited
+            .read_to_end(&mut body)
+            .await
+            .map_err(|e| format!("read {label}: {e}"))?;
+    }
+    debug_assert!(body.len() <= WIKI_INGEST_SOURCE_MAX_BYTES);
+
+    if body.len() == WIKI_INGEST_SOURCE_MAX_BYTES {
+        let mut overflow_probe = [0_u8; 1];
+        let overflow_len = reader
+            .read(&mut overflow_probe)
+            .await
+            .map_err(|e| format!("read {label}: {e}"))?;
+        if overflow_len != 0 {
+            return Err(format!(
+                "{label} exceeds {} byte limit",
+                WIKI_INGEST_SOURCE_MAX_BYTES
+            ));
+        }
+    }
+
+    String::from_utf8(body).map_err(|e| format!("read {label} as UTF-8: {e}"))
+}
+
+#[cfg(test)]
+pub(crate) async fn handle_wiki_ingest_post_fetch_for_test(
+    server: &MemoryServer,
+    raw_source: &str,
+    content: String,
+    topic: Option<String>,
+    update_related: bool,
+) -> Result<String, String> {
+    let durable_source = validate_wiki_ingest_http_url(raw_source)
+        .await?
+        .sanitized_source;
+    handle_wiki_ingest_post_fetch(
+        server,
+        WikiIngestPostFetch {
+            content,
+            durable_source,
+            topic,
+            update_related,
+        },
+    )
+    .await
 }
 
 pub(super) fn wiki_ingest_http_client_for_url(
@@ -171,6 +270,7 @@ pub(super) async fn validate_wiki_ingest_http_url(
     if let Ok(ip) = ip_literal.parse::<IpAddr>() {
         reject_blocked_wiki_ingest_ip(ip)?;
         return Ok(ValidatedWikiIngestHttpUrl {
+            sanitized_source: sanitized_wiki_ingest_source(&url),
             url,
             resolved_addrs: None,
         });
@@ -194,9 +294,22 @@ pub(super) async fn validate_wiki_ingest_http_url(
     }
 
     Ok(ValidatedWikiIngestHttpUrl {
+        sanitized_source: sanitized_wiki_ingest_source(&url),
         url,
         resolved_addrs: Some(resolved_addrs),
     })
+}
+
+fn sanitized_wiki_ingest_source(url: &reqwest::Url) -> String {
+    let mut sanitized = url.clone();
+    // Credentials are rejected above. Keep this defensive clearing local to
+    // the derived durable representation so a future caller cannot persist
+    // URL userinfo even if validation is accidentally reordered.
+    let _ = sanitized.set_username("");
+    let _ = sanitized.set_password(None);
+    sanitized.set_query(None);
+    sanitized.set_fragment(None);
+    sanitized.to_string()
 }
 
 fn reject_blocked_wiki_ingest_ip(ip: IpAddr) -> Result<(), String> {
@@ -211,16 +324,16 @@ fn wiki_ingest_ip_is_blocked(ip: IpAddr) -> bool {
     is_private_or_local_ip(ip)
 }
 
-async fn read_limited_wiki_http_response(
+pub(super) async fn read_limited_wiki_http_response(
     mut response: reqwest::Response,
 ) -> Result<String, String> {
     if response
         .content_length()
-        .is_some_and(|len| len > WIKI_INGEST_HTTP_MAX_BYTES as u64)
+        .is_some_and(|len| len > WIKI_INGEST_SOURCE_MAX_BYTES as u64)
     {
         return Err(format!(
             "source response exceeds {} byte limit",
-            WIKI_INGEST_HTTP_MAX_BYTES
+            WIKI_INGEST_SOURCE_MAX_BYTES
         ));
     }
 
@@ -230,10 +343,10 @@ async fn read_limited_wiki_http_response(
         .await
         .map_err(|e| format!("read source response: {e}"))?
     {
-        if body.len().saturating_add(chunk.len()) > WIKI_INGEST_HTTP_MAX_BYTES {
+        if body.len().saturating_add(chunk.len()) > WIKI_INGEST_SOURCE_MAX_BYTES {
             return Err(format!(
                 "source response exceeds {} byte limit",
-                WIKI_INGEST_HTTP_MAX_BYTES
+                WIKI_INGEST_SOURCE_MAX_BYTES
             ));
         }
         body.extend_from_slice(&chunk);
@@ -457,23 +570,53 @@ pub(crate) async fn handle_wiki_ingest(
     server: &MemoryServer,
     params: TachiWikiIngestParams,
 ) -> Result<String, String> {
-    let content = source_for_path(&server.tachi_home_dir(), &params.source).await?;
+    let TachiWikiIngestParams {
+        source,
+        topic,
+        update_related,
+    } = params;
+    let WikiIngestSource {
+        content,
+        durable_source,
+    } = source_for_path(&server.tachi_home_dir(), source).await?;
+    handle_wiki_ingest_post_fetch(
+        server,
+        WikiIngestPostFetch {
+            content,
+            durable_source,
+            topic,
+            update_related,
+        },
+    )
+    .await
+}
+
+async fn handle_wiki_ingest_post_fetch(
+    server: &MemoryServer,
+    source: WikiIngestPostFetch,
+) -> Result<String, String> {
+    let WikiIngestPostFetch {
+        content,
+        durable_source,
+        topic,
+        update_related,
+    } = source;
     if content.trim().is_empty() {
         append_wiki_log(
             server,
             "ingest",
-            &format!("{} | skipped empty source", params.source),
+            &format!("{} | skipped empty source", durable_source),
         );
         return serde_json::to_string(&json!({
             "status": "skipped",
             "reason": "empty_source",
-            "source": params.source,
+            "source": durable_source,
         }))
         .map_err(|e| format!("serialize wiki_ingest: {e}"));
     }
 
     let (metadata, model_invocation) =
-        extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await?;
+        extract_ingest_metadata(server, &durable_source, topic.as_deref(), &content).await?;
     let title = metadata
         .get("title")
         .and_then(Value::as_str)
@@ -485,7 +628,7 @@ pub(crate) async fn handle_wiki_ingest(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
-        .or(params.topic.clone())
+        .or(topic.clone())
         .unwrap_or_else(|| "ingest".to_string());
     let summary = metadata
         .get("summary")
@@ -500,7 +643,8 @@ pub(crate) async fn handle_wiki_ingest(
     let path = format!("/wiki/general/{}", sanitize_safe_path_name(&topic));
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let evidence_refs_v1 = build_evidence_refs_v1(std::slice::from_ref(&params.source), &timestamp);
+    let evidence_refs_v1 =
+        build_evidence_refs_v1(std::slice::from_ref(&durable_source), &timestamp);
     let reference_appends = evidence_refs_v1
         .into_iter()
         .map(|reference| {
@@ -526,7 +670,7 @@ pub(crate) async fn handle_wiki_ingest(
             json!({
             "wiki": true,
             "wiki_title": title,
-            "ingest_source": params.source.clone(),
+            "ingest_source": durable_source.clone(),
             "allow_cross_project": true,
             // #1072 fix-round (#1215 BUG 6): `wiki_ingest` used to upsert
             // straight into `/wiki/general/...` with no lifecycle/authority
@@ -552,7 +696,7 @@ pub(crate) async fn handle_wiki_ingest(
         "wiki_ingest",
         Some("global"),
         crate::server_state::DbScope::Project,
-        json!({"source": params.source.clone()}),
+        json!({"source": durable_source.clone()}),
     );
     let entry = MemoryEntry {
         id: id.clone(),
@@ -588,7 +732,7 @@ pub(crate) async fn handle_wiki_ingest(
 
     let mut related = Vec::new();
     let mut related_edges = Vec::new();
-    if params.update_related {
+    if update_related {
         related = find_related_by_entities(server, "wiki", &entities, &id, 10)
             .map_err(|error| format!("wiki ingest related lookup: {error}"))?;
         for related_entry in &related {
@@ -657,13 +801,14 @@ pub(crate) async fn handle_wiki_ingest(
     append_wiki_log(
         server,
         "ingest",
-        &format!("{} | created {} at {}", params.source, id, path),
+        &format!("{} | created {} at {}", durable_source, id, path),
     );
 
     serde_json::to_string(&json!({
         "status": "created",
         "id": id,
         "path": path,
+        "source": durable_source,
         "title": title,
         "summary": summary,
         "related_entries": related,

@@ -1,9 +1,13 @@
 mod reference_validation_tests {
     use super::super::ingest::{
-        validate_wiki_ingest_http_url, wiki_ingest_http_client, wiki_ingest_http_client_for_url,
-        ValidatedWikiIngestHttpUrl,
+        read_limited_wiki_http_response, read_limited_wiki_reader, validate_wiki_ingest_http_url,
+        wiki_ingest_http_client, wiki_ingest_http_client_for_url, ValidatedWikiIngestHttpUrl,
     };
     use super::super::references::{validate_reference_format, validate_references};
+    use axum::{body::Body, response::Response, routing::get, Router};
+    use futures::stream;
+    use std::convert::Infallible;
+    use std::io::Cursor;
     use std::net::SocketAddr;
 
     #[test]
@@ -88,6 +92,7 @@ mod reference_validation_tests {
     fn wiki_ingest_http_client_accepts_validated_dns_override() {
         let validated = ValidatedWikiIngestHttpUrl {
             url: reqwest::Url::parse("https://example.com/source.md").unwrap(),
+            sanitized_source: "https://example.com/source.md".to_string(),
             resolved_addrs: Some(vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()]),
         };
         wiki_ingest_http_client_for_url(&validated).expect("client with DNS override should build");
@@ -99,6 +104,118 @@ mod reference_validation_tests {
             .await
             .unwrap_err();
         assert!(err.contains("host is not allowed"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_http_url_rejects_userinfo() {
+        let err = validate_wiki_ingest_http_url("https://user:password@93.184.216.34/source.md")
+            .await
+            .unwrap_err();
+        assert!(err.contains("must not include credentials"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_signed_url_stays_request_usable_but_durable_source_is_scrubbed() {
+        let signed = "https://93.184.216.34:8443/wiki/page.md?X-Amz-Signature=secret-token&expires=123#secret-fragment";
+        let validated = validate_wiki_ingest_http_url(signed)
+            .await
+            .expect("signed URL should remain fetchable after validation");
+
+        assert_eq!(validated.url.as_str(), signed);
+        assert_eq!(
+            validated.url.query(),
+            Some("X-Amz-Signature=secret-token&expires=123")
+        );
+        assert_eq!(validated.url.fragment(), Some("secret-fragment"));
+        assert_eq!(
+            validated.sanitized_source,
+            "https://93.184.216.34:8443/wiki/page.md"
+        );
+        assert!(!validated.sanitized_source.contains("secret-token"));
+        assert!(!validated.sanitized_source.contains("secret-fragment"));
+        assert!(validated
+            .sanitized_source
+            .contains("93.184.216.34:8443/wiki/page.md"));
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_fallback_reader_accepts_exact_source_cap() {
+        let reader = Cursor::new(vec![b'x'; super::super::WIKI_INGEST_SOURCE_MAX_BYTES]);
+        let content = read_limited_wiki_reader(reader, "source file")
+            .await
+            .expect("fallback reader must accept exact-cap EOF");
+
+        assert_eq!(content.len(), super::super::WIKI_INGEST_SOURCE_MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_fallback_reader_refuses_source_cap_plus_one() {
+        let reader = Cursor::new(vec![b'x'; super::super::WIKI_INGEST_SOURCE_MAX_BYTES + 1]);
+        let error = read_limited_wiki_reader(reader, "source file")
+            .await
+            .expect_err("fallback reader must detect growth past metadata size");
+
+        assert_eq!(
+            error,
+            format!(
+                "source file exceeds {} byte limit",
+                super::super::WIKI_INGEST_SOURCE_MAX_BYTES
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_chunked_http_reader_refuses_more_than_source_cap() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind chunked source fixture");
+        let port = listener
+            .local_addr()
+            .expect("chunked source fixture address")
+            .port();
+        let first_chunk = vec![b'x'; super::super::WIKI_INGEST_SOURCE_MAX_BYTES];
+        let app = Router::new().route(
+            "/source.md",
+            get(move || {
+                let first_chunk = first_chunk.clone();
+                async move {
+                    let chunks = stream::iter([
+                        Ok::<_, Infallible>(first_chunk),
+                        Ok::<_, Infallible>(vec![b'y']),
+                    ]);
+                    Response::new(Body::from_stream(chunks))
+                }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve chunked source fixture");
+        });
+
+        crate::ensure_tls_provider();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build chunked source client");
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/source.md"))
+            .send()
+            .await
+            .expect("fetch chunked source fixture");
+        let error = read_limited_wiki_http_response(response)
+            .await
+            .expect_err("chunked oversized HTTP source must be refused");
+        task.abort();
+        let _ = task.await;
+
+        assert_eq!(
+            error,
+            format!(
+                "source response exceeds {} byte limit",
+                super::super::WIKI_INGEST_SOURCE_MAX_BYTES
+            )
+        );
     }
 
     #[test]

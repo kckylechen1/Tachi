@@ -1,6 +1,6 @@
 use super::*;
 use axum::{response::IntoResponse, routing::post, Json, Router};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tachi_llm::{
     llm::{ChatLaneConfig, ProviderRuntimeConfig},
     LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
@@ -8,6 +8,7 @@ use tachi_llm::{
 
 struct MockWikiIngestProvider {
     llm: LlmClient,
+    requests: Arc<Mutex<Vec<Value>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -26,12 +27,18 @@ impl MockWikiIngestProvider {
         let content = content.to_string();
         let finish_reason = finish_reason.to_string();
         let response_model = model.to_string();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = Arc::clone(&requests);
         let app = Router::new().route(
             "/chat/completions",
-            post(move || {
+            post(move |Json(request): Json<Value>| {
                 let content = content.clone();
                 let finish_reason = finish_reason.clone();
                 let response_model = response_model.clone();
+                captured_requests
+                    .lock()
+                    .expect("capture wiki ingest request")
+                    .push(request);
                 async move {
                     Json(json!({
                         "choices": [{
@@ -69,7 +76,18 @@ impl MockWikiIngestProvider {
                 value: "test-key".to_string(),
             }],
         ));
-        Self { llm, task }
+        Self {
+            llm,
+            requests,
+            task,
+        }
+    }
+
+    fn captured_requests(&self) -> Vec<Value> {
+        self.requests
+            .lock()
+            .expect("read captured wiki ingest requests")
+            .clone()
     }
 }
 
@@ -122,6 +140,145 @@ fn wiki_memory_count(server: &crate::MemoryServer) -> i64 {
 }
 
 #[tokio::test]
+async fn tachi_wiki_ingest_rejects_oversized_local_file_before_allocation() {
+    let (mut server, home) = seed_wiki_project_entries(vec![]);
+    install_unavailable_wiki_ingest_llm(&mut server);
+    let source_path = home.temp_home.join(".tachi/oversized-ingest-source.md");
+    std::fs::write(
+        &source_path,
+        vec![b'x'; crate::wiki_ops::WIKI_INGEST_SOURCE_MAX_BYTES + 1],
+    )
+    .expect("write oversized ingest source");
+
+    let error = server
+        .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
+            source: source_path.to_string_lossy().to_string(),
+            topic: Some("oversized-source".to_string()),
+            update_related: false,
+        }))
+        .await
+        .expect_err("oversized local wiki source must be refused");
+
+    assert!(error.contains("byte limit"), "{error}");
+    assert_eq!(wiki_memory_count(&server), 0);
+}
+
+#[tokio::test]
+async fn tachi_wiki_ingest_reports_local_invalid_utf8_clearly() {
+    let (mut server, home) = seed_wiki_project_entries(vec![]);
+    install_unavailable_wiki_ingest_llm(&mut server);
+    let source_path = home.temp_home.join(".tachi/invalid-utf8-ingest-source.md");
+    std::fs::write(&source_path, [0xff, 0xfe]).expect("write invalid UTF-8 source");
+
+    let error = server
+        .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
+            source: source_path.to_string_lossy().to_string(),
+            topic: Some("invalid-utf8-source".to_string()),
+            update_related: false,
+        }))
+        .await
+        .expect_err("invalid UTF-8 local source must be refused");
+
+    assert!(error.contains("read source file as UTF-8"), "{error}");
+    assert_eq!(wiki_memory_count(&server), 0);
+}
+
+#[tokio::test]
+async fn tachi_wiki_ingest_signed_url_scrubs_every_post_fetch_output_seam() {
+    let raw_source = "https://93.184.216.34:8443/wiki/page.md?X-Amz-Signature=secret-token&expires=123#secret-fragment";
+    let durable_source = "https://93.184.216.34:8443/wiki/page.md";
+    let provider = MockWikiIngestProvider::start(
+        r#"{"title":"Signed Wiki","topic":"signed-wiki","summary":"signed source summary","keywords":["signed"],"entities":["Wiki"]}"#,
+        "stop",
+    )
+    .await;
+    let (mut server, _home) = seed_wiki_project_entries(vec![]);
+    server.llm = Arc::new(provider.llm.clone());
+
+    let response = crate::wiki_ops::handle_wiki_ingest_post_fetch_for_test(
+        &server,
+        raw_source,
+        "# Signed source\nFetched content without URL credentials.".to_string(),
+        None,
+        false,
+    )
+    .await
+    .expect("signed URL post-fetch ingest");
+    let response_json: Value = serde_json::from_str(&response).expect("signed ingest response");
+    let id = response_json["id"].as_str().expect("signed ingest id");
+    let entry = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(id).map_err(|error| error.to_string())
+        })
+        .expect("read signed ingest entry")
+        .expect("signed ingest entry exists");
+    let wiki_log = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get("wiki-operation-log")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read signed ingest log")
+        .expect("signed ingest log exists");
+    let requests = provider.captured_requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "one metadata extraction request expected"
+    );
+    let model_prompt = requests[0]["messages"]
+        .as_array()
+        .expect("captured model messages")
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(response_json["source"], json!(durable_source));
+    assert_eq!(entry.metadata["ingest_source"], json!(durable_source));
+    assert_eq!(
+        entry.metadata["evidence_refs_v1"][0]["ref"],
+        json!(durable_source)
+    );
+    assert_eq!(
+        entry.metadata["provenance"]["context"]["source"],
+        json!(durable_source)
+    );
+
+    for (label, rendered) in [
+        ("model prompt", model_prompt),
+        ("response", response),
+        ("durable metadata", entry.metadata.to_string()),
+        (
+            "evidence refs",
+            entry.metadata["evidence_refs_v1"].to_string(),
+        ),
+        ("provenance", entry.metadata["provenance"].to_string()),
+        ("wiki operation log", wiki_log.text),
+    ] {
+        assert!(
+            rendered.contains(durable_source),
+            "{label} must contain the sanitized source: {rendered}"
+        );
+        assert!(
+            !rendered.contains(raw_source),
+            "{label} must not contain the raw signed URL: {rendered}"
+        );
+        for secret in [
+            "X-Amz-Signature",
+            "secret-token",
+            "expires=123",
+            "secret-fragment",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "{label} leaked {secret}: {rendered}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn tachi_wiki_ingest_creates_entry_and_related_edge() {
     let mut existing = make_entry("wiki-ingest-existing");
     existing.path = "/wiki/general/existing".to_string();
@@ -149,6 +306,10 @@ async fn tachi_wiki_ingest_creates_entry_and_related_edge() {
     let json: Value = serde_json::from_str(&response).expect("wiki ingest json");
     let created_id = json["id"].as_str().expect("created id");
     assert_eq!(json["status"], json!("created"));
+    assert_eq!(
+        json["source"],
+        json!(source_path.to_string_lossy().to_string())
+    );
     assert!(json["related_entries"].as_array().is_some_and(|items| {
         items
             .iter()
