@@ -5,6 +5,8 @@ use std::collections::HashSet;
 
 use rusqlite::{OptionalExtension, TransactionBehavior};
 
+use crate::db::ConfirmedContradictionOutcome;
+use crate::types::ExpectedMemoryState;
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
 impl MemoryStore {
@@ -15,12 +17,20 @@ impl MemoryStore {
     /// receipt-bearing metadata, and the unsuperseded lifecycle CAS. Any
     /// failure drops this `BEGIN IMMEDIATE`, including edge observations that
     /// were appended before a later mutation failed.
+    ///
+    /// `expected_candidate` is the candidate's complete state as read on the
+    /// way into verification. The model round-trip happens outside any
+    /// transaction, so this snapshot — not `superseded_by IS NULL`, and not
+    /// `revision`, which enrichment does not bump — is what keeps the verdict
+    /// bound to the content it was actually about. A snapshot mismatch returns
+    /// [`ConfirmedContradictionOutcome::StaleSkipped`] with nothing written.
     pub fn commit_confirmed_contradiction(
         &mut self,
         contradicts_edge: &crate::MemoryEdge,
         supersedes_edge: &crate::MemoryEdge,
         superseded_at: &str,
-    ) -> Result<(), MemoryError> {
+        expected_candidate: &ExpectedMemoryState,
+    ) -> Result<ConfirmedContradictionOutcome, MemoryError> {
         let db_label = self.db_label.clone();
         let reserved_reference_write = self.reserved_reference_write.clone();
         db::retry_memory_locked("confirmed_contradiction", &db_label, || {
@@ -28,14 +38,15 @@ impl MemoryStore {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            db::persist_confirmed_contradiction_within_tx(
+            let outcome = db::persist_confirmed_contradiction_within_tx(
                 &tx,
                 contradicts_edge,
                 supersedes_edge,
                 superseded_at,
+                expected_candidate,
             )?;
             tx.commit()?;
-            Ok(())
+            Ok(outcome)
         })
     }
 

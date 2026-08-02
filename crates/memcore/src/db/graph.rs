@@ -1,10 +1,10 @@
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Deserialize;
 use std::collections::HashSet;
 
 use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
-use crate::types::{GraphExpandResult, MemoryEdge};
+use crate::types::{ExpectedMemoryState, GraphExpandResult, MemoryEdge};
 
 use super::common::{normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::fetch_by_ids;
@@ -90,6 +90,55 @@ pub fn add_edge_with_provenance(
     write_edge_row(conn, edge, &edge.relation, provenance)
 }
 
+/// Disposition of one confirmed-contradiction commit attempt.
+///
+/// `StaleSkipped` is deliberately **not** an error. The contradiction pipeline
+/// reads a candidate, hands it to a model, and only then opens the write
+/// transaction; if the candidate changed in between, the verdict describes
+/// content that is no longer stored and the only correct action is to drop it.
+/// That is an ordinary outcome of racing with concurrent writers, so callers
+/// count it and continue rather than failing the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmedContradictionOutcome {
+    /// Both graph projections and the lifecycle transition are durable.
+    Committed,
+    /// The candidate no longer matches the state the model judged; nothing was
+    /// written.
+    StaleSkipped,
+}
+
+/// Re-read the candidate row inside the writer's transaction and compare it to
+/// the state the caller froze before the model was consulted.
+///
+/// The comparison itself is [`ExpectedMemoryState::matches`] — the same
+/// field-by-field comparator the tachi#1551 migration writes go through — so a
+/// contradiction commit and a migration commit can never disagree about what
+/// "unchanged" means. Only the row load is restated here: the equivalent loader
+/// in `db::memory_crud::update` is private to that module.
+///
+/// A missing row reads as a mismatch, which is the fail-closed direction: a
+/// verdict about a row that no longer exists must not write edges.
+fn candidate_matches_judged_state(
+    tx: &Transaction<'_>,
+    candidate_id: &str,
+    expected: &ExpectedMemoryState,
+) -> Result<bool, MemoryError> {
+    let ids = vec![candidate_id.to_string()];
+    let mut current = fetch_by_ids(tx, &ids, true)?;
+    let Some(current) = current.remove(candidate_id) else {
+        return Ok(false);
+    };
+    let superseded_by = tx
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id = ?1",
+            [candidate_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(expected.matches(&current, superseded_by.as_deref()))
+}
+
 /// Persist one model-confirmed contradiction inside the caller's transaction.
 ///
 /// This is deliberately narrower than a generic transaction surface: the two
@@ -97,13 +146,26 @@ pub fn add_edge_with_provenance(
 /// model-invocation provenance, and use the fixed `contradicts`/`supersedes`
 /// relations. The lifecycle update must win its unsuperseded-row CAS or the
 /// caller rolls the whole transaction back.
+///
+/// `expected_candidate` binds the write to the exact candidate state the model
+/// judged (tachi#1551 `ExpectedMemoryState`). `superseded_by IS NULL` alone
+/// cannot carry that binding, and neither can `revision`: enrichment rewrites
+/// `summary`, `keywords`, and `metadata` without bumping it, so a candidate can
+/// be rewritten in place during the model round-trip. The snapshot is verified
+/// after `BEGIN IMMEDIATE` and before any edge write, so a stale verdict leaves
+/// the database untouched.
 pub(crate) fn persist_confirmed_contradiction_within_tx(
     tx: &Transaction<'_>,
     contradicts_edge: &MemoryEdge,
     supersedes_edge: &MemoryEdge,
     superseded_at: &str,
-) -> Result<(), MemoryError> {
+    expected_candidate: &ExpectedMemoryState,
+) -> Result<ConfirmedContradictionOutcome, MemoryError> {
     validate_confirmed_contradiction(contradicts_edge, supersedes_edge, superseded_at)?;
+
+    if !candidate_matches_judged_state(tx, &contradicts_edge.target_id, expected_candidate)? {
+        return Ok(ConfirmedContradictionOutcome::StaleSkipped);
+    }
 
     write_edge_row(
         tx,
@@ -135,7 +197,7 @@ pub(crate) fn persist_confirmed_contradiction_within_tx(
             contradicts_edge.target_id, contradicts_edge.source_id
         )));
     }
-    Ok(())
+    Ok(ConfirmedContradictionOutcome::Committed)
 }
 
 fn validate_confirmed_contradiction(

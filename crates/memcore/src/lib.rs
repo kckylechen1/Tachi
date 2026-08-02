@@ -148,7 +148,8 @@ pub use db::{
     MEMORY_DB_FILENAME,
 };
 pub use db::{
-    CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, InsertMemoryResult, PathPrefixMemoryRow,
+    CategoryPathPrefixMemoryRow, ConfirmedContradictionOutcome, FoundryJobStatusCounts,
+    InsertMemoryResult, PathPrefixMemoryRow,
 };
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
