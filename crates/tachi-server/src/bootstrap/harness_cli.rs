@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::HarnessAction;
 
+use super::instruction_manifest::{scan_instruction_manifest, InstructionManifestStatus};
+
 const SUPPORTED_HOSTS: &[&str] = &["codex", "claude", "gemini", "antigravity", "cursor"];
 const MANAGED_MARKER: &str = "TACHI:HARNESS";
 
@@ -55,15 +57,27 @@ struct HarnessStatusReport {
     summary: HarnessSummary,
     targets: Vec<HarnessTargetStatus>,
     duplicate_groups: Vec<DuplicateGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instruction_manifest: Option<InstructionManifestStatus>,
 }
 
 pub(super) async fn run_harness_command(
     action: HarnessAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        HarnessAction::Status { hosts, home, json } => {
+        HarnessAction::Status {
+            hosts,
+            home,
+            manifest,
+            json,
+        } => {
             let home = crate::utils::resolve_home_arg(home)?;
-            let report = build_harness_report(&home, &hosts)?;
+            let report = match manifest.as_deref() {
+                Some(manifest_path) => {
+                    build_harness_report_with_manifest(&home, &hosts, Some(manifest_path))?
+                }
+                None => build_harness_report(&home, &hosts)?,
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -77,6 +91,14 @@ pub(super) async fn run_harness_command(
 fn build_harness_report(
     home: &Path,
     host_filters: &[String],
+) -> Result<HarnessStatusReport, String> {
+    build_harness_report_with_manifest(home, host_filters, None)
+}
+
+fn build_harness_report_with_manifest(
+    home: &Path,
+    host_filters: &[String],
+    manifest_path: Option<&Path>,
 ) -> Result<HarnessStatusReport, String> {
     let hosts =
         crate::utils::normalize_supported_values(host_filters, SUPPORTED_HOSTS, "harness host")?;
@@ -114,6 +136,7 @@ fn build_harness_report(
         summary,
         targets,
         duplicate_groups,
+        instruction_manifest: manifest_path.map(scan_instruction_manifest).transpose()?,
     })
 }
 
@@ -355,6 +378,51 @@ fn print_harness_report(report: &HarnessStatusReport) {
             }
         }
     }
+
+    if let Some(instruction_manifest) = &report.instruction_manifest {
+        println!();
+        println!("Instruction manifest:");
+        println!("  manifest: {}", instruction_manifest.manifest_path);
+        println!("  root: {}", instruction_manifest.root);
+        println!("  status: {}", instruction_manifest.status);
+        println!("  manifest_hash: {}", instruction_manifest.manifest_hash);
+        for source in &instruction_manifest.sources {
+            let hash = source.hash.as_deref().unwrap_or("-");
+            let bytes = source
+                .bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "  source {:<20} {:<10} exists={} bytes={} hash={} {}",
+                source.id, source.status, source.exists, bytes, hash, source.resolved_path
+            );
+            println!(
+                "    audience={} tier={} budget={} ({} bytes) remediation_owner={}",
+                source.audience,
+                source.tier,
+                source.density_budget.name,
+                source.density_budget.bytes,
+                source.remediation_owner
+            );
+            for target in &source.targets {
+                let hash = target.hash.as_deref().unwrap_or("-");
+                let bytes = target
+                    .bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "    target {:<12} {:<13} {:<10} exists={} bytes={} hash={} {}",
+                    target.carrier,
+                    target.ownership_mode,
+                    target.status,
+                    target.exists,
+                    bytes,
+                    hash,
+                    target.resolved_path
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -400,6 +468,15 @@ mod tests {
             .issues
             .contains(&"stale_or_host_specific_hardcode".to_string())));
 
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn legacy_harness_report_omits_optional_instruction_manifest_section() {
+        let home = temp_home("legacy-shape");
+        let report = build_harness_report(&home, &[]).expect("legacy report");
+        let value = serde_json::to_value(report).expect("legacy JSON");
+        assert!(value.get("instruction_manifest").is_none());
         let _ = std::fs::remove_dir_all(home);
     }
 }
