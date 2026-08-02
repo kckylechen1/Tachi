@@ -52,9 +52,11 @@ grown as a rebuildable projection over the event ledger — not a pile of
 features.
 
 ### 2. The crew is the product
-Work is done by seats — implementer, cross-vendor reviewer, independent
-verifier, mechanical clerk — enforcing the invariants that were proven in live
-operation: implementation and review never share a vendor (攻守异手), no
+Work is done by seats — implementer, independent reviewer, verifier, mechanical
+clerk — enforcing the invariants that were proven in live operation:
+implementation and review never share a seat or model; the different-model
+boundary applies equally to security, credentials, identity/authority, egress,
+and merge/release gates, while cross-vendor routing remains optional defense-in-depth; no
 self-report is trusted without independent verification (自报勿信), and change
 lands only as a reviewable PR (呈单即止). The seats are the product; any
 particular model staffing them is not. The leader seat is a *role*: its
@@ -153,6 +155,6 @@ Substrate #734 #773 #774 · crew/runtime #839 #894 · circulation #906 (+ the
 autonomous-loop leaf, to be filed) · project timeline (leaf, to be filed) ·
 precedents (leaf: filed with this document) · soul #855 #858 · user-model
 (leaf, to be filed) · ask/project-manager conversation #954/#1071 · research
-sources #530/#745 (+ resident-service leaf, to be filed) · multi-device sync
+source adapter #530 under the #1467 product boundary · multi-device sync
 (leaf, to be filed). Mechanism details belong in
 those issues and their design docs — never here.

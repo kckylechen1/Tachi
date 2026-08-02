@@ -53,7 +53,7 @@ Stance today: worktree isolation + concurrent-tree discipline + review gate befo
 merge (safe_merge/verify). Stance later: sandbox-enforced scopes (macOS sandbox
 profiles / container worktrees) — tracked as a gap, not promised.
 The merge gate is the real wall: nothing a worker writes reaches main without a
-different-vendor review and verification evidence (#516 pipeline hardens this).
+fresh different-model review and verification evidence (#516 pipeline hardens this).
 
 **T3 — Malicious or compromised MCP upstream.** An upstream tool's OUTPUT is
 injectable content aimed at whichever agent called it; a hostile server can also
@@ -84,7 +84,7 @@ product decision to revisit.
 
 **T7 — Eval/routing poisoning.** Workers self-report; a lying worker inflates its
 own route.
-Stance: eval rows record verdicts from the REVIEW lane (different vendor), not the
+Stance: eval rows record verdicts from the REVIEW lane (different model), not the
 worker's self-report (review discipline is law); route changes go through proposals
 with `confirm=true` human application — the scheduler learns, but the owner ratifies.
 
@@ -113,7 +113,7 @@ follow-up hardening, not part of this gate.
    them only as card-whitelisted, per-dispatch, audit-logged leases.
 2. Trust is minted only at the owner's local CLI; no MCP-surface path may
    auto-approve capabilities, keys, or route changes.
-3. Nothing merges to a default branch without different-vendor review evidence and
+3. Nothing merges to a default branch without different-model review evidence and
    verification checks (goal/* included at campaign close).
 4. Every GitHub write and every key lease is attributable in the audit log.
 5. Review/verify gates fail CLOSED (missing/stale/unparseable evidence = blocked).

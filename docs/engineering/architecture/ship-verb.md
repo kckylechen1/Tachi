@@ -83,8 +83,10 @@ Given `issue` + current branch (or worktree) + optional `base`:
 3. **Verify.** Dispatch a test-runner worker to run the full suite ONCE; it records
    results via `tachi_verify(record)`. Red suite → ship halts in `verify_failed`,
    reports, does not open a PR.
-4. **Adversarial review.** Dispatch a reviewer via `recommend` routing (different
-   vendor/model than the implementer — the two-gate contract is repo law). The reviewer
+4. **Adversarial review.** Dispatch a reviewer via `recommend` routing (a different
+   model than the implementer; vendor diversity is optional defense-in-depth). The route
+   receipt must show a distinct model identity; a new session, profile alias, persona, or
+   reasoning-effort change on the same model does not count. The reviewer
    returns a STRUCTURED verdict (see frozen constraints) which is recorded as a required
    check in the verify ledger. BLOCK verdict → ship halts in `review_blocked`.
 5. **Open the PR.** Contract mode: PR body generated from `git log <base>..HEAD`
@@ -134,12 +136,12 @@ repair = dispatch, adjudicate = leader.
 
 A multi-contract campaign (umbrella issue) gets an integration branch `goal/<issue>`:
 
-- Slices ship with `base=goal/<issue>` and may be **self-merged into goal/*** after their
-  review check passes (`safe_merge` against a goal base honors the same verify gates).
-- Exactly ONE reviewed PR goes `goal/* → main` at campaign close; the owner merges it.
-- This removes the only legitimate-looking reason for an autonomous implementer to stop
-  mid-campaign: waiting on serialized owner merges (observed 2026-07-05: three finished
-  lanes idle for hours "waiting for #496 to merge").
+- Slices ship with `base=goal/<issue>`, open a reviewable PR, and stop. Implementers never
+  self-merge into the integration branch.
+- The adjudicator personally reads and merges each accepted slice into `goal/*`; exactly
+  one separately reviewed PR goes `goal/* → main` at campaign close, merged by the owner.
+- The integration branch bounds campaign state and default-branch churn. It does not
+  transfer merge authority or relax review freshness.
 
 ### Phases
 
@@ -188,7 +190,7 @@ A multi-contract campaign (umbrella issue) gets an integration branch `goal/<iss
 - Required-check set per repo: hardcode the tachi trio (suite/clippy/gitleaks) first, or
   read from repo config at Phase 2? (Leaning: hardcode first, config when a second repo
   needs it.)
-- Reviewer routing when the implementer vendor is unknown (manual branches): default to
-  the strongest available non-resident vendor, or ask? (Leaning: default + record.)
+- Reviewer routing when the implementer model is unknown (manual branches): resolve and
+  record it before routing; otherwise the different-model gate cannot be proven.
 - Whether `ship` on a dirty tree should auto-commit leftovers (leaning NO: refuse and
   list them — silent batching hides scope creep).
