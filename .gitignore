@@ -5,6 +5,9 @@
 # Claude Code worktrees / local session artifacts (repo root only; not ~/.claude)
 .claude/
 
+# Amp worktrees / local session artifacts
+/.amp/
+
 # One-off local migration helper (machine-specific ~/.tachi / ~/.openclaw paths)
 scripts/migrate_openclaw_central.py
 
