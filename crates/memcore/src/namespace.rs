@@ -368,11 +368,19 @@ pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>)
         || (!path_prefix_opts_into_continuity_projection(&entry.path, path_prefix)
             && is_continuity_projection_entry(entry))
         || is_anchor_entry(entry)
+        // Generic-surface backstop for reserved Wiki REM operation rows. The
+        // wiki-scoped surface already excludes these via
+        // `USER_FACING_WIKI_SQL_WHERE`, but that clause only fires when a
+        // `/wiki` path_prefix is in play; an unscoped search routed into the
+        // wiki store by project-name inference has no such filter, so this
+        // function is the only remaining backstop.
+        || is_reserved_wiki_rem_id(&entry.id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn rem_operation_namespace_matches_sqlite_ascii_case_folding() {
@@ -381,5 +389,67 @@ mod tests {
         assert!(is_reserved_wiki_rem_id("WIKI-REM:spoof"));
         assert!(!is_reserved_wiki_rem_id("wiki-rem"));
         assert!(!is_reserved_wiki_rem_id("wiki:ordinary"));
+    }
+
+    fn fixture_entry(id: &str, path: &str, content: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: path.to_string(),
+            summary: content.to_string(),
+            text: content.to_string(),
+            importance: 0.7,
+            timestamp: "2026-07-28T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            source: "fixture".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
+            revision: 1,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            metadata: json!({}),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    #[test]
+    fn namespace_search_noise_excludes_reserved_wiki_rem_rows() {
+        let rem_draft = fixture_entry(
+            "wiki-rem:9f2c1a",
+            "/wiki/drafts/9f2c1a",
+            "unreviewed REM draft body",
+        );
+        assert!(
+            is_namespace_search_noise(&rem_draft, None),
+            "unscoped search must treat reserved wiki-rem ids as noise, \
+             not surface unreviewed draft bodies"
+        );
+    }
+
+    #[test]
+    fn namespace_search_noise_keeps_user_facing_wiki_rows() {
+        let user_wiki_entry = fixture_entry(
+            "d290f1ee-6c54-4b01-90e6-d701748f0851",
+            "/wiki/xxx",
+            "ordinary user-facing wiki content",
+        );
+        assert!(
+            !is_namespace_search_noise(&user_wiki_entry, None),
+            "the wiki-rem backstop must not classify ordinary user-facing \
+             wiki entries as noise"
+        );
     }
 }
