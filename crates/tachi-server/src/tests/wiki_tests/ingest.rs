@@ -128,6 +128,24 @@ fn write_wiki_ingest_source(home: &super::super::TempHomeGuard, name: &str) -> S
     source_path.to_string_lossy().to_string()
 }
 
+/// #1566 r3: mirrors `wiki_ops::ingest`'s local-file identity rule for every
+/// fixture this file constructs — they land directly under `.tachi` (never
+/// inside a `docs/`/`skill/` subdirectory), so
+/// `wiki_ingest_local_file_identity`'s vocabulary gate always falls back to
+/// the canonicalized *absolute* path, not the raw fixture path callers pass
+/// in as `source`. On macOS `$TMPDIR` is itself a symlink
+/// (`/var/folders/...` -> `/private/var/folders/...`), so the canonical form
+/// differs byte-for-byte from the raw one `write_wiki_ingest_source`/
+/// `home.temp_home.join(...)` return — an assertion comparing a persisted
+/// identity against the raw path is comparing against a value production
+/// never actually persists.
+fn canonical_local_ingest_identity(raw_source: &str) -> String {
+    std::fs::canonicalize(raw_source)
+        .expect("canonicalize local wiki ingest fixture path")
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn wiki_memory_count(server: &crate::MemoryServer) -> i64 {
     server
         .with_named_project_store_read("wiki", |store| {
@@ -308,7 +326,9 @@ async fn tachi_wiki_ingest_creates_entry_and_related_edge() {
     assert_eq!(json["status"], json!("created"));
     assert_eq!(
         json["source"],
-        json!(source_path.to_string_lossy().to_string())
+        json!(canonical_local_ingest_identity(
+            &source_path.to_string_lossy()
+        ))
     );
     assert!(json["related_entries"].as_array().is_some_and(|items| {
         items
@@ -439,7 +459,10 @@ async fn tachi_wiki_ingest_update_preserves_trusted_first_receipt_exactly() {
         Some(&receipt_a),
         "replacement must preserve receipt A as an exact JSON value"
     );
-    assert_eq!(replacement.metadata["ingest_source"], second_source);
+    assert_eq!(
+        replacement.metadata["ingest_source"],
+        canonical_local_ingest_identity(&second_source)
+    );
     assert_eq!(
         replacement.metadata["provenance"]["tool_name"],
         "wiki_ingest"
@@ -888,7 +911,9 @@ async fn tachi_wiki_ingest_stamps_pending_review_lifecycle_not_active() {
     );
     assert_eq!(
         entry["metadata"]["evidence_refs_v1"][0]["ref"],
-        json!(source_path.to_string_lossy().to_string())
+        json!(canonical_local_ingest_identity(
+            &source_path.to_string_lossy()
+        ))
     );
     assert_eq!(
         entry["metadata"]["evidence_refs_v1"][0]["captured_at"], entry["timestamp"],

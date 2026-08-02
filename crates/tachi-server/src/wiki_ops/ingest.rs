@@ -39,23 +39,59 @@ struct WikiIngestPostFetch {
 /// alongside the resolved `tachi_home` and cwd. See
 /// `ingest_local_file_allowed_tests::admits_union_of_all_three_home_env_roots`
 /// below for the regression this closes.
-fn wiki_ingest_local_file_allowed(source_path: &Path, tachi_home: &Path) -> bool {
-    if std::env::var("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE")
+///
+/// Returns the canonicalized path (and the allow-list root it was admitted
+/// under, when there is one) on success. #1566: callers must reuse this
+/// canonical form as the durable ingest source identity instead of
+/// canonicalizing a second time (or worse, persisting the raw un-canonicalized
+/// argument) — otherwise two different spellings of the same file (relative
+/// vs. absolute, or a path containing `..`) end up recorded as two different
+/// `evidence_refs_v1` identities for what is actually one file on disk.
+struct WikiIngestLocalFileCanonical {
+    /// Absolute, canonicalized path. This is always what actually gets
+    /// opened for read — never the (possibly root-relative) identity below.
+    absolute: PathBuf,
+    /// The allow-list root `absolute` was admitted under, if admission went
+    /// through the allow-list rather than the
+    /// `TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE` escape hatch (which has no
+    /// notion of "the" root — the whole point of the escape hatch is to
+    /// bypass root membership). #1566-2/r3: callers use this to *try* to
+    /// render the durable identity relative to the root — but only when the
+    /// result lands in `WIKI_INGEST_RELATIVE_REF_PREFIXES`'s vocabulary (see
+    /// `wiki_ingest_local_file_identity`), so a `docs/...`-shaped repo file
+    /// still classifies as `SourceKindV1::CanonicalDoc`
+    /// (`tachi_params::classify_wiki_reference`) after canonicalization even
+    /// when the raw input was already absolute, without turning every other
+    /// admitted file's identity into a root-relative (and root-choice- and
+    /// cwd-sensitive) string.
+    matched_root: Option<PathBuf>,
+}
+
+fn wiki_ingest_local_file_canonical(
+    source_path: &Path,
+    tachi_home: &Path,
+) -> Option<WikiIngestLocalFileCanonical> {
+    let allow_any = std::env::var("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE")
         .ok()
         .is_some_and(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes" | "on"
             )
-        })
-    {
-        return true;
-    }
+        });
 
-    let canonical_source = match std::fs::canonicalize(source_path) {
-        Ok(path) => path,
-        Err(_) => return false,
-    };
+    let canonical_source = std::fs::canonicalize(source_path).ok();
+    if allow_any {
+        // Preserve the escape hatch even when canonicalization fails (e.g.
+        // the path doesn't exist yet) — the subsequent file open surfaces
+        // the real I/O error; this bypass must not itself become that error.
+        return Some(WikiIngestLocalFileCanonical {
+            absolute: canonical_source.unwrap_or_else(|| source_path.to_path_buf()),
+            matched_root: None,
+        });
+    }
+    let canonical_source = canonical_source?;
+
     let cwd = std::env::current_dir().ok();
     let mut roots = Vec::new();
     if let Some(cwd) = cwd {
@@ -82,10 +118,129 @@ fn wiki_ingest_local_file_allowed(source_path: &Path, tachi_home: &Path) -> bool
         roots.push(home.join(".tachi"));
     }
 
+    // `find`, not `any`: we need to keep *which* root matched so the caller
+    // can render the identity relative to it. #1566 r3: root selection is
+    // NOT just a function of `roots`' fixed push order, `source_path`, and
+    // the filesystem — `roots` itself is a function of the process's current
+    // `cwd` (pushed first) and its `TACHI_HOME`/`SIGIL_HOME`/`TACHI_APP_HOME`
+    // env vars, both of which vary per-invocation (a daemon can be launched
+    // from different working directories across restarts). When `cwd`
+    // happens to be an ancestor of the "real" root (e.g. `cwd=$HOME` and
+    // `tachi_home=$HOME/.tachi`), `cwd` wins the `find` ahead of `tachi_home`
+    // on some invocations and not others, so *which* root matched can
+    // genuinely differ across cwds for the same file. `wiki_ingest_local_file_identity`'s
+    // vocabulary gate is what makes the *rendered identity* resilient to
+    // that: an outer/accidental root produces a relative string that (almost
+    // always) does not start with `docs/`/`skill/`, so it falls back to the
+    // canonical absolute path — the one value that is a pure function of the
+    // filesystem and `source_path` alone, independent of `roots`/cwd/env.
+    // The one case this does not close: an outer root that itself has a
+    // `docs`/`skill` child sitting exactly on the same path the inner root's
+    // `docs`/`skill` child would produce (i.e. `docs`/`skill` independently
+    // registered as a home root one level apart) can still render two
+    // different vocabulary-shaped relatives for the same file — a
+    // misconfiguration, not something this function defends against.
     roots
         .into_iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
-        .any(|root| canonical_source.starts_with(root))
+        .find(|root| canonical_source.starts_with(root))
+        .map(|matched_root| WikiIngestLocalFileCanonical {
+            absolute: canonical_source,
+            matched_root: Some(matched_root),
+        })
+}
+
+/// Repo-relative prefixes recognized as a "legal, typed" reference shape by
+/// this codebase's two existing closed vocabularies:
+/// `wiki_ops::references::validate_reference_format` (what a hand-supplied
+/// `references[]` entry must match to be accepted as a repo-relative
+/// reference at all — see that function for the authoritative list) and
+/// `tachi_params::classify_wiki_reference` (which further tags a `docs/`
+/// entry, though not `skill/`, as `SourceKindV1::CanonicalDoc`). Neither
+/// function exports these prefixes as a reusable constant, so this array is
+/// kept in sync with them by hand — update all three together.
+///
+/// #1566 r3: `wiki_ingest_local_file_identity` only renders a canonicalized
+/// local ingest source relative to its matched allow-list root when doing so
+/// produces a string that starts with one of these prefixes; every other
+/// file keeps its canonical absolute form. See that function's doc for why
+/// unconditional relativization (the r2 shape) was unsound.
+const WIKI_INGEST_RELATIVE_REF_PREFIXES: [&str; 4] = ["docs/", "docs\\", "skill/", "skill\\"];
+
+/// Render a locally-admitted canonical path as the string persisted for both
+/// `metadata.ingest_source` and `evidence_refs_v1[].ref` — always the exact
+/// same value for both, so there is one identity, not two.
+///
+/// #1566-2/r3: when the path was admitted under an allow-list root AND
+/// rendering it relative to that root falls inside
+/// `WIKI_INGEST_RELATIVE_REF_PREFIXES` (e.g. a canonicalized
+/// `/repo/docs/x.md` under allow-list root `/repo` becomes `docs/x.md`), use
+/// that relative form — this is what lets
+/// `tachi_params::classify_wiki_reference`'s `docs/`-prefix check keep
+/// recognizing an ingested repo doc as `SourceKindV1::CanonicalDoc` after
+/// canonicalization (canonicalizing a `docs/...`-relative input turns it
+/// absolute, which would otherwise silently and permanently lose that
+/// classification, and desync it from non-canonicalized `docs/...` refs
+/// written elsewhere, which do classify).
+///
+/// Every other case keeps the canonical **absolute** path — this is the r3
+/// fix over the r2 shape, which relativized unconditionally. Unconditional
+/// relativization broke identity uniqueness three ways a cross-vendor review
+/// caught: (1) a file sitting directly under an allow-list root (not inside
+/// a `docs/`/`skill/` subdirectory) rendered as a bare filename, so two
+/// different repos' same-named root file (or any two files in different
+/// allow-list roots that share a leaf name) collided on one identity; (2)
+/// when an allow-list root is nested inside another (e.g. `~/.tachi` under
+/// `$HOME`, both admitted roots), which one `find` matches first depends on
+/// the process's cwd — a value that a daemon's own restarts can vary — so
+/// the *same file on disk* could render two different identities purely
+/// because of an unrelated cwd change; (3) an arbitrary relative shape (e.g.
+/// `notes/a.md`, or the bare filename from (1)) is not a legal reference per
+/// `wiki_ops::references::validate_reference_format`'s closed vocabulary —
+/// this ingest path does not itself run `durable_source` through that
+/// validator (`memcore::db::ValidatedReferenceMutation::evidence` only
+/// bounds/normalizes it), so an unconditionally-relativized identity could
+/// silently write a ref shape into `evidence_refs_v1` that a caller manually
+/// supplying the same string to `references[]` would have had rejected.
+/// Gating relativization on the same vocabulary those two functions already
+/// recognize keeps every rendered identity inside the legal shape space,
+/// restores uniqueness (the canonical absolute path is unique by
+/// construction — `std::fs::canonicalize` resolves symlinks/`.`/`..` to one
+/// string per file), and removes the cwd sensitivity for every file that
+/// does not land in the vocabulary (the absolute path does not depend on
+/// which root matched or what the process's cwd was). It is not a complete
+/// fix for (2) in the narrow case where the *outer* accidental root also
+/// independently produces a vocabulary-shaped relative for the same file
+/// (an outer root's own `docs`/`skill` child coinciding with the inner
+/// root's) — see the `find, not any` comment in
+/// `wiki_ingest_local_file_canonical` above for that residual.
+///
+/// Fails closed on non-UTF-8 paths rather than lossily substituting U+FFFD
+/// replacement characters into a stored identity (#1566 N1) — a lossy
+/// rewrite is a fail-open silent corruption of the identity this whole
+/// function exists to keep exact.
+fn wiki_ingest_local_file_identity(
+    canonical: &WikiIngestLocalFileCanonical,
+) -> Result<String, String> {
+    let absolute = canonical
+        .absolute
+        .to_str()
+        .ok_or_else(|| "wiki ingest source path is not valid UTF-8".to_string())?;
+
+    let relative_in_vocabulary = canonical.matched_root.as_ref().and_then(|root| {
+        canonical
+            .absolute
+            .strip_prefix(root)
+            .ok()
+            .and_then(|relative| relative.to_str())
+            .filter(|relative| {
+                WIKI_INGEST_RELATIVE_REF_PREFIXES
+                    .iter()
+                    .any(|prefix| relative.starts_with(prefix))
+            })
+    });
+
+    Ok(relative_in_vocabulary.unwrap_or(absolute).to_string())
 }
 
 async fn source_for_path(tachi_home: &Path, source: String) -> Result<WikiIngestSource, String> {
@@ -111,18 +266,53 @@ async fn source_for_path(tachi_home: &Path, source: String) -> Result<WikiIngest
         })
     } else {
         let path = Path::new(&source);
-        if !wiki_ingest_local_file_allowed(path, tachi_home) {
+        let Some(canonical) = wiki_ingest_local_file_canonical(path, tachi_home) else {
             return Err(
                 "local wiki ingest is restricted to the current workspace or TACHI_HOME; set TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE=1 to override"
                     .to_string(),
             );
-        }
-        let content = read_limited_wiki_local_file(path).await?;
+        };
+        // #1566-1: persist the canonicalized identity (not the raw `source`
+        // argument) as `durable_source`, so two spellings of the same file
+        // (relative vs. absolute, or a path containing `..`) land on the
+        // same `evidence_refs_v1` ref. #1566 r3: identity is the canonical
+        // absolute path — `wiki_ingest_local_file_identity` only substitutes
+        // a root-relative rendering when that rendering falls inside
+        // `WIKI_INGEST_RELATIVE_REF_PREFIXES`'s vocabulary; that gate is what
+        // keeps the dedupe invariant above holding for the relative form
+        // too (both spellings resolve to the same canonical path, select the
+        // same matched root, and the vocabulary check is a pure function of
+        // that root-relative string, so it agrees for both), and it does not
+        // introduce a cwd dependency into identity: for every file the gate
+        // rejects, the value falls back to the canonical absolute path,
+        // which depends only on the filesystem and `source_path`, not on
+        // which root matched or the process's cwd. #1566-3: bound it before
+        // the file read, so an oversized path never reaches disk I/O.
+        let durable_source =
+            bound_wiki_ingest_durable_source(wiki_ingest_local_file_identity(&canonical)?)?;
+        let content = read_limited_wiki_local_file(&canonical.absolute).await?;
         Ok(WikiIngestSource {
             content,
-            durable_source: source,
+            durable_source,
         })
     }
+}
+
+/// Bound a would-be `durable_source` (persisted as `evidence_refs_v1[].ref` /
+/// `metadata.ingest_source`) to the same limit `memcore` enforces on
+/// evidence-ref storage. Fail-closed: reject rather than silently truncate,
+/// so a caller never observes a saved identity shorter than what they typed.
+/// #1566-2/3: shared by both the HTTP (`sanitized_wiki_ingest_source`) and
+/// local-file branches so the bound is checked once, in one place, ahead of
+/// any network or filesystem I/O the source would otherwise trigger.
+fn bound_wiki_ingest_durable_source(source: String) -> Result<String, String> {
+    if source.len() > memcore::db::MAX_REFERENCE_BYTES {
+        return Err(format!(
+            "wiki ingest source identity exceeds {} byte limit",
+            memcore::db::MAX_REFERENCE_BYTES
+        ));
+    }
+    Ok(source)
 }
 
 async fn read_limited_wiki_local_file(path: &Path) -> Result<String, String> {
@@ -257,6 +447,12 @@ pub(super) async fn validate_wiki_ingest_http_url(
         return Err("wiki ingest source URLs must not include credentials".to_string());
     }
 
+    // #1566-3: bound the durable source identity here, before the DNS
+    // resolution (`lookup_host`) below and before any caller can reach the
+    // actual fetch. An oversized URL must fail here with zero network I/O
+    // and zero downstream LLM calls, not after a wasted round trip.
+    let sanitized_source = sanitized_wiki_ingest_source(&url)?;
+
     let host = url
         .host_str()
         .ok_or_else(|| "wiki ingest source URL must include a host".to_string())?;
@@ -270,7 +466,7 @@ pub(super) async fn validate_wiki_ingest_http_url(
     if let Ok(ip) = ip_literal.parse::<IpAddr>() {
         reject_blocked_wiki_ingest_ip(ip)?;
         return Ok(ValidatedWikiIngestHttpUrl {
-            sanitized_source: sanitized_wiki_ingest_source(&url),
+            sanitized_source,
             url,
             resolved_addrs: None,
         });
@@ -294,13 +490,21 @@ pub(super) async fn validate_wiki_ingest_http_url(
     }
 
     Ok(ValidatedWikiIngestHttpUrl {
-        sanitized_source: sanitized_wiki_ingest_source(&url),
+        sanitized_source,
         url,
         resolved_addrs: Some(resolved_addrs),
     })
 }
 
-fn sanitized_wiki_ingest_source(url: &reqwest::Url) -> String {
+/// Derive the durable, credential-stripped source identity for an ingested
+/// URL, bounded to `memcore`'s `MAX_REFERENCE_BYTES` (fail-closed — see
+/// `bound_wiki_ingest_durable_source`). #1566-2: this used to return an
+/// unbounded `String`; a sufficiently long query string or path could
+/// produce a `durable_source` wider than what `memcore::memory_crud` accepts
+/// as an evidence-ref target, which meant the *save*, not the fetch, was the
+/// first place an oversized ingest source would fail — after already paying
+/// for the network round trip.
+fn sanitized_wiki_ingest_source(url: &reqwest::Url) -> Result<String, String> {
     let mut sanitized = url.clone();
     // Credentials are rejected above. Keep this defensive clearing local to
     // the derived durable representation so a future caller cannot persist
@@ -309,7 +513,7 @@ fn sanitized_wiki_ingest_source(url: &reqwest::Url) -> String {
     let _ = sanitized.set_password(None);
     sanitized.set_query(None);
     sanitized.set_fragment(None);
-    sanitized.to_string()
+    bound_wiki_ingest_durable_source(sanitized.to_string())
 }
 
 fn reject_blocked_wiki_ingest_ip(ip: IpAddr) -> Result<(), String> {
@@ -818,7 +1022,7 @@ async fn handle_wiki_ingest_post_fetch(
 
 #[cfg(test)]
 mod ingest_local_file_allowed_tests {
-    use super::wiki_ingest_local_file_allowed;
+    use super::wiki_ingest_local_file_canonical;
     use crate::test_support::EnvRestore;
 
     /// #1096 leaf-2a round-2 (codex C3-wiki): RED against the first-pass
@@ -857,16 +1061,332 @@ mod ingest_local_file_allowed_tests {
         let resolved_tachi_home = tachi_home_dir.path();
 
         assert!(
-            wiki_ingest_local_file_allowed(&tachi_file, resolved_tachi_home),
+            wiki_ingest_local_file_canonical(&tachi_file, resolved_tachi_home).is_some(),
             "file under the resolved (winning) TACHI_HOME must be allowed"
         );
         assert!(
-            wiki_ingest_local_file_allowed(&sigil_file, resolved_tachi_home),
+            wiki_ingest_local_file_canonical(&sigil_file, resolved_tachi_home).is_some(),
             "file under the losing key SIGIL_HOME must still be allowed (union, not narrowing)"
         );
         assert!(
-            wiki_ingest_local_file_allowed(&app_file, resolved_tachi_home),
+            wiki_ingest_local_file_canonical(&app_file, resolved_tachi_home).is_some(),
             "file under the losing key TACHI_APP_HOME must still be allowed (union, not narrowing)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ingest_source_identity_tests {
+    use super::{bound_wiki_ingest_durable_source, build_evidence_refs_v1, source_for_path};
+    use crate::test_support::{CwdRestore, EnvRestore};
+    use tachi_params::SourceKindV1;
+
+    /// #1566-1: the same file, ingested through two different spellings of
+    /// its path (relative-with-`..` vs. absolute), must produce the exact
+    /// same `durable_source` identity — because that string is what lands in
+    /// both `metadata.ingest_source` and `evidence_refs_v1[].ref`. Before
+    /// this fix, `source_for_path`'s local branch persisted the raw `source`
+    /// argument verbatim (post allow-list check, which canonicalized
+    /// separately and threw the result away), so the two spellings produced
+    /// two different refs for one file.
+    #[tokio::test]
+    async fn local_ingest_dedupes_source_identity_across_path_spellings() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tachi_home_dir = tempfile::tempdir().expect("tachi_home tempdir");
+        let sub_dir = tachi_home_dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).expect("create sub dir");
+        let target_file = sub_dir.join("page.md");
+        std::fs::write(&target_file, "# Page\n").expect("write fixture");
+
+        let _tachi_env = EnvRestore::set_path("TACHI_HOME", tachi_home_dir.path());
+        let _allow_any_off = EnvRestore::remove("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE");
+
+        let absolute_spelling = target_file.to_string_lossy().into_owned();
+        let roundabout_spelling = sub_dir
+            .join("..")
+            .join("sub")
+            .join("page.md")
+            .to_string_lossy()
+            .into_owned();
+        assert_ne!(
+            absolute_spelling, roundabout_spelling,
+            "test fixture must actually exercise two distinct spellings"
+        );
+
+        let via_absolute = source_for_path(tachi_home_dir.path(), absolute_spelling)
+            .await
+            .expect("absolute spelling should ingest");
+        let via_roundabout = source_for_path(tachi_home_dir.path(), roundabout_spelling)
+            .await
+            .expect("`..`-containing spelling should ingest");
+
+        assert_eq!(
+            via_absolute.durable_source, via_roundabout.durable_source,
+            "two spellings of the same file must canonicalize to one durable_source identity"
+        );
+    }
+
+    /// #1566-2: canonicalizing a `docs/...`-relative input turns it
+    /// absolute, which would otherwise silently drop the resulting
+    /// `evidence_refs_v1` ref's `SourceKindV1::CanonicalDoc` classification
+    /// (`tachi_params::classify_wiki_reference` only recognizes a literal
+    /// `docs/` prefix, and an absolute canonical path never has one) — and
+    /// would desync the same file's identity depending on which spelling
+    /// ingested it. Asserts both invariants hold together: (a) an absolute
+    /// spelling and a `docs/`-relative spelling of the same file still
+    /// dedupe to one `durable_source` (the item-1 invariant), and (b) that
+    /// shared identity is still classified `CanonicalDoc` (item 2 / B2).
+    #[tokio::test]
+    async fn local_ingest_of_docs_path_keeps_canonical_doc_classification() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let repo_root = tempfile::tempdir().expect("repo root tempdir");
+        let docs_dir = repo_root.path().join("docs");
+        std::fs::create_dir_all(&docs_dir).expect("create docs dir");
+        let target_file = docs_dir.join("x.md");
+        std::fs::write(&target_file, "# X\n").expect("write fixture");
+
+        // `wiki_ingest_local_file_canonical`'s roots list pushes cwd first,
+        // ahead of `tachi_home`/the env-var roots/`~/.tachi` — pin cwd to
+        // `repo_root` so it is deterministically the matched root, and clear
+        // the other roots so none of them can spuriously prefix-match first.
+        let _cwd = CwdRestore::set(repo_root.path());
+        let tachi_home_dir = tempfile::tempdir().expect("tachi_home tempdir");
+        let _tachi_env = EnvRestore::remove("TACHI_HOME");
+        let _sigil_env = EnvRestore::remove("SIGIL_HOME");
+        let _app_env = EnvRestore::remove("TACHI_APP_HOME");
+        let _allow_any_off = EnvRestore::remove("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE");
+
+        let absolute_spelling = target_file.to_string_lossy().into_owned();
+        let relative_spelling = "docs/x.md".to_string();
+
+        let via_absolute = source_for_path(tachi_home_dir.path(), absolute_spelling)
+            .await
+            .expect("absolute spelling should ingest");
+        let via_relative = source_for_path(tachi_home_dir.path(), relative_spelling)
+            .await
+            .expect("docs/-relative spelling should ingest");
+
+        assert_eq!(
+            via_absolute.durable_source, via_relative.durable_source,
+            "absolute and docs/-relative spellings of the same file must dedupe to one identity"
+        );
+        assert_eq!(
+            via_absolute.durable_source, "docs/x.md",
+            "durable_source should be rendered relative to the matched cwd root, not absolute"
+        );
+
+        let evidence_refs = build_evidence_refs_v1(
+            std::slice::from_ref(&via_absolute.durable_source),
+            "2026-01-01T00:00:00.000Z",
+        );
+        assert_eq!(
+            evidence_refs[0].target_kind,
+            Some(SourceKindV1::CanonicalDoc),
+            "canonicalized docs/ file must still classify as CanonicalDoc, not silently lose target_kind"
+        );
+    }
+
+    /// #1566 r3 (cold-review point 1, real gap): the coverage above only
+    /// exercises `matched_root` coming from cwd. Prove the *other* matching
+    /// path — `matched_root` coming from the `tachi_home` argument while cwd
+    /// is a completely unrelated directory outside the repo — still renders
+    /// a `docs/`-relative identity and still classifies `CanonicalDoc`. This
+    /// is the shape a daemon actually hits: launched from an arbitrary cwd,
+    /// with `TACHI_HOME` as the stable configured root.
+    #[tokio::test]
+    async fn local_ingest_of_docs_path_via_tachi_home_root_outside_cwd_keeps_canonical_doc_classification(
+    ) {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let repo_root = tempfile::tempdir().expect("repo root tempdir");
+        let docs_dir = repo_root.path().join("docs");
+        std::fs::create_dir_all(&docs_dir).expect("create docs dir");
+        let target_file = docs_dir.join("x.md");
+        std::fs::write(&target_file, "# X\n").expect("write fixture");
+
+        // cwd is deliberately outside `repo_root` so it can never
+        // prefix-match `target_file` — the only candidate root that can
+        // admit it is the `tachi_home` argument itself.
+        let cwd_outside = tempfile::tempdir().expect("unrelated cwd tempdir");
+        let _cwd = CwdRestore::set(cwd_outside.path());
+        let _tachi_env = EnvRestore::remove("TACHI_HOME");
+        let _sigil_env = EnvRestore::remove("SIGIL_HOME");
+        let _app_env = EnvRestore::remove("TACHI_APP_HOME");
+        let _allow_any_off = EnvRestore::remove("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE");
+
+        let absolute_spelling = target_file.to_string_lossy().into_owned();
+        let via_absolute = source_for_path(repo_root.path(), absolute_spelling)
+            .await
+            .expect("absolute spelling should ingest via the tachi_home root");
+
+        assert_eq!(
+            via_absolute.durable_source, "docs/x.md",
+            "matched_root came from the tachi_home argument (cwd is outside the repo), \
+             and must still render docs/-relative"
+        );
+
+        let evidence_refs = build_evidence_refs_v1(
+            std::slice::from_ref(&via_absolute.durable_source),
+            "2026-01-01T00:00:00.000Z",
+        );
+        assert_eq!(
+            evidence_refs[0].target_kind,
+            Some(SourceKindV1::CanonicalDoc),
+            "docs/ file admitted via the tachi_home root (not cwd) must still classify CanonicalDoc"
+        );
+    }
+
+    /// #1566 r3 (cold-review point 1, real gap): before r3, a file admitted
+    /// directly under an allow-list root (not inside a `docs/`/`skill/`
+    /// subdirectory) rendered as a bare filename — the exact shape
+    /// `write_wiki_ingest_source` in `tests/wiki_tests/ingest.rs` uses for
+    /// its fixtures (`home.temp_home.join(".tachi").join(name)`, admitted
+    /// directly under the `.tachi` root), and the shape that would let two
+    /// different repos' same-named root file (or `allow_cross_project`
+    /// letting two projects' same-named file) collide on one identity. Prove
+    /// such a file keeps its canonical absolute identity instead.
+    #[tokio::test]
+    async fn local_ingest_of_non_vocabulary_root_file_keeps_absolute_identity() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let repo_root = tempfile::tempdir().expect("repo root tempdir");
+        let target_file = repo_root.path().join("README.md");
+        std::fs::write(&target_file, "# Readme\n").expect("write fixture");
+
+        let _cwd = CwdRestore::set(repo_root.path());
+        let tachi_home_dir = tempfile::tempdir().expect("tachi_home tempdir");
+        let _tachi_env = EnvRestore::remove("TACHI_HOME");
+        let _sigil_env = EnvRestore::remove("SIGIL_HOME");
+        let _app_env = EnvRestore::remove("TACHI_APP_HOME");
+        let _allow_any_off = EnvRestore::remove("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE");
+
+        let absolute_spelling = target_file.to_string_lossy().into_owned();
+        let via_absolute = source_for_path(tachi_home_dir.path(), absolute_spelling)
+            .await
+            .expect("absolute spelling should ingest");
+
+        let expected_canonical = std::fs::canonicalize(&target_file)
+            .expect("canonicalize test fixture")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            via_absolute.durable_source, expected_canonical,
+            "a root-direct file outside docs/skill must keep its canonical absolute identity"
+        );
+        assert_ne!(
+            via_absolute.durable_source, "README.md",
+            "must never collapse to a bare filename — two different repos' same-named \
+             root file would collide on one identity"
+        );
+    }
+
+    /// #1566 r3 (cold-review point 2, real gap): the same absolute file,
+    /// ingested once with cwd matching it as the root and once with cwd
+    /// pointed somewhere unrelated (so the `tachi_home` argument matches
+    /// instead), must render the exact same identity. This is the realistic
+    /// form daemon-restart cwd drift takes: `TACHI_HOME` is a stable
+    /// configuration value, but a process's cwd is not, and the pre-r3
+    /// unconditional-relativization shape rendered a different string
+    /// depending on which of the two admitted the file.
+    #[tokio::test]
+    async fn local_ingest_of_docs_path_is_identical_across_differing_cwd() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let repo_root = tempfile::tempdir().expect("repo root tempdir");
+        let docs_dir = repo_root.path().join("docs");
+        std::fs::create_dir_all(&docs_dir).expect("create docs dir");
+        let target_file = docs_dir.join("x.md");
+        std::fs::write(&target_file, "# X\n").expect("write fixture");
+        let absolute_spelling = target_file.to_string_lossy().into_owned();
+
+        let _tachi_env = EnvRestore::remove("TACHI_HOME");
+        let _sigil_env = EnvRestore::remove("SIGIL_HOME");
+        let _app_env = EnvRestore::remove("TACHI_APP_HOME");
+        let _allow_any_off = EnvRestore::remove("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE");
+
+        // cwd matches the file directly (repo_root itself wins the `find`).
+        let identity_cwd_matches = {
+            let _cwd = CwdRestore::set(repo_root.path());
+            let tachi_home_dir = tempfile::tempdir().expect("tachi_home tempdir");
+            source_for_path(tachi_home_dir.path(), absolute_spelling.clone())
+                .await
+                .expect("ingest via cwd-matched root")
+                .durable_source
+        };
+
+        // cwd is unrelated to the file; only the `tachi_home` argument
+        // (still `repo_root`) matches.
+        let identity_tachi_home_matches = {
+            let cwd_outside = tempfile::tempdir().expect("unrelated cwd tempdir");
+            let _cwd = CwdRestore::set(cwd_outside.path());
+            source_for_path(repo_root.path(), absolute_spelling.clone())
+                .await
+                .expect("ingest via tachi_home-matched root")
+                .durable_source
+        };
+
+        assert_eq!(
+            identity_cwd_matches, identity_tachi_home_matches,
+            "the same file's identity must not depend on whether cwd or tachi_home \
+             supplied the matched root"
+        );
+        assert_eq!(identity_cwd_matches, "docs/x.md");
+    }
+
+    /// #1566-2: `bound_wiki_ingest_durable_source` is the shared fail-closed
+    /// gate both the HTTP and local branches route through. Directly
+    /// unit-test its boundary since constructing an actual >4096-byte
+    /// canonicalized filesystem path is impractical (macOS `PATH_MAX`/
+    /// `NAME_MAX` are far smaller than the evidence-ref limit).
+    #[test]
+    fn bound_rejects_source_over_max_reference_bytes() {
+        let oversized = "x".repeat(memcore::db::MAX_REFERENCE_BYTES + 1);
+        let err = bound_wiki_ingest_durable_source(oversized).unwrap_err();
+        assert!(err.contains("byte limit"), "err: {err}");
+
+        let exactly_at_limit = "x".repeat(memcore::db::MAX_REFERENCE_BYTES);
+        assert!(bound_wiki_ingest_durable_source(exactly_at_limit).is_ok());
+    }
+
+    /// #1566-3: the local branch must reject an oversized source identity
+    /// before it ever attempts to open/read the file. This uses the
+    /// `TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE` escape hatch with a
+    /// nonexistent path so the *only* way this test can pass is if the
+    /// length bound is enforced ahead of the read — a raw file-open of this
+    /// path would fail with a "no such file" I/O error, not a byte-limit
+    /// error, if the ordering regressed.
+    #[tokio::test]
+    async fn local_ingest_rejects_oversized_source_before_reading_file() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let _allow_any = EnvRestore::set("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE", "1");
+        let tachi_home_dir = tempfile::tempdir().expect("tachi_home tempdir");
+        let oversized_source = format!(
+            "/nonexistent/{}",
+            "x".repeat(memcore::db::MAX_REFERENCE_BYTES)
+        );
+
+        let err = source_for_path(tachi_home_dir.path(), oversized_source)
+            .await
+            .expect_err("oversized local source must be rejected");
+        assert!(err.contains("byte limit"), "err: {err}");
+        assert!(
+            !err.contains("read source file"),
+            "must fail on the length bound, not a filesystem read: {err}"
         );
     }
 }

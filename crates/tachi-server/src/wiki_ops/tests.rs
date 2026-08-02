@@ -138,6 +138,29 @@ mod reference_validation_tests {
             .contains("93.184.216.34:8443/wiki/page.md"));
     }
 
+    /// #1566-2/3: an oversized durable-source identity must be rejected by
+    /// `validate_wiki_ingest_http_url` itself, before DNS resolution
+    /// (`lookup_host`) or the actual fetch ever run. The host here uses the
+    /// RFC 2606 `.invalid` TLD, which is reserved to never resolve — if the
+    /// length bound regressed to run *after* DNS resolution, this test would
+    /// fail with a "resolve source URL host" error (or hang on a real
+    /// lookup) instead of the length error asserted below.
+    #[tokio::test]
+    async fn wiki_ingest_http_url_rejects_oversized_source_before_dns_resolution() {
+        let oversized_path = "a".repeat(memcore::db::MAX_REFERENCE_BYTES + 1);
+        let oversized_url = format!("https://wiki-ingest-1566-hardening.invalid/{oversized_path}");
+
+        let err = validate_wiki_ingest_http_url(&oversized_url)
+            .await
+            .expect_err("oversized source URL must be rejected");
+
+        assert!(err.contains("byte limit"), "err: {err}");
+        assert!(
+            !err.contains("resolve source URL host"),
+            "must fail on the length bound before DNS resolution, not after: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn wiki_ingest_fallback_reader_accepts_exact_source_cap() {
         let reader = Cursor::new(vec![b'x'; super::super::WIKI_INGEST_SOURCE_MAX_BYTES]);
