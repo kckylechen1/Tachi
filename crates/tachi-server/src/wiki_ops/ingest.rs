@@ -1091,6 +1091,7 @@ mod ingest_source_identity_tests {
     /// separately and threw the result away), so the two spellings produced
     /// two different refs for one file.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn local_ingest_dedupes_source_identity_across_path_spellings() {
         let _lock = crate::utils::global_test_lock()
             .lock()
@@ -1141,6 +1142,7 @@ mod ingest_source_identity_tests {
     /// dedupe to one `durable_source` (the item-1 invariant), and (b) that
     /// shared identity is still classified `CanonicalDoc` (item 2 / B2).
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn local_ingest_of_docs_path_keeps_canonical_doc_classification() {
         let _lock = crate::utils::global_test_lock()
             .lock()
@@ -1201,6 +1203,7 @@ mod ingest_source_identity_tests {
     /// is the shape a daemon actually hits: launched from an arbitrary cwd,
     /// with `TACHI_HOME` as the stable configured root.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn local_ingest_of_docs_path_via_tachi_home_root_outside_cwd_keeps_canonical_doc_classification(
     ) {
         let _lock = crate::utils::global_test_lock()
@@ -1255,6 +1258,7 @@ mod ingest_source_identity_tests {
     /// letting two projects' same-named file) collide on one identity. Prove
     /// such a file keeps its canonical absolute identity instead.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn local_ingest_of_non_vocabulary_root_file_keeps_absolute_identity() {
         let _lock = crate::utils::global_test_lock()
             .lock()
@@ -1300,6 +1304,7 @@ mod ingest_source_identity_tests {
     /// unconditional-relativization shape rendered a different string
     /// depending on which of the two admitted the file.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn local_ingest_of_docs_path_is_identical_across_differing_cwd() {
         let _lock = crate::utils::global_test_lock()
             .lock()
@@ -1369,6 +1374,7 @@ mod ingest_source_identity_tests {
     /// path would fail with a "no such file" I/O error, not a byte-limit
     /// error, if the ordering regressed.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn local_ingest_rejects_oversized_source_before_reading_file() {
         let _lock = crate::utils::global_test_lock()
             .lock()
