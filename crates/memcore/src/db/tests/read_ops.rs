@@ -423,9 +423,26 @@ fn user_facing_wiki_projection_excludes_rem_operations_even_with_lifecycle_all()
 fn user_facing_wiki_projection_excludes_anchor_rows() {
     let mut conn = make_conn();
 
+    // This row must be excluded by its **id** alone, so its path has to stay
+    // an ordinary `/wiki` page — `ensure_anchor` cannot build it, because it
+    // also forces `/anchors/<kind>/<key>` and would move the row onto the
+    // path branch, leaving `id NOT GLOB 'anchor:*'` untested. Write it
+    // through the ordinary insert seam under a non-reserved id and then
+    // rename it, the same fixture shape this file already uses above to mint
+    // the reserved `WIKI_LOG` topic. Every other column is byte-for-byte what
+    // the normal write path produces, so the id is the only thing that can
+    // account for the row's absence from the projection.
     let mut anchor_by_id = make_entry("anchor:issue:kckylechen1/tachi:1561", "anchor plumbing");
     anchor_by_id.path = "/wiki/agent/tachi".to_string();
-    insert_if_absent(&mut conn, &anchor_by_id, false).unwrap();
+    let mut seed_anchor_by_id = anchor_by_id.clone();
+    seed_anchor_by_id.id = "anchor-id-seed".to_string();
+    insert_if_absent(&mut conn, &seed_anchor_by_id, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET id = 'anchor:issue:kckylechen1/tachi:1561' \
+         WHERE id = 'anchor-id-seed'",
+        [],
+    )
+    .unwrap();
 
     let mut anchor_by_path = make_entry("anchor-row-by-path", "anchor plumbing");
     anchor_by_path.path = "/anchors/issue/kckylechen1/tachi:1561".to_string();

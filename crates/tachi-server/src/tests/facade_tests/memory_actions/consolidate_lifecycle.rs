@@ -2979,16 +2979,26 @@ async fn consolidate_propose_near_dup_merge_for_chinese_cross_path_twins() {
 async fn consolidate_scope_accounting_redacts_internal_row_ids_only() {
     let server = make_server();
 
+    // Both fixtures must be excluded for `retention_policy` and nothing else.
+    // `make_entry` gives every row the same `"test memory"` body, and
+    // write-time near-duplicate merging supersedes one of two identical
+    // bodies — which reclassified the ordinary row as `already_superseded`
+    // and made the reason census 1/1 instead of 2. Distinct bodies keep both
+    // rows independent, which is what this fixture always meant.
     let mut cache = make_entry("foundry:recall-cache:consolidate-leak");
     cache.path = "/scope/leak/recall-cache/entry".to_string();
     cache.topic = "recall_rerank_cache".to_string();
     cache.source = memcore::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
     cache.metadata = json!({ "cache_key": memcore::FOUNDRY_RECALL_CACHE_SOURCE });
     cache.retention_policy = Some("durable".to_string());
+    cache.text = "internal recall-cache row held by scope accounting".to_string();
+    cache.summary = cache.text.clone();
 
     let mut ordinary = make_entry("scope-leak-ordinary-protected");
     ordinary.path = "/scope/leak/ordinary".to_string();
     ordinary.retention_policy = Some("durable".to_string());
+    ordinary.text = "ordinary durable note the owner still expects named".to_string();
+    ordinary.summary = ordinary.text.clone();
 
     server
         .with_global_store(|store| {
