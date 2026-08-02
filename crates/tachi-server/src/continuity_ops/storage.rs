@@ -155,6 +155,13 @@ pub(super) fn write_event(
 /// continuity writes. The boolean preserves the ledger's idempotent outcome
 /// for governed transitions that must distinguish a first establishment from
 /// an exact replay.
+///
+/// `#[cfg(feature = "contract-leaves")]`: the only such transition is
+/// `governed_precedent_establishment`, gated per #1564 pending owner
+/// disposition; this writer is gated with it rather than deleted. The
+/// `()`-returning sibling `write_event` stays ungated — `emit`, `pipeline`
+/// and `promotion` all call it.
+#[cfg(feature = "contract-leaves")]
 pub(crate) fn insert_event_if_absent(
     server: &MemoryServer,
     target: &ContinuityEventTarget,

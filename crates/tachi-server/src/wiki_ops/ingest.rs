@@ -8,6 +8,7 @@ pub(super) struct ValidatedWikiIngestHttpUrl {
     pub(super) resolved_addrs: Option<Vec<SocketAddr>>,
 }
 
+#[derive(Debug)]
 struct WikiIngestSource {
     content: String,
     durable_source: String,
