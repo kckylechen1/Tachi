@@ -18,17 +18,22 @@ impl MemoryStore {
     /// failure drops this `BEGIN IMMEDIATE`, including edge observations that
     /// were appended before a later mutation failed.
     ///
-    /// `expected_candidate` is the candidate's complete state as read on the
-    /// way into verification. The model round-trip happens outside any
-    /// transaction, so this snapshot — not `superseded_by IS NULL`, and not
-    /// `revision`, which enrichment does not bump — is what keeps the verdict
-    /// bound to the content it was actually about. A snapshot mismatch returns
+    /// `expected_entry` and `expected_candidate` are the entry's and
+    /// candidate's complete state as read on the way into verification. The
+    /// model round-trip happens outside any transaction, so these snapshots —
+    /// not `superseded_by IS NULL`, and not `revision`, which enrichment does
+    /// not bump — are what keep the verdict bound to the content it was
+    /// actually about, on both sides of the judged pair (tachi#1563 extends
+    /// the candidate-only binding from tachi#1551 to the entry too, since the
+    /// entry can equally be rewritten or archived while the model call is in
+    /// flight). A snapshot mismatch on either side returns
     /// [`ConfirmedContradictionOutcome::StaleSkipped`] with nothing written.
     pub fn commit_confirmed_contradiction(
         &mut self,
         contradicts_edge: &crate::MemoryEdge,
         supersedes_edge: &crate::MemoryEdge,
         superseded_at: &str,
+        expected_entry: &ExpectedMemoryState,
         expected_candidate: &ExpectedMemoryState,
     ) -> Result<ConfirmedContradictionOutcome, MemoryError> {
         let db_label = self.db_label.clone();
@@ -43,6 +48,7 @@ impl MemoryStore {
                 contradicts_edge,
                 supersedes_edge,
                 superseded_at,
+                expected_entry,
                 expected_candidate,
             )?;
             tx.commit()?;
@@ -70,8 +76,12 @@ impl MemoryStore {
     /// recall from returning the superseded fact forever (same invariant as
     /// [`MemoryStore::supersede_memory`]); COALESCE keeps any explicit window
     /// intact. Unlike `supersede_memory`, this uses the caller-supplied
-    /// timestamp and does not bump `revision`, matching the auto-link and
-    /// contradiction write paths that record the supersession edge separately.
+    /// timestamp and does not bump `revision`, matching the auto-link write
+    /// path that calls it directly. The LLM-confirmed contradiction path
+    /// (`db::persist_confirmed_contradiction_within_tx`) does **not** call
+    /// this function — it runs its own lifecycle `UPDATE` that does advance
+    /// `revision`, so `update_enrichment_fields`'s CAS notices the
+    /// supersession (tachi#1563).
     ///
     /// Returns the number of rows actually updated (0 or 1 — `id` is the
     /// primary key) so callers can tell "this call is what closed the row"

@@ -45,9 +45,9 @@ fn confirmed_contradiction_edges(
     (edge("contradicts"), edge("supersedes"), at)
 }
 
-/// Snapshot a candidate row the way the contradiction read path does, through
-/// the same loader the write transaction re-reads with.
-fn expected_candidate_state(conn: &Connection, id: &str) -> ExpectedMemoryState {
+/// Snapshot a row (entry or candidate) the way the contradiction read path
+/// does, through the same loader the write transaction re-reads with.
+fn expected_state(conn: &Connection, id: &str) -> ExpectedMemoryState {
     let ids = vec![id.to_string()];
     let entry = fetch_by_ids(conn, &ids, true)
         .unwrap()
@@ -98,14 +98,28 @@ fn confirmed_contradiction_transaction_commits_edges_observations_and_lifecycle(
     upsert(&mut conn, &make_entry("confirmed-old", "old fact"), false).unwrap();
     let (contradicts, supersedes, at) =
         confirmed_contradiction_edges("confirmed-new", "confirmed-old", "complete");
-    let expected = expected_candidate_state(&conn, "confirmed-old");
+    let expected_entry = expected_state(&conn, "confirmed-new");
+    let expected = expected_state(&conn, "confirmed-old");
+    let revision_before: i64 = conn
+        .query_row(
+            "SELECT revision FROM memories WHERE id = 'confirmed-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
 
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    let outcome =
-        persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at, &expected)
-            .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
     tx.commit().unwrap();
     assert_eq!(outcome, ConfirmedContradictionOutcome::Committed);
 
@@ -123,17 +137,23 @@ fn confirmed_contradiction_transaction_commits_edges_observations_and_lifecycle(
             |row| row.get(0),
         )
         .unwrap();
-    let state: (Option<String>, Option<String>) = conn
+    let state: (Option<String>, Option<String>, i64) = conn
         .query_row(
-            "SELECT superseded_by, valid_until FROM memories WHERE id = 'confirmed-old'",
+            "SELECT superseded_by, valid_until, revision FROM memories WHERE id = 'confirmed-old'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(edge_count, 2);
     assert_eq!(observation_count, 2);
     assert_eq!(state.0.as_deref(), Some("confirmed-new"));
     assert_eq!(state.1.as_deref(), Some("2026-07-30T01:02:03.000Z"));
+    assert_eq!(
+        state.2,
+        revision_before + 1,
+        "supersession must advance revision so revision-scoped CAS callers (e.g. \
+         update_enrichment_fields) notice the lifecycle transition"
+    );
 }
 
 #[test]
@@ -163,7 +183,8 @@ fn confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary(
         conn.execute_batch(trigger).unwrap();
         let (contradicts, supersedes, at) =
             confirmed_contradiction_edges("rollback-new", "rollback-old", "complete");
-        let expected = expected_candidate_state(&conn, "rollback-old");
+        let expected_entry = expected_state(&conn, "rollback-new");
+        let expected = expected_state(&conn, "rollback-old");
 
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -173,6 +194,7 @@ fn confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary(
             &contradicts,
             &supersedes,
             &at,
+            &expected_entry,
             &expected,
         )
         .expect_err("injected side-effect failure must abort the mutation");
@@ -194,13 +216,21 @@ fn confirmed_contradiction_transaction_rejects_truncated_receipt_before_writes()
     upsert(&mut conn, &make_entry("truncated-old", "old fact"), false).unwrap();
     let (contradicts, supersedes, at) =
         confirmed_contradiction_edges("truncated-new", "truncated-old", "truncated");
-    let expected = expected_candidate_state(&conn, "truncated-old");
+    let expected_entry = expected_state(&conn, "truncated-new");
+    let expected = expected_state(&conn, "truncated-old");
 
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at, &expected)
-        .expect_err("truncated verification receipt must be rejected");
+    persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .expect_err("truncated verification receipt must be rejected");
     drop(tx);
     assert_no_contradiction_mutation(&conn, "truncated-old");
 }
@@ -223,12 +253,20 @@ fn confirmed_contradiction_transaction_rejects_non_allowlisted_receipt_fields() 
             );
     }
 
-    let expected = expected_candidate_state(&conn, "unsafe-old");
+    let expected_entry = expected_state(&conn, "unsafe-new");
+    let expected = expected_state(&conn, "unsafe-old");
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at, &expected)
-        .expect_err("receipt fields outside the persistence allowlist must fail closed");
+    persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .expect_err("receipt fields outside the persistence allowlist must fail closed");
     drop(tx);
     assert_no_contradiction_mutation(&conn, "unsafe-old");
 }
@@ -248,13 +286,21 @@ fn confirmed_contradiction_transaction_rolls_back_when_lifecycle_cas_loses() {
     // Snapshot after the pre-existing supersession so the state gate passes and
     // this test still exercises the `superseded_by IS NULL` predicate it was
     // written for, rather than short-circuiting on a stale snapshot.
-    let expected = expected_candidate_state(&conn, "cas-old");
+    let expected_entry = expected_state(&conn, "cas-new");
+    let expected = expected_state(&conn, "cas-old");
 
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at, &expected)
-        .expect_err("lost lifecycle CAS must abort both edge writes");
+    persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .expect_err("lost lifecycle CAS must abort both edge writes");
     drop(tx);
 
     let edge_count: i64 = conn
@@ -1287,7 +1333,8 @@ fn confirmed_contradiction_skips_a_verdict_about_content_enrichment_rewrote() {
     let mut conn = make_conn();
     upsert(&mut conn, &make_entry("stale-new", "new fact"), false).unwrap();
     upsert(&mut conn, &make_entry("stale-old", "old fact"), false).unwrap();
-    let expected = expected_candidate_state(&conn, "stale-old");
+    let expected_entry = expected_state(&conn, "stale-new");
+    let expected = expected_state(&conn, "stale-old");
     let revision_before: i64 = conn
         .query_row(
             "SELECT revision FROM memories WHERE id = 'stale-old'",
@@ -1326,9 +1373,15 @@ fn confirmed_contradiction_skips_a_verdict_about_content_enrichment_rewrote() {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    let outcome =
-        persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at, &expected)
-            .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
     tx.commit().unwrap();
 
     assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
@@ -1342,7 +1395,8 @@ fn confirmed_contradiction_skips_a_verdict_after_a_revision_bumping_rewrite() {
     let mut conn = make_conn();
     upsert(&mut conn, &make_entry("rev-new", "new fact"), false).unwrap();
     upsert(&mut conn, &make_entry("rev-old", "old fact"), false).unwrap();
-    let expected = expected_candidate_state(&conn, "rev-old");
+    let expected_entry = expected_state(&conn, "rev-new");
+    let expected = expected_state(&conn, "rev-old");
     let revision_before: i64 = conn
         .query_row(
             "SELECT revision FROM memories WHERE id = 'rev-old'",
@@ -1368,9 +1422,15 @@ fn confirmed_contradiction_skips_a_verdict_after_a_revision_bumping_rewrite() {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    let outcome =
-        persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at, &expected)
-            .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
     tx.commit().unwrap();
 
     assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
@@ -1384,7 +1444,8 @@ fn confirmed_contradiction_skips_a_verdict_about_a_deleted_candidate() {
     let mut conn = make_conn();
     upsert(&mut conn, &make_entry("gone-new", "new fact"), false).unwrap();
     upsert(&mut conn, &make_entry("gone-old", "old fact"), false).unwrap();
-    let expected = expected_candidate_state(&conn, "gone-old");
+    let expected_entry = expected_state(&conn, "gone-new");
+    let expected = expected_state(&conn, "gone-old");
     assert!(delete(&mut conn, "gone-old", false).unwrap());
 
     let (contradicts, supersedes, at) =
@@ -1392,9 +1453,15 @@ fn confirmed_contradiction_skips_a_verdict_about_a_deleted_candidate() {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    let outcome =
-        persist_confirmed_contradiction_within_tx(&tx, &contradicts, &supersedes, &at, &expected)
-            .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
     tx.commit().unwrap();
 
     assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
@@ -1412,4 +1479,300 @@ fn confirmed_contradiction_skips_a_verdict_about_a_deleted_candidate() {
         .unwrap();
     assert_eq!(edge_count, 0);
     assert_eq!(observation_count, 0);
+}
+
+/// tachi#1563 item 1: the entry (the newer fact that triggered detection) can
+/// be rewritten by enrichment during the LLM round-trip exactly like a
+/// candidate can — mirrors
+/// `confirmed_contradiction_skips_a_verdict_about_content_enrichment_rewrote`
+/// above, but on the entry side of the pair. Before this fix the write path
+/// never re-read the entry, so this same rewrite would have gone unnoticed
+/// and the commit would have proceeded.
+#[test]
+fn confirmed_contradiction_skips_a_verdict_about_content_enrichment_rewrote_on_the_entry_side() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("entry-stale-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("entry-stale-old", "old fact"), false).unwrap();
+    let expected_entry = expected_state(&conn, "entry-stale-new");
+    let expected = expected_state(&conn, "entry-stale-old");
+    let revision_before: i64 = conn
+        .query_row(
+            "SELECT revision FROM memories WHERE id = 'entry-stale-new'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert!(update_enrichment_fields(
+        &mut conn,
+        "entry-stale-new",
+        Some("rewritten while the model was being consulted"),
+        None,
+        None,
+        None,
+        revision_before,
+        None,
+        None,
+        None,
+    )
+    .unwrap());
+
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("entry-stale-new", "entry-stale-old", "complete");
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+    assert_no_contradiction_mutation(&conn, "entry-stale-old");
+}
+
+/// The entry side of the same guard must also fail closed when the entry was
+/// archived (not merely rewritten) between the read that fed the model and
+/// the write — `archived` is one of the compared fields in
+/// `ExpectedMemoryState::matches`, so no separate lifecycle check is needed
+/// (tachi#1563).
+#[test]
+fn confirmed_contradiction_skips_a_verdict_when_the_entry_was_archived() {
+    let mut conn = make_conn();
+    upsert(
+        &mut conn,
+        &make_entry("entry-archived-new", "new fact"),
+        false,
+    )
+    .unwrap();
+    upsert(
+        &mut conn,
+        &make_entry("entry-archived-old", "old fact"),
+        false,
+    )
+    .unwrap();
+    let expected_entry = expected_state(&conn, "entry-archived-new");
+    let expected = expected_state(&conn, "entry-archived-old");
+
+    assert!(
+        archive_memory(&conn, "entry-archived-new").unwrap(),
+        "fixture must actually archive the entry"
+    );
+
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("entry-archived-new", "entry-archived-old", "complete");
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+    assert_no_contradiction_mutation(&conn, "entry-archived-old");
+}
+
+/// A verdict about an entry that has since been deleted must also fail
+/// closed, mirroring `confirmed_contradiction_skips_a_verdict_about_a_deleted_candidate`
+/// but for the entry side (tachi#1563).
+#[test]
+fn confirmed_contradiction_skips_a_verdict_when_the_entry_was_deleted() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("entry-gone-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("entry-gone-old", "old fact"), false).unwrap();
+    let expected_entry = expected_state(&conn, "entry-gone-new");
+    let expected = expected_state(&conn, "entry-gone-old");
+    assert!(delete(&mut conn, "entry-gone-new", false).unwrap());
+
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("entry-gone-new", "entry-gone-old", "complete");
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+    assert_no_contradiction_mutation(&conn, "entry-gone-old");
+}
+
+/// tachi#1563 item 2: the lifecycle `UPDATE` that supersedes the candidate
+/// must advance `revision`, or a revision-scoped CAS (chief among them
+/// `update_enrichment_fields`) cannot notice the transition and can still
+/// write into a row that has already been superseded.
+#[test]
+fn confirmed_contradiction_supersede_advances_revision_and_blocks_a_stale_enrichment_cas() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("revcas-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("revcas-old", "old fact"), false).unwrap();
+    let expected_entry = expected_state(&conn, "revcas-new");
+    let expected = expected_state(&conn, "revcas-old");
+    let revision_before: i64 = conn
+        .query_row(
+            "SELECT revision FROM memories WHERE id = 'revcas-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("revcas-new", "revcas-old", "complete");
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(outcome, ConfirmedContradictionOutcome::Committed);
+
+    let revision_after: i64 = conn
+        .query_row(
+            "SELECT revision FROM memories WHERE id = 'revcas-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        revision_after,
+        revision_before + 1,
+        "supersede must advance revision so revision-scoped observers see the lifecycle transition"
+    );
+
+    // An enrichment write that read the row before supersession (and so is
+    // still carrying the pre-supersession revision) must lose its CAS rather
+    // than land fields on a row that has already been superseded — this is
+    // the product-visible reason the revision bump exists: without it, an
+    // in-flight enrichment write would silently resurrect content on a
+    // memory the graph has already retired.
+    let cas_result = update_enrichment_fields(
+        &mut conn,
+        "revcas-old",
+        Some("late enrichment racing the supersede"),
+        None,
+        None,
+        None,
+        revision_before,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !cas_result,
+        "enrichment write against the pre-supersession revision must be refused"
+    );
+
+    // The same drift is visible through the read-path snapshot: a candidate
+    // matcher built from the pre-supersession row must now disagree with the
+    // stored row, both because `revision` moved and because `superseded_by`
+    // is no longer NULL.
+    let ids = vec!["revcas-old".to_string()];
+    let current = fetch_by_ids(&conn, &ids, true)
+        .unwrap()
+        .remove("revcas-old")
+        .expect("row still exists");
+    let superseded_by: Option<String> = conn
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id = 'revcas-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !expected.matches(&current, superseded_by.as_deref()),
+        "the pre-supersession snapshot must no longer match the post-supersede row"
+    );
+}
+
+/// Review follow-up on tachi#1563: `ExpectedMemoryState::matches` no longer
+/// compares `recall_count` / `query_diversity` (see the docstring on
+/// [`ExpectedMemoryState`]). Bump both, through the real search-recording
+/// path, on the entry *and* the candidate between the frozen snapshot and the
+/// write — the exact race unrelated search traffic hitting the hottest row
+/// during the LLM round-trip produces — and confirm the verdict still
+/// commits instead of spuriously landing in `StaleSkipped`.
+#[test]
+fn confirmed_contradiction_commits_despite_recall_count_drift_on_both_sides() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("hot-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("hot-old", "old fact"), false).unwrap();
+    let expected_entry = expected_state(&conn, "hot-new");
+    let expected = expected_state(&conn, "hot-old");
+
+    // Unrelated search traffic lands on both rows while this verdict's model
+    // round-trip is still in flight.
+    record_access(
+        &conn,
+        &["hot-new".to_string(), "hot-old".to_string()],
+        &["hot-new".to_string(), "hot-old".to_string()],
+        Some("unrelated query"),
+    )
+    .unwrap();
+    let (recall_new, recall_old, diversity_new, diversity_old): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT
+                (SELECT recall_count FROM memories WHERE id = 'hot-new'),
+                (SELECT recall_count FROM memories WHERE id = 'hot-old'),
+                (SELECT query_diversity FROM memories WHERE id = 'hot-new'),
+                (SELECT query_diversity FROM memories WHERE id = 'hot-old')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert!(
+        recall_new > 0 && recall_old > 0 && diversity_new > 0 && diversity_old > 0,
+        "setup must actually bump recall_count and query_diversity on both rows: \
+         recall_new={recall_new} recall_old={recall_old} diversity_new={diversity_new} \
+         diversity_old={diversity_old}"
+    );
+
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("hot-new", "hot-old", "complete");
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(
+        outcome,
+        ConfirmedContradictionOutcome::Committed,
+        "recall_count/query_diversity drift alone must not sink an otherwise-valid verdict"
+    );
 }

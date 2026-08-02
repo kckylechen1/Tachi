@@ -107,8 +107,13 @@ pub enum ConfirmedContradictionOutcome {
     StaleSkipped,
 }
 
-/// Re-read the candidate row inside the writer's transaction and compare it to
-/// the state the caller froze before the model was consulted.
+/// Re-read a row inside the writer's transaction and compare it to the state
+/// the caller froze before the model was consulted.
+///
+/// Used for both sides of a confirmed contradiction: the candidate (the older
+/// fact being judged) and, since tachi#1563, the entry (the newer fact that
+/// triggered detection) can each be rewritten or archived during the LLM
+/// round-trip, which happens outside any transaction.
 ///
 /// The comparison itself is [`ExpectedMemoryState::matches`] — the same
 /// field-by-field comparator the tachi#1551 migration writes go through — so a
@@ -117,21 +122,23 @@ pub enum ConfirmedContradictionOutcome {
 /// in `db::memory_crud::update` is private to that module.
 ///
 /// A missing row reads as a mismatch, which is the fail-closed direction: a
-/// verdict about a row that no longer exists must not write edges.
-fn candidate_matches_judged_state(
+/// verdict about a row that no longer exists must not write edges. An
+/// archived row is likewise a mismatch whenever the snapshot was taken before
+/// archival, because `archived` is one of the compared fields.
+fn row_matches_expected_state(
     tx: &Transaction<'_>,
-    candidate_id: &str,
+    row_id: &str,
     expected: &ExpectedMemoryState,
 ) -> Result<bool, MemoryError> {
-    let ids = vec![candidate_id.to_string()];
+    let ids = vec![row_id.to_string()];
     let mut current = fetch_by_ids(tx, &ids, true)?;
-    let Some(current) = current.remove(candidate_id) else {
+    let Some(current) = current.remove(row_id) else {
         return Ok(false);
     };
     let superseded_by = tx
         .query_row(
             "SELECT superseded_by FROM memories WHERE id = ?1",
-            [candidate_id],
+            [row_id],
             |row| row.get::<_, Option<String>>(0),
         )
         .optional()?
@@ -151,19 +158,37 @@ fn candidate_matches_judged_state(
 /// judged (tachi#1551 `ExpectedMemoryState`). `superseded_by IS NULL` alone
 /// cannot carry that binding, and neither can `revision`: enrichment rewrites
 /// `summary`, `keywords`, and `metadata` without bumping it, so a candidate can
-/// be rewritten in place during the model round-trip. The snapshot is verified
-/// after `BEGIN IMMEDIATE` and before any edge write, so a stale verdict leaves
-/// the database untouched.
+/// be rewritten in place during the model round-trip. `expected_entry` binds
+/// the same write to the entry (the newer fact) that triggered detection —
+/// the entry can equally be rewritten or archived while the model call is in
+/// flight, and nothing upstream of this function re-reads it (tachi#1563).
+/// Both snapshots are verified after `BEGIN IMMEDIATE` and before any edge
+/// write, so a stale verdict about either side leaves the database untouched.
 pub(crate) fn persist_confirmed_contradiction_within_tx(
     tx: &Transaction<'_>,
     contradicts_edge: &MemoryEdge,
     supersedes_edge: &MemoryEdge,
     superseded_at: &str,
+    expected_entry: &ExpectedMemoryState,
     expected_candidate: &ExpectedMemoryState,
 ) -> Result<ConfirmedContradictionOutcome, MemoryError> {
     validate_confirmed_contradiction(contradicts_edge, supersedes_edge, superseded_at)?;
 
-    if !candidate_matches_judged_state(tx, &contradicts_edge.target_id, expected_candidate)? {
+    if !row_matches_expected_state(tx, &contradicts_edge.source_id, expected_entry)? {
+        // A batch shares one `expected_entry` snapshot across every candidate
+        // (`apply_auto_contradiction_detection` freezes it once), so once the
+        // entry drifts, this line fires once per remaining candidate — the
+        // candidate id below is what turns those repeats into a distinguishable
+        // per-candidate diagnostic instead of duplicate noise.
+        eprintln!(
+            "[confirmed-contradiction] entry-side snapshot mismatch for {} (candidate {}): \
+             the triggering memory changed (or was archived/deleted) between the read \
+             that fed the model and the write",
+            contradicts_edge.source_id, contradicts_edge.target_id
+        );
+        return Ok(ConfirmedContradictionOutcome::StaleSkipped);
+    }
+    if !row_matches_expected_state(tx, &contradicts_edge.target_id, expected_candidate)? {
         return Ok(ConfirmedContradictionOutcome::StaleSkipped);
     }
 
@@ -181,9 +206,15 @@ pub(crate) fn persist_confirmed_contradiction_within_tx(
     )?;
 
     let superseded_at = super::normalize_utc_iso(superseded_at)?;
+    // `revision` advances here (unlike `mark_superseded_closing_validity`,
+    // which intentionally does not) so revision-scoped observers — the
+    // `update_enrichment_fields` CAS chief among them — see the lifecycle
+    // transition: an enrichment write in flight against the pre-supersession
+    // revision must lose its CAS rather than land on a row that has already
+    // been superseded (tachi#1563).
     let affected = tx.execute(
         "UPDATE memories SET superseded_by = ?1, updated_at = ?2, \
-         valid_until = COALESCE(valid_until, ?2) \
+         valid_until = COALESCE(valid_until, ?2), revision = revision + 1 \
          WHERE id = ?3 AND superseded_by IS NULL",
         params![
             contradicts_edge.source_id,

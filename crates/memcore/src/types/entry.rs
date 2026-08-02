@@ -403,9 +403,16 @@ pub struct MemoryEntry {
 ///
 /// Fields are private and the only constructor snapshots a full memory entry,
 /// so callers cannot accidentally omit a generated field, lifecycle field, or
-/// vector when defining the expected state. Exposure/use counters are
-/// deliberately excluded because they can change independently of content;
-/// recall count and query diversity remain bound because Wiki plans freeze them.
+/// vector when defining the expected state. Recall/exposure counters
+/// (`recall_count`, `query_diversity`) are excluded from the comparison in
+/// [`Self::matches`]: they observe the search path independently of content
+/// and can be bumped by unrelated traffic during a caller's async round-trip
+/// (e.g. the LLM verification call in tachi#1563's contradiction detection),
+/// so binding them would make a verdict about *content* spuriously fail on
+/// *usage* drift it never cared about. Every wiki-migration race-hook test
+/// (tachi#1551, `wiki_corpus.rs`) mutates a content field — summary, keywords,
+/// vector, `valid_until`, or revision — to exercise staleness, never these
+/// two counters alone, so this exclusion does not weaken that CAS.
 #[derive(Debug, Clone)]
 pub struct ExpectedMemoryState {
     entry: MemoryEntry,
@@ -446,8 +453,6 @@ impl ExpectedMemoryState {
             && expected.retention_policy == current.retention_policy
             && expected.domain == current.domain
             && expected.metadata == current.metadata
-            && expected.recall_count == current.recall_count
-            && expected.query_diversity == current.query_diversity
             && expected.tier == current.tier
             && self.superseded_by.as_deref() == superseded_by
     }
