@@ -152,8 +152,15 @@ pub(super) async fn serve_http_daemon(
                 .await
                 {
                     Ok(report) => eprintln!(
-                        "[rem-wiki-evolver] completed: clusters={} drafts={} skipped={} errors={}",
-                        report.clusters_found, report.drafts_written, report.skipped, report.errors
+                        "[rem-wiki-evolver] {}: clusters={} drafts={} skipped={} errors={} recovered_completed={} recovered_aborted={} foreign_pending_skipped={}",
+                        if report.errors == 0 { "completed" } else { "completed_with_errors" },
+                        report.clusters_found,
+                        report.drafts_written,
+                        report.skipped,
+                        report.errors,
+                        report.recovered_completed,
+                        report.recovered_aborted,
+                        report.foreign_pending_skipped,
                     ),
                     Err(e) => eprintln!("[rem-wiki-evolver] failed: {e}"),
                 }

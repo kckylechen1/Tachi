@@ -376,18 +376,20 @@ impl TrustedExistingModelInvocationReceipt {
 fn persist_wiki_ingest_entry(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
-    old_id: Option<&str>,
     reference_appends: &[memcore::db::ValidatedReferenceMutation],
     new_invocation: Option<&tachi_llm::PersistedModelInvocationReceiptV1>,
-) -> Result<(), String> {
+    related_edges: &[memcore::MemoryEdge],
+) -> Result<Vec<String>, String> {
     store
         .with_immutable_supersession_transaction(|replacement| {
-            let trusted_existing_receipt = old_id
-                .map(|old_id| replacement.get_memory(old_id))
-                .transpose()?
-                .flatten()
-                .as_ref()
-                .and_then(TrustedExistingModelInvocationReceipt::from_existing_row);
+            let old_entries = replacement
+                .list_active_wiki_ingest_predecessors(&entry.path, &entry.topic)?
+                .into_iter()
+                .filter(|existing| existing.id != entry.id)
+                .collect::<Vec<_>>();
+            let trusted_existing_receipt = old_entries
+                .iter()
+                .find_map(TrustedExistingModelInvocationReceipt::from_existing_row);
             let mut replacement_entry = entry.clone();
             replacement_entry.metadata = match trusted_existing_receipt {
                 Some(receipt) => receipt.attach_exactly(replacement_entry.metadata)?,
@@ -405,18 +407,48 @@ fn persist_wiki_ingest_entry(
                 .as_object()
                 .cloned()
                 .unwrap_or_default();
-            if let Some(old_id) = old_id {
-                replacement.claim_immutable_supersession(old_id, &replacement_entry.id)?;
+            for old_entry in &old_entries {
+                replacement.claim_immutable_supersession(&old_entry.id, &replacement_entry.id)?;
             }
             replacement.upsert_with_validated_reference_mutations(
                 &replacement_entry,
                 &metadata_patch,
                 reference_appends,
             )?;
-            if let Some(old_id) = old_id {
-                replacement.archive_claimed_source(old_id)?;
+            for old_entry in &old_entries {
+                replacement.archive_claimed_source(&old_entry.id)?;
             }
-            Ok(())
+            let mut committed_related_ids = Vec::new();
+            let normalized_entities = replacement_entry
+                .entities
+                .iter()
+                .map(|entity| entity.trim().to_ascii_lowercase())
+                .filter(|entity| !entity.is_empty())
+                .collect::<HashSet<_>>();
+            for edge in related_edges {
+                if old_entries
+                    .iter()
+                    .any(|predecessor| predecessor.id == edge.target_id)
+                    || edge.target_id == replacement_entry.id
+                {
+                    continue;
+                }
+                let Some(target) = replacement.get_memory(&edge.target_id)? else {
+                    continue;
+                };
+                if !replacement.memory_is_active_unsuperseded(&edge.target_id)?
+                    || !is_ordinary_related_wiki_entry(&target)
+                        .map_err(memcore::MemoryError::InvalidArg)?
+                    || !entry_shares_normalized_entity(&target, &normalized_entities)
+                {
+                    continue;
+                }
+                replacement.add_edge(edge).map_err(|error| {
+                    memcore::MemoryError::Internal(format!("wiki ingest edge: {error}"))
+                })?;
+                committed_related_ids.push(edge.target_id.clone());
+            }
+            Ok(committed_related_ids)
         })
         .map_err(|e| format!("wiki ingest refused: {e}"))
 }
@@ -554,45 +586,16 @@ pub(crate) async fn handle_wiki_ingest(
         tier: "raw".to_string(),
     };
 
-    server.with_named_project_store("wiki", |store| {
-        let old_id = {
-            let mut stmt = store
-                .connection()
-                .prepare(
-                    "SELECT id FROM memories
-                     WHERE (path = ?1 OR (domain = 'wiki' AND topic = ?2))
-                       AND archived = 0
-                       AND superseded_by IS NULL
-                     LIMIT 1",
-                )
-                .map_err(|e| format!("prepare wiki duplicate query failed: {e}"))?;
-            let mut rows = stmt
-                .query_map((&path, &topic), |row| row.get::<_, String>(0))
-                .map_err(|e| format!("query wiki duplicate failed: {e}"))?;
-            if let Some(row) = rows.next() {
-                Some(row.map_err(|e| format!("read wiki duplicate row failed: {e}"))?)
-            } else {
-                None
-            }
-        };
-
-        persist_wiki_ingest_entry(
-            store,
-            &entry,
-            old_id.as_deref(),
-            &reference_appends,
-            model_invocation.as_ref(),
-        )
-    })?;
-
     let mut related = Vec::new();
+    let mut related_edges = Vec::new();
     if params.update_related {
-        related = find_related_by_entities(server, "wiki", &entities, &id, 10);
+        related = find_related_by_entities(server, "wiki", &entities, &id, 10)
+            .map_err(|error| format!("wiki ingest related lookup: {error}"))?;
         for related_entry in &related {
             let Some(target_id) = related_entry.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            let edge = memcore::MemoryEdge {
+            related_edges.push(memcore::MemoryEdge {
                 source_id: id.clone(),
                 target_id: target_id.to_string(),
                 relation: "references".to_string(),
@@ -604,17 +607,29 @@ pub(crate) async fn handle_wiki_ingest(
                 created_at: Utc::now().to_rfc3339(),
                 valid_from: String::new(),
                 valid_to: None,
-            };
-            if let Err(e) = server.with_named_project_store("wiki", |store| {
-                store
-                    .add_edge(&edge)
-                    .map_err(|e| format!("wiki ingest edge: {e}"))
-            }) {
-                tracing::warn!("wiki ingest edge write failed: {e}");
-                return Err(e);
-            }
+            });
         }
     }
+
+    let committed_related_ids =
+        server.with_named_project_store_identity_checked("wiki", |store| {
+            persist_wiki_ingest_entry(
+                store,
+                &entry,
+                &reference_appends,
+                model_invocation.as_ref(),
+                &related_edges,
+            )
+        })?;
+    let committed_related_ids = committed_related_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    related.retain(|entry| {
+        entry
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| committed_related_ids.contains(id))
+    });
 
     // #1413 concern 1: bust the shared (global) recall cache AFTER every
     // content-changing write in this ingest has committed — the entry upsert
@@ -750,44 +765,249 @@ mod immutable_supersession_tests {
     }
 
     #[test]
-    fn conflicted_predecessor_refuses_before_saving_a_new_wiki_candidate() {
+    fn replacement_selects_current_active_predecessor_inside_transaction() {
         let temp = tempfile::tempdir().expect("wiki immutable-edge tempdir");
         let db_path = temp.path().join("wiki.db");
         let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
             .expect("open wiki test store");
         let old = wiki_entry("old-wiki-entry");
         let canonical = wiki_entry("canonical-wiki-entry");
-        let candidate = wiki_entry("stale-wiki-candidate");
+        let mut candidate = wiki_entry("fresh-wiki-candidate");
+        candidate.path = canonical.path.clone();
+        candidate.topic = canonical.topic.clone();
         store.upsert(&old).expect("seed old wiki entry");
         store.upsert(&canonical).expect("seed canonical wiki entry");
         assert!(store
             .supersede_memory(&old.id, &canonical.id)
             .expect("seed immutable predecessor edge"));
 
-        let err = persist_wiki_ingest_entry(&mut store, &candidate, Some(&old.id), &[], None)
-            .expect_err("conflicted predecessor must refuse wiki candidate");
-        assert!(err.contains("immutable supersession CAS"), "err: {err}");
+        persist_wiki_ingest_entry(&mut store, &candidate, &[], None, &[])
+            .expect("replacement must select and claim the current active winner");
         let old_after = store
             .get_with_options(&old.id, true)
             .expect("read old wiki entry")
             .expect("old wiki entry remains");
         assert!(
             !old_after.archived,
-            "failed CAS must not archive the established predecessor"
+            "historical predecessor must not be rewritten"
         );
         assert_eq!(
             store
                 .supersession_target(&old.id)
                 .expect("read predecessor edge"),
-            Some(Some(canonical.id)),
-            "failed CAS must preserve the original predecessor edge"
+            Some(Some(canonical.id.clone())),
+            "historical predecessor edge must remain immutable"
         );
-        assert!(
+        assert_eq!(
             store
-                .get_with_options(&candidate.id, true)
-                .expect("read candidate")
-                .is_none(),
-            "failed CAS must not leave a new competing wiki candidate"
+                .supersession_target(&canonical.id)
+                .expect("read current winner edge"),
+            Some(Some(candidate.id.clone())),
+            "replacement must claim the winner observed in its transaction"
+        );
+        assert!(store.get(&candidate.id).expect("read candidate").is_some());
+    }
+
+    #[test]
+    fn replacement_supersedes_same_topic_wiki_predecessor_at_legacy_path() {
+        let temp = tempfile::tempdir().expect("wiki same-topic replacement tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+        let mut legacy = wiki_entry("legacy-topic-path");
+        legacy.path = "/wiki/general/trendlock-legacy".to_string();
+        legacy.topic = "trendlock".to_string();
+        legacy.domain = None;
+        let mut replacement = wiki_entry("current-topic-path");
+        replacement.path = "/wiki/general/trendlock".to_string();
+        replacement.topic = legacy.topic.clone();
+        let mut guide = wiki_entry("same-topic-guide");
+        guide.path = "/guide/global/trendlock".to_string();
+        guide.topic = legacy.topic.clone();
+        guide.category = "guide".to_string();
+        store
+            .upsert(&legacy)
+            .expect("seed legacy Wiki predecessor without a domain tag");
+        store.upsert(&guide).expect("seed same-topic Guide");
+
+        persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &[])
+            .expect("same-topic Wiki predecessor must be replaced atomically");
+
+        let legacy_after = store
+            .get_with_options(&legacy.id, true)
+            .expect("read legacy predecessor")
+            .expect("legacy predecessor remains auditable");
+        assert!(legacy_after.archived);
+        assert_eq!(
+            store
+                .supersession_target(&legacy.id)
+                .expect("read legacy predecessor supersession"),
+            Some(Some(replacement.id.clone())),
+            "legacy same-topic predecessor must not remain active"
+        );
+        assert!(store
+            .get(&replacement.id)
+            .expect("read replacement")
+            .is_some());
+        let guide_after = store
+            .get(&guide.id)
+            .expect("read same-topic Guide")
+            .expect("same-topic Guide remains");
+        assert!(!guide_after.archived);
+        assert_eq!(
+            store
+                .supersession_target(&guide.id)
+                .expect("read Guide supersession"),
+            Some(None),
+            "Wiki ingest must not classify a Guide as its predecessor"
+        );
+    }
+
+    #[test]
+    fn replacement_stays_canonical_when_an_unrelated_jaccard_candidate_exists() {
+        let temp = tempfile::tempdir().expect("wiki replacement jaccard tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+        let mut old = wiki_entry("old-replacement-target");
+        old.text = "The predecessor has deliberately unrelated content.".to_string();
+        let mut near_duplicate = wiki_entry("unrelated-near-duplicate");
+        near_duplicate.text =
+            "Canonical ingest content must remain the active replacement winner.".to_string();
+        let mut replacement = wiki_entry("fresh-replacement");
+        replacement.path = old.path.clone();
+        replacement.topic = old.topic.clone();
+        replacement.text = near_duplicate.text.clone();
+        store.upsert(&old).expect("seed predecessor");
+        store.upsert(&near_duplicate).expect("seed near duplicate");
+
+        persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &[])
+            .expect("persist canonical replacement");
+
+        assert_eq!(
+            store
+                .supersession_target(&replacement.id)
+                .expect("read replacement supersession"),
+            Some(None),
+            "replacement must not be inserted as a generic Jaccard loser"
+        );
+        assert_eq!(
+            store
+                .supersession_target(&old.id)
+                .expect("read predecessor supersession"),
+            Some(Some(replacement.id.clone()))
+        );
+    }
+
+    #[test]
+    fn replacement_does_not_relate_to_the_predecessor_it_archives() {
+        let temp = tempfile::tempdir().expect("wiki replacement relation tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+        let old = wiki_entry("related-predecessor");
+        let mut replacement = wiki_entry("fresh-related-replacement");
+        replacement.path = old.path.clone();
+        replacement.topic = old.topic.clone();
+        store.upsert(&old).expect("seed predecessor");
+        let edge = memcore::MemoryEdge {
+            source_id: replacement.id.clone(),
+            target_id: old.id.clone(),
+            relation: "references".to_string(),
+            weight: 0.6,
+            metadata: serde_json::json!({"wiki_ingest": true}),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+
+        let committed_related =
+            persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &[edge])
+                .expect("persist replacement without stale relation");
+
+        assert!(committed_related.is_empty());
+        let edges = store
+            .get_edges(&replacement.id, "outgoing", Some("references"))
+            .expect("read replacement edges");
+        assert!(
+            edges.iter().all(|edge| edge.target_id != old.id),
+            "the archived predecessor is not a truthful related target"
+        );
+    }
+
+    #[test]
+    fn replacement_revalidates_related_corpus_lifecycle_and_entities_in_transaction() {
+        let temp = tempfile::tempdir().expect("wiki related revalidation tempdir");
+        let db_path = temp.path().join("wiki.db");
+        let mut store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("open wiki test store");
+
+        let mut replacement = wiki_entry("fresh-related-candidate");
+        replacement.entities = vec!["SharedEntity".to_string()];
+
+        let mut valid = wiki_entry("active-related-target");
+        valid.path = "/wiki/general/active-related-target".to_string();
+        valid.entities = vec!["sharedentity".to_string()];
+
+        let mut rem_draft = wiki_entry("wiki-rem:pending-related-target");
+        rem_draft.path = "/wiki/drafts/rem-pending-related-target".to_string();
+        rem_draft.entities = vec!["SharedEntity".to_string()];
+        rem_draft.metadata = serde_json::json!({
+            "wiki": true,
+            "lifecycle": "pending_review",
+            "rem": {
+                "producer": "weekly_wiki_evolver",
+                "operation_id": rem_draft.id.clone(),
+                "operation_status": "pending_sources"
+            }
+        });
+
+        let mut pending = wiki_entry("pending-related-target");
+        pending.path = "/wiki/general/pending-related-target".to_string();
+        pending.entities = vec!["SharedEntity".to_string()];
+        pending.metadata = serde_json::json!({"wiki": true, "lifecycle": "pending_review"});
+
+        let mut entity_drifted = wiki_entry("entity-drifted-related-target");
+        entity_drifted.path = "/wiki/general/entity-drifted-related-target".to_string();
+        entity_drifted.entities = vec!["NoLongerShared".to_string()];
+
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation
+                    .insert_rem_operation_if_absent(&rem_draft)
+                    .map(|_| ())
+            })
+            .expect("seed REM related candidate");
+        for entry in [&valid, &pending, &entity_drifted] {
+            store.upsert(entry).expect("seed related candidate");
+        }
+        let edges = [&valid, &rem_draft, &pending, &entity_drifted]
+            .into_iter()
+            .map(|target| memcore::MemoryEdge {
+                source_id: replacement.id.clone(),
+                target_id: target.id.clone(),
+                relation: "references".to_string(),
+                weight: 0.6,
+                metadata: serde_json::json!({"wiki_ingest": true}),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_to: None,
+            })
+            .collect::<Vec<_>>();
+
+        let committed = persist_wiki_ingest_entry(&mut store, &replacement, &[], None, &edges)
+            .expect("persist replacement with transactionally revalidated relations");
+
+        assert_eq!(committed, vec![valid.id.clone()]);
+        let persisted = store
+            .get_edges(&replacement.id, "outgoing", Some("references"))
+            .expect("read committed related edges");
+        assert_eq!(
+            persisted
+                .into_iter()
+                .map(|edge| edge.target_id)
+                .collect::<Vec<_>>(),
+            vec![valid.id]
         );
     }
 }

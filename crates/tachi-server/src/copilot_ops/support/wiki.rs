@@ -9,7 +9,7 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
     } else {
         format!("/{raw}")
     };
-    if with_slash == "/wiki"
+    let namespaced = if with_slash == "/wiki"
         || with_slash.starts_with("/wiki/")
         || with_slash == "/guide"
         || with_slash.starts_with("/guide/")
@@ -17,7 +17,8 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
         with_slash
     } else {
         format!("/wiki{}", with_slash)
-    }
+    };
+    memcore::path_router::normalize_path(&namespaced)
 }
 
 /// Builds the canonical candidate artifact metadata stamped onto every
@@ -100,12 +101,11 @@ pub(in crate::copilot_ops) fn wiki_text_jaccard_sets(
     }
 }
 
-pub(in crate::copilot_ops) fn find_wiki_entry_by_path_or_topic(
+pub(in crate::copilot_ops) fn find_wiki_entry_by_path(
     store: &mut MemoryStore,
     path: &str,
-    topic: &str,
 ) -> Result<Option<MemoryEntry>, String> {
-    memcore::db::find_active_wiki_entry_by_path_or_topic(store.connection(), path, topic)
+    memcore::db::find_active_wiki_entry_by_path(store.connection(), path)
         .map_err(|e| format!("wiki existing lookup: {e}"))
 }
 
@@ -116,9 +116,9 @@ pub(in crate::copilot_ops) fn with_existing_wiki_store<T>(
     f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     if use_named_project {
-        server.with_named_project_store(project_name, f)
+        server.with_named_project_store_identity_checked(project_name, f)
     } else {
-        server.with_global_store(f)
+        server.with_global_store_identity_checked(f)
     }
 }
 
@@ -142,70 +142,123 @@ pub(in crate::copilot_ops) fn default_named_project_available(
     server.global_db_path_buf().starts_with(&app_home) || server_home == app_home
 }
 
-/// Identify and supersede wiki entries that duplicate the newly written entry.
-pub(in crate::copilot_ops) fn supersede_wiki_duplicates(
-    store: &mut MemoryStore,
-    canonical_id: &str,
+/// Decide whether an active Wiki/Guide row describes the same semantic subject
+/// as a canonical projection candidate.
+pub(crate) fn is_wiki_projection_duplicate(
+    candidate: &MemoryEntry,
     path: &str,
     topic: &str,
     text: &str,
-) -> Result<usize, String> {
-    let parent_path = wiki_parent_path(path);
-    let candidates = store
-        .list_wiki_duplicate_candidates(path, topic, &parent_path, 500)
-        .map_err(|e| format!("wiki duplicate scan: {e}"))?;
-    let mut changed = 0usize;
+) -> bool {
     let target_subject = wiki_subject_token(topic);
     let target_text_tokens = wiki_text_tokens(text);
-    for candidate in candidates {
-        if candidate.id == canonical_id {
-            continue;
-        }
-        // Dedup criteria (OR-combined, but single-token topic match requires path prefix overlap)
-        let same_path = candidate.path == path;
-        let same_topic = target_subject.as_ref().is_some_and(|token| {
-            let cand_token = wiki_subject_token(&candidate.topic);
-            cand_token.as_ref() == Some(token)
-                // Single-token topics require path prefix overlap to avoid over-broad matching
-                && (token.len() > 1
-                    || candidate.path.rsplit_once('/').map(|(parent, _)| parent) == path.rsplit_once('/').map(|(parent, _)| parent))
-        });
-        let similar_text =
-            wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
-                >= WIKI_DUP_JACCARD_THRESHOLD;
-        let same_subject = same_path || same_topic || similar_text;
-        if !same_subject {
-            continue;
-        }
-        if store
-            .supersede_memory(&candidate.id, canonical_id)
-            .map_err(|e| format!("wiki duplicate supersede: {e}"))?
-        {
-            let edge = memcore::MemoryEdge {
-                source_id: canonical_id.to_string(),
-                target_id: candidate.id.clone(),
-                relation: "supersedes".to_string(),
-                weight: 0.9,
-                metadata: json!({
-                    "source": "wiki_write_dedup",
-                    "path": path,
-                    "topic": topic,
-                }),
-                created_at: Utc::now().to_rfc3339(),
-                valid_from: String::new(),
-                valid_to: None,
-            };
-            let _ = store.add_edge(&edge);
-            changed += 1;
-        }
-    }
-    Ok(changed)
+    // Dedup criteria (OR-combined, but single-token topic match requires path
+    // prefix overlap to avoid over-broad matching).
+    let same_path = candidate.path == path;
+    let same_parent = candidate.path.rsplit_once('/').map(|(parent, _)| parent)
+        == path.rsplit_once('/').map(|(parent, _)| parent);
+    let same_exact_topic = !topic.trim().is_empty()
+        && candidate.topic.trim().eq_ignore_ascii_case(topic.trim())
+        && same_parent;
+    let same_subject_token = target_subject.as_ref().is_some_and(|token| {
+        let candidate_token = wiki_subject_token(&candidate.topic);
+        candidate_token.as_ref() == Some(token) && same_parent
+    });
+    let similar_text =
+        wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
+            >= WIKI_DUP_JACCARD_THRESHOLD;
+    same_path || same_exact_topic || same_subject_token || similar_text
 }
 
-pub(in crate::copilot_ops) fn wiki_parent_path(path: &str) -> String {
+pub(crate) fn wiki_projection_supersedes_edge(
+    canonical_id: &str,
+    candidate_id: &str,
+    path: &str,
+    topic: &str,
+    created_at: &str,
+) -> memcore::MemoryEdge {
+    memcore::MemoryEdge {
+        source_id: canonical_id.to_string(),
+        target_id: candidate_id.to_string(),
+        relation: "supersedes".to_string(),
+        weight: 0.9,
+        metadata: json!({
+            "source": "wiki_write_dedup",
+            "path": path,
+            "topic": topic,
+        }),
+        created_at: created_at.to_string(),
+        valid_from: String::new(),
+        valid_to: None,
+    }
+}
+
+pub(crate) fn wiki_parent_path(path: &str) -> String {
     path.trim_end_matches('/')
         .rsplit_once('/')
         .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
         .unwrap_or("/wiki")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wiki_candidate(id: &str, path: &str, topic: &str, text: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: path.to_string(),
+            summary: text.to_string(),
+            text: text.to_string(),
+            importance: 0.7,
+            timestamp: "2026-07-31T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "experience".to_string(),
+            topic: topic.to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "wiki".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
+            revision: 1,
+            metadata: json!({"wiki": true}),
+            vector: None,
+            retention_policy: Some("permanent".to_string()),
+            domain: Some("wiki".to_string()),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    #[test]
+    fn single_token_topic_requires_the_same_parent_to_be_a_duplicate() {
+        let candidate = wiki_candidate(
+            "ops-mcp",
+            "/wiki/ops/mcp",
+            "mcp",
+            "Operational transport retry notes with no engineering overlap.",
+        );
+
+        assert!(!is_wiki_projection_duplicate(
+            &candidate,
+            "/wiki/engineering/mcp",
+            "mcp",
+            "Engineering protocol schema conventions for tool interoperability.",
+        ));
+        assert!(is_wiki_projection_duplicate(
+            &candidate,
+            "/wiki/ops/mcp-replacement",
+            "mcp",
+            "A replacement operational transport note.",
+        ));
+    }
 }

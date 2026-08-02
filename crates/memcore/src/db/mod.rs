@@ -106,15 +106,18 @@ pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
+pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
 #[cfg(test)]
 pub(crate) use memory_crud::AccessUpdate;
 pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
 pub use memory_crud::{
     access_event_density, archive_memory, archive_memory_if_revision, delete,
-    delete_memories_symbolic_fts, fetch_by_ids, find_active_wiki_entry_by_path_or_topic,
-    find_exact_path_text_id, get_access_times, get_all, get_use_access_times, list_by_path,
-    list_by_path_recent, list_wiki_duplicate_candidates, normalize_for_write,
-    record_enrichment_failure, record_memory_use, release_event_claim,
+    delete_memories_symbolic_fts, fetch_by_ids, find_active_wiki_entry_by_path,
+    find_exact_path_text_id, get_access_times, get_all, get_use_access_times,
+    is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
+    list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
+    list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
+    normalize_for_write, record_enrichment_failure, record_memory_use, release_event_claim,
     restore_archived_if_revision, search_fts, search_symbolic_candidates, search_vec,
     set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
     symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
@@ -134,8 +137,8 @@ pub(crate) use memory_crud::{
 /// body (main row + FTS + vectors + idless semantics) inside a caller-owned
 /// `BEGIN IMMEDIATE` transaction. See `memory_crud::upsert_within_tx`.
 pub(crate) use memory_crud::{
-    insert_if_absent, insert_if_absent_within_tx, upsert, upsert_idless,
-    upsert_with_validated_reference_mutations_within_tx, upsert_within_tx,
+    insert_if_absent, insert_if_absent_within_tx, insert_rem_operation_if_absent_within_tx, upsert,
+    upsert_idless, upsert_within_tx,
 };
 /// Public: see `open::ensure_reserved_reference_write_guard`'s doc comment.
 pub use open::ensure_reserved_reference_write_guard;

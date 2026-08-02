@@ -6,6 +6,17 @@
 use crate::types::{MemoryEntry, ProjectionKind};
 
 pub const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
+pub const WIKI_REM_OPERATION_ID_PREFIX: &str = "wiki-rem:";
+
+/// Whether `id` occupies the internal Wiki REM operation namespace.
+///
+/// SQLite's REM recovery queries use ASCII-case-insensitive `LIKE`, so every
+/// generic Rust write/mutation guard must reserve the same case-folded prefix.
+/// Canonical producer-owned REM ids remain lowercase.
+pub fn is_reserved_wiki_rem_id(id: &str) -> bool {
+    id.get(..WIKI_REM_OPERATION_ID_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(WIKI_REM_OPERATION_ID_PREFIX))
+}
 
 /// SQL predicate for rows that belong to the non-durable recall-cache
 /// namespace. Keep this aligned with [`is_recall_cache_entry`].
@@ -39,12 +50,61 @@ pub const RECALL_CACHE_SQL_WHERE_M: &str = r#"
     OR COALESCE(json_extract(m.metadata, '$.cache_key'), '') = 'foundry_recall_rerank_cache'
 "#;
 
+/// SQL classifier for the user-facing Wiki corpus. Keep this aligned with
+/// [`is_user_facing_wiki_entry`].
+pub const USER_FACING_WIKI_SQL_WHERE: &str = r#"
+    path != '/wiki/_log'
+    AND path NOT GLOB '/wiki/_log/*'
+    AND lower(topic) != 'wiki_log'
+    AND lower(id) NOT GLOB 'wiki-rem:*'
+    AND lower(id) != 'foundry_recall_rerank_cache'
+    AND lower(id) NOT GLOB 'foundry:recall-cache:*'
+    AND path NOT GLOB '*/recall-cache'
+    AND path NOT GLOB '*/recall-cache/*'
+    AND instr(path, 'foundry_recall_rerank_cache') = 0
+    AND lower(source) != 'foundry_recall_rerank_cache'
+    AND lower(topic) != 'foundry_recall_rerank_cache'
+    AND lower(topic) != 'recall_rerank_cache'
+    AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.wiki_log'), 0) != 1
+    AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.recall_rerank_cache'), 0) != 1
+    AND lower(COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.cache_key'), '')) != 'foundry_recall_rerank_cache'
+"#;
+
+/// `m.`-qualified counterpart to [`USER_FACING_WIKI_SQL_WHERE`].
+pub const USER_FACING_WIKI_SQL_WHERE_M: &str = r#"
+    m.path != '/wiki/_log'
+    AND m.path NOT GLOB '/wiki/_log/*'
+    AND lower(m.topic) != 'wiki_log'
+    AND lower(m.id) NOT GLOB 'wiki-rem:*'
+    AND lower(m.id) != 'foundry_recall_rerank_cache'
+    AND lower(m.id) NOT GLOB 'foundry:recall-cache:*'
+    AND m.path NOT GLOB '*/recall-cache'
+    AND m.path NOT GLOB '*/recall-cache/*'
+    AND instr(m.path, 'foundry_recall_rerank_cache') = 0
+    AND lower(m.source) != 'foundry_recall_rerank_cache'
+    AND lower(m.topic) != 'foundry_recall_rerank_cache'
+    AND lower(m.topic) != 'recall_rerank_cache'
+    AND COALESCE(json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.wiki_log'), 0) != 1
+    AND COALESCE(json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.recall_rerank_cache'), 0) != 1
+    AND lower(COALESCE(json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.cache_key'), '')) != 'foundry_recall_rerank_cache'
+"#;
+
 fn metadata_bool(entry: &MemoryEntry, key: &str) -> bool {
     entry
         .metadata
         .get(key)
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+fn metadata_bool_or_one(entry: &MemoryEntry, key: &str) -> bool {
+    match entry.metadata.get(key) {
+        Some(serde_json::Value::Bool(true)) => true,
+        Some(serde_json::Value::Number(number)) => {
+            number.as_i64() == Some(1) || number.as_u64() == Some(1) || number.as_f64() == Some(1.0)
+        }
+        _ => false,
+    }
 }
 
 fn metadata_str_eq(entry: &MemoryEntry, key: &str, expected: &str) -> bool {
@@ -83,10 +143,28 @@ pub fn is_recall_cache_entry(entry: &MemoryEntry) -> bool {
             .topic
             .eq_ignore_ascii_case(FOUNDRY_RECALL_CACHE_SOURCE)
         || entry.topic.eq_ignore_ascii_case("recall_rerank_cache")
-        || entry.id.starts_with("foundry:recall-cache:")
+        || entry
+            .id
+            .to_ascii_lowercase()
+            .starts_with("foundry:recall-cache:")
         || path_contains_recall_cache(&entry.path)
-        || metadata_bool(entry, "recall_rerank_cache")
+        || metadata_bool_or_one(entry, "recall_rerank_cache")
         || metadata_str_eq(entry, "cache_key", FOUNDRY_RECALL_CACHE_SOURCE)
+}
+
+/// Internal Wiki bookkeeping that must never consume a user-facing Wiki
+/// retrieval budget.
+pub fn is_wiki_log_entry(entry: &MemoryEntry) -> bool {
+    entry.path == "/wiki/_log"
+        || entry.path.starts_with("/wiki/_log/")
+        || entry.topic.eq_ignore_ascii_case("wiki_log")
+        || metadata_bool_or_one(entry, "wiki_log")
+}
+
+pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
+    !is_reserved_wiki_rem_id(&entry.id)
+        && !is_wiki_log_entry(entry)
+        && !is_recall_cache_entry(entry)
 }
 
 pub fn is_wiki_entry(entry: &MemoryEntry) -> bool {
@@ -283,15 +361,25 @@ pub fn path_prefix_opts_into_continuity_projection(path: &str, path_prefix: Opti
 pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
-    let wiki_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/wiki"));
-    (!wiki_scoped
-        && (entry.path == "/wiki/_log"
-            || metadata_bool(entry, "wiki_log")
-            || entry.topic.eq_ignore_ascii_case("wiki_log")))
+    is_wiki_log_entry(entry)
         || (!path_prefix_opts_into_recall_cache(path_prefix) && is_recall_cache_entry(entry))
         || (!kanban_scoped && is_kanban_entry(entry))
         || (!handoff_scoped && is_handoff_entry(entry))
         || (!path_prefix_opts_into_continuity_projection(&entry.path, path_prefix)
             && is_continuity_projection_entry(entry))
         || is_anchor_entry(entry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rem_operation_namespace_matches_sqlite_ascii_case_folding() {
+        assert!(is_reserved_wiki_rem_id("wiki-rem:canonical"));
+        assert!(is_reserved_wiki_rem_id("Wiki-Rem:spoof"));
+        assert!(is_reserved_wiki_rem_id("WIKI-REM:spoof"));
+        assert!(!is_reserved_wiki_rem_id("wiki-rem"));
+        assert!(!is_reserved_wiki_rem_id("wiki:ordinary"));
+    }
 }

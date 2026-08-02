@@ -120,8 +120,9 @@ pub fn get_all(
 }
 
 /// Return the id of an active (non-archived) row with the EXACT `path` and
-/// `text`, via a direct SQL predicate — no recency-window `LIMIT` to hide
-/// behind. #1041 F6: the previous dedup check ran `list_by_path(path, 64,
+/// `text`, excluding internal REM operation rows, via a direct SQL predicate
+/// — no recency-window `LIMIT` to hide behind. #1041 F6: the previous dedup
+/// check ran `list_by_path(path, 64,
 /// false)` (exact path OR descendant paths, ordered `path ASC, timestamp
 /// DESC`, capped at 64 rows) and THEN filtered in memory for an exact
 /// path+text match. Once 64+ rows already exist under a path's descendant
@@ -137,6 +138,7 @@ pub fn find_exact_path_text_id(
 ) -> Result<Option<String>, MemoryError> {
     conn.query_row(
         "SELECT id FROM memories WHERE path = ?1 AND text = ?2 AND archived = 0 \
+         AND id NOT LIKE 'wiki-rem:%' \
          ORDER BY timestamp DESC LIMIT 1",
         params![path, text],
         |row| row.get::<_, String>(0),
@@ -163,21 +165,7 @@ pub fn list_by_path(
     limit: usize,
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let mut normalized = path_prefix.trim().to_string();
-    if normalized.is_empty() {
-        normalized = "/".to_string();
-    }
-    if !normalized.starts_with('/') {
-        normalized = format!("/{normalized}");
-    }
-    if normalized.len() > 1 {
-        normalized = normalized.trim_end_matches('/').to_string();
-    }
-    let like_prefix = if normalized == "/" {
-        "/%".to_string()
-    } else {
-        format!("{normalized}/%")
-    };
+    let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
 
     let sql = if include_archived {
         format!(
@@ -202,6 +190,71 @@ pub fn list_by_path(
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Fetch active, unsuperseded entries under a path prefix.
+///
+/// This intentionally does not change [`list_by_path`]: audit callers still
+/// need the generic archived-only view so they can inspect active rows that
+/// have a lifecycle edge. Default Wiki listing uses this narrower route
+/// because a row with `superseded_by` is historical, not current truth.
+pub fn list_by_path_active_unsuperseded(
+    conn: &Connection,
+    path_prefix: &str,
+    limit: usize,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM memories
+         WHERE (path = ?1 OR path LIKE ?2)
+           AND archived = 0
+           AND superseded_by IS NULL
+         ORDER BY path ASC, timestamp DESC
+         LIMIT ?3"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![normalized, like_prefix, limit as i64], row_to_entry)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Fetch the Wiki corpus with its ownership predicate applied before LIMIT.
+/// Migration/audit callers may retain active superseded history; archived
+/// rows remain excluded.
+pub fn list_user_facing_wiki_entries(
+    conn: &Connection,
+    path_prefix: &str,
+    limit: usize,
+    include_superseded: bool,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
+    let lifecycle = if include_superseded {
+        "AND archived = 0"
+    } else {
+        "AND archived = 0 AND superseded_by IS NULL"
+    };
+    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM memories
+         WHERE (path = ?1 OR path LIKE ?2)
+           {lifecycle}
+           AND ({wiki_predicate})
+         ORDER BY path ASC, timestamp DESC
+         LIMIT ?3"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![normalized, like_prefix, limit as i64], row_to_entry)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
     }
     Ok(out)
 }
@@ -225,21 +278,7 @@ pub fn list_by_path_recent(
     limit: usize,
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let mut normalized = path_prefix.trim().to_string();
-    if normalized.is_empty() {
-        normalized = "/".to_string();
-    }
-    if !normalized.starts_with('/') {
-        normalized = format!("/{normalized}");
-    }
-    if normalized.len() > 1 {
-        normalized = normalized.trim_end_matches('/').to_string();
-    }
-    let like_prefix = if normalized == "/" {
-        "/%".to_string()
-    } else {
-        format!("{normalized}/%")
-    };
+    let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
 
     let sql = if include_archived {
         format!(
@@ -268,20 +307,64 @@ pub fn list_by_path_recent(
     Ok(out)
 }
 
+fn normalize_path_prefix(path_prefix: &str) -> (String, String) {
+    let mut normalized = path_prefix.trim().to_string();
+    if normalized.is_empty() {
+        normalized = "/".to_string();
+    }
+    if !normalized.starts_with('/') {
+        normalized = format!("/{normalized}");
+    }
+    if normalized.len() > 1 {
+        normalized = normalized.trim_end_matches('/').to_string();
+    }
+    let like_prefix = if normalized == "/" {
+        "/%".to_string()
+    } else {
+        format!("{normalized}/%")
+    };
+    (normalized, like_prefix)
+}
+
+/// One typed ownership predicate for rows ordinary Wiki reads and projection
+/// deduplication may expose or retire.
+pub fn is_reserved_wiki_internal_path(path: &str) -> bool {
+    path == "/wiki/_log"
+        || path.starts_with("/wiki/_log/")
+        || crate::namespace::path_contains_recall_cache(path)
+}
+
+pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
+    crate::namespace::is_user_facing_wiki_entry(entry)
+}
+
 pub fn list_wiki_duplicate_candidates(
     conn: &Connection,
     path: &str,
     topic: &str,
     parent_path: &str,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let parent_like = format!("{}/%", parent_path.trim_end_matches('/'));
+    let guide_corpus = path == "/guide" || path.starts_with("/guide/");
+    let corpus_root = if guide_corpus { "/guide" } else { "/wiki" };
+    let corpus_like = format!("{corpus_root}/%");
+    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
     let sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
          WHERE archived = 0
            AND superseded_by IS NULL
-           AND path LIKE '/wiki/%'
+           AND id NOT LIKE 'wiki-rem:%'
+           AND (path = ?6 OR path LIKE ?7)
+           AND ({wiki_predicate})
+           AND (
+               (?8 = 1
+                OR ((?1 = '/wiki/drafts' OR ?1 LIKE '/wiki/drafts/%')
+                AND (path = '/wiki/drafts' OR path LIKE '/wiki/drafts/%'))
+               OR ((?1 != '/wiki/drafts' AND ?1 NOT LIKE '/wiki/drafts/%')
+                   AND path != '/wiki/drafts' AND path NOT LIKE '/wiki/drafts/%'))
+           )
            AND (path = ?1 OR (?2 != '' AND topic = ?2) OR path = ?3 OR path LIKE ?4)
          ORDER BY CASE WHEN path = ?1 THEN 0 WHEN topic = ?2 THEN 1 ELSE 2 END,
                   path ASC,
@@ -290,7 +373,16 @@ pub fn list_wiki_duplicate_candidates(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        params![path, topic, parent_path, parent_like, limit as i64],
+        params![
+            path,
+            topic,
+            parent_path,
+            parent_like,
+            limit.map(|value| value as i64).unwrap_or(-1),
+            corpus_root,
+            corpus_like,
+            i64::from(guide_corpus)
+        ],
         row_to_entry,
     )?;
     let mut out = Vec::new();
@@ -300,25 +392,61 @@ pub fn list_wiki_duplicate_candidates(
     Ok(out)
 }
 
-/// Find the canonical active wiki row for a path/topic pair.
-pub fn find_active_wiki_entry_by_path_or_topic(
+/// Find the canonical active Wiki or Guide row for one exact path.
+///
+/// Topic similarity is duplicate evidence, not row identity. It is handled by
+/// the projection classifier after this exact update target has been chosen.
+pub fn find_active_wiki_entry_by_path(
     conn: &Connection,
     path: &str,
-    topic: &str,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
+    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
     let sql = format!(
         r#"SELECT {MEMORY_SELECT_COLUMNS}
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL
-             AND (path = ?1 OR (topic = ?2 AND path LIKE '/wiki/%'))
-           ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END, timestamp DESC
+             AND id NOT LIKE 'wiki-rem:%'
+             AND ({wiki_predicate})
+             AND path = ?1
+           ORDER BY timestamp DESC
            LIMIT 1"#
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query_map(params![path, topic], row_to_entry)?;
+    let mut rows = stmt.query_map(params![path], row_to_entry)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
         None => Ok(None),
     }
+}
+
+/// Find every active predecessor that Wiki ingest treats as the same page:
+/// an exact path match, or a user-facing `/wiki` row with the same topic.
+/// Legacy/imported Wiki rows are classified by path and may have no `domain`;
+/// the predecessor scan must use the same corpus boundary as Wiki reads.
+/// Exact-path
+/// rows sort first so receipt preservation remains deterministic.
+pub fn list_active_wiki_ingest_predecessors(
+    conn: &Connection,
+    path: &str,
+    topic: &str,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
+    let sql = format!(
+        r#"SELECT {MEMORY_SELECT_COLUMNS}
+           FROM memories
+           WHERE archived = 0
+             AND superseded_by IS NULL
+             AND ({wiki_predicate})
+             AND (path = ?1 OR (
+                 (path = '/wiki' OR path LIKE '/wiki/%')
+                 AND topic = ?2
+             ))
+           ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END,
+                    timestamp DESC,
+                    id ASC"#
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![path, topic], row_to_entry)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }

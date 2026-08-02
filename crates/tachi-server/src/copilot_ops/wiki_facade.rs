@@ -42,6 +42,11 @@ async fn handle_tachi_wiki_write_inner(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| wiki_slug(&params.title));
     let path = normalize_wiki_path(params.path.clone(), &topic);
+    if memcore::db::is_reserved_wiki_internal_path(&path) {
+        return Err(format!(
+            "wiki path {path} is reserved for internal runtime state"
+        ));
+    }
     let requested_project = params.project.clone();
     let project_name = requested_project
         .clone()
@@ -88,6 +93,15 @@ async fn handle_tachi_wiki_write_inner(
         obj.remove("review_receipt");
         obj.remove("source_bundle_hash");
         obj.remove("artifact_metadata_warnings");
+        obj.remove("wiki_log");
+        // `rem` is an internal coordination receipt owned by the weekly Wiki
+        // evolver. Accepting it from an ordinary facade caller would let a
+        // user row impersonate or obstruct replay recovery.
+        obj.remove("rem");
+        // Projection lineage is stamped from the active winner inside the
+        // save transaction, never accepted from facade metadata.
+        obj.remove("wiki_update_of");
+        obj.remove("wiki_previous_revision");
         obj.insert("wiki".to_string(), json!(true));
         obj.insert("wiki_title".to_string(), json!(params.title.clone()));
         obj.insert("user_force".to_string(), json!(params.force));
@@ -105,19 +119,9 @@ async fn handle_tachi_wiki_write_inner(
     }
 
     let existing = with_existing_wiki_store(server, &project_name, use_named_project, |store| {
-        find_wiki_entry_by_path_or_topic(store, &path, &topic)
+        find_wiki_entry_by_path(store, &path)
     })?;
-    if let Some(existing) = &existing {
-        if let Some(obj) = wiki_metadata.as_object_mut() {
-            obj.insert("wiki_update_of".to_string(), json!(existing.id));
-            obj.insert(
-                "wiki_previous_revision".to_string(),
-                json!(existing.revision),
-            );
-        }
-    }
     let update_id = existing.as_ref().map(|entry| entry.id.clone());
-    let existing_revision = existing.as_ref().map(|entry| entry.revision).unwrap_or(1);
     let captured_at = Utc::now().to_rfc3339();
     let mut reference_mutations = build_evidence_refs_v1(&references, &captured_at)
         .into_iter()
@@ -181,78 +185,46 @@ async fn handle_tachi_wiki_write_inner(
         metadata: Some(wiki_metadata),
         emit_continuity: false,
     };
-    let save_result = match model_invocation {
-        Some(invocation) => {
-            crate::memory_search_ops::handle_save_memory_with_authorized_reference_mutations_and_invocation(
-                server,
-                save_params,
-                reference_mutations,
-                invocation,
-            )
-            .await?
-        }
-        None => {
-            crate::memory_search_ops::handle_save_memory_with_authorized_reference_mutations(
-                server,
-                save_params,
-                reference_mutations,
-            )
-            .await?
-        }
-    };
+    let save_result = crate::memory_search_ops::handle_save_memory_with_wiki_projection(
+        server,
+        save_params,
+        reference_mutations,
+        model_invocation,
+    )
+    .await?;
 
     let mut response: Value =
         serde_json::from_str(&save_result).map_err(|e| format!("parse wiki save response: {e}"))?;
+    let duplicate = response.get("saved").and_then(Value::as_bool) == Some(false)
+        && response.get("status").and_then(Value::as_str) == Some("duplicate");
+    let transaction_replaced_existing = response
+        .get("wiki_previous_revision")
+        .and_then(Value::as_i64)
+        .is_some();
+    let wiki_write_mode = if duplicate {
+        "duplicate"
+    } else if update_id.is_some() || transaction_replaced_existing {
+        "updated"
+    } else {
+        "created"
+    };
     if let Some(obj) = response.as_object_mut() {
         obj.insert("wiki_path".to_string(), json!(path));
         obj.insert("wiki_topic".to_string(), json!(topic));
-        obj.insert(
-            "wiki_write_mode".to_string(),
-            json!(if update_id.is_some() {
-                "updated"
-            } else {
-                "created"
-            }),
-        );
+        obj.insert("wiki_write_mode".to_string(), json!(wiki_write_mode));
     }
     let canonical_id = response
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| "wiki write response missing id".to_string())?
         .to_string();
-    let duplicate_action = |store: &mut MemoryStore| {
-        supersede_wiki_duplicates(store, &canonical_id, &path, &topic, &entry_text)
-    };
-    let duplicates_superseded = match with_existing_wiki_store(
-        server,
-        &project_name,
-        use_named_project,
-        duplicate_action,
-    ) {
-        Ok(count) => count,
-        Err(err) => {
-            tracing::warn!(wiki_path = %path, wiki_topic = %topic, error = %err, "wiki duplicate scan failed");
-            0
-        }
-    };
     if let Some(obj) = response.as_object_mut() {
-        obj.insert(
-            "wiki_duplicates_superseded".to_string(),
-            json!(duplicates_superseded),
-        );
         obj.insert("pattern_refs".to_string(), json!(pattern_refs.clone()));
-        if update_id.is_some() {
-            obj.insert(
-                "wiki_previous_revision".to_string(),
-                json!(existing_revision),
-            );
-        }
     }
-    let wiki_write_mode = if update_id.is_some() {
-        "updated"
-    } else {
-        "created"
-    };
+    if duplicate {
+        return serde_json::to_string(&response)
+            .map_err(|e| format!("serialize duplicate wiki_write: {e}"));
+    }
     let continuity_event = crate::continuity_ops::emit_wiki_saved_event(
         server,
         crate::continuity_ops::WikiSavedEventInput {
@@ -282,7 +254,10 @@ async fn handle_tachi_wiki_write_inner(
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
-            duplicates_superseded
+            response
+                .get("wiki_duplicates_superseded")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
         ),
     );
     if let Some(obj) = response.as_object_mut() {

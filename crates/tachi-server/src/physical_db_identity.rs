@@ -122,6 +122,12 @@ pub(crate) struct PhysicalDbInventory {
     pub unresolved_paths: Vec<UnresolvedDbPath>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhysicalDbPathBinding {
+    pub(crate) physical_id: String,
+    pub(crate) is_primary_alias: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum IdentityKey {
     #[cfg(unix)]
@@ -273,7 +279,9 @@ fn identity_key(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if !force_canonical_identity && (metadata.dev() != 0 || metadata.ino() != 0) {
+        if !force_canonical_identity
+            && has_stable_unix_file_identity(metadata.dev(), metadata.ino())
+        {
             return IdentityKey::Unix {
                 device: metadata.dev(),
                 inode: metadata.ino(),
@@ -288,9 +296,14 @@ fn identity_key(
 }
 
 #[cfg(unix)]
+fn has_stable_unix_file_identity(device: u64, inode: u64) -> bool {
+    device != 0 && inode != 0
+}
+
+#[cfg(unix)]
 fn unix_file_identity(metadata: &std::fs::Metadata) -> Option<UnixFileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    (metadata.dev() != 0 || metadata.ino() != 0).then_some(UnixFileIdentity {
+    has_stable_unix_file_identity(metadata.dev(), metadata.ino()).then_some(UnixFileIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
     })
@@ -449,6 +462,59 @@ pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> Physic
     }
 }
 
+/// Resolve a runtime set of database paths together, preserving input order.
+///
+/// Callers that may mutate through more than one logical alias must use this
+/// set-level seam: classifying aliases independently cannot detect two live
+/// WAL/SHM owners for the same main-file inode. Such a topology has no safe
+/// logical mutation owner and therefore fails loudly.
+pub(crate) fn physical_db_bindings_for_paths(
+    paths: &[PathBuf],
+) -> Result<Vec<PhysicalDbPathBinding>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let inventory = classify_paths(paths.iter().cloned());
+    if let Some(unresolved) = inventory.unresolved_paths.first() {
+        return Err(format!(
+            "physical database identity unavailable for {}: {}",
+            unresolved.path.display(),
+            unresolved.error
+        ));
+    }
+    if let Some(store) = inventory
+        .stores
+        .iter()
+        .find(|store| store.mutation_state == PhysicalStoreMutationState::AmbiguousPhysicalStore)
+    {
+        return Err(format!(
+            "invariant: physical database aliases for {} have multiple live WAL/SHM owners; mutation routing is ambiguous",
+            store.physical_id
+        ));
+    }
+
+    paths
+        .iter()
+        .map(|path| {
+            let display = path.display().to_string();
+            inventory
+                .stores
+                .iter()
+                .find(|store| store.aliases.iter().any(|alias| alias == &display))
+                .map(|store| PhysicalDbPathBinding {
+                    physical_id: store.physical_id.clone(),
+                    is_primary_alias: store.primary_path == display,
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "physical database identity for {} was absent from the runtime inventory",
+                        path.display()
+                    )
+                })
+        })
+        .collect()
+}
+
 pub(crate) fn same_physical_file(left: &Path, right: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -561,7 +627,7 @@ fn sqlite_sidecar_owner_key(path: &Path) -> String {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                if metadata.dev() != 0 || metadata.ino() != 0 {
+                if has_stable_unix_file_identity(metadata.dev(), metadata.ino()) {
                     return Some(format!("{suffix}:{}:{}", metadata.dev(), metadata.ino()));
                 }
             }
@@ -640,6 +706,15 @@ pub(crate) fn open_read_only_connection(path: &Path) -> rusqlite::Result<rusqlit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_unix_file_identity_never_authorizes_mutation() {
+        assert!(!has_stable_unix_file_identity(7, 0));
+        assert!(!has_stable_unix_file_identity(0, 11));
+        assert!(!has_stable_unix_file_identity(0, 0));
+        assert!(has_stable_unix_file_identity(7, 11));
+    }
 
     #[cfg(unix)]
     #[test]

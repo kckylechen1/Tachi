@@ -457,7 +457,16 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
         let mut store = MemoryStore::open(wiki_db.to_str().expect("utf8 wiki db"))
             .expect("open wiki project db");
         for entry in &entries {
-            store.upsert(entry).expect("seed wiki project entry");
+            if entry.id == "wiki-operation-log"
+                && entry.path == "/wiki/_log"
+                && entry.topic.eq_ignore_ascii_case("wiki_log")
+            {
+                store
+                    .upsert_wiki_operation_log(entry)
+                    .expect("seed Wiki operation log");
+            } else {
+                store.upsert(entry).expect("seed wiki project entry");
+            }
         }
     }
     seed_pre_v23_wiki_reference_metadata(&wiki_db, &entries);

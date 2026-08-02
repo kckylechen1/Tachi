@@ -793,4 +793,17 @@ async fn tachi_wiki_ingest_propagates_edge_write_errors() {
         err.contains("wiki ingest edge"),
         "expected edge write error to propagate, got: {err}"
     );
+    let persisted: i64 = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE json_extract(metadata, '$.ingest_source') = ?1",
+                    [source_path.to_string_lossy().as_ref()],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("count failed ingest rows");
+    assert_eq!(persisted, 0, "failed edge must roll the ingest row back");
 }

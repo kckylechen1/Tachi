@@ -11,8 +11,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const EXACT_DEDUPE_POLICY: &str = "exact-text-same-normalized-path-v1";
-pub const EXACT_DEDUPE_SCHEMA_VERSION: u32 = 1;
-pub const EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const EXACT_DEDUPE_SCHEMA_VERSION: u32 = 2;
+pub const EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION: u32 = 2;
+pub const EXACT_DEDUPE_LEGACY_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY: &str = "exact-dedupe-in-memory-test-sentinel-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +60,7 @@ pub struct ExactDedupePlan {
     pub schema_version: u32,
     pub policy_version: String,
     pub target_db_identity: String,
+    pub target_db_physical_identity: String,
     pub generated_at: String,
     pub groups: Vec<ExactDedupeGroup>,
     pub planned_groups: usize,
@@ -74,6 +77,20 @@ pub struct ExactDedupeApplyResult {
     /// (CLI adapter) is responsible for persisting this to disk before
     /// treating the apply as complete — see #1348 "receipt conventions".
     pub receipt: ExactDedupeReceipt,
+}
+
+/// Read-only reconciliation of a prepared receipt after its caller observed
+/// an error around the SQLite commit boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactDedupeReceiptDbState {
+    /// Every loser and its durable lineage exactly match the receipt's
+    /// committed post-state.
+    Applied,
+    /// Every loser still matches the pre-apply state and has no apply lineage.
+    NotApplied,
+    /// The rows are mixed, drifted, missing, or otherwise cannot prove either
+    /// atomic outcome.
+    Indeterminate,
 }
 
 /// One archived loser as recorded at apply time — the exact CAS binding
@@ -111,6 +128,36 @@ pub struct ExactDedupeReceipt {
     pub schema_version: u32,
     pub policy_version: String,
     pub target_db_identity: String,
+    pub target_db_physical_identity: String,
+    pub plan_digest: String,
+    /// Per-apply lineage token also written to the durable lineage ledger in
+    /// the same SQLite transaction. Restore requires this exact token, so a
+    /// re-hashed receipt cannot claim an unrelated archived row.
+    pub apply_id: String,
+    pub applied_at: String,
+    /// `prepared` is durably written before the database commit. It remains a
+    /// valid recovery artifact because restore proves the exact post-state and
+    /// apply lineage before mutating anything.
+    pub phase: ExactDedupeReceiptPhase,
+    pub rows: Vec<ExactDedupeReceiptRow>,
+    pub applied_groups: usize,
+    pub applied_losers: usize,
+    pub receipt_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExactDedupeReceiptPhase {
+    Prepared,
+    Committed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactDedupeLegacyReceiptV1 {
+    pub schema_version: u32,
+    pub policy_version: String,
+    pub target_db_identity: String,
     pub plan_digest: String,
     pub applied_at: String,
     pub rows: Vec<ExactDedupeReceiptRow>,
@@ -119,10 +166,57 @@ pub struct ExactDedupeReceipt {
     pub receipt_digest: String,
 }
 
+#[derive(Debug, Clone)]
+pub enum ExactDedupeRestoreReceipt {
+    V2(ExactDedupeReceipt),
+    V1LegacyPathCas(ExactDedupeLegacyReceiptV1),
+}
+
+struct ExactDedupeRestoreView<'a> {
+    target_db_identity: &'a str,
+    target_db_physical_identity: Option<&'a str>,
+    rows: &'a [ExactDedupeReceiptRow],
+    reject_reserved_rem: bool,
+    apply_id: Option<&'a str>,
+    plan_digest: Option<&'a str>,
+    applied_at: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExactDedupeRestoreResult {
     pub restored_losers: usize,
+}
+
+fn validate_receipt_rows(
+    rows: &[ExactDedupeReceiptRow],
+    applied_losers: usize,
+    reject_reserved_rem: bool,
+) -> Result<(), MemoryError> {
+    if applied_losers != rows.len() {
+        return Err(MemoryError::InvalidArg(
+            "exact-dedupe receipt counts mismatch".into(),
+        ));
+    }
+    let mut ids = HashSet::new();
+    for row in rows {
+        if !ids.insert(row.loser_id.as_str())
+            || row.loser_id.is_empty()
+            || row.winner_id.is_empty()
+            || (reject_reserved_rem
+                && (crate::namespace::is_reserved_wiki_rem_id(&row.loser_id)
+                    || crate::namespace::is_reserved_wiki_rem_id(&row.winner_id)))
+            || row.loser_id == row.winner_id
+            || row.before_revision < 1
+            || row.archived_revision != row.before_revision + 1
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "invalid exact-dedupe receipt row {}",
+                row.loser_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl ExactDedupeReceipt {
@@ -135,37 +229,130 @@ impl ExactDedupeReceipt {
     pub fn validate(&self) -> Result<(), MemoryError> {
         if self.schema_version != EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION
             || self.policy_version != EXACT_DEDUPE_POLICY
+            || self.target_db_identity.is_empty()
+            || self.target_db_physical_identity.is_empty()
+            || uuid::Uuid::parse_str(&self.apply_id).is_err()
         {
             return Err(MemoryError::InvalidArg(
                 "unsupported exact-dedupe receipt schema/policy".into(),
             ));
         }
-        if self.applied_losers != self.rows.len() {
-            return Err(MemoryError::InvalidArg(
-                "exact-dedupe receipt counts mismatch".into(),
-            ));
-        }
-        let mut ids = HashSet::new();
-        for row in &self.rows {
-            if !ids.insert(row.loser_id.as_str())
-                || row.loser_id.is_empty()
-                || row.winner_id.is_empty()
-                || row.loser_id == row.winner_id
-                || row.before_revision < 1
-                || row.archived_revision != row.before_revision + 1
-            {
-                return Err(MemoryError::InvalidArg(format!(
-                    "invalid exact-dedupe receipt row {}",
-                    row.loser_id
-                )));
-            }
-        }
+        validate_receipt_rows(&self.rows, self.applied_losers, true)?;
         if !valid_digest(&self.receipt_digest) || self.receipt_digest != self.compute_digest()? {
             return Err(MemoryError::InvalidArg(
                 "exact-dedupe receipt digest mismatch".into(),
             ));
         }
         Ok(())
+    }
+
+    pub fn into_committed(mut self) -> Result<Self, MemoryError> {
+        if self.phase != ExactDedupeReceiptPhase::Prepared {
+            return Err(MemoryError::InvalidArg(
+                "exact-dedupe receipt is not prepared".into(),
+            ));
+        }
+        self.phase = ExactDedupeReceiptPhase::Committed;
+        self.receipt_digest.clear();
+        self.receipt_digest = self.compute_digest()?;
+        self.validate()?;
+        Ok(self)
+    }
+}
+
+impl ExactDedupeLegacyReceiptV1 {
+    pub fn compute_digest(&self) -> Result<String, MemoryError> {
+        let mut r = self.clone();
+        r.receipt_digest.clear();
+        Ok(digest(&serde_json::to_vec(&r)?))
+    }
+
+    pub fn validate(&self) -> Result<(), MemoryError> {
+        if self.schema_version != EXACT_DEDUPE_LEGACY_RECEIPT_SCHEMA_VERSION
+            || self.policy_version != EXACT_DEDUPE_POLICY
+            || self.target_db_identity.is_empty()
+        {
+            return Err(MemoryError::InvalidArg(
+                "unsupported exact-dedupe legacy receipt schema/policy".into(),
+            ));
+        }
+        // Preserve the v1 receipt contract byte-for-byte: the legacy
+        // validator predated the reserved `wiki-rem:` namespace and did not
+        // reject those ids. Tightening it here would orphan an already-issued
+        // rollback receipt instead of merely protecting new v2 applies.
+        validate_receipt_rows(&self.rows, self.applied_losers, false)?;
+        if !valid_digest(&self.receipt_digest) || self.receipt_digest != self.compute_digest()? {
+            return Err(MemoryError::InvalidArg(
+                "exact-dedupe legacy receipt digest mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ExactDedupeRestoreReceipt {
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, MemoryError> {
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
+        let schema_version = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                MemoryError::InvalidArg(
+                    "exact-dedupe receipt missing numeric schema_version".into(),
+                )
+            })?;
+        match schema_version {
+            2 => {
+                let receipt: ExactDedupeReceipt = serde_json::from_value(value)?;
+                receipt.validate()?;
+                Ok(Self::V2(receipt))
+            }
+            1 => {
+                let receipt: ExactDedupeLegacyReceiptV1 = serde_json::from_value(value)?;
+                receipt.validate()?;
+                Ok(Self::V1LegacyPathCas(receipt))
+            }
+            _ => Err(MemoryError::InvalidArg(format!(
+                "unsupported exact-dedupe receipt schema_version {schema_version}"
+            ))),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), MemoryError> {
+        match self {
+            Self::V2(receipt) => receipt.validate(),
+            Self::V1LegacyPathCas(receipt) => receipt.validate(),
+        }
+    }
+
+    pub fn target_db_identity(&self) -> &str {
+        match self {
+            Self::V2(receipt) => &receipt.target_db_identity,
+            Self::V1LegacyPathCas(receipt) => &receipt.target_db_identity,
+        }
+    }
+
+    fn restore_view(&self) -> ExactDedupeRestoreView<'_> {
+        match self {
+            Self::V2(receipt) => ExactDedupeRestoreView {
+                target_db_identity: &receipt.target_db_identity,
+                target_db_physical_identity: Some(&receipt.target_db_physical_identity),
+                rows: &receipt.rows,
+                reject_reserved_rem: true,
+                apply_id: Some(&receipt.apply_id),
+                plan_digest: Some(&receipt.plan_digest),
+                applied_at: Some(&receipt.applied_at),
+            },
+            Self::V1LegacyPathCas(receipt) => ExactDedupeRestoreView {
+                target_db_identity: &receipt.target_db_identity,
+                target_db_physical_identity: None,
+                rows: &receipt.rows,
+                reject_reserved_rem: false,
+                apply_id: None,
+                plan_digest: None,
+                applied_at: None,
+            },
+        }
     }
 }
 
@@ -293,6 +480,8 @@ impl ExactDedupePlan {
     pub fn validate(&self) -> Result<(), MemoryError> {
         if self.schema_version != EXACT_DEDUPE_SCHEMA_VERSION
             || self.policy_version != EXACT_DEDUPE_POLICY
+            || self.target_db_identity.is_empty()
+            || self.target_db_physical_identity.is_empty()
         {
             return Err(MemoryError::InvalidArg(
                 "unsupported exact-dedupe schema/policy".into(),
@@ -378,17 +567,80 @@ impl ExactDedupePlan {
 }
 
 impl MemoryStore {
+    fn exact_dedupe_physical_identity(&self, target: &str) -> Result<String, MemoryError> {
+        match self.opened_physical_db_identity.clone() {
+            Some(identity) => Ok(identity),
+            None if target == ":memory:" => {
+                Ok(EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY.to_string())
+            }
+            None => Err(MemoryError::InvalidArg(
+                "exact-dedupe file-backed plan requires a stable physical DB identity".to_string(),
+            )),
+        }
+    }
+
+    fn validate_exact_dedupe_physical_identity(
+        &self,
+        artifact_kind: &str,
+        expected: &str,
+    ) -> Result<(), MemoryError> {
+        match self.opened_physical_db_identity.as_deref() {
+            Some(opened) if opened == expected => Ok(()),
+            Some(_) => Err(MemoryError::InvalidArg(format!(
+                "exact-dedupe {artifact_kind} physical DB identity mismatch"
+            ))),
+            None if expected == EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY => Ok(()),
+            None => Err(MemoryError::InvalidArg(format!(
+                "exact-dedupe {artifact_kind} requires a file-backed physical DB identity"
+            ))),
+        }
+    }
+
+    fn validate_exact_dedupe_target_at_mutation_boundary(
+        &self,
+        artifact_kind: &str,
+        target_db_identity: &str,
+        expected_physical_identity: Option<&str>,
+    ) -> Result<(), MemoryError> {
+        if target_db_identity == ":memory:" {
+            if let Some(expected) = expected_physical_identity {
+                self.validate_exact_dedupe_physical_identity(artifact_kind, expected)?;
+            }
+            return Ok(());
+        }
+
+        let effective: String = self.conn.query_row(
+            "SELECT file FROM pragma_database_list WHERE name='main'",
+            [],
+            |r| r.get(0),
+        )?;
+        if canonical(&effective)? != canonical(target_db_identity)? {
+            return Err(MemoryError::InvalidArg(format!(
+                "exact-dedupe {artifact_kind} target DB mismatch"
+            )));
+        }
+        if self.opened_physical_db_identity.is_some() {
+            self.verify_opened_physical_db_identity(Path::new(target_db_identity))?;
+        }
+        if let Some(expected) = expected_physical_identity {
+            self.validate_exact_dedupe_physical_identity(artifact_kind, expected)?;
+        }
+        Ok(())
+    }
+
     pub fn plan_exact_dedupe(
         &self,
         target: String,
         limit: Option<usize>,
         prefix: Option<&str>,
     ) -> Result<ExactDedupePlan, MemoryError> {
+        let target_db_physical_identity = self.exact_dedupe_physical_identity(&target)?;
         if limit == Some(0) {
             let mut plan = ExactDedupePlan {
                 schema_version: EXACT_DEDUPE_SCHEMA_VERSION,
                 policy_version: EXACT_DEDUPE_POLICY.into(),
                 target_db_identity: target,
+                target_db_physical_identity,
                 generated_at: Utc::now().to_rfc3339(),
                 groups: Vec::new(),
                 planned_groups: 0,
@@ -403,7 +655,7 @@ impl MemoryStore {
         } else {
             "0"
         };
-        let mut sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE archived=0 AND superseded_by IS NULL");
+        let mut sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE archived=0 AND superseded_by IS NULL AND id NOT LIKE 'wiki-rem:%'");
         sql.push_str(" ORDER BY path,text,id");
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt
@@ -457,6 +709,7 @@ impl MemoryStore {
             schema_version: EXACT_DEDUPE_SCHEMA_VERSION,
             policy_version: EXACT_DEDUPE_POLICY.into(),
             target_db_identity: target,
+            target_db_physical_identity,
             generated_at: Utc::now().to_rfc3339(),
             planned_groups: groups.len(),
             planned_losers: groups.iter().map(|g| g.losers.len()).sum(),
@@ -471,19 +724,22 @@ impl MemoryStore {
         &mut self,
         plan: &ExactDedupePlan,
     ) -> Result<ExactDedupeApplyResult, MemoryError> {
+        self.apply_exact_dedupe_with_precommit_receipt(plan, |_| Ok(()))
+    }
+
+    pub fn apply_exact_dedupe_with_precommit_receipt(
+        &mut self,
+        plan: &ExactDedupePlan,
+        precommit_receipt: impl FnOnce(&ExactDedupeApplyResult) -> Result<(), MemoryError>,
+    ) -> Result<ExactDedupeApplyResult, MemoryError> {
         let _authorization =
             crate::db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         plan.validate()?;
-        let effective: String = self.conn.query_row(
-            "SELECT file FROM pragma_database_list WHERE name='main'",
-            [],
-            |r| r.get(0),
+        self.validate_exact_dedupe_target_at_mutation_boundary(
+            "plan",
+            &plan.target_db_identity,
+            Some(&plan.target_db_physical_identity),
         )?;
-        if canonical(&effective)? != canonical(&plan.target_db_identity)? {
-            return Err(MemoryError::InvalidArg(
-                "exact-dedupe target DB mismatch".into(),
-            ));
-        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -492,8 +748,8 @@ impl MemoryStore {
         } else {
             "0"
         };
-        let candidate_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE id=?1");
-        let live_group_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE text=?1 AND archived=0 AND superseded_by IS NULL");
+        let candidate_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE id=?1 AND id NOT LIKE 'wiki-rem:%'");
+        let live_group_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE text=?1 AND archived=0 AND superseded_by IS NULL AND id NOT LIKE 'wiki-rem:%'");
         for g in &plan.groups {
             let winner = tx
                 .query_row(&candidate_sql, [&g.winner.id], candidate_from_row)
@@ -542,6 +798,7 @@ impl MemoryStore {
             }
         }
         let now = Utc::now().to_rfc3339();
+        let apply_id = uuid::Uuid::new_v4().to_string();
         // The complete text-digest revalidation above runs after BEGIN IMMEDIATE,
         // which excludes intervening writers until commit. The UPDATE therefore
         // needs only the revision/state/original-path CAS predicates.
@@ -553,13 +810,30 @@ impl MemoryStore {
                     [&f.id],
                     |r| r.get(0),
                 )?;
-                let changed=tx.execute("UPDATE memories SET archived=1,superseded_by=?1,valid_until=COALESCE(valid_until,?2),updated_at=?2,revision=revision+1 WHERE id=?3 AND revision=?4 AND archived=0 AND superseded_by IS NULL AND path=?5",params![g.winner.id,now,f.id,f.revision,f.path])?;
+                let changed=tx.execute("UPDATE memories SET archived=1,superseded_by=?1,valid_until=COALESCE(valid_until,?2),updated_at=?2,revision=revision+1 WHERE id=?3 AND revision=?4 AND archived=0 AND superseded_by IS NULL AND path=?5 AND id NOT LIKE 'wiki-rem:%'",params![g.winner.id,now,f.id,f.revision,f.path])?;
                 if changed != 1 {
                     return Err(MemoryError::InvalidArg(format!(
                         "exact-dedupe CAS failed: {}",
                         f.id
                     )));
                 }
+                tx.execute(
+                    "INSERT INTO exact_dedupe_apply_lineage (
+                         loser_id,apply_id,plan_digest,winner_id,
+                         before_revision,archived_revision,
+                         loser_valid_until_before,applied_at
+                     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![
+                        f.id,
+                        apply_id,
+                        plan.plan_digest,
+                        g.winner.id,
+                        f.revision,
+                        f.revision + 1,
+                        valid_until_before,
+                        now
+                    ],
+                )?;
                 transfer_edges_to_winner(&tx, &f.id, &g.winner.id)?;
                 receipt_rows.push(ExactDedupeReceiptRow {
                     winner_id: g.winner.id.clone(),
@@ -575,20 +849,127 @@ impl MemoryStore {
             schema_version: EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION,
             policy_version: EXACT_DEDUPE_POLICY.into(),
             target_db_identity: plan.target_db_identity.clone(),
+            target_db_physical_identity: plan.target_db_physical_identity.clone(),
             plan_digest: plan.plan_digest.clone(),
+            apply_id,
             applied_at: now,
+            phase: ExactDedupeReceiptPhase::Prepared,
             applied_groups: plan.groups.len(),
             applied_losers: plan.planned_losers,
             rows: receipt_rows,
             receipt_digest: String::new(),
         };
         receipt.receipt_digest = receipt.compute_digest()?;
-        tx.commit()?;
-        Ok(ExactDedupeApplyResult {
+        let mut result = ExactDedupeApplyResult {
             applied_groups: plan.groups.len(),
             applied_losers: plan.planned_losers,
             receipt,
-        })
+        };
+        precommit_receipt(&result)?;
+        tx.commit()?;
+        result.receipt = result.receipt.into_committed()?;
+        Ok(result)
+    }
+
+    /// Classify whether a prepared exact-dedupe receipt reached its atomic DB
+    /// post-state. This never mutates rows. Callers use it only to decide
+    /// whether a public prepared receipt may be removed after an apply error.
+    pub fn classify_exact_dedupe_receipt_db_state(
+        &self,
+        receipt: &ExactDedupeReceipt,
+    ) -> Result<ExactDedupeReceiptDbState, MemoryError> {
+        receipt.validate()?;
+        self.validate_exact_dedupe_target_at_mutation_boundary(
+            "receipt",
+            &receipt.target_db_identity,
+            Some(&receipt.target_db_physical_identity),
+        )?;
+        if receipt.rows.is_empty() {
+            return Ok(ExactDedupeReceiptDbState::Indeterminate);
+        }
+
+        let mut all_applied = true;
+        let mut all_not_applied = true;
+        for row in &receipt.rows {
+            let state = self
+                .conn
+                .query_row(
+                    "SELECT archived,superseded_by,revision,path,valid_until,
+                            EXISTS (
+                                SELECT 1 FROM exact_dedupe_apply_lineage lineage
+                                WHERE lineage.loser_id=?1
+                                  AND lineage.apply_id=?2
+                                  AND lineage.plan_digest=?3
+                                  AND lineage.winner_id=?4
+                                  AND lineage.before_revision=?5
+                                  AND lineage.archived_revision=?6
+                                  AND lineage.loser_valid_until_before IS ?7
+                                  AND lineage.applied_at=?8
+                            ),
+                            EXISTS (
+                                SELECT 1 FROM exact_dedupe_apply_lineage lineage
+                                WHERE lineage.loser_id=?1
+                            )
+                     FROM memories WHERE id=?1",
+                    params![
+                        row.loser_id,
+                        receipt.apply_id,
+                        receipt.plan_digest,
+                        row.winner_id,
+                        row.before_revision,
+                        row.archived_revision,
+                        row.loser_valid_until_before,
+                        receipt.applied_at
+                    ],
+                    |db_row| {
+                        Ok((
+                            db_row.get::<_, bool>(0)?,
+                            db_row.get::<_, Option<String>>(1)?,
+                            db_row.get::<_, i64>(2)?,
+                            db_row.get::<_, String>(3)?,
+                            db_row.get::<_, Option<String>>(4)?,
+                            db_row.get::<_, bool>(5)?,
+                            db_row.get::<_, bool>(6)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((
+                archived,
+                superseded_by,
+                revision,
+                path,
+                valid_until,
+                exact_lineage,
+                any_lineage,
+            )) = state
+            else {
+                return Ok(ExactDedupeReceiptDbState::Indeterminate);
+            };
+            let applied_valid_until = row
+                .loser_valid_until_before
+                .as_deref()
+                .unwrap_or(receipt.applied_at.as_str());
+            all_applied &= archived
+                && superseded_by.as_deref() == Some(row.winner_id.as_str())
+                && revision == row.archived_revision
+                && path == row.loser_path
+                && valid_until.as_deref() == Some(applied_valid_until)
+                && exact_lineage;
+            all_not_applied &= !archived
+                && superseded_by.is_none()
+                && revision == row.before_revision
+                && path == row.loser_path
+                && valid_until == row.loser_valid_until_before
+                && !any_lineage;
+        }
+        if all_applied {
+            Ok(ExactDedupeReceiptDbState::Applied)
+        } else if all_not_applied {
+            Ok(ExactDedupeReceiptDbState::NotApplied)
+        } else {
+            Ok(ExactDedupeReceiptDbState::Indeterminate)
+        }
     }
 
     /// Restore every loser archived by one [`ExactDedupeReceipt`]. All-or-nothing,
@@ -601,31 +982,69 @@ impl MemoryStore {
         &mut self,
         receipt: &ExactDedupeReceipt,
     ) -> Result<ExactDedupeRestoreResult, MemoryError> {
+        receipt.validate()?;
+        let restore_receipt = ExactDedupeRestoreReceipt::V2(receipt.clone());
+        self.restore_exact_dedupe_versioned(&restore_receipt)
+    }
+
+    pub fn restore_exact_dedupe_versioned(
+        &mut self,
+        receipt: &ExactDedupeRestoreReceipt,
+    ) -> Result<ExactDedupeRestoreResult, MemoryError> {
         let _authorization =
             crate::db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         receipt.validate()?;
-        let effective: String = self.conn.query_row(
-            "SELECT file FROM pragma_database_list WHERE name='main'",
-            [],
-            |r| r.get(0),
+        let view = receipt.restore_view();
+        self.validate_exact_dedupe_target_at_mutation_boundary(
+            "receipt",
+            view.target_db_identity,
+            view.target_db_physical_identity,
         )?;
-        if canonical(&effective)? != canonical(&receipt.target_db_identity)? {
-            return Err(MemoryError::InvalidArg(
-                "exact-dedupe receipt target DB mismatch".into(),
-            ));
-        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for row in &receipt.rows {
+        let restore_sql = if view.reject_reserved_rem {
+            "UPDATE memories
+             SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1
+             WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4
+               AND path=?5 AND id NOT LIKE 'wiki-rem:%'
+               AND EXISTS (
+                 SELECT 1 FROM exact_dedupe_apply_lineage lineage
+                 WHERE lineage.loser_id=?2
+                   AND lineage.apply_id=?6
+                   AND lineage.plan_digest=?7
+                   AND lineage.winner_id=?4
+                   AND lineage.before_revision=?8
+                   AND lineage.archived_revision=?3
+                   AND lineage.loser_valid_until_before IS ?1
+                   AND lineage.applied_at=?9
+               )"
+            .to_string()
+        } else {
+            "UPDATE memories
+             SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1
+             WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4
+               AND path=?5 AND ?6 IS NULL AND ?7 IS NULL AND ?8 IS NULL
+               AND ?9 IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM exact_dedupe_apply_lineage lineage
+                 WHERE lineage.loser_id=?2
+               )"
+            .to_string()
+        };
+        for row in view.rows {
             let changed = tx.execute(
-                "UPDATE memories SET archived=0,superseded_by=NULL,valid_until=?1,revision=revision+1 WHERE id=?2 AND revision=?3 AND archived=1 AND superseded_by=?4 AND path=?5",
+                &restore_sql,
                 params![
                     row.loser_valid_until_before,
                     row.loser_id,
                     row.archived_revision,
                     row.winner_id,
-                    row.loser_path
+                    row.loser_path,
+                    view.apply_id,
+                    view.plan_digest,
+                    view.apply_id.map(|_| row.before_revision),
+                    view.applied_at
                 ],
             )?;
             if changed != 1 {
@@ -634,10 +1053,34 @@ impl MemoryStore {
                     row.loser_id
                 )));
             }
+            if let Some(apply_id) = view.apply_id {
+                let removed = tx.execute(
+                    "DELETE FROM exact_dedupe_apply_lineage
+                     WHERE loser_id=?1 AND apply_id=?2 AND plan_digest=?3
+                       AND winner_id=?4 AND before_revision=?5 AND archived_revision=?6
+                       AND loser_valid_until_before IS ?7 AND applied_at=?8",
+                    params![
+                        row.loser_id,
+                        apply_id,
+                        view.plan_digest,
+                        row.winner_id,
+                        row.before_revision,
+                        row.archived_revision,
+                        row.loser_valid_until_before,
+                        view.applied_at
+                    ],
+                )?;
+                if removed != 1 {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "exact-dedupe restore lineage CAS failed: {}",
+                        row.loser_id
+                    )));
+                }
+            }
         }
         tx.commit()?;
         Ok(ExactDedupeRestoreResult {
-            restored_losers: receipt.rows.len(),
+            restored_losers: view.rows.len(),
         })
     }
 }
@@ -747,6 +1190,10 @@ mod tests {
         let plan = store
             .plan_exact_dedupe(":memory:".into(), None, Some("/wiki"))
             .unwrap();
+        assert_eq!(
+            plan.target_db_physical_identity,
+            EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY
+        );
         assert_eq!(plan.groups.len(), 2);
         assert_eq!(plan.groups[0].winner.id, "a");
         assert_eq!(plan.groups[0].ranked_candidates.len(), 2);
@@ -776,6 +1223,197 @@ mod tests {
         assert_eq!(literal.groups[0].normalized_path, "/wiki/%_literal");
         assert_eq!(literal.groups[0].winner.path, "/wiki/%_literal");
         assert_eq!(literal.groups[0].losers[0].path, "/Wiki//%_literal/");
+    }
+
+    #[test]
+    fn exact_dedupe_never_plans_or_mutates_a_rem_operation_row() {
+        let (_dir, identity, mut store) = disk_store();
+        insert(
+            &store,
+            "wiki-rem:protected",
+            "/wiki/drafts/protected",
+            "same draft text",
+        );
+        insert(
+            &store,
+            "ordinary-a",
+            "/wiki/drafts/protected",
+            "same draft text",
+        );
+        insert(
+            &store,
+            "ordinary-b",
+            "/wiki/drafts/protected",
+            "same draft text",
+        );
+
+        let plan = store
+            .plan_exact_dedupe(identity, None, Some("/wiki/drafts"))
+            .unwrap();
+        assert_eq!(plan.groups.len(), 1);
+        assert!(plan.groups[0]
+            .ranked_candidates
+            .iter()
+            .all(|candidate| !crate::namespace::is_reserved_wiki_rem_id(&candidate.row.id)));
+        store.apply_exact_dedupe(&plan).unwrap();
+
+        let protected = store.get("wiki-rem:protected").unwrap().unwrap();
+        assert!(!protected.archived);
+        let superseded_by: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id = 'wiki-rem:protected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(superseded_by.is_none());
+    }
+
+    #[test]
+    fn exact_dedupe_restore_rejects_a_forged_rem_receipt_before_mutation() {
+        let (_dir, identity, mut store) = disk_store();
+        insert(&store, "winner", "/same", "same text");
+        insert(&store, "loser", "/same", "same text");
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET retention_policy = 'pinned' WHERE id = 'winner'",
+                    [],
+                )
+                .unwrap();
+        });
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+        let mut receipt = store.apply_exact_dedupe(&plan).unwrap().receipt;
+        let row = receipt.rows.first_mut().expect("one archived loser");
+        row.loser_id = "wiki-rem:protected".to_string();
+        insert(
+            &store,
+            &row.loser_id,
+            &row.loser_path,
+            "protected REM operation",
+        );
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET archived = 1, superseded_by = ?1, revision = ?2 WHERE id = ?3",
+                    params![row.winner_id, row.archived_revision, row.loser_id],
+                )
+                .unwrap();
+        });
+        receipt.receipt_digest = receipt.compute_digest().unwrap();
+
+        let error = store
+            .restore_exact_dedupe(&receipt)
+            .expect_err("restore must not own the REM operation namespace");
+        assert!(error
+            .to_string()
+            .contains("invalid exact-dedupe receipt row"));
+        let archived: bool = store
+            .conn
+            .query_row(
+                "SELECT archived FROM memories WHERE id = 'wiki-rem:protected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(archived);
+    }
+
+    #[test]
+    fn exact_dedupe_restore_rejects_a_rehashed_receipt_for_an_unrelated_archived_row() {
+        let (_dir, identity, mut store) = disk_store();
+        insert(&store, "winner", "/same", "same text");
+        insert(&store, "loser", "/same", "same text");
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET retention_policy = 'pinned' WHERE id = 'winner'",
+                    [],
+                )
+                .unwrap();
+        });
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+        let mut forged = store.apply_exact_dedupe(&plan).unwrap().receipt;
+        insert(&store, "unrelated", "/same", "different text");
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories
+                     SET archived=1,superseded_by='winner',revision=2
+                     WHERE id='unrelated'",
+                    [],
+                )
+                .unwrap();
+        });
+        forged.rows[0].loser_id = "unrelated".to_string();
+        forged.receipt_digest.clear();
+        forged.receipt_digest = forged.compute_digest().unwrap();
+
+        let error = store
+            .restore_exact_dedupe(&forged)
+            .expect_err("receipt must prove the row was archived by this exact apply");
+        assert!(
+            error.to_string().contains("restore CAS failed"),
+            "unexpected refusal: {error}"
+        );
+        let archived: bool = store
+            .conn
+            .query_row(
+                "SELECT archived FROM memories WHERE id='unrelated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(archived, "failed lineage proof must not mutate the row");
+    }
+
+    #[test]
+    fn legacy_v1_receipt_cannot_downgrade_a_v2_applied_row() {
+        let (_dir, identity, mut store) = disk_store();
+        seed_winner_loser(&store);
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+        let receipt = store.apply_exact_dedupe(&plan).unwrap().receipt;
+        let mut downgraded = ExactDedupeLegacyReceiptV1 {
+            schema_version: EXACT_DEDUPE_LEGACY_RECEIPT_SCHEMA_VERSION,
+            policy_version: receipt.policy_version.clone(),
+            target_db_identity: receipt.target_db_identity.clone(),
+            plan_digest: receipt.plan_digest.clone(),
+            applied_at: receipt.applied_at.clone(),
+            rows: receipt.rows.clone(),
+            applied_groups: receipt.applied_groups,
+            applied_losers: receipt.applied_losers,
+            receipt_digest: String::new(),
+        };
+        downgraded.receipt_digest = downgraded.compute_digest().unwrap();
+        let parsed = ExactDedupeRestoreReceipt::from_slice(
+            &serde_json::to_vec(&downgraded).expect("serialize downgraded receipt"),
+        )
+        .expect("syntactically valid legacy receipt");
+
+        let error = store
+            .restore_exact_dedupe_versioned(&parsed)
+            .expect_err("legacy receipt must not claim a v2 lineage row");
+        assert!(
+            error.to_string().contains("restore CAS failed"),
+            "unexpected refusal: {error}"
+        );
+        let (archived, lineage_rows): (bool, i64) = store
+            .conn
+            .query_row(
+                "SELECT archived,
+                        (SELECT count(*) FROM exact_dedupe_apply_lineage WHERE loser_id='loser')
+                 FROM memories WHERE id='loser'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(archived);
+        assert_eq!(lineage_rows, 1);
     }
 
     #[test]
@@ -897,6 +1535,168 @@ mod tests {
         (dir, identity, store)
     }
 
+    fn seed_winner_loser(store: &MemoryStore) {
+        insert(store, "winner", "/same", "same text");
+        insert(store, "loser", "/same", "same text");
+        fixture_sql(store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET retention_policy='pinned' WHERE id='winner'",
+                    [],
+                )
+                .unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_rejects_replacement_database_even_when_path_and_rows_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let identity = path.to_string_lossy().into_owned();
+        let original = MemoryStore::open(&identity).unwrap();
+        seed_winner_loser(&original);
+        let plan = original
+            .plan_exact_dedupe(identity.clone(), None, None)
+            .unwrap();
+        assert_ne!(
+            plan.target_db_physical_identity,
+            EXACT_DEDUPE_IN_MEMORY_PHYSICAL_DB_IDENTITY
+        );
+        drop(original);
+
+        let replacement_path = dir.path().join("replacement.db");
+        let replacement_identity = replacement_path.to_string_lossy().into_owned();
+        let replacement = MemoryStore::open(&replacement_identity).unwrap();
+        seed_winner_loser(&replacement);
+        drop(replacement);
+        std::fs::rename(&replacement_path, &path).unwrap();
+
+        let mut substituted = MemoryStore::open_existing_read_write(&identity).unwrap();
+        let error = substituted
+            .apply_exact_dedupe(&plan)
+            .expect_err("replacement DB with matching rows must not satisfy the plan");
+        assert!(
+            error.to_string().contains("physical DB identity mismatch"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = substituted
+            .conn
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_rejects_direct_api_target_path_replacement_after_open_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let identity = path.to_string_lossy().into_owned();
+        let mut store = MemoryStore::open(&identity).unwrap();
+        seed_winner_loser(&store);
+        let plan = store
+            .plan_exact_dedupe(identity.clone(), None, None)
+            .unwrap();
+
+        let replacement_path = dir.path().join("replacement.db");
+        drop(MemoryStore::open(&replacement_path.to_string_lossy()).unwrap());
+        std::fs::rename(&replacement_path, &path).unwrap();
+
+        let error = store
+            .apply_exact_dedupe(&plan)
+            .expect_err("direct API apply must reject a replaced target path before mutation");
+        assert!(
+            error.to_string().contains("identity changed after open"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = store
+            .conn
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_replacement_database_even_when_path_and_revisions_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let identity = path.to_string_lossy().into_owned();
+        let mut original = MemoryStore::open(&identity).unwrap();
+        seed_winner_loser(&original);
+        let plan = original
+            .plan_exact_dedupe(identity.clone(), None, None)
+            .unwrap();
+        let receipt = original.apply_exact_dedupe(&plan).unwrap().receipt;
+        drop(original);
+
+        let replacement_path = dir.path().join("replacement.db");
+        let replacement_identity = replacement_path.to_string_lossy().into_owned();
+        let mut replacement = MemoryStore::open(&replacement_identity).unwrap();
+        seed_winner_loser(&replacement);
+        let replacement_plan = replacement
+            .plan_exact_dedupe(replacement_identity, None, None)
+            .unwrap();
+        replacement.apply_exact_dedupe(&replacement_plan).unwrap();
+        drop(replacement);
+        std::fs::rename(&replacement_path, &path).unwrap();
+
+        let mut substituted = MemoryStore::open_existing_read_write(&identity).unwrap();
+        let error = substituted
+            .restore_exact_dedupe(&receipt)
+            .expect_err("replacement DB with matching restore CAS must not satisfy receipt");
+        assert!(
+            error.to_string().contains("physical DB identity mismatch"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = substituted
+            .conn
+            .query_row(
+                "SELECT archived FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_direct_api_target_path_replacement_after_open_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let identity = path.to_string_lossy().into_owned();
+        let mut store = MemoryStore::open(&identity).unwrap();
+        seed_winner_loser(&store);
+        let plan = store
+            .plan_exact_dedupe(identity.clone(), None, None)
+            .unwrap();
+        let receipt = store.apply_exact_dedupe(&plan).unwrap().receipt;
+
+        let replacement_path = dir.path().join("replacement.db");
+        drop(MemoryStore::open(&replacement_path.to_string_lossy()).unwrap());
+        std::fs::rename(&replacement_path, &path).unwrap();
+
+        let error = store
+            .restore_exact_dedupe(&receipt)
+            .expect_err("direct API restore must reject a replaced target path before mutation");
+        assert!(
+            error.to_string().contains("identity changed after open"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = store
+            .conn
+            .query_row(
+                "SELECT archived FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1);
+    }
+
     #[test]
     fn apply_rejects_wrong_target_and_all_drift_with_batch_rollback() {
         let (_dir, identity, mut store) = disk_store();
@@ -1000,6 +1800,118 @@ mod tests {
                 .unwrap();
             assert_eq!(archived, 0, "apply partially mutated group for {id}");
         }
+    }
+
+    #[test]
+    fn precommit_receipt_sink_failure_rolls_back_exact_dedupe_mutation() {
+        let (_dir, identity, mut store) = disk_store();
+        seed_winner_loser(&store);
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+        let mut sink_called = false;
+        let mut prepared_receipt = None;
+
+        let error = store
+            .apply_exact_dedupe_with_precommit_receipt(&plan, |result| {
+                sink_called = true;
+                assert_eq!(result.applied_losers, 1);
+                assert_eq!(result.receipt.phase, ExactDedupeReceiptPhase::Prepared);
+                prepared_receipt = Some(result.receipt.clone());
+                Err(MemoryError::InvalidArg(
+                    "injected durable receipt sink failure".into(),
+                ))
+            })
+            .expect_err("receipt sink failure must abort the DB commit");
+
+        assert!(sink_called, "precommit receipt sink must be invoked");
+        assert!(
+            error
+                .to_string()
+                .contains("injected durable receipt sink failure"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = store
+            .conn
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            archived, 0,
+            "DB transaction committed without durable receipt"
+        );
+        let prepared_receipt = prepared_receipt.expect("sink observed the exact prepared receipt");
+        assert_eq!(
+            store
+                .classify_exact_dedupe_receipt_db_state(&prepared_receipt)
+                .expect("classify rolled-back receipt"),
+            ExactDedupeReceiptDbState::NotApplied
+        );
+        let restore_error = store
+            .restore_exact_dedupe(&prepared_receipt)
+            .expect_err("prepared receipt must not restore a transaction that rolled back");
+        assert!(
+            restore_error.to_string().contains("restore CAS failed"),
+            "unexpected recovery refusal: {restore_error}"
+        );
+    }
+
+    #[test]
+    fn successful_apply_exposes_prepared_receipt_before_commit_and_committed_after() {
+        let (_dir, identity, mut store) = disk_store();
+        seed_winner_loser(&store);
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+
+        let result = store
+            .apply_exact_dedupe_with_precommit_receipt(&plan, |result| {
+                assert_eq!(result.receipt.phase, ExactDedupeReceiptPhase::Prepared);
+                Ok(())
+            })
+            .expect("apply exact dedupe");
+
+        assert_eq!(result.receipt.phase, ExactDedupeReceiptPhase::Committed);
+        result
+            .receipt
+            .validate()
+            .expect("validate committed receipt");
+        assert_eq!(
+            store
+                .classify_exact_dedupe_receipt_db_state(&result.receipt)
+                .expect("classify committed receipt"),
+            ExactDedupeReceiptDbState::Applied
+        );
+    }
+
+    #[test]
+    fn apply_lineage_preserves_non_object_metadata_and_remains_restorable() {
+        let (_dir, identity, mut store) = disk_store();
+        seed_winner_loser(&store);
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute("UPDATE memories SET metadata='[]' WHERE id='loser'", [])
+                .unwrap();
+        });
+        let plan = store.plan_exact_dedupe(identity, None, None).unwrap();
+
+        let receipt = store.apply_exact_dedupe(&plan).unwrap().receipt;
+        let archived_metadata: String = store
+            .conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived_metadata, "[]");
+
+        store.restore_exact_dedupe(&receipt).unwrap();
+        let restored_metadata: String = store
+            .conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored_metadata, "[]");
     }
 
     #[test]
@@ -1176,6 +2088,13 @@ mod tests {
                     [],
                 )
                 .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET valid_until='2027-01-01T00:00:00Z' WHERE id='loser'",
+                    [],
+                )
+                .unwrap();
         });
         let plan = store
             .plan_exact_dedupe(identity, None, None)
@@ -1186,11 +2105,16 @@ mod tests {
         receipt
             .validate()
             .expect("apply receipt is self-consistent");
+        assert_eq!(receipt.phase, ExactDedupeReceiptPhase::Committed);
         assert_eq!(receipt.applied_losers, 1);
         assert_eq!(receipt.rows.len(), 1);
         assert_eq!(receipt.rows[0].loser_id, "loser");
         assert_eq!(receipt.rows[0].winner_id, "winner");
         assert_eq!(receipt.rows[0].archived_revision, 2);
+        assert_eq!(
+            receipt.rows[0].loser_valid_until_before.as_deref(),
+            Some("2027-01-01T00:00:00Z")
+        );
 
         let archived: i64 = store
             .conn
@@ -1227,6 +2151,60 @@ mod tests {
             .unwrap();
         assert_eq!(still_archived, 1, "failed CAS must not mutate");
 
+        // The caller can recompute a receipt digest, so the durable apply
+        // lineage must also bind the exact valid_until value restore writes.
+        let mut forged_valid_until = receipt.clone();
+        forged_valid_until.rows[0].loser_valid_until_before =
+            Some("2099-12-31T23:59:59Z".to_string());
+        forged_valid_until.receipt_digest.clear();
+        forged_valid_until.receipt_digest = forged_valid_until.compute_digest().unwrap();
+        assert!(store.restore_exact_dedupe(&forged_valid_until).is_err());
+        let (still_archived, valid_until): (i64, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT archived,valid_until FROM memories WHERE id='loser'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(still_archived, 1, "forged restore must not unarchive");
+        assert_eq!(
+            valid_until.as_deref(),
+            Some("2027-01-01T00:00:00Z"),
+            "forged restore must not rewrite valid_until"
+        );
+
+        // The durable lineage timestamp is part of the receipt-bound apply
+        // record too. A row whose timestamp drifted must be neither
+        // classified as applied nor accepted for restore.
+        store
+            .conn
+            .execute(
+                "UPDATE exact_dedupe_apply_lineage SET applied_at='2099-12-31T23:59:59Z' WHERE loser_id='loser'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .classify_exact_dedupe_receipt_db_state(&receipt)
+                .expect("classify timestamp-drifted lineage"),
+            ExactDedupeReceiptDbState::Indeterminate
+        );
+        assert!(store.restore_exact_dedupe(&receipt).is_err());
+        store
+            .conn
+            .execute(
+                "UPDATE exact_dedupe_apply_lineage SET applied_at=?1 WHERE loser_id='loser'",
+                [&receipt.applied_at],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .classify_exact_dedupe_receipt_db_state(&receipt)
+                .expect("classify restored lineage timestamp"),
+            ExactDedupeReceiptDbState::Applied
+        );
+
         let restored = store
             .restore_exact_dedupe(&receipt)
             .expect("restore the untampered receipt");
@@ -1242,6 +2220,15 @@ mod tests {
         assert_eq!(archived, 0);
         assert_eq!(superseded_by, None);
         assert!(store.get("loser").unwrap().is_some());
+        let lineage_rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM exact_dedupe_apply_lineage WHERE loser_id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lineage_rows, 0, "restore must consume apply lineage");
 
         // The receipt is now stale (loser is no longer archived at the
         // recorded revision): repeat restore is a hard refusal, not a
@@ -1257,5 +2244,93 @@ mod tests {
             .unwrap();
         assert_eq!(archived, 0);
         assert_eq!(superseded_by, None);
+    }
+
+    #[test]
+    fn legacy_v1_receipt_deserializes_by_version_and_restores_by_path_cas_only() {
+        let (_dir, identity, mut store) = disk_store();
+        seed_winner_loser(&store);
+        let plan = store
+            .plan_exact_dedupe(identity.clone(), None, None)
+            .expect("build plan");
+        let applied_at = Utc::now().to_rfc3339();
+        let loser = &plan.groups[0].losers[0];
+        fixture_sql(&store, || {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories
+                     SET archived=1,superseded_by=?1,valid_until=?2,
+                         updated_at=?2,revision=revision+1
+                     WHERE id=?3 AND revision=?4",
+                    params![
+                        plan.groups[0].winner.id,
+                        applied_at,
+                        loser.id,
+                        loser.revision
+                    ],
+                )
+                .unwrap();
+        });
+        let mut legacy = ExactDedupeLegacyReceiptV1 {
+            schema_version: EXACT_DEDUPE_LEGACY_RECEIPT_SCHEMA_VERSION,
+            policy_version: EXACT_DEDUPE_POLICY.to_string(),
+            target_db_identity: identity.clone(),
+            plan_digest: plan.plan_digest.clone(),
+            applied_at,
+            rows: vec![ExactDedupeReceiptRow {
+                winner_id: plan.groups[0].winner.id.clone(),
+                loser_id: loser.id.clone(),
+                loser_path: loser.path.clone(),
+                loser_valid_until_before: None,
+                before_revision: loser.revision,
+                archived_revision: loser.revision + 1,
+            }],
+            applied_groups: 1,
+            applied_losers: 1,
+            receipt_digest: String::new(),
+        };
+        legacy.receipt_digest = legacy.compute_digest().unwrap();
+
+        let mut legacy_value = serde_json::to_value(&legacy).unwrap();
+        legacy_value["target_db_physical_identity"] = serde_json::json!("unix:pretend:identity");
+        assert!(
+            serde_json::from_value::<ExactDedupeLegacyReceiptV1>(legacy_value).is_err(),
+            "v1 restore must not pretend the legacy receipt carried physical identity"
+        );
+
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+        let parsed = ExactDedupeRestoreReceipt::from_slice(&legacy_bytes)
+            .expect("v1 receipt must parse through the version-aware path");
+        match &parsed {
+            ExactDedupeRestoreReceipt::V1LegacyPathCas(v1) => {
+                assert_eq!(v1.target_db_identity, identity);
+            }
+            ExactDedupeRestoreReceipt::V2(_) => panic!("v1 receipt parsed as v2"),
+        }
+
+        store
+            .restore_exact_dedupe_versioned(&parsed)
+            .expect("legacy v1 path/CAS receipt must restore");
+        let (archived, superseded_by): (i64, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT archived, superseded_by FROM memories WHERE id='loser'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(archived, 0);
+        assert_eq!(superseded_by, None);
+
+        let mut tampered = legacy;
+        tampered.applied_at.push('Z');
+        let tampered_bytes = serde_json::to_vec(&tampered).unwrap();
+        let error = ExactDedupeRestoreReceipt::from_slice(&tampered_bytes)
+            .expect_err("v1 receipt digest validation must reject tampering");
+        assert!(
+            error.to_string().contains("legacy receipt digest mismatch"),
+            "unexpected v1 digest refusal: {error}"
+        );
     }
 }

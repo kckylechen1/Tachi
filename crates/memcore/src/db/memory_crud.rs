@@ -23,8 +23,10 @@ pub use access::{
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{
-    fetch_by_ids, find_active_wiki_entry_by_path_or_topic, find_exact_path_text_id, get_all,
-    list_by_path, list_by_path_recent, list_wiki_duplicate_candidates,
+    fetch_by_ids, find_active_wiki_entry_by_path, find_exact_path_text_id, get_all,
+    is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
+    list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
+    list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
@@ -304,6 +306,7 @@ fn merge_into_jaccard_candidate(
              WHERE memories_fts MATCH simple_query(?1)
                AND m.archived = 0 AND m.superseded_by IS NULL
                AND m.id != ?2
+               AND m.id NOT LIKE 'wiki-rem:%'
              LIMIT 5",
         )?;
         let rows = stmt.query_map(params![safe_query, entry.id], |r| {
@@ -750,8 +753,10 @@ pub(crate) fn upsert(
 }
 
 const RESERVED_REFERENCE_KEYS: [&str; 2] = ["evidence_refs_v1", "source_refs"];
+const RESERVED_REM_KEY: &str = "rem";
+const RESERVED_WIKI_LOG_KEY: &str = "wiki_log";
 
-fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
+fn strip_untrusted_reference_metadata(metadata: &Value) -> Value {
     let Some(mut object) = metadata.as_object().cloned() else {
         return metadata.clone();
     };
@@ -759,6 +764,15 @@ fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
         object.remove(key);
     }
     Value::Object(object)
+}
+
+fn strip_untrusted_reserved_metadata(metadata: &Value) -> Value {
+    let mut sanitized = strip_untrusted_reference_metadata(metadata);
+    if let Some(object) = sanitized.as_object_mut() {
+        object.remove(RESERVED_REM_KEY);
+        object.remove(RESERVED_WIKI_LOG_KEY);
+    }
+    sanitized
 }
 
 fn read_existing_metadata(
@@ -782,6 +796,9 @@ fn merge_ordinary_reserved_metadata(
     incoming: &Value,
 ) -> Result<Value, MemoryError> {
     let mut sanitized = strip_untrusted_reserved_metadata(incoming);
+    // REM state is written only by the dedicated insert-once operation and
+    // source-marker seams. Ordinary upsert may preserve an existing value
+    // below, but it may never mint or replace one from its input payload.
     let Some(existing) = read_existing_metadata(tx, entry_id)? else {
         return Ok(sanitized);
     };
@@ -790,6 +807,7 @@ fn merge_ordinary_reserved_metadata(
     };
     let reserved = RESERVED_REFERENCE_KEYS
         .into_iter()
+        .chain([RESERVED_REM_KEY, RESERVED_WIKI_LOG_KEY])
         .filter_map(|key| existing_object.get(key).cloned().map(|value| (key, value)))
         .collect::<Vec<_>>();
     if reserved.is_empty() {
@@ -910,9 +928,41 @@ impl crate::MemoryStore {
                     vec_available,
                     Some(metadata_patch),
                     mutations,
+                    false,
                 )
             },
         )
+    }
+
+    /// Dedicated internal writer for the reserved Wiki operation-log row.
+    /// Ordinary/public upsert cannot mint this identity or visibility marker.
+    pub fn upsert_wiki_operation_log(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        if entry.id != "wiki-operation-log"
+            || entry.path != "/wiki/_log"
+            || !entry.topic.eq_ignore_ascii_case("wiki_log")
+        {
+            return Err(MemoryError::InvalidArg(
+                "trusted Wiki log write requires the reserved operation-log identity".to_string(),
+            ));
+        }
+        let db_label = self.db_label.clone();
+        let vec_available = self.vec_available;
+        let authorization = self.reserved_reference_write.clone();
+        crate::db::retry_memory_locked("upsert_wiki_operation_log", &db_label, || {
+            let _authorization = crate::db::authorize_reserved_reference_write(&authorization)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut trusted = entry.clone();
+            trusted.metadata = merge_ordinary_reserved_metadata(&tx, &entry.id, &entry.metadata)?;
+            let object = trusted.metadata.as_object_mut().ok_or_else(|| {
+                MemoryError::InvalidArg("Wiki operation-log metadata must be an object".to_string())
+            })?;
+            object.insert(RESERVED_WIKI_LOG_KEY.to_string(), Value::Bool(true));
+            upsert_prepared_within_tx(&tx, &trusted, vec_available, None, false, true)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 }
 
@@ -963,7 +1013,11 @@ fn merge_validated_reference_metadata(
         .cloned()
         .unwrap_or_default();
     for (key, value) in metadata_patch {
-        if key != "evidence_refs_v1" && key != "source_refs" {
+        if key != "evidence_refs_v1"
+            && key != "source_refs"
+            && key != RESERVED_REM_KEY
+            && key != RESERVED_WIKI_LOG_KEY
+        {
             merged.insert(key.clone(), value.clone());
         }
     }
@@ -972,6 +1026,16 @@ fn merge_validated_reference_metadata(
             return Err(MemoryError::InvalidArg(format!(
                 "trusted metadata removal cannot delete reserved reference key '{key}'"
             )));
+        }
+        if *key == RESERVED_REM_KEY {
+            return Err(MemoryError::InvalidArg(
+                "trusted metadata removal cannot delete reserved REM state".to_string(),
+            ));
+        }
+        if *key == RESERVED_WIKI_LOG_KEY {
+            return Err(MemoryError::InvalidArg(
+                "trusted metadata removal cannot delete reserved Wiki log state".to_string(),
+            ));
         }
         merged.remove(*key);
     }
@@ -1030,31 +1094,14 @@ fn upsert_with_validated_reference_mutations(
         metadata_patch,
         metadata_removals,
         mutations,
+        true,
     )?;
     tx.commit()?;
     Ok(result)
 }
 
-pub(crate) fn upsert_with_validated_reference_mutations_within_tx(
-    tx: &rusqlite::Transaction<'_>,
-    entry: &MemoryEntry,
-    vec_available: bool,
-    idless_identity: Option<&str>,
-    metadata_patch: &Map<String, Value>,
-    mutations: &[ValidatedReferenceMutation],
-) -> Result<(IdlessUpsertResult, Value), MemoryError> {
-    upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
-        tx,
-        entry,
-        vec_available,
-        idless_identity,
-        metadata_patch,
-        &[],
-        mutations,
-    )
-}
-
-fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+#[allow(clippy::too_many_arguments)] // fixed transaction seam; grouping these trust channels would blur them
+pub(crate) fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
     tx: &rusqlite::Transaction<'_>,
     entry: &MemoryEntry,
     vec_available: bool,
@@ -1062,6 +1109,7 @@ fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
     metadata_patch: &Map<String, Value>,
     metadata_removals: &[&str],
     mutations: &[ValidatedReferenceMutation],
+    allow_near_duplicate_merge: bool,
 ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let mut merged_entry = entry.clone();
     merged_entry.metadata = merge_validated_reference_metadata(
@@ -1071,7 +1119,14 @@ fn upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
         metadata_removals,
         mutations,
     )?;
-    let result = upsert_prepared_within_tx(tx, &merged_entry, vec_available, idless_identity)?;
+    let result = upsert_prepared_within_tx(
+        tx,
+        &merged_entry,
+        vec_available,
+        idless_identity,
+        allow_near_duplicate_merge,
+        false,
+    )?;
     Ok((result, merged_entry.metadata))
 }
 
@@ -1146,7 +1201,8 @@ mod reserved_reference_tests {
                     "ref": "#999",
                     "captured_at": "2026-07-25T00:00:00Z"
                 }],
-                "source_refs": [{ "target_ref": "#998" }]
+                "source_refs": [{ "target_ref": "#998" }],
+                "wiki_log": true
             }),
         );
         store.upsert(&hostile).expect("ordinary create");
@@ -1155,6 +1211,62 @@ mod reserved_reference_tests {
         assert_eq!(stored.metadata["kept"], json!(true));
         assert!(stored.metadata.get("evidence_refs_v1").is_none());
         assert!(stored.metadata.get("source_refs").is_none());
+        assert!(stored.metadata.get("wiki_log").is_none());
+    }
+
+    #[test]
+    fn only_trusted_wiki_log_seam_can_mint_log_authority() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("wiki.db");
+        let mut store = crate::MemoryStore::open_with_label(&path.to_string_lossy(), "wiki")
+            .expect("open Wiki store");
+        let mut log = entry("wiki-operation-log", json!({"caller": "internal"}));
+        log.path = "/wiki/_log".to_string();
+        log.topic = "wiki_log".to_string();
+        assert!(store.upsert(&log).is_err());
+        store
+            .upsert_wiki_operation_log(&log)
+            .expect("trusted Wiki log write");
+        let stored = store.get(&log.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["wiki_log"], json!(true));
+
+        let mut hostile_update = log.clone();
+        hostile_update.metadata = json!({"wiki_log": false, "caller": "public"});
+        assert!(store.upsert(&hostile_update).is_err());
+        let preserved = store.get(&log.id).unwrap().unwrap();
+        assert_eq!(preserved.metadata["wiki_log"], json!(true));
+        assert_eq!(preserved.metadata["caller"], json!("internal"));
+    }
+
+    #[test]
+    fn ordinary_store_writes_reject_canonical_wiki_log_path_aliases() {
+        let aliases = ["/wiki//_log", "/wiki//_log/spoof", "/Wiki/_log"];
+        for (index, alias) in aliases.into_iter().enumerate() {
+            let (_dir, mut store) = open_store();
+            let mut candidate = entry(&format!("ordinary-wiki-log-alias-{index}"), json!({}));
+            candidate.path = alias.to_string();
+
+            let upsert_error = store
+                .upsert(&candidate)
+                .expect_err("ordinary upsert must reject a normalized Wiki log path alias");
+            assert!(
+                upsert_error
+                    .to_string()
+                    .contains("Wiki operation-log identity is reserved"),
+                "unexpected upsert refusal for {alias}: {upsert_error}"
+            );
+
+            let insert_error = store
+                .insert_if_absent(&candidate)
+                .expect_err("insert-if-absent must reject a normalized Wiki log path alias");
+            assert!(
+                insert_error
+                    .to_string()
+                    .contains("Wiki operation-log identity is reserved"),
+                "unexpected insert refusal for {alias}: {insert_error}"
+            );
+            assert!(store.get(&candidate.id).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -1177,7 +1289,12 @@ mod reserved_reference_tests {
                     "ref": "#999",
                     "captured_at": "2026-07-25T00:00:00Z"
                 }],
-                "source_refs": ["#998"]
+                "source_refs": ["#998"],
+                "rem": {
+                    "processed": 1,
+                    "processed_revision": 1,
+                    "processed_by": "wiki-rem:forged"
+                }
             }),
         );
         store.upsert(&hostile).expect("ordinary hostile update");
@@ -1186,6 +1303,44 @@ mod reserved_reference_tests {
         assert_eq!(refs(&stored), vec!["#100"]);
         assert_eq!(stored.metadata["kept"], json!(true));
         assert!(stored.metadata.get("source_refs").is_none());
+        assert!(stored.metadata.get("rem").is_none());
+    }
+
+    #[test]
+    fn ordinary_store_upsert_cannot_mint_or_replace_reserved_rem_state() {
+        let (_dir, mut store) = open_store();
+        let forged = entry(
+            "reserved-rem-boundary",
+            json!({"rem": {"processed": 0, "processed_by": "forged"}}),
+        );
+        store.upsert(&forged).expect("ordinary insert");
+        let inserted = store.get(&forged.id).unwrap().unwrap();
+        assert!(inserted.metadata.get("rem").is_none());
+
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[(inserted.id.clone(), inserted.revision)],
+                "2026-07-31T01:00:00Z",
+                "wiki-rem:trusted",
+            )
+            .expect("trusted REM marker");
+        let hostile = entry(
+            "reserved-rem-boundary",
+            json!({
+                "ordinary": true,
+                "rem": {"processed": 0, "processed_by": "replaced"}
+            }),
+        );
+        store.upsert(&hostile).expect("ordinary hostile update");
+
+        let stored = store.get(&hostile.id).unwrap().unwrap();
+        assert_eq!(stored.metadata["ordinary"], true);
+        assert_eq!(stored.metadata["rem"]["processed"], 1);
+        assert_eq!(stored.metadata["rem"]["processed_by"], "wiki-rem:trusted");
+        assert_eq!(
+            stored.metadata["rem"]["processed_revision"],
+            inserted.revision
+        );
     }
 
     #[test]
@@ -1604,7 +1759,12 @@ mod reserved_reference_tests {
                     "ref": "#999",
                     "captured_at": "2026-07-25T00:00:00Z"
                 }],
-                "source_refs": ["#998"]
+                "source_refs": ["#998"],
+                "rem": {
+                    "processed": 1,
+                    "processed_revision": 1,
+                    "processed_by": "wiki-rem:forged"
+                }
             }),
         );
         assert_eq!(
@@ -1615,6 +1775,7 @@ mod reserved_reference_tests {
         assert_eq!(stored.metadata["kept"], json!(true));
         assert!(stored.metadata.get("evidence_refs_v1").is_none());
         assert!(stored.metadata.get("source_refs").is_none());
+        assert!(stored.metadata.get("rem").is_none());
     }
 
     #[test]
@@ -2192,7 +2353,7 @@ pub(crate) fn insert_if_absent(
     entry: &MemoryEntry,
     vec_available: bool,
 ) -> Result<InsertMemoryResult, MemoryError> {
-    insert_if_absent_with_reference_mutations(conn, entry, vec_available, None, &[])
+    insert_if_absent_with_reference_mutations(conn, entry, vec_available, None, &[], false)
 }
 
 fn insert_if_absent_with_reference_mutations(
@@ -2201,6 +2362,7 @@ fn insert_if_absent_with_reference_mutations(
     vec_available: bool,
     metadata_patch: Option<&Map<String, Value>>,
     mutations: &[ValidatedReferenceMutation],
+    allow_reserved_rem: bool,
 ) -> Result<InsertMemoryResult, MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let result = insert_if_absent_with_reference_mutations_within_tx(
@@ -2209,6 +2371,7 @@ fn insert_if_absent_with_reference_mutations(
         vec_available,
         metadata_patch,
         mutations,
+        allow_reserved_rem,
     )?;
     tx.commit()?;
     Ok(result)
@@ -2221,7 +2384,15 @@ pub(crate) fn insert_if_absent_within_tx(
     entry: &MemoryEntry,
     vec_available: bool,
 ) -> Result<InsertMemoryResult, MemoryError> {
-    insert_if_absent_with_reference_mutations_within_tx(tx, entry, vec_available, None, &[])
+    insert_if_absent_with_reference_mutations_within_tx(tx, entry, vec_available, None, &[], false)
+}
+
+pub(crate) fn insert_rem_operation_if_absent_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+) -> Result<InsertMemoryResult, MemoryError> {
+    insert_if_absent_with_reference_mutations_within_tx(tx, entry, vec_available, None, &[], true)
 }
 
 fn insert_if_absent_with_reference_mutations_within_tx(
@@ -2230,6 +2401,7 @@ fn insert_if_absent_with_reference_mutations_within_tx(
     vec_available: bool,
     metadata_patch: Option<&Map<String, Value>>,
     mutations: &[ValidatedReferenceMutation],
+    allow_reserved_rem: bool,
 ) -> Result<InsertMemoryResult, MemoryError> {
     if entry.id.trim().is_empty() || entry.id.starts_with("anchor:") {
         return Err(MemoryError::InvalidArg(
@@ -2237,6 +2409,15 @@ fn insert_if_absent_with_reference_mutations_within_tx(
         ));
     }
     let path = crate::path_router::normalize_path(&entry.path);
+    if entry.id == "wiki-operation-log"
+        || path == "/wiki/_log"
+        || path.starts_with("/wiki/_log/")
+        || entry.topic.eq_ignore_ascii_case("wiki_log")
+    {
+        return Err(MemoryError::InvalidArg(
+            "Wiki operation-log identity is reserved; use the trusted Wiki log seam".to_string(),
+        ));
+    }
     let source = MemorySource::parse_or_external(&entry.source);
     let category = MemoryCategory::normalize(&entry.category);
     let scope = MemoryScope::normalize(&entry.scope);
@@ -2274,6 +2455,7 @@ fn insert_if_absent_with_reference_mutations_within_tx(
         Some(metadata_patch) => {
             merge_validated_reference_metadata(tx, &entry.id, metadata_patch, &[], mutations)?
         }
+        None if allow_reserved_rem => strip_untrusted_reference_metadata(&entry.metadata),
         None => strip_untrusted_reserved_metadata(&entry.metadata),
     };
     let path = crate::types::apply_location_relocation(&path, &entry.location, &mut metadata);
@@ -2412,7 +2594,7 @@ pub(crate) fn upsert_within_tx(
 ) -> Result<IdlessUpsertResult, MemoryError> {
     let mut sanitized = entry.clone();
     sanitized.metadata = merge_ordinary_reserved_metadata(tx, &entry.id, &entry.metadata)?;
-    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity)
+    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity, true, false)
 }
 
 fn upsert_prepared_within_tx(
@@ -2420,10 +2602,32 @@ fn upsert_prepared_within_tx(
     entry: &MemoryEntry,
     vec_available: bool,
     idless_identity: Option<&str>,
+    allow_near_duplicate_merge: bool,
+    allow_wiki_operation_log: bool,
 ) -> Result<IdlessUpsertResult, MemoryError> {
+    // `wiki-rem:` rows are deterministic insert-once operation records. They
+    // are created only through the REM claim + insert_if_absent transaction;
+    // allowing ordinary ON CONFLICT upsert would let any caller rewrite the
+    // recovery identity, producer receipt, or active winner in place.
+    if crate::namespace::is_reserved_wiki_rem_id(&entry.id) {
+        return Err(MemoryError::InvalidArg(format!(
+            "id '{}' is in the reserved 'wiki-rem:' namespace; use the REM insert-once operation seam, not upsert",
+            entry.id
+        )));
+    }
+    let path = crate::path_router::normalize_path(&entry.path);
+    if !allow_wiki_operation_log
+        && (entry.id == "wiki-operation-log"
+            || path == "/wiki/_log"
+            || path.starts_with("/wiki/_log/")
+            || entry.topic.eq_ignore_ascii_case("wiki_log"))
+    {
+        return Err(MemoryError::InvalidArg(
+            "Wiki operation-log identity is reserved; use the trusted Wiki log seam".to_string(),
+        ));
+    }
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.
-    let path = crate::path_router::normalize_path(&entry.path);
     let source = MemorySource::parse_or_external(&entry.source);
     let category = MemoryCategory::normalize(&entry.category);
     let scope = MemoryScope::normalize(&entry.scope);
@@ -2474,7 +2678,7 @@ fn upsert_prepared_within_tx(
         |r| r.get::<_, i64>(0),
     )? == 0;
 
-    if is_new && idless_identity.is_none() {
+    if allow_near_duplicate_merge && is_new && idless_identity.is_none() {
         if let Some(cand_id) = merge_into_jaccard_candidate(tx, entry, importance, &write_time_utc)?
         {
             // Write this entry as superseded by the candidate
@@ -2620,7 +2824,7 @@ fn upsert_prepared_within_tx(
     // which origin/main's `upsert()` always deduped via this same
     // FTS+Jaccard search. Run it now, after the atomic decision, so the two
     // mechanisms never compete over the same row.
-    if idless_identity.is_some() {
+    if allow_near_duplicate_merge && idless_identity.is_some() {
         if let Some(cand_id) = merge_into_jaccard_candidate(tx, entry, importance, &write_time_utc)?
         {
             // `entry`'s row just won the identity race and is currently the
@@ -3117,6 +3321,7 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
     if trimmed.is_empty() {
         return Err(MemoryError::InvalidArg("empty ID".to_string()));
     }
+    refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
 
     let tx = conn.transaction()?;
 
@@ -3156,7 +3361,17 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
     Ok(deleted)
 }
 
+fn refuse_reserved_rem_operation_mutation(id: &str, action: &str) -> Result<(), MemoryError> {
+    if crate::namespace::is_reserved_wiki_rem_id(id) {
+        return Err(MemoryError::InvalidArg(format!(
+            "invariant: reserved REM operation {id} cannot be {action} through a generic lifecycle seam"
+        )));
+    }
+    Ok(())
+}
+
 pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
+    refuse_reserved_rem_operation_mutation(id, "archived")?;
     let now = now_utc_iso();
     conn.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0",
@@ -3170,6 +3385,7 @@ pub fn archive_memory_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
+    refuse_reserved_rem_operation_mutation(id, "archived")?;
     let now = now_utc_iso();
     conn.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0 AND revision = ?3",
@@ -3183,6 +3399,7 @@ pub fn restore_archived_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
+    refuse_reserved_rem_operation_mutation(id, "restored")?;
     let now = now_utc_iso();
     conn.execute(
         "UPDATE memories SET archived = 0, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 1 AND revision = ?3",
@@ -3201,6 +3418,7 @@ pub fn supersede_memory(
     if id == superseded_by {
         return Ok(false);
     }
+    refuse_reserved_rem_operation_mutation(id, "superseded")?;
     let now = now_utc_iso();
     // Closing valid_until at supersession time turns the superseded row into a
     // point-in-time-recoverable version: `as_of` before `now` still returns it,

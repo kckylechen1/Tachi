@@ -14,29 +14,27 @@ pub(super) fn find_related_by_entities(
     entities: &[String],
     exclude_id: &str,
     limit: usize,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, String> {
     let entity_set: HashSet<String> = entities
         .iter()
         .map(|entity| entity.trim().to_ascii_lowercase())
         .filter(|entity| !entity.is_empty())
         .collect();
     if entity_set.is_empty() || limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let entries = list_related_candidates(server, project, 5000).unwrap_or_default();
+    let entries = list_related_candidates(server, project, 5000)?;
 
-    let mut related = entries
-        .into_iter()
-        .filter(is_user_facing_wiki_entry)
-        .filter(|entry| entry.id != exclude_id)
-        .filter(|entry| {
-            entry
-                .entities
-                .iter()
-                .any(|entity| entity_set.contains(&entity.trim().to_ascii_lowercase()))
-        })
-        .collect::<Vec<_>>();
+    let mut related = Vec::new();
+    for entry in entries {
+        if entry.id != exclude_id
+            && is_ordinary_related_wiki_entry(&entry)?
+            && entry_shares_normalized_entity(&entry, &entity_set)
+        {
+            related.push(entry);
+        }
+    }
     related.sort_by(|a, b| {
         b.importance
             .partial_cmp(&a.importance)
@@ -46,12 +44,33 @@ pub(super) fn find_related_by_entities(
     });
 
     let mut seen = HashSet::new();
-    related
+    Ok(related
         .into_iter()
         .filter(|entry| seen.insert(entry.id.clone()))
         .take(limit)
         .map(|entry| compact_entry(&entry))
-        .collect()
+        .collect())
+}
+
+pub(super) fn entry_shares_normalized_entity(
+    entry: &MemoryEntry,
+    normalized_entities: &HashSet<String>,
+) -> bool {
+    entry
+        .entities
+        .iter()
+        .any(|entity| normalized_entities.contains(&entity.trim().to_ascii_lowercase()))
+}
+
+/// Related edges from ordinary Wiki ingest may target only the same
+/// user-facing, default-retrievable corpus. Drafts and REM operations are
+/// intentionally excluded even while their rows are active in SQLite.
+pub(super) fn is_ordinary_related_wiki_entry(entry: &MemoryEntry) -> Result<bool, String> {
+    Ok(is_user_facing_wiki_entry(entry)
+        && entry.path != "/wiki/drafts"
+        && !entry.path.starts_with("/wiki/drafts/")
+        && !memcore::is_reserved_wiki_rem_id(&entry.id)
+        && wiki_entry_matches_lifecycle_scope(entry, None)?)
 }
 
 pub(super) fn list_related_candidates(
@@ -65,14 +84,7 @@ pub(super) fn list_related_candidates(
 }
 
 pub(super) fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
-    entry.path != "/wiki/_log"
-        && !entry.path.contains("/recall-cache/")
-        && entry.source != "foundry_recall_rerank_cache"
-        && !entry
-            .metadata
-            .get("wiki_log")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    memcore::db::is_user_facing_wiki_entry(entry)
 }
 
 #[derive(Debug, Clone)]
@@ -145,9 +157,11 @@ pub(super) fn with_wiki_store_read<T>(
     action: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     match store_ref {
-        StoreRef::BoundProject => server.with_project_store_read(action),
-        StoreRef::NamedProject { project } => server.with_named_project_store_read(project, action),
-        StoreRef::LegacyGlobal => server.with_global_store_read(action),
+        StoreRef::BoundProject => server.with_project_store_read_identity_checked(action),
+        StoreRef::NamedProject { project } => {
+            server.with_named_project_store_read_identity_checked(project, action)
+        }
+        StoreRef::LegacyGlobal => server.with_global_store_read_identity_checked(action),
     }
 }
 
@@ -157,9 +171,11 @@ pub(super) fn with_wiki_store<T>(
     action: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     match store_ref {
-        StoreRef::BoundProject => server.with_project_store(action),
-        StoreRef::NamedProject { project } => server.with_named_project_store(project, action),
-        StoreRef::LegacyGlobal => server.with_global_store(action),
+        StoreRef::BoundProject => server.with_project_store_identity_checked(action),
+        StoreRef::NamedProject { project } => {
+            server.with_named_project_store_identity_checked(project, action)
+        }
+        StoreRef::LegacyGlobal => server.with_global_store_identity_checked(action),
     }
 }
 
@@ -172,9 +188,12 @@ pub(crate) fn list_wiki_entries_for_plan(
     let mut entries = Vec::new();
     for store_ref in stores_for_wiki_plan(server, plan) {
         let listed = with_wiki_store_read(server, &store_ref, |store| {
-            store
-                .list_by_path(path_prefix, limit, false)
-                .map_err(|error| format!("wiki list: {error}"))
+            let listed = store.list_user_facing_wiki_entries(
+                path_prefix,
+                limit,
+                matches!(plan, WikiReadPlan::MigrationAudit),
+            );
+            listed.map_err(|error| format!("wiki list: {error}"))
         });
         let listed = listed?;
         entries.extend(

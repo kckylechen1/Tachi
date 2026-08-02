@@ -40,7 +40,7 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
         tier: "raw".to_string(),
     };
 
-    let append_result = server.with_named_project_store("wiki", |store| {
+    let append_result = server.with_named_project_store_identity_checked("wiki", |store| {
         let mut entry = entry.clone();
         if let Some(existing) = store
             .get("wiki-operation-log")
@@ -50,12 +50,12 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
             entry.revision = existing.revision;
         }
         store
-            .upsert(&entry)
+            .upsert_wiki_operation_log(&entry)
             .map_err(|e| format!("wiki_log upsert: {e}"))
     });
 
     if append_result.is_err() {
-        if let Err(error) = server.with_global_store(|store| {
+        if let Err(error) = server.with_global_store_identity_checked(|store| {
             let mut entry = entry;
             entry.metadata = json!({"wiki_log": true, "fallback_db": "global"});
             if let Some(existing) = store
@@ -66,7 +66,7 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
                 entry.revision = existing.revision;
             }
             store
-                .upsert(&entry)
+                .upsert_wiki_operation_log(&entry)
                 .map_err(|e| format!("wiki_log fallback upsert: {e}"))
         }) {
             tracing::warn!(

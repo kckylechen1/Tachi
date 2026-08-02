@@ -3,10 +3,34 @@ use crate::memory_search_ops::contradiction::apply_auto_contradiction_detection;
 use crate::{DbScope, MemoryServer};
 use memcore::{db::IdlessUpsertResult, MemoryEntry, MemoryStore};
 
+pub(super) struct WikiProjectionWriteResult {
+    pub upsert: IdlessUpsertResult,
+    pub duplicates_superseded: usize,
+    pub previous_revision: Option<i64>,
+}
+
 pub(super) struct AtomicReferenceWrite {
     pub metadata_patch: serde_json::Map<String, serde_json::Value>,
     pub metadata_removals: Vec<&'static str>,
     pub mutations: Vec<memcore::db::ValidatedReferenceMutation>,
+}
+
+fn attach_trusted_model_invocation_to_patch(
+    metadata_patch: &mut serde_json::Map<String, serde_json::Value>,
+    invocation: serde_json::Value,
+) -> Result<(), memcore::MemoryError> {
+    let provenance = metadata_patch
+        .entry("provenance".to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            memcore::MemoryError::InvalidArg(
+                "Wiki projection provenance must be an object before receipt preservation"
+                    .to_string(),
+            )
+        })?;
+    provenance.insert("model_invocation".to_string(), invocation);
+    Ok(())
 }
 
 /// Return the id of an active row with the same normalized path and exact
@@ -169,6 +193,154 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
         server.with_named_project_store(project_name, |store| persist(store, Some(project_name)))
     } else {
         server.with_store_for_scope(target_db, |store| persist(store, None))
+    }
+}
+
+/// Persist the canonical Wiki/Guide row, every duplicate supersession claim,
+/// and every corresponding graph edge under one `BEGIN IMMEDIATE` writer
+/// snapshot. A failed scan, claim, or edge write rolls the canonical upsert
+/// back with the rest of the projection.
+pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
+    server: &MemoryServer,
+    entry: &mut MemoryEntry,
+    idless_identity: Option<&str>,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    evidence_write: &AtomicReferenceWrite,
+) -> Result<WikiProjectionWriteResult, String> {
+    let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
+        let (result, metadata, duplicates_superseded, previous_revision) = store
+            .with_immutable_supersession_transaction(|projection| {
+                let active = projection.find_active_wiki_entry_by_path(&entry.path)?;
+                if idless_identity.is_none() {
+                    if active.as_ref().map(|winner| winner.id.as_str()) != Some(entry.id.as_str()) {
+                        return Err(memcore::MemoryError::InvalidArg(format!(
+                            "wiki projection canonical changed before commit: expected {}",
+                            entry.id
+                        )));
+                    }
+                }
+                // Update lineage belongs to the same writer snapshot as the
+                // mutation. A facade pre-read can be stale by the time this
+                // BEGIN IMMEDIATE transaction runs, and an id-less writer can
+                // discover a predecessor created after that pre-read. Treat
+                // both fields as transaction-owned: erase caller/inherited
+                // values first, then stamp the immediate predecessor whenever
+                // this snapshot contains one.
+                let metadata = entry.metadata.as_object_mut().ok_or_else(|| {
+                    memcore::MemoryError::InvalidArg(
+                        "Wiki projection metadata must be an object".to_string(),
+                    )
+                })?;
+                metadata.remove("wiki_update_of");
+                metadata.remove("wiki_previous_revision");
+                let mut metadata_patch = evidence_write.metadata_patch.clone();
+                metadata_patch.remove("wiki_update_of");
+                metadata_patch.remove("wiki_previous_revision");
+                let predecessor = active
+                    .as_ref()
+                    .map(|active| (active.id.clone(), active.revision));
+                let previous_revision = predecessor.as_ref().map(|(id, revision)| {
+                    metadata.insert("wiki_update_of".to_string(), serde_json::json!(id));
+                    metadata.insert(
+                        "wiki_previous_revision".to_string(),
+                        serde_json::json!(revision),
+                    );
+                    metadata_patch.insert("wiki_update_of".to_string(), serde_json::json!(id));
+                    metadata_patch.insert(
+                        "wiki_previous_revision".to_string(),
+                        serde_json::json!(revision),
+                    );
+                    *revision
+                });
+                // The candidate query is corpus-bound by the target path:
+                // Guide rows compete only with Guide rows, ordinary Wiki rows
+                // only with ordinary Wiki rows. Both use the same writer
+                // snapshot so an id-less same-path race cannot leave two
+                // active winners.
+                let parent_path = crate::copilot_ops::wiki_parent_path(&entry.path);
+                let candidates = projection.list_all_wiki_duplicate_candidates(
+                    &entry.path,
+                    &entry.topic,
+                    &parent_path,
+                )?;
+                let duplicates = candidates
+                    .into_iter()
+                    .filter(|candidate| {
+                        candidate.id != entry.id
+                            && memcore::db::is_user_facing_wiki_entry(candidate)
+                            && crate::copilot_ops::is_wiki_projection_duplicate(
+                                candidate,
+                                &entry.path,
+                                &entry.topic,
+                                &entry.text,
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                if active.as_ref().map(|winner| winner.id.as_str()) != Some(entry.id.as_str()) {
+                    if let Some(invocation) = duplicates.iter().find_map(|candidate| {
+                        crate::provenance::trusted_existing_model_invocation(&candidate.metadata)
+                    }) {
+                        attach_trusted_model_invocation_to_patch(&mut metadata_patch, invocation)?;
+                    }
+                }
+                let (result, metadata) = projection
+                    .upsert_with_validated_reference_mutations_and_metadata_removals(
+                        entry,
+                        idless_identity,
+                        &metadata_patch,
+                        &evidence_write.metadata_removals,
+                        &evidence_write.mutations,
+                        false,
+                    )?;
+                let (winner_id, committed_previous_revision) = match &result {
+                    IdlessUpsertResult::Saved => (entry.id.as_str(), previous_revision),
+                    // A replay can discover stale active duplicates even when
+                    // its path+text identity already has a winner. The
+                    // duplicate response means no canonical content write,
+                    // not that projection reconciliation may be skipped.
+                    IdlessUpsertResult::Duplicate { id } => (id.as_str(), None),
+                };
+
+                let created_at = chrono::Utc::now().to_rfc3339();
+                let mut changed = 0usize;
+                for candidate in duplicates
+                    .into_iter()
+                    .filter(|candidate| candidate.id != winner_id)
+                {
+                    projection.claim_immutable_supersession(&candidate.id, winner_id)?;
+                    projection.add_edge(&crate::copilot_ops::wiki_projection_supersedes_edge(
+                        winner_id,
+                        &candidate.id,
+                        &entry.path,
+                        &entry.topic,
+                        &created_at,
+                    ))?;
+                    changed += 1;
+                }
+                Ok((result, metadata, changed, committed_previous_revision))
+            })
+            .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
+        entry.metadata = metadata;
+        Ok(WikiProjectionWriteResult {
+            upsert: result,
+            duplicates_superseded,
+            previous_revision,
+        })
+    };
+    if let Some(project_name) = named_project {
+        server.with_named_project_store_identity_checked(project_name, |store| {
+            persist(store, Some(project_name))
+        })
+    } else {
+        match target_db {
+            DbScope::Global => {
+                server.with_global_store_identity_checked(|store| persist(store, None))
+            }
+            DbScope::Project => {
+                server.with_project_store_identity_checked(|store| persist(store, None))
+            }
+        }
     }
 }
 

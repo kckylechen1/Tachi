@@ -165,10 +165,11 @@ pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_kanban_entry, is_namespace_search_noise, is_recall_cache_entry,
-    is_wiki_entry, path_contains_recall_cache, path_in_namespace,
+    is_reserved_wiki_rem_id, is_wiki_entry, path_contains_recall_cache, path_in_namespace,
     path_prefix_opts_into_continuity_projection, path_prefix_opts_into_recall_cache, surface_of,
     surface_sql_clause, Surface, DOCS_SURFACE_SQL_WHERE, DOCS_SURFACE_SQL_WHERE_M,
     FOUNDRY_RECALL_CACHE_SOURCE, RECALL_CACHE_SQL_WHERE, RECALL_CACHE_SQL_WHERE_M,
+    WIKI_REM_OPERATION_ID_PREFIX,
 };
 pub use near_dup::{near_duplicate_raw_pairs, text_token_jaccard, NEAR_DUP_RAW_SCAN_CAP};
 pub use noise::{is_noise_text, should_skip_query};
@@ -236,6 +237,10 @@ pub struct MemoryStore {
     /// Whether path validation is enforced for this store. Disabled when
     /// db_label is unknown to avoid breaking unlabeled callers.
     pub(crate) path_validation: bool,
+    /// Physical identity captured immediately after this connection opened.
+    /// Long-lived runtimes use it to fail closed if the path is later replaced
+    /// while SQLite still holds the original file descriptor.
+    pub(crate) opened_physical_db_identity: Option<String>,
 }
 
 #[cfg(test)]

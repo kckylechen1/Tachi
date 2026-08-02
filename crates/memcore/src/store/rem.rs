@@ -1,5 +1,7 @@
 //! REM wiki-evolver persistence helpers on [`MemoryStore`].
 
+use rusqlite::{OptionalExtension, TransactionBehavior};
+
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
 impl MemoryStore {
@@ -15,20 +17,112 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} FROM memories
              WHERE archived = 0
+               AND json_valid(metadata)
                AND tier = 'pattern'
                AND path != '/sft'
                AND path NOT LIKE '/sft/%'
                AND topic != 'sft-memory'
                AND source != 'sft_seed'
                AND COALESCE(json_extract(metadata, '$.training_sample'), 0) = 0
-               AND created_at > datetime('now', '-7 day')
+               AND COALESCE(updated_at, created_at) > datetime('now', '-7 day')
                AND (json_extract(metadata, '$.rem.processed') IS NULL
-                    OR json_extract(metadata, '$.rem.processed') = 0)
+                    OR json_extract(metadata, '$.rem.processed') = 0
+                    OR (json_extract(metadata, '$.rem.processed_revision') IS NOT NULL
+                        AND json_extract(metadata, '$.rem.processed_revision') != revision)
+                    OR (json_extract(metadata, '$.rem.processed') = 1
+                        AND json_extract(metadata, '$.rem.processed_revision') IS NULL
+                        AND json_extract(metadata, '$.rem.processed_at') IS NOT NULL
+                        AND updated_at > json_extract(metadata, '$.rem.processed_at')))
              ORDER BY importance DESC, access_count DESC
              LIMIT 200",
             db::MEMORY_SELECT_COLUMNS
         ))?;
         let rows = stmt.query_map([], db::row_to_entry)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
+    /// Load unfinished REM draft operations, including archived occupants so
+    /// recovery can fail loudly instead of silently minting a replacement.
+    pub fn pending_rem_wiki_operations(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        self.pending_rem_wiki_operations_after(None, limit)
+    }
+
+    /// Page unfinished REM operations in stable `(timestamp, id)` order.
+    /// The cursor prevents one repository's operations in a shared Wiki DB
+    /// from starving recovery work owned by another repository.
+    pub fn pending_rem_wiki_operations_after(
+        &self,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        // A reserved operation row is audit/coordination state, not an
+        // ordinary candidate. Silently hiding a malformed owner can make a
+        // recovery pass report success while its source claims remain pinned.
+        let invalid_owner = self
+            .conn
+            .query_row(
+                r#"SELECT m.id
+                   FROM memories AS m
+                   WHERE m.path LIKE '/wiki/drafts/%'
+                     AND m.id LIKE 'wiki-rem:%'
+                     AND (m.archived = 0 OR EXISTS(
+                           SELECT 1 FROM rem_source_claims AS c
+                           WHERE c.draft_id = m.id
+                         ))
+                     AND (
+                       NOT json_valid(m.metadata)
+                       OR json_extract(
+                            CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END,
+                            '$.rem.producer'
+                          ) IS NOT 'weekly_wiki_evolver'
+                       OR json_extract(
+                            CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END,
+                            '$.rem.operation_status'
+                          ) NOT IN ('pending_sources', 'complete')
+                       OR json_extract(
+                            CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END,
+                            '$.rem.operation_status'
+                          ) IS NULL
+                     )
+                   ORDER BY m.id
+                   LIMIT 1"#,
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(id) = invalid_owner {
+            return Err(MemoryError::InvalidArg(format!(
+                "invariant: REM operation occupant {id} has invalid coordination metadata"
+            )));
+        }
+        let (after_timestamp, after_id) = after
+            .map(|(timestamp, id)| (Some(timestamp), Some(id)))
+            .unwrap_or((None, None));
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM memories
+             WHERE path LIKE '/wiki/drafts/%'
+               AND id LIKE 'wiki-rem:%'
+               AND json_valid(metadata)
+               AND json_extract(metadata, '$.rem.producer') = 'weekly_wiki_evolver'
+               AND json_extract(metadata, '$.rem.operation_status') = 'pending_sources'
+               AND (?1 IS NULL
+                    OR timestamp > ?1
+                    OR (timestamp = ?1 AND id > ?2))
+             ORDER BY timestamp ASC, id ASC
+             LIMIT ?3",
+            db::MEMORY_SELECT_COLUMNS
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![after_timestamp, after_id, limit as i64],
+            db::row_to_entry,
+        )?;
         let mut entries = Vec::new();
         for row in rows {
             entries.push(row?);
@@ -62,25 +156,481 @@ impl MemoryStore {
     /// Mark source memories as REM-processed so the next weekly pass skips
     /// them.
     pub fn mark_rem_processed(
-        &self,
+        &mut self,
         ids: &[String],
         processed_at: &str,
     ) -> Result<(), MemoryError> {
-        let _authorization =
-            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        for id in ids {
-            self.conn.execute(
+        self.mark_rem_processed_for_draft(ids, processed_at, None)
+    }
+
+    /// Atomically mark one store's share of a replay-safe REM source set.
+    /// Every named source must still exist and may be claimed only once; a
+    /// same-draft replay is idempotent, while a different claimant fails the
+    /// whole store-local transaction.
+    pub fn mark_rem_processed_for_draft(
+        &mut self,
+        ids: &[String],
+        processed_at: &str,
+        draft_id: Option<&str>,
+    ) -> Result<(), MemoryError> {
+        let sources = ids.iter().map(|id| (id.clone(), None)).collect::<Vec<_>>();
+        self.mark_rem_processed_sources(&sources, processed_at, draft_id)
+    }
+
+    /// Strict REM completion seam. Every source must still be the revision
+    /// that was synthesized into the deterministic draft identity.
+    pub fn mark_rem_processed_for_draft_at_revisions(
+        &mut self,
+        sources: &[(String, i64)],
+        processed_at: &str,
+        draft_id: &str,
+    ) -> Result<(), MemoryError> {
+        let sources = sources
+            .iter()
+            .map(|(id, revision)| (id.clone(), Some(*revision)))
+            .collect::<Vec<_>>();
+        self.mark_rem_processed_sources(&sources, processed_at, Some(draft_id))
+    }
+
+    /// True when this source store contains a REM marker that names a draft
+    /// operation. Recovery uses this to distinguish legitimate first-run
+    /// initialization from a missing coordination ledger after source markers
+    /// may already have committed.
+    pub fn has_rem_processed_source_markers(&self) -> Result<bool, MemoryError> {
+        let found = self.conn.query_row(
+            r#"SELECT EXISTS(
+                 SELECT 1
+                 FROM memories
+                 WHERE json_valid(metadata)
+                   AND json_extract(metadata, '$.rem.processed') = 1
+                   AND json_extract(metadata, '$.rem.processed_by') LIKE 'wiki-rem:%'
+                 LIMIT 1
+               )"#,
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(found != 0)
+    }
+
+    /// Source-row ids and operation ids for durable REM markers that still
+    /// suppress the current source revision. Stale revision-bound and changed
+    /// legacy markers are already reprocessable and need no live ledger.
+    pub fn rem_processed_source_markers(&self) -> Result<Vec<(String, String, i64)>, MemoryError> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT id, json_extract(metadata, '$.rem.processed_by'), revision
+               FROM memories
+               WHERE json_valid(metadata)
+                 AND json_extract(metadata, '$.rem.processed') = 1
+                 AND json_extract(metadata, '$.rem.processed_by') LIKE 'wiki-rem:%'
+                 AND NOT (
+                   (json_extract(metadata, '$.rem.processed_revision') IS NOT NULL
+                    AND json_extract(metadata, '$.rem.processed_revision') != revision)
+                   OR (json_extract(metadata, '$.rem.processed_revision') IS NULL
+                       AND json_extract(metadata, '$.rem.processed_at') IS NOT NULL
+                       AND updated_at > json_extract(metadata, '$.rem.processed_at'))
+                 )
+               ORDER BY id"#,
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn mark_rem_processed_sources(
+        &mut self,
+        sources: &[(String, Option<i64>)],
+        processed_at: &str,
+        draft_id: Option<&str>,
+    ) -> Result<(), MemoryError> {
+        let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
+        db::retry_memory_locked("mark_rem_processed_for_draft", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for (id, expected_revision) in sources {
+                let state = tx.query_row(
+                    "SELECT COALESCE(json_extract(metadata, '$.rem.processed'), 0), \
+                            json_extract(metadata, '$.rem.processed_by'), \
+                            json_extract(metadata, '$.rem.processed_revision'), \
+                            json_extract(metadata, '$.rem.processed_at'), \
+                            updated_at, revision \
+                     FROM memories WHERE id = ?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    },
+                );
+                let (
+                    processed,
+                    processed_by,
+                    processed_revision,
+                    prior_processed_at,
+                    updated_at,
+                    actual_revision,
+                ) = match state {
+                    Ok(state) => state,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "REM source disappeared before processing: {id}"
+                        )))
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                if let Some(expected_revision) = *expected_revision {
+                    if expected_revision != actual_revision {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "REM source revision changed before processing: {id} expected {expected_revision}, found {actual_revision}"
+                        )));
+                    }
+                }
+                if processed != 0 {
+                    let same_operation = (draft_id.is_some()
+                        && processed_by.as_deref() == draft_id)
+                        || (draft_id.is_none() && processed_by.is_none());
+                    if same_operation {
+                        match *expected_revision {
+                            Some(expected) if processed_revision == Some(expected) => continue,
+                            Some(expected)
+                                if processed_revision.is_none() && expected == actual_revision =>
+                            {
+                                // Legacy same-operation markers did not record the
+                                // source revision. Upgrade the marker in place after
+                                // proving this draft still owns it and the requested
+                                // revision is current, so recovery cannot wedge.
+                                let changed = tx.execute(
+                                    r#"UPDATE memories
+                                       SET metadata = json_set(
+                                             metadata,
+                                             '$.rem.processed_revision', ?1
+                                           )
+                                       WHERE id = ?2
+                                         AND revision = ?1
+                                         AND COALESCE(json_extract(metadata, '$.rem.processed'), 0) = 1
+                                         AND json_extract(metadata, '$.rem.processed_by') = ?3
+                                         AND json_extract(metadata, '$.rem.processed_revision') IS NULL"#,
+                                    rusqlite::params![expected, id, draft_id],
+                                )?;
+                                if changed != 1 {
+                                    return Err(MemoryError::InvalidArg(format!(
+                                        "REM legacy same-operation marker upgrade CAS failed: {id}"
+                                    )));
+                                }
+                                continue;
+                            }
+                            None => continue,
+                            Some(_) => {}
+                        }
+                    }
+                    let newer_revision_is_reprocessable = expected_revision
+                        .is_some_and(|expected| expected == actual_revision)
+                        && processed_revision.is_some_and(|processed| processed != actual_revision);
+                    let changed_legacy_marker_is_reprocessable = expected_revision
+                        .is_some_and(|expected| expected == actual_revision)
+                        && processed_revision.is_none()
+                        && prior_processed_at
+                            .as_deref()
+                            .is_some_and(|processed_at| updated_at.as_str() > processed_at);
+                    if !newer_revision_is_reprocessable && !changed_legacy_marker_is_reprocessable {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "REM source already belongs to another completed operation: {id}"
+                        )));
+                    }
+                }
+                let changed = tx.execute(
+                    r#"UPDATE memories
+                       SET metadata = json_set(
+                             CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                             '$.rem.processed', 1,
+                             '$.rem.processed_at', ?1,
+                             '$.rem.processed_by', ?2,
+                             '$.rem.processed_revision', ?4
+                           )
+                       WHERE id = ?3
+                         AND (COALESCE(json_extract(metadata, '$.rem.processed'), 0) = 0
+                              OR (?5 IS NOT NULL
+                                  AND ((json_extract(metadata, '$.rem.processed_revision') IS NOT NULL
+                                        AND json_extract(metadata, '$.rem.processed_revision') != revision)
+                                       OR (json_extract(metadata, '$.rem.processed_revision') IS NULL
+                                           AND json_extract(metadata, '$.rem.processed_at') IS NOT NULL
+                                           AND updated_at > json_extract(metadata, '$.rem.processed_at')))))
+                         AND (?5 IS NULL OR revision = ?5)"#,
+                    rusqlite::params![
+                        processed_at,
+                        draft_id,
+                        id,
+                        actual_revision,
+                        expected_revision
+                    ],
+                )?;
+                if changed != 1 {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "REM source processing CAS failed: {id}"
+                    )));
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Compensate a partially completed cross-store REM operation. Only the
+    /// exact draft/revision markers named by the caller may be removed; a
+    /// different claimant or marker revision aborts the whole store-local
+    /// rollback transaction.
+    pub fn rollback_rem_processed_for_draft_at_revisions(
+        &mut self,
+        sources: &[(String, i64)],
+        draft_id: &str,
+    ) -> Result<(), MemoryError> {
+        let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
+        db::retry_memory_locked("rollback_rem_processed_for_draft", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for (id, expected_revision) in sources {
+                let state = tx.query_row(
+                    "SELECT COALESCE(json_extract(metadata, '$.rem.processed'), 0), \
+                            json_extract(metadata, '$.rem.processed_by'), \
+                            json_extract(metadata, '$.rem.processed_revision'), \
+                            CASE WHEN json_extract(metadata, '$.rem.processed_at') IS NOT NULL \
+                                      AND updated_at > json_extract(metadata, '$.rem.processed_at') \
+                                 THEN 1 ELSE 0 END \
+                     FROM memories WHERE id = ?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    },
+                );
+                let (processed, processed_by, processed_revision, changed_after_legacy_marker) =
+                    match state {
+                        Ok(state) => state,
+                        Err(rusqlite::Error::QueryReturnedNoRows) => {
+                            return Err(MemoryError::InvalidArg(format!(
+                                "REM source disappeared before marker compensation: {id}"
+                            )))
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                if processed == 0 {
+                    continue;
+                }
+                let same_draft = processed_by.as_deref() == Some(draft_id);
+                let same_revision = processed_revision == Some(*expected_revision);
+                if !same_draft && !same_revision && processed_revision.is_some() {
+                    continue;
+                }
+                // A legacy marker has no revision binding. If its source was
+                // updated after that marker and another draft owns it, the
+                // marker predates this pending operation and is not ours to
+                // compensate. This is the same eligibility rule used by REM
+                // collection and marking; treating it as ownership drift
+                // would wedge stale-operation recovery forever.
+                if !same_draft && processed_revision.is_none() && changed_after_legacy_marker {
+                    continue;
+                }
+                if !same_draft || !same_revision {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "REM marker compensation ownership changed: {id}"
+                    )));
+                }
+                let changed = tx.execute(
+                    r#"UPDATE memories
+                       SET metadata = json_remove(
+                             metadata,
+                             '$.rem.processed',
+                             '$.rem.processed_at',
+                             '$.rem.processed_by',
+                             '$.rem.processed_revision'
+                           )
+                       WHERE id = ?1
+                         AND json_extract(metadata, '$.rem.processed') = 1
+                         AND json_extract(metadata, '$.rem.processed_by') = ?2
+                         AND json_extract(metadata, '$.rem.processed_revision') = ?3"#,
+                    rusqlite::params![id, draft_id, expected_revision],
+                )?;
+                if changed != 1 {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "REM marker compensation CAS failed: {id}"
+                    )));
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Retire a pending operation whose source revisions can no longer be
+    /// completed. The operation row remains as an archived audit record while
+    /// its source claims are released in the same Wiki-store transaction so a
+    /// fresh source-set revision can make progress.
+    pub fn abort_stale_rem_wiki_operation(
+        &mut self,
+        draft_id: &str,
+        aborted_at: &str,
+    ) -> Result<(), MemoryError> {
+        if !draft_id.starts_with("wiki-rem:") {
+            return Err(MemoryError::InvalidArg(
+                "REM stale-operation abort requires a wiki-rem id".to_string(),
+            ));
+        }
+        let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
+        db::retry_memory_locked("abort_stale_rem_wiki_operation", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let state = tx.query_row(
+                "SELECT archived, superseded_by, json_extract(metadata, '$.rem.operation_status') \
+                 FROM memories WHERE id = ?1",
+                [draft_id],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            );
+            let (archived, superseded_by, status) = match state {
+                Ok(state) => state,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "REM draft disappeared before stale abort: {draft_id}"
+                    )))
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if archived && status.as_deref() == Some("aborted_stale_sources") {
+                tx.execute(
+                    "DELETE FROM rem_source_claims WHERE draft_id = ?1",
+                    [draft_id],
+                )?;
+                tx.commit()?;
+                return Ok(());
+            }
+            if archived || superseded_by.is_some() || status.as_deref() != Some("pending_sources") {
+                return Err(MemoryError::InvalidArg(format!(
+                    "REM draft is not an abortable pending winner: {draft_id}"
+                )));
+            }
+            let changed = tx.execute(
                 r#"UPDATE memories
                    SET metadata = json_set(
-                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                         '$.rem.processed', 1,
-                         '$.rem.processed_at', ?1
-                       )
-                   WHERE id = ?2"#,
-                rusqlite::params![processed_at, id],
+                         metadata,
+                         '$.rem.operation_status', 'aborted_stale_sources',
+                         '$.rem.aborted_at', ?1,
+                         '$.rem.abort_reason', 'source_revision_changed'
+                       ),
+                       archived = 1,
+                       valid_until = COALESCE(valid_until, ?1),
+                       updated_at = ?1,
+                       revision = revision + 1
+                   WHERE id = ?2
+                     AND archived = 0
+                     AND superseded_by IS NULL
+                     AND json_extract(metadata, '$.rem.operation_status') = 'pending_sources'"#,
+                rusqlite::params![aborted_at, draft_id],
             )?;
-        }
-        Ok(())
+            if changed != 1 {
+                return Err(MemoryError::InvalidArg(format!(
+                    "REM stale-operation abort CAS failed: {draft_id}"
+                )));
+            }
+            tx.execute(
+                "DELETE FROM rem_source_claims WHERE draft_id = ?1",
+                [draft_id],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Finish a pending REM draft operation after every source-store marker
+    /// transaction has committed. Same-operation replay is idempotent.
+    pub fn complete_rem_wiki_operation(
+        &mut self,
+        draft_id: &str,
+        completed_at: &str,
+    ) -> Result<bool, MemoryError> {
+        let db_label = self.db_label.clone();
+        let authorization = self.reserved_reference_write.clone();
+        db::retry_memory_locked("complete_rem_wiki_operation", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&authorization)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let status = tx.query_row(
+                "SELECT archived, superseded_by, json_extract(metadata, '$.rem.operation_status') \
+                 FROM memories WHERE id = ?1",
+                [draft_id],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            );
+            let (archived, superseded_by, status) = match status {
+                Ok(status) => status,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "REM draft disappeared before completion: {draft_id}"
+                    )))
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if archived || superseded_by.is_some() {
+                return Err(MemoryError::InvalidArg(format!(
+                    "REM draft is not an active canonical winner: {draft_id}"
+                )));
+            }
+            if status.as_deref() == Some("complete") {
+                tx.commit()?;
+                return Ok(false);
+            }
+            if status.as_deref() != Some("pending_sources") {
+                return Err(MemoryError::InvalidArg(format!(
+                    "REM draft has an invalid operation status: {draft_id}"
+                )));
+            }
+            let changed = tx.execute(
+                r#"UPDATE memories
+                   SET metadata = json_set(
+                         metadata,
+                         '$.rem.operation_status', 'complete',
+                         '$.rem.completed_at', ?1
+                       )
+                   WHERE id = ?2
+                     AND archived = 0
+                     AND superseded_by IS NULL
+                     AND json_extract(metadata, '$.rem.operation_status') = 'pending_sources'"#,
+                rusqlite::params![completed_at, draft_id],
+            )?;
+            if changed != 1 {
+                return Err(MemoryError::InvalidArg(format!(
+                    "REM draft completion CAS failed: {draft_id}"
+                )));
+            }
+            tx.commit()?;
+            Ok(true)
+        })
     }
 }
 
@@ -125,6 +675,18 @@ mod tests {
         }
     }
 
+    fn seed_rem_operation(store: &mut MemoryStore, draft: &mut MemoryEntry) {
+        draft.source = "wiki".to_string();
+        draft.metadata["rem"]["producer"] = json!("weekly_wiki_evolver");
+        draft.metadata["rem"]["operation_id"] = json!(draft.id.clone());
+        draft.metadata["rem"]["operation_status"] = json!("pending_sources");
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.insert_rem_operation_if_absent(draft).map(|_| ())
+            })
+            .expect("seed canonical REM operation");
+    }
+
     #[test]
     fn unprocessed_pattern_memories_filters_processed_and_non_pattern_rows() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
@@ -132,12 +694,11 @@ mod tests {
             .upsert(&test_entry("fresh", "pattern", json!({})))
             .expect("seed fresh");
         store
-            .upsert(&test_entry(
-                "processed",
-                "pattern",
-                json!({ "rem": { "processed": 1 } }),
-            ))
+            .upsert(&test_entry("processed", "pattern", json!({})))
             .expect("seed processed");
+        store
+            .mark_rem_processed(&["processed".to_string()], "2026-07-05T01:00:00Z")
+            .expect("mark processed");
         store
             .upsert(&test_entry("raw-entry", "raw", json!({})))
             .expect("seed raw");
@@ -150,6 +711,87 @@ mod tests {
             .expect("collect patterns");
         let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(ids, vec!["fresh"]);
+    }
+
+    #[test]
+    fn malformed_pattern_rows_are_skipped_but_malformed_rem_owners_fail_closed() {
+        let dir = tempfile::tempdir().expect("create test directory");
+        let db_path = dir.path().join("memory.db");
+        let mut store =
+            MemoryStore::open(db_path.to_str().expect("UTF-8 test path")).expect("open test store");
+        store
+            .upsert(&test_entry("valid-pattern", "pattern", json!({})))
+            .expect("seed valid pattern");
+        store
+            .upsert(&test_entry("invalid-pattern", "pattern", json!({})))
+            .expect("seed invalid pattern fixture");
+        let mut valid_pending = test_entry(
+            "wiki-rem:valid-pending",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        valid_pending.path = "/wiki/drafts/valid-pending".to_string();
+        seed_rem_operation(&mut store, &mut valid_pending);
+        let mut invalid_pending = test_entry(
+            "wiki-rem:invalid-pending",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        invalid_pending.path = "/wiki/drafts/invalid-pending".to_string();
+        seed_rem_operation(&mut store, &mut invalid_pending);
+        {
+            // Model a legacy/corrupted database that predates the current
+            // write guards. The production connection keeps its authorizer;
+            // only this raw fixture connection temporarily disables trigger
+            // execution while seeding the impossible-through-current-writes
+            // rows.
+            let fixture = rusqlite::Connection::open(&db_path).expect("open fixture connection");
+            fixture
+                .set_db_config(
+                    rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
+                    false,
+                )
+                .expect("disable fixture trigger execution");
+            fixture
+                .execute(
+                    "UPDATE memories SET metadata = 'not-json' WHERE id IN ('invalid-pattern', 'wiki-rem:invalid-pending')",
+                    [],
+                )
+                .expect("corrupt fixture metadata");
+            fixture
+                .set_db_config(
+                    rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
+                    true,
+                )
+                .expect("restore fixture trigger execution");
+        }
+
+        assert_eq!(
+            store
+                .unprocessed_pattern_memories()
+                .expect("scan valid patterns around malformed rows")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["valid-pattern"]
+        );
+        let error = store
+            .pending_rem_wiki_operations(10)
+            .expect_err("malformed REM coordination state must not look recovered");
+        assert!(
+            error.to_string().contains("wiki-rem:invalid-pending"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -201,5 +843,791 @@ mod tests {
         }
         let two = store.get("two").expect("read two").expect("exists");
         assert_eq!(two.metadata["keep"], true);
+    }
+
+    #[test]
+    fn rem_source_group_rolls_back_and_same_operation_replays() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        for id in ["one", "two"] {
+            store
+                .upsert(&test_entry(id, "pattern", json!({})))
+                .expect("seed source");
+        }
+        let failing_ids = ["one".to_string(), "missing".to_string()];
+        let error = store
+            .mark_rem_processed_for_draft(
+                &failing_ids,
+                "2026-07-05T01:00:00Z",
+                Some("wiki-rem:operation"),
+            )
+            .expect_err("second marker failure must abort the source group");
+        assert!(error.to_string().contains("REM source disappeared"));
+        for id in ["one", "two"] {
+            let source = store.get(id).expect("read source").expect("source exists");
+            assert!(source.metadata["rem"]["processed"].is_null());
+        }
+
+        let ids = ["one".to_string(), "two".to_string()];
+        for _ in 0..2 {
+            store
+                .mark_rem_processed_for_draft(
+                    &ids,
+                    "2026-07-05T01:00:00Z",
+                    Some("wiki-rem:operation"),
+                )
+                .expect("same operation is replay-safe");
+        }
+        for id in ["one", "two"] {
+            let source = store.get(id).expect("read source").expect("source exists");
+            assert_eq!(source.metadata["rem"]["processed"], 1);
+            assert_eq!(source.metadata["rem"]["processed_by"], "wiki-rem:operation");
+        }
+    }
+
+    #[test]
+    fn same_draft_recovery_upgrades_an_owned_legacy_marker_without_source_change() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        let authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize legacy marker fixture");
+        store
+            .conn
+            .execute(
+                r#"UPDATE memories
+                   SET metadata = json_set(
+                         metadata,
+                         '$.rem.processed', 1,
+                         '$.rem.processed_by', 'wiki-rem:legacy-owned',
+                         '$.rem.processed_at', '2099-01-01T00:00:00Z'
+                       )
+                   WHERE id = 'source'"#,
+                [],
+            )
+            .expect("seed legacy marker without processed_revision");
+        drop(authorization);
+
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:legacy-owned",
+            )
+            .expect("upgrade same-draft legacy marker");
+
+        let source = store
+            .get("source")
+            .expect("read upgraded source")
+            .expect("source exists");
+        assert_eq!(source.revision, revision);
+        assert_eq!(
+            source.metadata["rem"]["processed_by"],
+            "wiki-rem:legacy-owned"
+        );
+        assert_eq!(source.metadata["rem"]["processed_revision"], revision);
+    }
+
+    #[test]
+    fn same_draft_replay_rechecks_actual_source_revision_before_accepting_marker() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let original_revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), original_revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:operation",
+            )
+            .expect("mark first revision");
+
+        let mut changed = store
+            .get("source")
+            .expect("read marked source")
+            .expect("marked source exists");
+        changed.text = "source changed after the draft marker was written".to_string();
+        store.upsert(&changed).expect("update source revision");
+        let changed = store
+            .get("source")
+            .expect("read changed source")
+            .expect("changed source exists");
+        assert_ne!(changed.revision, original_revision);
+
+        let error = store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), original_revision)],
+                "2026-07-06T01:00:00Z",
+                "wiki-rem:operation",
+            )
+            .expect_err("same-draft stale revision replay must fail");
+        assert!(error.to_string().contains("source revision changed"));
+        let marker = store
+            .get("source")
+            .expect("read rejected replay source")
+            .expect("source exists");
+        assert_eq!(marker.metadata["rem"]["processed_by"], "wiki-rem:operation");
+        assert_eq!(
+            marker.metadata["rem"]["processed_at"],
+            "2026-07-05T01:00:00Z"
+        );
+        assert_eq!(
+            marker.metadata["rem"]["processed_revision"],
+            original_revision
+        );
+    }
+
+    #[test]
+    fn strict_rem_source_group_rolls_back_when_a_source_revision_changes() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        for id in ["unchanged", "changed"] {
+            store
+                .upsert(&test_entry(id, "pattern", json!({})))
+                .expect("seed source");
+        }
+        let unchanged_revision = store
+            .get("unchanged")
+            .expect("read unchanged")
+            .expect("unchanged exists")
+            .revision;
+        let original_changed = store
+            .get("changed")
+            .expect("read changed")
+            .expect("changed exists");
+        let changed_revision = original_changed.revision;
+        let mut replacement = original_changed;
+        replacement.text = "source changed after REM synthesis".to_string();
+        store.upsert(&replacement).expect("update changed source");
+        assert_ne!(
+            store
+                .get("changed")
+                .expect("read changed revision")
+                .expect("changed still exists")
+                .revision,
+            changed_revision
+        );
+
+        let error = store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[
+                    ("unchanged".to_string(), unchanged_revision),
+                    ("changed".to_string(), changed_revision),
+                ],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:revision-bound",
+            )
+            .expect_err("stale source revision must abort the complete source group");
+        assert!(error.to_string().contains("source revision changed"));
+        for id in ["unchanged", "changed"] {
+            let source = store.get(id).expect("read source").expect("source exists");
+            assert!(source.metadata["rem"]["processed"].is_null());
+        }
+    }
+
+    #[test]
+    fn rem_marker_compensation_is_revision_bound_and_store_atomic() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut sources = Vec::new();
+        for id in ["one", "two"] {
+            store
+                .upsert(&test_entry(id, "pattern", json!({})))
+                .expect("seed source");
+            let revision = store
+                .get(id)
+                .expect("read source")
+                .expect("source exists")
+                .revision;
+            sources.push((id.to_string(), revision));
+        }
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &sources,
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:operation",
+            )
+            .expect("mark source group");
+        store
+            .rollback_rem_processed_for_draft_at_revisions(&sources, "wiki-rem:operation")
+            .expect("compensate source group");
+        for (id, _) in &sources {
+            let source = store.get(id).expect("read source").expect("source exists");
+            assert!(source.metadata["rem"]["processed"].is_null());
+        }
+
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &sources,
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:operation",
+            )
+            .expect("remark source group");
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize ownership drift fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET metadata = json_set(metadata, '$.rem.processed_by', 'wiki-rem:foreign') WHERE id = 'two'",
+                    [],
+                )
+                .expect("drift second marker ownership");
+        }
+        let error = store
+            .rollback_rem_processed_for_draft_at_revisions(&sources, "wiki-rem:operation")
+            .expect_err("foreign ownership must abort the whole compensation transaction");
+        assert!(error.to_string().contains("ownership changed"));
+        assert_eq!(
+            store
+                .get("one")
+                .expect("read first source")
+                .expect("first source exists")
+                .metadata["rem"]["processed"],
+            1
+        );
+    }
+
+    #[test]
+    fn rem_marker_compensation_ignores_unrelated_older_completed_marker() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let first_revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), first_revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:older-complete",
+            )
+            .expect("mark older completed operation");
+
+        let mut changed = store
+            .get("source")
+            .expect("read older marked source")
+            .expect("source exists");
+        changed.text = "source changed after older REM completion".to_string();
+        store.upsert(&changed).expect("advance source revision");
+        let second_revision = store
+            .get("source")
+            .expect("read advanced source")
+            .expect("source exists")
+            .revision;
+        assert_ne!(second_revision, first_revision);
+
+        store
+            .rollback_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), second_revision)],
+                "wiki-rem:stale-pending",
+            )
+            .expect("older completed marker is not owned by the stale pending draft");
+        let source = store
+            .get("source")
+            .expect("read compensated source")
+            .expect("source exists");
+        assert_eq!(
+            source.metadata["rem"]["processed_by"],
+            "wiki-rem:older-complete"
+        );
+        assert_eq!(source.metadata["rem"]["processed_revision"], first_revision);
+    }
+
+    #[test]
+    fn rem_marker_compensation_ignores_changed_legacy_marker_from_older_draft() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let first_revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), first_revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:legacy-complete",
+            )
+            .expect("mark legacy completed operation");
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize legacy fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET metadata=json_remove(metadata, '$.rem.processed_revision') WHERE id='source'",
+                    [],
+                )
+                .expect("remove legacy revision marker");
+        }
+
+        let mut changed = store
+            .get("source")
+            .expect("read legacy source")
+            .expect("legacy source exists");
+        changed.text = "legacy source changed before pending REM synthesis".to_string();
+        store
+            .upsert(&changed)
+            .expect("advance source for pending draft");
+        let pending_revision = store
+            .get("source")
+            .expect("read pending source")
+            .expect("pending source exists")
+            .revision;
+        let mut changed_again = store
+            .get("source")
+            .expect("read pending source again")
+            .expect("pending source still exists");
+        changed_again.text = "legacy source changed again before recovery".to_string();
+        store
+            .upsert(&changed_again)
+            .expect("make pending source revision stale");
+
+        store
+            .rollback_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), pending_revision)],
+                "wiki-rem:stale-pending",
+            )
+            .expect("older changed legacy marker is not owned by pending draft");
+        let source = store
+            .get("source")
+            .expect("read source after compensation")
+            .expect("source exists after compensation");
+        assert_eq!(
+            source.metadata["rem"]["processed_by"],
+            "wiki-rem:legacy-complete"
+        );
+        assert!(source.metadata["rem"]["processed_revision"].is_null());
+    }
+
+    #[test]
+    fn rem_marker_compensation_rejects_foreign_marker_on_the_pending_revision() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:foreign",
+            )
+            .expect("mark foreign operation on same revision");
+
+        let error = store
+            .rollback_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), revision)],
+                "wiki-rem:stale-pending",
+            )
+            .expect_err("same-revision foreign marker is dangerous ownership drift");
+        assert!(error.to_string().contains("ownership changed"));
+        let source = store
+            .get("source")
+            .expect("read uncompensated source")
+            .expect("source exists");
+        assert_eq!(source.metadata["rem"]["processed_by"], "wiki-rem:foreign");
+    }
+
+    #[test]
+    fn detects_rem_source_markers_for_missing_coordination_ledger_recovery() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("plain", "pattern", json!({})))
+            .expect("seed plain source");
+        assert!(!store
+            .has_rem_processed_source_markers()
+            .expect("scan empty markers"));
+
+        let revision = store
+            .get("plain")
+            .expect("read plain source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("plain".to_string(), revision)],
+                "2026-07-31T00:00:01Z",
+                "wiki-rem:pending",
+            )
+            .expect("mark source");
+        assert!(store
+            .has_rem_processed_source_markers()
+            .expect("scan committed marker"));
+    }
+
+    #[test]
+    fn a_new_source_revision_is_eligible_for_a_new_rem_operation() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("source", "pattern", json!({})))
+            .expect("seed source");
+        let first_revision = store
+            .get("source")
+            .expect("read source")
+            .expect("source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), first_revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:first",
+            )
+            .expect("mark first revision");
+
+        let mut updated = store
+            .get("source")
+            .expect("read marked source")
+            .expect("marked source exists");
+        updated.text = "source content changed after the first REM operation".to_string();
+        updated.metadata = json!({"ordinary": true});
+        store.upsert(&updated).expect("update source revision");
+        let updated = store
+            .get("source")
+            .expect("read updated source")
+            .expect("updated source exists");
+        assert_ne!(updated.revision, first_revision);
+        assert_eq!(updated.metadata["rem"]["processed_by"], "wiki-rem:first");
+        assert_eq!(
+            store
+                .unprocessed_pattern_memories()
+                .expect("collect changed source")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["source"]
+        );
+
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("source".to_string(), updated.revision)],
+                "2026-07-06T01:00:00Z",
+                "wiki-rem:second",
+            )
+            .expect("mark updated revision");
+        let remarked = store
+            .get("source")
+            .expect("read remarked source")
+            .expect("remarked source exists");
+        assert_eq!(remarked.metadata["rem"]["processed_by"], "wiki-rem:second");
+        assert_eq!(
+            remarked.metadata["rem"]["processed_revision"],
+            updated.revision
+        );
+        assert!(store
+            .unprocessed_pattern_memories()
+            .expect("collect after remark")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_changed_legacy_marker_and_old_source_age_reenter_rem() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        store
+            .upsert(&test_entry("legacy", "pattern", json!({})))
+            .expect("seed legacy source");
+        let revision = store
+            .get("legacy")
+            .expect("read legacy source")
+            .expect("legacy source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("legacy".to_string(), revision)],
+                "2026-07-05T01:00:00Z",
+                "wiki-rem:legacy",
+            )
+            .expect("mark legacy source");
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize legacy fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET metadata = json_remove(metadata, '$.rem.processed_revision'), created_at = '2020-01-01T00:00:00Z', updated_at = '2020-01-01T00:00:00Z' WHERE id = 'legacy'",
+                    [],
+                )
+                .expect("shape legacy marker");
+        }
+
+        let mut changed = store
+            .get("legacy")
+            .expect("read legacy fixture")
+            .expect("legacy fixture exists");
+        changed.text = "legacy source changed after its old REM marker".to_string();
+        store.upsert(&changed).expect("update old legacy source");
+
+        assert_eq!(
+            store
+                .unprocessed_pattern_memories()
+                .expect("collect changed legacy source")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["legacy"]
+        );
+        let current_revision = store
+            .get("legacy")
+            .expect("read changed legacy source")
+            .expect("changed legacy source exists")
+            .revision;
+        store
+            .mark_rem_processed_for_draft_at_revisions(
+                &[("legacy".to_string(), current_revision)],
+                "2026-07-06T01:00:00Z",
+                "wiki-rem:legacy-successor",
+            )
+            .expect("complete REM for the changed legacy source");
+        let completed = store
+            .get("legacy")
+            .expect("read completed legacy source")
+            .expect("completed legacy source exists");
+        assert_eq!(
+            completed.metadata["rem"]["processed_by"],
+            "wiki-rem:legacy-successor"
+        );
+        assert_eq!(
+            completed.metadata["rem"]["processed_revision"],
+            current_revision
+        );
+    }
+
+    #[test]
+    fn pending_rem_operation_is_discoverable_and_completion_is_idempotent() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut draft = test_entry(
+            "wiki-rem:pending",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        draft.path = "/wiki/drafts/pending".to_string();
+        seed_rem_operation(&mut store, &mut draft);
+        assert_eq!(
+            store
+                .pending_rem_wiki_operations(10)
+                .expect("list pending")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["wiki-rem:pending"]
+        );
+
+        assert!(store
+            .complete_rem_wiki_operation("wiki-rem:pending", "2026-07-05T02:00:00Z")
+            .expect("first completion transitions the operation"));
+        assert!(!store
+            .complete_rem_wiki_operation("wiki-rem:pending", "2026-07-05T02:00:00Z")
+            .expect("completion replay is a no-op"));
+        assert!(store
+            .pending_rem_wiki_operations(10)
+            .expect("list after completion")
+            .is_empty());
+        let draft = store
+            .get("wiki-rem:pending")
+            .expect("read draft")
+            .expect("draft exists");
+        assert_eq!(draft.metadata["rem"]["operation_status"], "complete");
+    }
+
+    #[test]
+    fn stale_rem_abort_archives_operation_and_releases_claims_atomically() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut draft = test_entry("wiki-rem:stale", "raw", json!({}));
+        draft.path = "/wiki/drafts/stale".to_string();
+        draft.source = "wiki".to_string();
+        draft.metadata = json!({
+            "rem": {
+                "producer": "weekly_wiki_evolver",
+                "operation_id": draft.id,
+                "operation_status": "pending_sources"
+            }
+        });
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_rem_source(
+                    "rem-source:stale",
+                    "stale-source-identity",
+                    &draft.id,
+                    "2026-07-05T01:00:00Z",
+                )?;
+                operation.insert_rem_operation_if_absent(&draft).map(|_| ())
+            })
+            .expect("seed claimed stale operation");
+
+        for _ in 0..2 {
+            store
+                .abort_stale_rem_wiki_operation(&draft.id, "2026-07-06T01:00:00Z")
+                .expect("stale abort is replay-safe");
+        }
+        assert!(store
+            .pending_rem_wiki_operations(10)
+            .expect("list pending after abort")
+            .is_empty());
+        let aborted = store
+            .get_with_options(&draft.id, true)
+            .expect("read aborted operation")
+            .expect("aborted operation remains as audit evidence");
+        assert!(aborted.archived);
+        assert_eq!(
+            aborted.metadata["rem"]["operation_status"],
+            "aborted_stale_sources"
+        );
+        assert_eq!(
+            aborted.metadata["rem"]["abort_reason"],
+            "source_revision_changed"
+        );
+        let claims: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM rem_source_claims WHERE draft_id = ?1",
+                [&draft.id],
+                |row| row.get(0),
+            )
+            .expect("count released claims");
+        assert_eq!(claims, 0);
+    }
+
+    #[test]
+    fn pending_rem_scan_ignores_ordinary_drafts_with_rem_shaped_metadata() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut ordinary = test_entry(
+            "ordinary-draft",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        ordinary.path = "/wiki/drafts/ordinary".to_string();
+        let mut canonical = test_entry(
+            "wiki-rem:canonical",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        canonical.path = "/wiki/drafts/canonical".to_string();
+        store.upsert(&ordinary).expect("seed ordinary draft");
+        seed_rem_operation(&mut store, &mut canonical);
+
+        assert_eq!(
+            store
+                .pending_rem_wiki_operations(10)
+                .expect("list canonical pending REM operations")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["wiki-rem:canonical"]
+        );
+    }
+
+    #[test]
+    fn reserved_rem_operation_refuses_generic_lifecycle_even_after_completion() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut draft = test_entry(
+            "wiki-rem:protected",
+            "raw",
+            json!({
+                "rem": {
+                    "producer": "weekly_wiki_evolver",
+                    "operation_status": "pending_sources"
+                }
+            }),
+        );
+        draft.path = "/wiki/drafts/protected".to_string();
+        seed_rem_operation(&mut store, &mut draft);
+
+        let insert = store
+            .insert_if_absent(&draft)
+            .expect_err("generic insert-once must reject the REM namespace");
+        assert!(insert
+            .to_string()
+            .contains("reserved 'wiki-rem:' namespace"));
+
+        let mut overwrite = draft.clone();
+        overwrite.source = "mcp".to_string();
+        overwrite.text = "hostile generic overwrite".to_string();
+        let upsert = store
+            .upsert(&overwrite)
+            .expect_err("pending REM winner must reject generic upsert");
+        assert!(upsert
+            .to_string()
+            .contains("reserved 'wiki-rem:' namespace"));
+
+        let revision_update = store
+            .update_with_revision(
+                &draft.id,
+                "hostile revision update",
+                "hostile summary",
+                "mcp",
+                &draft.metadata,
+                None,
+                draft.revision,
+            )
+            .expect_err("pending REM winner must reject generic revision update");
+        assert!(revision_update
+            .to_string()
+            .contains("reserved REM operation"));
+
+        let archive = store
+            .archive_memory(&draft.id)
+            .expect_err("pending REM winner must reject generic archive");
+        assert!(archive.to_string().contains("reserved REM operation"));
+        let supersede = store
+            .supersede_memory(&draft.id, "replacement")
+            .expect_err("pending REM winner must reject generic supersession");
+        assert!(supersede.to_string().contains("reserved REM operation"));
+        let delete = store
+            .delete(&draft.id)
+            .expect_err("pending REM winner must reject generic deletion");
+        assert!(delete.to_string().contains("reserved REM operation"));
+
+        store
+            .complete_rem_wiki_operation(&draft.id, "2026-07-05T02:00:00Z")
+            .expect("complete REM operation");
+        let completed_archive = store
+            .archive_memory(&draft.id)
+            .expect_err("completed REM audit row remains namespace-protected");
+        assert!(completed_archive
+            .to_string()
+            .contains("reserved REM operation"));
+        let completed_delete = store
+            .delete(&draft.id)
+            .expect_err("completed REM audit row cannot be deleted generically");
+        assert!(completed_delete
+            .to_string()
+            .contains("reserved REM operation"));
     }
 }

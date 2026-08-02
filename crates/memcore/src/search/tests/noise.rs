@@ -10,14 +10,18 @@ fn hybrid_hides_operation_logs() {
         &["trendlock"],
     );
     let mut log = memory_entry(
-        "wiki-operation-log",
+        "wiki-hidden-log",
         "TrendLock write operation log should not be recalled",
         &["trendlock", "log"],
     );
-    log.path = "/wiki/_log".to_string();
-    log.topic = "wiki_log".to_string();
+    log.path = "/wiki/general/internal-log".to_string();
     log.metadata = json!({"wiki_log": true});
     upsert(&mut conn, &log, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET metadata = json_set(metadata, '$.wiki_log', 1) WHERE id = 'wiki-hidden-log'",
+        [],
+    )
+    .unwrap();
 
     let opts = SearchOptions {
         top_k: 5,
@@ -28,7 +32,48 @@ fn hybrid_hides_operation_logs() {
     assert!(results.iter().any(|result| result.entry.id == "knowledge"));
     assert!(!results
         .iter()
-        .any(|result| result.entry.id == "wiki-operation-log"));
+        .any(|result| result.entry.id == "wiki-hidden-log"));
+}
+
+#[test]
+fn wiki_scoped_search_filters_logs_before_channel_limit() {
+    let mut conn = setup();
+    let mut real = memory_entry(
+        "wiki-real",
+        "WikiBudgetNeedle durable user-facing lesson",
+        &["wikibudgetneedle"],
+    );
+    real.path = "/wiki/z-agent/real".to_string();
+    upsert(&mut conn, &real, false).unwrap();
+    for index in 0..8 {
+        let mut log = memory_entry(
+            &format!("wiki-log-{index}"),
+            "WikiBudgetNeedle WikiBudgetNeedle internal operation log",
+            &["wikibudgetneedle", "log"],
+        );
+        log.path = format!("/wiki/a-log/{index}");
+        log.importance = 1.0;
+        upsert(&mut conn, &log, false).unwrap();
+        conn.execute(
+            "UPDATE memories SET metadata = json_set(metadata, '$.wiki_log', 1) WHERE id = ?1",
+            [&log.id],
+        )
+        .unwrap();
+    }
+    let results = hybrid_search(
+        &conn,
+        "WikiBudgetNeedle",
+        &SearchOptions {
+            candidates_per_channel: 5,
+            top_k: 1,
+            path_prefix: Some("/wiki".to_string()),
+            record_access: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].entry.id, "wiki-real");
 }
 
 #[test]

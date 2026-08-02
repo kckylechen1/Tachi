@@ -57,6 +57,86 @@ async fn save_memory_rejects_exact_path_text_duplicate_without_force() {
 }
 
 #[tokio::test]
+async fn save_memory_strips_internal_rem_metadata_but_keeps_ordinary_metadata() {
+    let server = make_server();
+    let id = format!("public-rem-metadata-{}", uuid::Uuid::new_v4());
+    let mut params = SaveMemoryParams {
+        text: "Public memory metadata cannot reset internal REM processing state.".to_string(),
+        summary: String::new(),
+        path: format!("/scratch/tachi/{id}"),
+        importance: 0.7,
+        category: "fact".to_string(),
+        topic: "rem-metadata-boundary".to_string(),
+        keywords: Vec::new(),
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: String::new(),
+        scope: "global".to_string(),
+        vector: None,
+        id: Some(id.clone()),
+        force: true,
+        auto_link: false,
+        project: None,
+        project_explicit: false,
+        retention_policy: None,
+        domain: Some("scratch".to_string()),
+        timestamp: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: Some(serde_json::json!({
+            "caller_marker": "preserved",
+            "rem": {"processed": 0, "processed_by": "forged"}
+        })),
+        emit_continuity: false,
+    };
+
+    handle_save_memory(&server, params.clone())
+        .await
+        .expect("save public metadata");
+    let initial = server
+        .with_global_store_read(|store| store.get(&id).map_err(|error| error.to_string()))
+        .expect("read saved memory")
+        .expect("saved memory exists");
+    assert_eq!(initial.metadata["caller_marker"], "preserved");
+    assert!(initial.metadata.get("rem").is_none());
+
+    server
+        .with_global_store(|store| {
+            store
+                .mark_rem_processed_for_draft_at_revisions(
+                    &[(id.clone(), initial.revision)],
+                    "2026-07-31T01:00:00Z",
+                    "wiki-rem:real-operation",
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed trusted REM marker");
+
+    params.text = "A public update must preserve the trusted REM marker.".to_string();
+    params.metadata = Some(serde_json::json!({
+        "caller_marker": "updated",
+        "rem": {"processed": 0, "processed_by": "forged"}
+    }));
+    handle_save_memory(&server, params)
+        .await
+        .expect("update public metadata");
+    let updated = server
+        .with_global_store_read(|store| store.get(&id).map_err(|error| error.to_string()))
+        .expect("read updated memory")
+        .expect("updated memory exists");
+    assert_eq!(updated.metadata["caller_marker"], "updated");
+    assert_eq!(updated.metadata["rem"]["processed"], 1);
+    assert_eq!(
+        updated.metadata["rem"]["processed_by"],
+        "wiki-rem:real-operation"
+    );
+    assert_eq!(
+        updated.metadata["rem"]["processed_revision"],
+        initial.revision
+    );
+}
+
+#[tokio::test]
 async fn save_memory_allows_a_second_row_when_caller_supplies_its_own_id() {
     // An explicit `id=` (not `force`) is what makes a second row with the
     // same path+text land as a distinct save: `find_exact_path_text_duplicate`

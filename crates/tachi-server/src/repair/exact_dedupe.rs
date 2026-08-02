@@ -1,11 +1,372 @@
 use crate::daemon_lock::{DualDaemonLock, DualLockError};
 use crate::db_ownership::{daemon_ownership, DbOwnership};
 use crate::manifest::{DbRole, Manifest, MANIFEST_SCHEMA_VERSION};
-use memcore::store::exact_dedupe::{ExactDedupePlan, ExactDedupeReceipt};
+use memcore::store::exact_dedupe::{
+    ExactDedupePlan, ExactDedupeReceipt, ExactDedupeReceiptDbState, ExactDedupeRestoreReceipt,
+};
 use memcore::MemoryStore;
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+std::thread_local! {
+    static FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION: Cell<bool> = const { Cell::new(false) };
+    static FAULT_DURING_PREPARED_STAGE_WRITE: Cell<bool> = const { Cell::new(false) };
+    static FAULT_BEFORE_PREPARED_PARENT_SYNC: Cell<bool> = const { Cell::new(false) };
+    static FAULT_AFTER_PREPARED_PUBLISH_BEFORE_COMMIT: Cell<bool> = const { Cell::new(false) };
+    static FAULT_REPLACE_PUBLIC_RECEIPT_BEFORE_FINALIZATION: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+fn inject_fault_after_db_commit_before_finalization_for_test(enabled: bool) {
+    FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION.with(|fault| fault.set(enabled));
+}
+
+#[cfg(test)]
+fn inject_fault_during_prepared_stage_write_for_test(enabled: bool) {
+    FAULT_DURING_PREPARED_STAGE_WRITE.with(|fault| fault.set(enabled));
+}
+
+#[cfg(test)]
+fn inject_fault_before_prepared_parent_sync_for_test(enabled: bool) {
+    FAULT_BEFORE_PREPARED_PARENT_SYNC.with(|fault| fault.set(enabled));
+}
+
+#[cfg(test)]
+fn inject_fault_after_prepared_publish_before_commit_for_test(enabled: bool) {
+    FAULT_AFTER_PREPARED_PUBLISH_BEFORE_COMMIT.with(|fault| fault.set(enabled));
+}
+
+#[cfg(test)]
+fn inject_fault_replace_public_receipt_before_finalization_for_test(enabled: bool) {
+    FAULT_REPLACE_PUBLIC_RECEIPT_BEFORE_FINALIZATION.with(|fault| fault.set(enabled));
+}
+
+fn fault_after_db_commit_before_finalization() -> Result<(), &'static str> {
+    #[cfg(test)]
+    if FAULT_AFTER_DB_COMMIT_BEFORE_FINALIZATION.with(|fault| fault.replace(false)) {
+        return Err("injected post-commit/pre-finalization fault");
+    }
+    Ok(())
+}
+
+fn fault_after_prepared_publish_before_commit() -> Result<(), memcore::MemoryError> {
+    #[cfg(test)]
+    if FAULT_AFTER_PREPARED_PUBLISH_BEFORE_COMMIT.with(|fault| fault.replace(false)) {
+        return Err(memcore::MemoryError::InvalidArg(
+            "injected post-publication/pre-commit failure".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn fault_replace_public_receipt_before_finalization(_receipt_out: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if FAULT_REPLACE_PUBLIC_RECEIPT_BEFORE_FINALIZATION.with(|fault| fault.replace(false)) {
+        let displaced = _receipt_out.with_extension("displaced-prepared");
+        fs::rename(_receipt_out, &displaced)
+            .map_err(|error| format!("displace prepared receipt fixture: {error}"))?;
+        fs::write(_receipt_out, b"concurrent replacement")
+            .map_err(|error| format!("install receipt replacement fixture: {error}"))?;
+    }
+    Ok(())
+}
+
+fn sync_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
+    let parent = receipt_out
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+fn sync_prepared_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
+    #[cfg(test)]
+    if FAULT_BEFORE_PREPARED_PARENT_SYNC.with(|fault| fault.replace(false)) {
+        return Err(std::io::Error::other(
+            "injected prepared-receipt parent sync failure",
+        ));
+    }
+    sync_receipt_parent(receipt_out)
+}
+
+fn write_staged_receipt(
+    receipt_out: &Path,
+    phase: &str,
+    bytes: &[u8],
+) -> Result<(PathBuf, File), std::io::Error> {
+    let parent = receipt_out.parent().unwrap_or_else(|| Path::new("."));
+    let name = receipt_out
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "receipt".into());
+    for attempt in 0..32 {
+        let candidate = parent.join(format!(
+            ".{name}.exact-dedupe-{phase}-{}-{attempt}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let write_result = (|| {
+            #[cfg(test)]
+            if phase == "prepared"
+                && FAULT_DURING_PREPARED_STAGE_WRITE.with(|fault| fault.replace(false))
+            {
+                file.write_all(&bytes[..bytes.len() / 2])?;
+                return Err(std::io::Error::other(
+                    "injected partial prepared-receipt write failure",
+                ));
+            }
+            file.write_all(bytes)?;
+            file.write_all(b"\n")?;
+            file.sync_all()
+        })();
+        if let Err(error) = write_result {
+            drop(file);
+            let _ = fs::remove_file(&candidate);
+            return Err(error);
+        }
+        return Ok((candidate, file));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate exact-dedupe receipt staging path",
+    ))
+}
+
+fn persist_prepared_receipt_before_commit(
+    receipt_out: &Path,
+    result: &memcore::store::exact_dedupe::ExactDedupeApplyResult,
+) -> Result<File, memcore::MemoryError> {
+    let receipt_json = serde_json::to_vec_pretty(&result.receipt)?;
+    let (staged, file) =
+        write_staged_receipt(receipt_out, "prepared", &receipt_json).map_err(|error| {
+            memcore::MemoryError::InvalidArg(format!(
+                "exact-dedupe prepared receipt could not be staged durably at {}: {error}",
+                receipt_out.display()
+            ))
+        })?;
+    if let Err(error) = fs::hard_link(&staged, receipt_out) {
+        let _ = fs::remove_file(&staged);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(memcore::MemoryError::InvalidArg(format!(
+                "exact-dedupe receipt output already exists: {}",
+                receipt_out.display()
+            )));
+        }
+        return Err(memcore::MemoryError::InvalidArg(format!(
+            "exact-dedupe prepared receipt could not be atomically published before commit at {}: {error}",
+            receipt_out.display()
+        )));
+    }
+    if let Err(error) = sync_prepared_receipt_parent(receipt_out) {
+        // Never unlink the caller-visible path after publication: another
+        // process could replace it between an ownership check and unlink.
+        // The DB transaction still rolls back, and the prepared artifact is
+        // conservatively retained for read-only DB-state classification.
+        let _ = fs::remove_file(&staged);
+        return Err(memcore::MemoryError::InvalidArg(format!(
+            "exact-dedupe prepared receipt parent could not be synced durably before commit at {}: {error}; the public prepared artifact was retained conservatively",
+            receipt_out.display()
+        )));
+    }
+    // Once the public name and parent directory are durable, staging-name
+    // removal is cleanup only. A cleanup failure must not make the caller roll
+    // back the database while leaving an authoritative prepared receipt.
+    if fs::remove_file(&staged).is_ok() {
+        let _ = sync_receipt_parent(receipt_out);
+    }
+    Ok(file)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+fn atomic_exchange_paths(left: &Path, right: &Path) -> Result<(), std::io::Error> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let left = CString::new(left.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "exact-dedupe receipt path contains an interior NUL byte",
+        )
+    })?;
+    let right = CString::new(right.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "exact-dedupe receipt path contains an interior NUL byte",
+        )
+    })?;
+    // SAFETY: both C strings are live and NUL-terminated for the duration of
+    // the syscall. The platform primitive atomically exchanges two directory
+    // entries and does not retain either pointer.
+    let rc = unsafe {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                left.as_ptr(),
+                libc::AT_FDCWD,
+                right.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        }
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+fn atomic_exchange_paths(_left: &Path, _right: &Path) -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic receipt exchange is unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn path_names_open_file(path: &Path, file: &File) -> Result<bool, std::io::Error> {
+    let path_metadata = fs::symlink_metadata(path)?;
+    let file_metadata = file.metadata()?;
+    Ok(path_metadata.file_type().is_file()
+        && path_metadata.dev() == file_metadata.dev()
+        && path_metadata.ino() == file_metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn path_names_open_file(_path: &Path, _file: &File) -> Result<bool, std::io::Error> {
+    Ok(false)
+}
+
+fn finalize_prepared_receipt(
+    receipt_out: &Path,
+    prepared_file: &File,
+    committed_receipt: &ExactDedupeReceipt,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let bytes = serde_json::to_vec_pretty(committed_receipt)?;
+    let (staged, committed_file) = write_staged_receipt(receipt_out, "prepared-backup", &bytes)?;
+    if let Err(error) = atomic_exchange_paths(&staged, receipt_out) {
+        let _ = fs::remove_file(&staged);
+        return Err(format!("atomic committed-receipt exchange failed: {error}").into());
+    }
+    if !path_names_open_file(&staged, prepared_file)? {
+        // The output was replaced before the exchange. Exchange back so the
+        // unrelated object returns to its original path. Both sides are kept
+        // if further interference prevents proving that restoration.
+        let displaced = OpenOptions::new().read(true).open(&staged)?;
+        atomic_exchange_paths(&staged, receipt_out)?;
+        let restored = path_names_open_file(receipt_out, &displaced)?
+            && path_names_open_file(&staged, &committed_file)?;
+        if restored {
+            return Err(format!(
+                "public receipt path was replaced before finalization; replacement was restored without overwrite and the committed staging artifact was retained at {}",
+                staged.display()
+            )
+            .into());
+        }
+        return Err(format!(
+            "public receipt path changed during atomic finalization; no object was deleted and both exchange paths were retained: {} and {}",
+            receipt_out.display(),
+            staged.display()
+        )
+        .into());
+    }
+    // `staged` now names our own prepared inode, proven by the open handle.
+    // Keep it as commit-boundary audit evidence: deleting by pathname would
+    // reintroduce the same compare-then-unlink race this exchange avoids.
+    sync_receipt_parent(receipt_out)?;
+    Ok(staged)
+}
+
+fn reconcile_failed_prepared_receipt(
+    store: &MemoryStore,
+    receipt_out: &Path,
+    receipt: &ExactDedupeReceipt,
+    apply_error: Box<dyn std::error::Error>,
+) -> Box<dyn std::error::Error> {
+    let original = apply_error.to_string();
+    let db_state = match store.classify_exact_dedupe_receipt_db_state(receipt) {
+        Ok(state) => state,
+        Err(error) => {
+            return format!(
+                "exact-dedupe apply failed after prepared receipt publication: {original}; DB outcome could not be reconciled ({error}), so the prepared receipt was retained at {}",
+                receipt_out.display()
+            )
+            .into()
+        }
+    };
+    match db_state {
+        ExactDedupeReceiptDbState::Applied => format!(
+            "exact-dedupe apply returned an error after prepared receipt publication: {original}; the committed DB post-state was proven, so the recovery receipt was retained at {}",
+            receipt_out.display()
+        )
+        .into(),
+        ExactDedupeReceiptDbState::Indeterminate => format!(
+            "exact-dedupe apply failed after prepared receipt publication: {original}; the DB outcome is indeterminate, so the prepared receipt was retained at {}",
+            receipt_out.display()
+        )
+        .into(),
+        ExactDedupeReceiptDbState::NotApplied => {
+            format!(
+                "exact-dedupe apply failed after prepared receipt publication: {original}; DB rollback was proven and the prepared receipt was retained at {} because path-based cleanup cannot safely delete a concurrently replaced object",
+                receipt_out.display()
+            )
+            .into()
+        }
+    }
+}
+
+fn run_physical_identity_checked_exact_dedupe<T>(
+    store: &mut MemoryStore,
+    target: &Path,
+    operation: &str,
+    action: impl FnOnce(&mut MemoryStore) -> Result<T, memcore::MemoryError>,
+) -> Result<(T, Option<String>), Box<dyn std::error::Error>> {
+    store
+        .verify_opened_physical_db_identity(target)
+        .map_err(|error| {
+            format!(
+                "exact-dedupe {operation} physical identity check failed before operation: {error}"
+            )
+        })?;
+    let result = action(store);
+    let post = store
+        .verify_opened_physical_db_identity(target)
+        .map_err(|error| {
+            format!(
+                "exact-dedupe {operation} physical identity check failed after operation: {error}"
+            )
+        });
+    match (result, post) {
+        (Ok(value), Ok(())) => Ok((value, None)),
+        (Ok(value), Err(identity_error)) => Ok((value, Some(identity_error))),
+        (Err(error), Ok(())) => Err(error.into()),
+        (Err(error), Err(identity_error)) => Err(format!(
+            "{error}; additionally, the physical identity invariant failed after exact-dedupe {operation}: {identity_error}"
+        )
+        .into()),
+    }
+}
 
 pub(super) fn target_and_daemon_scope(
     operation: &str,
@@ -95,16 +456,6 @@ pub fn apply(
     if !yes {
         return Err("exact-dedupe apply requires --yes".into());
     }
-    // Fail before any mutation if the receipt destination is unusable: an
-    // apply that mutates the DB with no durable receipt to show for it
-    // violates #1348's receipt convention just as surely as a bad plan does.
-    if receipt_out.exists() {
-        return Err(format!(
-            "exact-dedupe receipt output already exists: {}",
-            receipt_out.display()
-        )
-        .into());
-    }
     let (target, daemon_scope) = target_and_daemon_scope("exact-dedupe", db, app_home, true)?;
     if receipt_out == target || std::fs::canonicalize(receipt_out).is_ok_and(|path| path == target)
     {
@@ -143,46 +494,78 @@ pub fn apply(
             .into())
         }
     }
-    let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
-    let result = store.apply_exact_dedupe(&plan)?;
-    let receipt_json = serde_json::to_string_pretty(&result.receipt)?;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(receipt_out)
-    {
-        Ok(mut file) => {
-            // A mid-write failure (e.g. disk full after create) is just as
-            // fatal as failing to open: the apply already committed, so a
-            // truncated receipt must be surfaced as loudly as a missing one,
-            // dumping the full JSON for a manual restore rather than dropping
-            // it behind a bare `?`.
-            if let Err(error) = file
-                .write_all(receipt_json.as_bytes())
-                .and_then(|()| file.write_all(b"\n"))
-            {
-                eprintln!(
-                    "CRITICAL: exact-dedupe apply committed {} archived loser(s) but the receipt could not be fully written to {}: {error}\nReceipt JSON (save for a manual `repair dedupe restore`):\n{receipt_json}",
-                    result.applied_losers,
-                    receipt_out.display(),
-                );
-                return Err(
-                    format!("exact-dedupe receipt write failed after commit: {error}").into(),
-                );
-            }
-        }
-        Err(error) => {
-            // The apply already committed. Losing the receipt file here
-            // would silently drop the only durable restore/audit trail, so
-            // this refusal must be loud rather than quietly swallowed.
-            eprintln!(
-                "CRITICAL: exact-dedupe apply committed {} archived loser(s) but the receipt could not be written to {}: {error}\nReceipt JSON (save for a manual `repair dedupe restore`):\n{receipt_json}",
-                result.applied_losers,
-                receipt_out.display(),
-            );
-            return Err(format!("exact-dedupe receipt write failed after commit: {error}").into());
-        }
+    if std::fs::symlink_metadata(receipt_out).is_ok() {
+        return Err(format!(
+            "exact-dedupe receipt output already exists: {}",
+            receipt_out.display()
+        )
+        .into());
     }
+    let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
+    let mut published_prepared_receipt = None;
+    let mut prepared_receipt_file = None;
+    let apply_attempt =
+        run_physical_identity_checked_exact_dedupe(&mut store, &target, "apply", |store| {
+            store.apply_exact_dedupe_with_precommit_receipt(&plan, |result| {
+                prepared_receipt_file =
+                    Some(persist_prepared_receipt_before_commit(receipt_out, result)?);
+                published_prepared_receipt = Some(result.receipt.clone());
+                fault_after_prepared_publish_before_commit()
+            })
+        });
+    let (result, post_identity_error) = match apply_attempt {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(receipt) = published_prepared_receipt.as_ref() {
+                return Err(reconcile_failed_prepared_receipt(
+                    &store,
+                    receipt_out,
+                    receipt,
+                    error,
+                ));
+            }
+            return Err(error);
+        }
+    };
+    if let Some(identity_error) = post_identity_error {
+        eprintln!(
+            "CRITICAL: exact-dedupe apply wrote and synced the receipt at {} before commit, then committed {} archived loser(s) to a database handle whose target path identity changed: {identity_error}",
+            receipt_out.display(),
+            result.applied_losers,
+        );
+        return Err(identity_error.into());
+    }
+    if let Err(error) = fault_after_db_commit_before_finalization() {
+        return Err(format!(
+            "exact-dedupe apply committed {} archived loser(s), then {error}; durable prepared recovery receipt retained at {}",
+            result.applied_losers,
+            receipt_out.display()
+        )
+        .into());
+    }
+    fault_replace_public_receipt_before_finalization(receipt_out)?;
+    let prepared_receipt_file = prepared_receipt_file.ok_or_else(|| {
+        "exact-dedupe apply committed without retaining its prepared receipt object handle"
+            .to_string()
+    })?;
+    let prepared_backup = match finalize_prepared_receipt(
+        receipt_out,
+        &prepared_receipt_file,
+        &result.receipt,
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            return Err(format!(
+                "exact-dedupe apply committed {} archived loser(s), but receipt finalization failed: {error}; commit-boundary artifacts were retained for recovery",
+                result.applied_losers,
+            )
+            .into())
+        }
+    };
+    eprintln!(
+        "exact-dedupe retained the immutable prepared receipt backup at {}",
+        prepared_backup.display()
+    );
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
@@ -197,9 +580,9 @@ pub fn restore(
         return Err("exact-dedupe restore requires --yes".into());
     }
     let (target, daemon_scope) = target_and_daemon_scope("exact-dedupe", db, app_home, true)?;
-    let receipt: ExactDedupeReceipt = serde_json::from_slice(&std::fs::read(receipt_path)?)?;
+    let receipt = ExactDedupeRestoreReceipt::from_slice(&std::fs::read(receipt_path)?)?;
     receipt.validate()?;
-    if std::fs::canonicalize(&receipt.target_db_identity)? != target {
+    if std::fs::canonicalize(receipt.target_db_identity())? != target {
         return Err("exact-dedupe receipt target DB mismatch".into());
     }
     let _lock = match DualDaemonLock::acquire(app_home, &daemon_scope) {
@@ -231,10 +614,17 @@ pub fn restore(
         }
     }
     let mut store = MemoryStore::open_existing_read_write(&target.to_string_lossy())?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&store.restore_exact_dedupe(&receipt)?)?
-    );
+    let (result, post_identity_error) =
+        run_physical_identity_checked_exact_dedupe(&mut store, &target, "restore", |store| {
+            store.restore_exact_dedupe_versioned(&receipt)
+        })?;
+    if let Some(identity_error) = post_identity_error {
+        eprintln!(
+            "CRITICAL: exact-dedupe restore committed against a database handle whose target path identity changed: {identity_error}"
+        );
+        return Err(identity_error.into());
+    }
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
@@ -316,6 +706,50 @@ mod tests {
         manifest.save(&app_home.join("manifest.json")).unwrap();
         let receipt_path = dir.path().join("receipt.json");
         (dir, app_home, db_path, plan_path, receipt_path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_dedupe_identity_guard_rejects_replacement_before_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.db");
+        let replacement = dir.path().join("replacement.db");
+        let mut store = MemoryStore::open(target.to_str().unwrap()).unwrap();
+        drop(MemoryStore::open(replacement.to_str().unwrap()).unwrap());
+        std::fs::rename(&replacement, &target).unwrap();
+        let mut called = false;
+
+        let error =
+            run_physical_identity_checked_exact_dedupe(&mut store, &target, "apply", |_| {
+                called = true;
+                Ok(())
+            })
+            .expect_err("detached handle must fail before mutation");
+
+        assert!(!called);
+        assert!(error.to_string().contains("before operation"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_dedupe_identity_guard_reports_replacement_during_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.db");
+        let replacement = dir.path().join("replacement.db");
+        let mut store = MemoryStore::open(target.to_str().unwrap()).unwrap();
+        drop(MemoryStore::open(replacement.to_str().unwrap()).unwrap());
+
+        let ((), post_error) =
+            run_physical_identity_checked_exact_dedupe(&mut store, &target, "restore", |_| {
+                std::fs::rename(&replacement, &target)
+                    .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
+                Ok(())
+            })
+            .expect("post-operation identity drift must preserve the action result for recovery");
+
+        assert!(post_error
+            .expect("replacement must be reported")
+            .contains("after operation"));
     }
 
     #[test]
@@ -691,8 +1125,17 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt file exists"))
                 .expect("receipt file is valid JSON");
         receipt.validate().expect("receipt is self-consistent");
+        assert_eq!(
+            receipt.phase,
+            memcore::store::exact_dedupe::ExactDedupeReceiptPhase::Committed
+        );
         assert_eq!(receipt.rows.len(), 1);
         assert_eq!(receipt.rows[0].loser_id, "loser");
+        assert!(
+            receipt.target_db_physical_identity.starts_with("unix:"),
+            "receipt must bind the physical DB identity, got {}",
+            receipt.target_db_physical_identity
+        );
 
         let archived_before: i64 = rusqlite::Connection::open(&db_path)
             .unwrap()
@@ -711,6 +1154,60 @@ mod tests {
             })
             .unwrap();
         assert_eq!(archived_after, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_commit_fault_retains_an_honest_prepared_receipt_that_can_restore() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_after_db_commit_before_finalization_for_test(true);
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect_err("inject crash window after DB commit");
+        assert!(
+            error
+                .to_string()
+                .contains("post-commit/pre-finalization fault"),
+            "unexpected failure: {error}"
+        );
+        let receipt: ExactDedupeReceipt = serde_json::from_slice(
+            &std::fs::read(&receipt_path).expect("prepared receipt remains durable"),
+        )
+        .expect("prepared receipt is valid JSON");
+        assert_eq!(
+            receipt.phase,
+            memcore::store::exact_dedupe::ExactDedupeReceiptPhase::Prepared
+        );
+        receipt.validate().expect("prepared receipt remains valid");
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT archived FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1, "DB transaction committed before the fault");
+
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        restore(&db_path.to_string_lossy(), &receipt_path, true, &app_home)
+            .expect("prepared receipt restores only after proving committed post-state");
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT archived FROM memories WHERE id='loser'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 0);
     }
 
     #[cfg(unix)]
@@ -738,6 +1235,276 @@ mod tests {
             .unwrap();
         assert_eq!(archived, 0);
         assert_eq!(std::fs::read(&receipt_path).unwrap(), b"pre-existing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_refuses_missing_receipt_parent_without_committing_mutation() {
+        let (dir, app_home, db_path, plan_path, _receipt_path) = fixture();
+        let receipt_path = dir.path().join("missing-parent").join("receipt.json");
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("could not be staged durably"),
+            "unexpected refusal: {error}"
+        );
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+        assert!(!receipt_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_prepared_stage_write_never_publishes_or_leaks_a_receipt() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_during_prepared_stage_write_for_test(true);
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect_err("partial staged write must abort before DB commit");
+        assert!(
+            error
+                .to_string()
+                .contains("injected partial prepared-receipt write failure"),
+            "unexpected refusal: {error}"
+        );
+        assert!(
+            !receipt_path.exists(),
+            "partial bytes must never appear at the public receipt path"
+        );
+        let leaked_stage = std::fs::read_dir(receipt_path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("exact-dedupe-prepared")
+            });
+        assert!(!leaked_stage, "partial staging file must be removed");
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_parent_sync_failure_retains_public_evidence_without_committing() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_before_prepared_parent_sync_for_test(true);
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect_err("unsynced public receipt must abort before DB commit");
+        assert!(
+            error
+                .to_string()
+                .contains("injected prepared-receipt parent sync failure"),
+            "unexpected refusal: {error}"
+        );
+        let retained: ExactDedupeReceipt = serde_json::from_slice(
+            &std::fs::read(&receipt_path).expect("prepared receipt remains inspectable"),
+        )
+        .expect("retained receipt JSON");
+        assert_eq!(
+            retained.phase,
+            memcore::store::exact_dedupe::ExactDedupeReceiptPhase::Prepared
+        );
+        let leaked_stage = std::fs::read_dir(receipt_path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("exact-dedupe-prepared")
+            });
+        assert!(!leaked_stage, "prepared staging name must be removed");
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0, "DB mutation must roll back with publication");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_publication_precommit_failure_proves_rollback_and_retains_prepared_evidence() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_after_prepared_publish_before_commit_for_test(true);
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect_err("failure after publication must reconcile the DB outcome");
+        let message = error.to_string();
+        assert!(
+            message.contains("injected post-publication/pre-commit failure")
+                && message.contains("DB rollback was proven")
+                && message.contains("prepared receipt was retained"),
+            "unexpected reconciliation error: {message}"
+        );
+        let retained: ExactDedupeReceipt = serde_json::from_slice(
+            &std::fs::read(&receipt_path).expect("prepared receipt remains as evidence"),
+        )
+        .expect("retained receipt JSON");
+        assert_eq!(
+            retained.phase,
+            memcore::store::exact_dedupe::ExactDedupeReceiptPhase::Prepared
+        );
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0, "the pre-commit DB transaction must roll back");
+        let lineage: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM exact_dedupe_apply_lineage",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lineage, 0, "rollback must leave no durable apply lineage");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalization_never_overwrites_a_concurrent_public_path_replacement() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        inject_fault_replace_public_receipt_before_finalization_for_test(true);
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .expect_err("replacement must make finalization fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("replacement was restored without overwrite"),
+            "unexpected finalization error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&receipt_path).expect("replacement remains public"),
+            b"concurrent replacement"
+        );
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            archived, 1,
+            "DB commit remains truthful despite finalization refusal"
+        );
+        let displaced = receipt_path.with_extension("displaced-prepared");
+        let prepared: ExactDedupeReceipt = serde_json::from_slice(
+            &std::fs::read(displaced).expect("original prepared receipt remains available"),
+        )
+        .expect("displaced prepared receipt JSON");
+        assert_eq!(
+            prepared.phase,
+            memcore::store::exact_dedupe::ExactDedupeReceiptPhase::Prepared
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_leaves_no_receipt_on_precommit_core_failure() {
+        let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
+        let mut store = MemoryStore::open_existing_read_write(&db_path.to_string_lossy()).unwrap();
+        store
+            .insert_if_absent(&memcore::MemoryEntry {
+                id: "drifter".into(),
+                path: "/same".into(),
+                summary: String::new(),
+                text: "duplicate".into(),
+                importance: 0.7,
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                valid_from: String::new(),
+                valid_until: None,
+                category: "fact".into(),
+                topic: String::new(),
+                keywords: Vec::new(),
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                source: "test".into(),
+                scope: "general".into(),
+                archived: false,
+                access_count: 0,
+                scored_count: 0,
+                last_access: None,
+                last_use_at: None,
+                revision: 1,
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                metadata: serde_json::json!({}),
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".into(),
+            })
+            .unwrap();
+        drop(store);
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+
+        let error = apply(
+            &db_path.to_string_lossy(),
+            &plan_path,
+            true,
+            &receipt_path,
+            &app_home,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("group membership drifted"),
+            "unexpected refusal: {error}"
+        );
+        assert!(
+            !receipt_path.exists(),
+            "precommit core failure must not create the final receipt"
+        );
+        let archived: i64 = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 0);
     }
 
     #[test]

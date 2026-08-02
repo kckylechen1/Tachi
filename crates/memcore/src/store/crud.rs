@@ -66,6 +66,15 @@ impl MemoryStore {
         Ok(map.remove(id))
     }
 
+    pub fn list_user_facing_wiki_entries(
+        &self,
+        path_prefix: &str,
+        limit: usize,
+        include_superseded: bool,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_user_facing_wiki_entries(&self.conn, path_prefix, limit, include_superseded)
+    }
+
     /// Compatibility access for diagnostics and typed helpers that operate on
     /// non-memory tables. `rusqlite::Connection` is inherently write-capable
     /// even through `&Connection`, so a connection authorizer
@@ -187,8 +196,8 @@ impl MemoryStore {
         db::get_all(&self.conn, limit, include_archived)
     }
 
-    /// Id of an active row with the EXACT `path` and `text`, via a direct
-    /// SQL predicate (no recency-window cutoff to hide behind — see
+    /// Id of an active non-REM row with the EXACT `path` and `text`, via a
+    /// direct SQL predicate (no recency-window cutoff to hide behind — see
     /// `db::find_exact_path_text_id`'s doc for the #1041 F6 bug this fixes).
     pub fn find_exact_path_text_id(
         &self,
@@ -206,6 +215,15 @@ impl MemoryStore {
         include_archived: bool,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
         db::list_by_path(&self.conn, path_prefix, limit, include_archived)
+    }
+
+    /// List active, unsuperseded entries under a path (exact + descendants).
+    pub fn list_by_path_active_unsuperseded(
+        &self,
+        path_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_by_path_active_unsuperseded(&self.conn, path_prefix, limit)
     }
 
     /// List entries under a path (exact + descendants), newest-first by
@@ -237,7 +255,7 @@ impl MemoryStore {
         parent_path: &str,
         limit: usize,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
-        db::list_wiki_duplicate_candidates(&self.conn, path, topic, parent_path, limit)
+        db::list_wiki_duplicate_candidates(&self.conn, path, topic, parent_path, Some(limit))
     }
 
     /// Run PRAGMA quick_check to detect database corruption early.

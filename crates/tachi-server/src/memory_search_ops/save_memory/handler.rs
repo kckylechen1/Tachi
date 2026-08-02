@@ -3,7 +3,7 @@ use super::entry::build_save_entry;
 use super::persist::{
     find_exact_path_text_duplicate, lookup_existing_entry, mark_save_target_used,
     spawn_save_contradiction_detection, upsert_idless_save_entry, upsert_save_entry,
-    AtomicReferenceWrite,
+    upsert_wiki_projection_entry, AtomicReferenceWrite,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
@@ -85,8 +85,30 @@ struct PreUpsertBarrier {
 }
 
 #[cfg(test)]
+struct PreUpsertIdentityBarrier {
+    identity: String,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+struct PreUpsertPathBarrier {
+    path: String,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
 static PRE_UPSERT_BARRIER: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsertBarrier>>> =
     std::sync::OnceLock::new();
+
+#[cfg(test)]
+static PRE_UPSERT_IDENTITY_BARRIER: std::sync::OnceLock<
+    std::sync::Mutex<Option<PreUpsertIdentityBarrier>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static PRE_UPSERT_PATH_BARRIER: std::sync::OnceLock<
+    std::sync::Mutex<Option<PreUpsertPathBarrier>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 struct PreUpsertPause {
@@ -102,6 +124,12 @@ static PRE_UPSERT_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<PreUpsertPa
 
 #[cfg(test)]
 pub(crate) struct PreUpsertBarrierGuard;
+
+#[cfg(test)]
+pub(crate) struct PreUpsertIdentityBarrierGuard;
+
+#[cfg(test)]
+pub(crate) struct PreUpsertPathBarrierGuard;
 
 #[cfg(test)]
 pub(crate) struct PreUpsertPauseGuard;
@@ -123,6 +151,52 @@ pub(crate) fn install_pre_upsert_barrier(
 impl Drop for PreUpsertBarrierGuard {
     fn drop(&mut self) {
         if let Some(slot) = PRE_UPSERT_BARRIER.get() {
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_pre_upsert_identity_barrier(
+    path: &str,
+    text: &str,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+) -> PreUpsertIdentityBarrierGuard {
+    let slot = PRE_UPSERT_IDENTITY_BARRIER.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(PreUpsertIdentityBarrier {
+            identity: idless_save_identity(path, text),
+            barrier,
+        });
+    PreUpsertIdentityBarrierGuard
+}
+
+#[cfg(test)]
+impl Drop for PreUpsertIdentityBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = PRE_UPSERT_IDENTITY_BARRIER.get() {
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_pre_upsert_path_barrier(
+    path: &str,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+) -> PreUpsertPathBarrierGuard {
+    let slot = PRE_UPSERT_PATH_BARRIER.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PreUpsertPathBarrier {
+        path: path.to_string(),
+        barrier,
+    });
+    PreUpsertPathBarrierGuard
+}
+
+#[cfg(test)]
+impl Drop for PreUpsertPathBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = PRE_UPSERT_PATH_BARRIER.get() {
             *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
     }
@@ -161,6 +235,36 @@ fn wait_at_pre_upsert_barrier(entry_id: &str) {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
             .filter(|configured| configured.entry_id == entry_id)
+            .map(|configured| std::sync::Arc::clone(&configured.barrier))
+    });
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+#[cfg(test)]
+fn wait_at_pre_upsert_identity_barrier(identity: Option<&str>) {
+    let barrier = identity.and_then(|identity| {
+        PRE_UPSERT_IDENTITY_BARRIER.get().and_then(|slot| {
+            slot.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .filter(|configured| configured.identity == identity)
+                .map(|configured| std::sync::Arc::clone(&configured.barrier))
+        })
+    });
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+#[cfg(test)]
+fn wait_at_pre_upsert_path_barrier(path: &str) {
+    let barrier = PRE_UPSERT_PATH_BARRIER.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|configured| configured.path == path)
             .map(|configured| std::sync::Arc::clone(&configured.barrier))
     });
     if let Some(barrier) = barrier {
@@ -218,10 +322,21 @@ fn atomic_evidence_metadata_patch(
     patch
 }
 
-fn strip_reserved_reference_metadata(metadata: &mut Option<serde_json::Value>) {
+fn strip_reserved_public_metadata(metadata: &mut Option<serde_json::Value>) {
     if let Some(serde_json::Value::Object(object)) = metadata {
         object.remove("evidence_refs_v1");
         object.remove("source_refs");
+        // REM receipts are owned by the evolver and source-marker seams.
+        // Public/system save metadata must neither mint a pending operation
+        // nor reset a source's processed marker.
+        object.remove("rem");
+        // Wiki operation-log ownership is established only by the internal
+        // log writer, never by caller metadata on an ordinary memory row.
+        object.remove("wiki_log");
+        // Wiki projection lineage is derived from the active row selected in
+        // the projection transaction. Public metadata cannot assert it.
+        object.remove("wiki_update_of");
+        object.remove("wiki_previous_revision");
     }
 }
 
@@ -332,6 +447,7 @@ pub(crate) async fn handle_save_memory(
         SaveMetadataAuthority::Public,
         SaveInitiator::System,
         None,
+        false,
     )
     .await
 }
@@ -350,6 +466,7 @@ pub(crate) async fn handle_save_memory_from_caller(
         SaveMetadataAuthority::Public,
         SaveInitiator::Caller,
         None,
+        false,
     )
     .await
 }
@@ -370,6 +487,7 @@ pub(crate) async fn handle_save_memory_with_references(
         SaveMetadataAuthority::Public,
         SaveInitiator::Caller,
         None,
+        false,
     )
     .await
 }
@@ -386,12 +504,14 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
         SaveMetadataAuthority::ServerVerified,
         SaveInitiator::System,
         None,
+        false,
     )
     .await
 }
 
 /// Server-internal first-write seam for durable model-derived artifacts.
 /// The receipt is typed and never passes through public JSON metadata.
+#[allow(dead_code)] // retained as the text-save sibling promised by the receipt API contract
 pub(crate) async fn handle_save_memory_with_authorized_reference_mutations_and_invocation(
     server: &MemoryServer,
     params: SaveMemoryParams,
@@ -405,6 +525,27 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations_and_i
         SaveMetadataAuthority::ServerVerified,
         SaveInitiator::System,
         Some(invocation),
+        false,
+    )
+    .await
+}
+
+/// Server-internal Wiki/Guide projection save. The canonical row, duplicate
+/// supersession claims, and supersedes edges share one transaction.
+pub(crate) async fn handle_save_memory_with_wiki_projection(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+    mutations: Vec<memcore::db::ValidatedReferenceMutation>,
+    model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
+) -> Result<String, String> {
+    handle_save_memory_impl(
+        server,
+        params,
+        AuthorizedReferenceMutations::from_authorized(mutations),
+        SaveMetadataAuthority::ServerVerified,
+        SaveInitiator::System,
+        model_invocation,
+        true,
     )
     .await
 }
@@ -416,8 +557,9 @@ async fn handle_save_memory_impl(
     metadata_authority: SaveMetadataAuthority,
     initiator: SaveInitiator,
     model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
+    wiki_projection: bool,
 ) -> Result<String, String> {
-    strip_reserved_reference_metadata(&mut params.metadata);
+    strip_reserved_public_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
     params.summary = scrub_think_tags(&params.summary);
     let (safe_text, secret_redactions) = scrub_secrets(&params.text);
@@ -528,7 +670,7 @@ async fn handle_save_memory_impl(
     // the race boundary: the v19 id-less identity constraint below is the
     // authoritative single-winner decision when concurrent callers both miss
     // this read.
-    if params.id.is_none() {
+    if params.id.is_none() && !wiki_projection {
         if let Some(existing_id) = find_exact_path_text_duplicate(
             server,
             &params.path,
@@ -641,9 +783,35 @@ async fn handle_save_memory_impl(
     #[cfg(test)]
     wait_at_pre_upsert_barrier(&entry.id);
     #[cfg(test)]
+    wait_at_pre_upsert_identity_barrier(idless_identity.as_deref());
+    #[cfg(test)]
+    wait_at_pre_upsert_path_barrier(&entry.path);
+    #[cfg(test)]
     wait_at_pre_upsert_pause(&entry.id, trusted_append);
 
-    if let Some(identity) = idless_identity.as_deref() {
+    let mut wiki_duplicates_superseded = None;
+    let mut wiki_previous_revision = None;
+    if wiki_projection {
+        let result = upsert_wiki_projection_entry(
+            server,
+            &mut entry,
+            idless_identity.as_deref(),
+            target_db,
+            named_project.as_deref(),
+            &evidence_write,
+        )?;
+        wiki_duplicates_superseded = Some(result.duplicates_superseded);
+        wiki_previous_revision = result.previous_revision;
+        if let memcore::db::IdlessUpsertResult::Duplicate { id } = result.upsert {
+            let mut response = build_duplicate_save_response(&id, &entry.path, target_db);
+            response.insert(
+                "wiki_duplicates_superseded".into(),
+                json!(result.duplicates_superseded),
+            );
+            return serde_json::to_string(&serde_json::Value::Object(response))
+                .map_err(|error| format!("Failed to serialize response: {error}"));
+        }
+    } else if let Some(identity) = idless_identity.as_deref() {
         match upsert_idless_save_entry(
             server,
             &mut entry,
@@ -742,6 +910,13 @@ async fn handle_save_memory_impl(
 
     if let Some(note) = affinity_note {
         response.insert("domain_affinity".into(), domain_affinity_note_json(&note));
+    }
+
+    if let Some(count) = wiki_duplicates_superseded {
+        response.insert("wiki_duplicates_superseded".into(), json!(count));
+    }
+    if let Some(revision) = wiki_previous_revision {
+        response.insert("wiki_previous_revision".into(), json!(revision));
     }
 
     if auto_link && !entry.entities.is_empty() && !is_training_seed(&entry) {
