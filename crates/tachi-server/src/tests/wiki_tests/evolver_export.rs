@@ -1,5 +1,5 @@
 use super::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes HOME/TACHI_HOME across async mock LLM + REM run
@@ -288,6 +288,150 @@ impl crate::wiki_ops::ExportTestHook for FailExportInstallHook {
             Ok(())
         }
     }
+}
+
+/// Stops the export dead at a chosen point *without* rolling back, which is the
+/// one thing `Drop`-based cleanup cannot model: a SIGKILL'd process runs no
+/// destructor and leaves the staging tree exactly where it stood.
+#[derive(Default)]
+struct TornStopHook {
+    stop_after_staging: bool,
+    stop_after_backups: Option<usize>,
+    stop_after_installs: Option<usize>,
+}
+
+impl TornStopHook {
+    fn after_staging() -> Self {
+        Self {
+            stop_after_staging: true,
+            ..Self::default()
+        }
+    }
+
+    fn after_backups(count: usize) -> Self {
+        Self {
+            stop_after_backups: Some(count),
+            ..Self::default()
+        }
+    }
+
+    fn after_installs(count: usize) -> Self {
+        Self {
+            stop_after_installs: Some(count),
+            ..Self::default()
+        }
+    }
+}
+
+impl crate::wiki_ops::ExportTestHook for TornStopHook {
+    fn after_stage_ready(&self) -> Result<(), String> {
+        if self.stop_after_staging {
+            Err("torn stop: staged but never published".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn before_backup(&self, moved: usize, _path: &Path) -> Result<(), String> {
+        if self.stop_after_backups == Some(moved) {
+            Err(format!("torn stop after {moved} backup move(s)"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn before_install(&self, installed: usize, _path: &Path) -> Result<(), String> {
+        if self.stop_after_installs == Some(installed) {
+            Err(format!("torn stop after {installed} install(s)"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn simulates_process_death(&self) -> bool {
+        true
+    }
+}
+
+fn crash_fixture_entries() -> Vec<MemoryEntry> {
+    ["alpha", "beta"]
+        .into_iter()
+        .map(|name| {
+            let mut entry = make_entry(&format!("wiki-export-crash-{name}"));
+            entry.path = "/wiki/crash".to_string();
+            entry.topic = format!("crash-{name}");
+            entry.summary = format!("Crash fixture {name}");
+            entry.text = format!("Original {name} body.");
+            entry
+        })
+        .collect()
+}
+
+fn rewrite_crash_fixture_body(server: &MemoryServer) {
+    server
+        .with_named_project_store("wiki", |store| {
+            let mut entry = store
+                .get("wiki-export-crash-alpha")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "crash fixture entry missing".to_string())?;
+            entry.text = "Replacement alpha body that only the new export has.".to_string();
+            store.upsert(&entry).map_err(|error| error.to_string())
+        })
+        .expect("rewrite crash fixture body");
+}
+
+/// Byte-exact reference: what a clean export of the current source produces in
+/// a directory that never saw a crash.
+fn fresh_export_snapshot(
+    server: &MemoryServer,
+    label: &str,
+) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let reference_dir =
+        crate::utils::test_fixture_path(format!("{label}-reference-{}", uuid::Uuid::new_v4()));
+    crate::wiki_ops::export_wiki_obsidian(server, "wiki", &reference_dir)
+        .expect("reference export should succeed");
+    let snapshot = export_file_snapshot(&reference_dir);
+    let _ = std::fs::remove_dir_all(&reference_dir);
+    snapshot
+}
+
+/// Staging roots claimed by `out_dir`. Fixture roots are shared between tests,
+/// so residue is matched by claim, never by mere presence.
+fn export_stage_residue(out_dir: &Path) -> Vec<(PathBuf, String)> {
+    let parent = out_dir.parent().expect("output parent");
+    let marker = out_dir
+        .file_name()
+        .expect("output name")
+        .to_string_lossy()
+        .to_string();
+    let mut found = Vec::new();
+    let Ok(listing) = std::fs::read_dir(parent) else {
+        return found;
+    };
+    for entry in listing {
+        let path = entry.expect("read staging parent entry").path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tachi-wiki-export-stage-"))
+        {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(path.join("_stage.json")) else {
+            continue;
+        };
+        let Ok(claim) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if claim["output"]
+            .as_str()
+            .is_some_and(|output| output.ends_with(&marker))
+        {
+            let phase = claim["phase"].as_str().unwrap_or_default().to_string();
+            found.push((path, phase));
+        }
+    }
+    found
 }
 
 fn export_file_snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
@@ -635,6 +779,498 @@ fn wiki_export_obsidian_commit_failure_restores_complete_prior_state() {
         export_file_snapshot(&out_dir),
         prior,
         "rollback must restore entries, index, manifest, and preserve unmanaged files exactly"
+    );
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_recovers_from_process_death_during_backup_phase() {
+    let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-torn-backup-{}",
+        uuid::Uuid::new_v4()
+    ));
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir).expect("prior managed export");
+    let prior = export_file_snapshot(&out_dir);
+    assert_eq!(prior.len(), 4, "two entries plus index plus manifest");
+    rewrite_crash_fixture_body(&server);
+    let expected = fresh_export_snapshot(&server, "wiki-export-torn-backup");
+
+    let error = crate::wiki_ops::export_wiki_obsidian_with_hook(
+        &server,
+        "wiki",
+        &out_dir,
+        &TornStopHook::after_backups(1),
+    )
+    .expect_err("simulated process death must abort the export");
+    assert!(error.contains("simulated process death"), "{error}");
+    // Exactly one prior-managed file was moved aside before the process died,
+    // so the output no longer matches its own manifest.
+    assert_eq!(
+        export_file_snapshot(&out_dir).len(),
+        prior.len() - 1,
+        "the killed run must leave the output torn mid-backup"
+    );
+    let residue = export_stage_residue(&out_dir);
+    assert_eq!(residue.len(), 1, "{residue:?}");
+    assert_eq!(residue[0].1, "committing");
+
+    let recovered = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("the next export must recover without human cleanup");
+    assert_eq!(recovered["count"], json!(2));
+    assert_eq!(
+        export_file_snapshot(&out_dir),
+        expected,
+        "recovered output must be byte-identical to a clean export"
+    );
+    assert!(export_stage_residue(&out_dir).is_empty());
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_recovers_from_process_death_during_install_phase() {
+    let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-torn-install-{}",
+        uuid::Uuid::new_v4()
+    ));
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir).expect("prior managed export");
+    rewrite_crash_fixture_body(&server);
+    let expected = fresh_export_snapshot(&server, "wiki-export-torn-install");
+
+    let error = crate::wiki_ops::export_wiki_obsidian_with_hook(
+        &server,
+        "wiki",
+        &out_dir,
+        &TornStopHook::after_installs(1),
+    )
+    .expect_err("simulated process death must abort the export");
+    assert!(error.contains("simulated process death"), "{error}");
+    // Everything was moved aside and only the first entry was published back.
+    assert!(
+        !out_dir.join("_index.md").exists() && !out_dir.join("_manifest.json").exists(),
+        "the killed run must leave the output torn mid-install"
+    );
+    let residue = export_stage_residue(&out_dir);
+    assert_eq!(residue.len(), 1, "{residue:?}");
+    assert_eq!(residue[0].1, "committing");
+
+    let recovered = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("the next export must recover without human cleanup");
+    assert_eq!(recovered["count"], json!(2));
+    assert_eq!(
+        export_file_snapshot(&out_dir),
+        expected,
+        "recovered output must be byte-identical to a clean export"
+    );
+    assert!(export_stage_residue(&out_dir).is_empty());
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_recovers_when_index_is_published_without_its_manifest() {
+    let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-torn-manifest-{}",
+        uuid::Uuid::new_v4()
+    ));
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir).expect("prior managed export");
+    rewrite_crash_fixture_body(&server);
+    let expected = fresh_export_snapshot(&server, "wiki-export-torn-manifest");
+
+    // Publish order is entries, index, manifest: stopping before install #3
+    // leaves the index in place with no manifest to own it.
+    let error = crate::wiki_ops::export_wiki_obsidian_with_hook(
+        &server,
+        "wiki",
+        &out_dir,
+        &TornStopHook::after_installs(3),
+    )
+    .expect_err("simulated process death must abort the export");
+    assert!(error.contains("simulated process death"), "{error}");
+    assert!(
+        out_dir.join("_index.md").is_file(),
+        "the reserved index must be published"
+    );
+    assert!(
+        !out_dir.join("_manifest.json").exists(),
+        "its manifest must still be missing"
+    );
+
+    let recovered = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("an index without a manifest must not become a permanent refusal");
+    assert_eq!(recovered["count"], json!(2));
+    assert_eq!(
+        export_file_snapshot(&out_dir),
+        expected,
+        "recovered output must be byte-identical to a clean export"
+    );
+    assert!(export_stage_residue(&out_dir).is_empty());
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_still_refuses_torn_output_with_no_staging_evidence() {
+    let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-torn-unowned-{}",
+        uuid::Uuid::new_v4()
+    ));
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir).expect("prior managed export");
+    let error = crate::wiki_ops::export_wiki_obsidian_with_hook(
+        &server,
+        "wiki",
+        &out_dir,
+        &TornStopHook::after_installs(3),
+    )
+    .expect_err("simulated process death must abort the export");
+    assert!(error.contains("simulated process death"), "{error}");
+
+    // Destroy the only evidence that this torn output is our own artifact. The
+    // ownership refusal must come straight back: recovery is authorized by a
+    // matching staging claim, not by the shape of the directory.
+    for (root, _) in export_stage_residue(&out_dir) {
+        std::fs::remove_dir_all(&root).expect("remove staging evidence");
+    }
+    let refusal = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect_err("an unowned reserved index must still be refused");
+    assert!(refusal.contains("reserved managed artifact"), "{refusal}");
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_reclaims_staging_residue_from_death_before_publish() {
+    let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-torn-staging-{}",
+        uuid::Uuid::new_v4()
+    ));
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir).expect("prior managed export");
+    let prior = export_file_snapshot(&out_dir);
+    rewrite_crash_fixture_body(&server);
+
+    let error = crate::wiki_ops::export_wiki_obsidian_with_hook(
+        &server,
+        "wiki",
+        &out_dir,
+        &TornStopHook::after_staging(),
+    )
+    .expect_err("simulated process death must abort the export");
+    assert!(error.contains("simulated process death"), "{error}");
+    assert_eq!(
+        export_file_snapshot(&out_dir),
+        prior,
+        "dying before the publish starts must leave the prior export untouched"
+    );
+    let residue = export_stage_residue(&out_dir);
+    assert_eq!(residue.len(), 1, "{residue:?}");
+    assert_eq!(residue[0].1, "staging");
+
+    let expected = fresh_export_snapshot(&server, "wiki-export-torn-staging");
+    let recovered = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("the next export must reclaim the residue and continue");
+    assert_eq!(recovered["count"], json!(2));
+    assert_eq!(export_file_snapshot(&out_dir), expected);
+    assert!(
+        export_stage_residue(&out_dir).is_empty(),
+        "reclaimed staging roots must not accumulate"
+    );
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+/// Hand-build the on-disk state a killed publish leaves behind, using nothing
+/// but `std::fs`: no export hooks and no export code run here.
+///
+/// `expected` is a clean export's file set. Everything except the reserved
+/// manifest is placed in the output as if it had already been renamed into
+/// place, the manifest is left behind in the staging tree, and one file the
+/// prior manifest owned but the new plan drops is left in the output for
+/// recovery to reap. The `_stage.json` is written literally, so this pins the
+/// journal's on-disk shape as a contract rather than as whatever the writer
+/// happens to emit today.
+///
+/// Returns the staging root it created.
+fn build_torn_export_state(
+    out_dir: &Path,
+    expected: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> PathBuf {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::create_dir_all(out_dir).expect("create torn output");
+    // Publish order is entries, then the reserved index, then the reserved
+    // manifest: model a process killed one rename short of the end.
+    let mut install_paths = expected
+        .keys()
+        .filter(|relative| {
+            relative.as_str() != "_index.md" && relative.as_str() != "_manifest.json"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    install_paths.push("_index.md".to_string());
+    install_paths.push("_manifest.json".to_string());
+    for relative in &install_paths {
+        if relative.as_str() == "_manifest.json" {
+            continue;
+        }
+        let path = out_dir.join(relative);
+        std::fs::create_dir_all(path.parent().expect("published file parent"))
+            .expect("create published parent");
+        std::fs::write(&path, &expected[relative]).expect("write published file");
+    }
+
+    // Owned by the prior manifest, dropped by the new plan, and never reached
+    // by the killed run. Recovery has to delete it; if it does not, the output
+    // cannot end up byte-identical to a clean export.
+    let stale = "crash/dropped-by-the-new-plan.md";
+    std::fs::write(out_dir.join(stale), b"prior body the new plan drops")
+        .expect("write stale prior file");
+    let mut backup_paths = install_paths.clone();
+    backup_paths.push(stale.to_string());
+
+    let stage_root = out_dir.parent().expect("output parent").join(format!(
+        ".tachi-wiki-export-stage-{}",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    std::fs::create_dir_all(stage_root.join("new")).expect("create staged tree");
+    std::fs::create_dir_all(stage_root.join("backup")).expect("create backup tree");
+    std::fs::write(
+        stage_root.join("new/_manifest.json"),
+        &expected["_manifest.json"],
+    )
+    .expect("stage the unpublished manifest");
+
+    let metadata = std::fs::metadata(out_dir).expect("stat torn output");
+    let claim = json!({
+        "format": "tachi_wiki_export_stage_v1",
+        "output": std::fs::canonicalize(out_dir)
+            .expect("canonicalize torn output")
+            .display()
+            .to_string(),
+        "output_dev": metadata.dev(),
+        "output_ino": metadata.ino(),
+        "phase": "committing",
+        "install_paths": install_paths,
+        "backup_paths": backup_paths,
+    });
+    std::fs::write(
+        stage_root.join("_stage.json"),
+        serde_json::to_string_pretty(&claim).expect("serialize hand-built claim") + "\n",
+    )
+    .expect("write hand-built stage journal");
+    stage_root
+}
+
+/// Every other recovery test reaches its torn state through the export's own
+/// test hooks, so the damage and the repair share a code path. This one builds
+/// the damage with bare filesystem calls, which is the only version of the test
+/// that fails on the pre-recovery code: an `_index.md` with no `_manifest.json`
+/// was a permanent "reserved managed artifact" refusal there.
+#[test]
+fn wiki_export_recovers_from_hand_built_torn_state_without_hooks() {
+    let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-manual-torn-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let expected = fresh_export_snapshot(&server, "wiki-export-manual-torn");
+    let stage_root = build_torn_export_state(&out_dir, &expected);
+
+    let recovered = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("a hand-built torn output must recover without human cleanup");
+    assert_eq!(recovered["count"], json!(2));
+    assert_eq!(
+        export_file_snapshot(&out_dir),
+        expected,
+        "recovered output must be byte-identical to a clean export"
+    );
+    assert!(
+        !stage_root.exists(),
+        "the reclaimed staging root must not survive recovery"
+    );
+    assert!(export_stage_residue(&out_dir).is_empty());
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+/// The claim names a canonical *path*, and a path can come to mean a different
+/// directory. Recovery runs ahead of the ownership check, so a claim that
+/// proved ownership by path alone would load our staged files into a stranger's
+/// directory precisely when that check would have refused it.
+#[test]
+fn wiki_export_ignores_a_claim_whose_output_directory_was_replaced() {
+    let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-replaced-output-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let expected = fresh_export_snapshot(&server, "wiki-export-replaced-output");
+    let stage_root = build_torn_export_state(&out_dir, &expected);
+
+    // Move the claimed directory aside rather than deleting it, so its inode
+    // cannot be recycled into the replacement and the test stays deterministic.
+    let moved_aside = out_dir.with_extension("moved-aside");
+    std::fs::rename(&out_dir, &moved_aside).expect("move the claimed output aside");
+    std::fs::create_dir_all(&out_dir).expect("create the replacement directory");
+    let stranger_index = out_dir.join("_index.md");
+    std::fs::write(&stranger_index, "someone else's index").expect("write stranger index");
+
+    let refusal = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect_err("a replaced output must not be adopted by the surviving claim");
+    assert!(refusal.contains("reserved managed artifact"), "{refusal}");
+    assert_eq!(
+        std::fs::read_to_string(&stranger_index).expect("read stranger index"),
+        "someone else's index",
+        "the replacement directory must be left exactly as found"
+    );
+    assert!(
+        !out_dir.join("_manifest.json").exists(),
+        "no staged file may be published into the replacement directory"
+    );
+    assert!(
+        stage_root.join("new/_manifest.json").is_file(),
+        "a declined claim is left intact, not consumed"
+    );
+    let _ = std::fs::remove_dir_all(out_dir);
+    let _ = std::fs::remove_dir_all(moved_aside);
+    let _ = std::fs::remove_dir_all(stage_root);
+}
+
+/// The NAME_MAX bound must not open a silent *rename* band. The unbounded
+/// predecessor wrote `<stem>.md` verbatim for every stem up to 252 bytes — 253
+/// is where the name first exceeds 255 — so every one of those names has to
+/// survive byte-for-byte. Truncating them would rename notes that already exist
+/// in the vault on the next export and orphan every wikilink into them.
+#[test]
+fn wiki_export_preserves_names_the_unbounded_predecessor_could_write() {
+    let writable_stems = ["a".repeat(250), "b".repeat(252)];
+    let overlong_stem = "c".repeat(253);
+    let entries = writable_stems
+        .iter()
+        .chain(std::iter::once(&overlong_stem))
+        .enumerate()
+        .map(|(index, stem)| {
+            let mut entry = make_entry(&format!("wiki-export-name-band-{index}"));
+            entry.path = "/wiki/long-names".to_string();
+            entry.topic = stem.clone();
+            entry.summary = format!("Name band entry {index}");
+            entry
+        })
+        .collect::<Vec<_>>();
+
+    let (server, _home) = seed_wiki_project_entries(entries);
+    let out_dir =
+        crate::utils::test_fixture_path(format!("wiki-export-name-band-{}", uuid::Uuid::new_v4()));
+    let result = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("name-band export should succeed");
+    assert_eq!(result["count"], json!(3));
+
+    let names = std::fs::read_dir(out_dir.join("long-names"))
+        .expect("read name-band output directory")
+        .map(|entry| {
+            entry
+                .expect("read name-band entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(names.len(), 3, "{names:?}");
+    for name in &names {
+        assert!(name.len() <= 255, "{} bytes: {name}", name.len());
+    }
+    for stem in &writable_stems {
+        let name = format!("{stem}.md");
+        assert!(
+            names.contains(&name),
+            "a {}-byte stem must keep the exact {}-byte name the previous release wrote",
+            stem.len(),
+            name.len()
+        );
+    }
+    // 253 bytes is the first stem the predecessor could not write at all
+    // (a 256-byte name is ENAMETOOLONG), so this one is allowed to change --
+    // and is bounded to exactly 252 stem bytes: 243 kept + "-" + 8 digest.
+    assert!(
+        !names.contains(&format!("{overlong_stem}.md")),
+        "a 253-byte stem cannot be written verbatim"
+    );
+    let bounded = names
+        .iter()
+        .find(|name| name.starts_with(&"c".repeat(243)))
+        .expect("the overlong stem must still produce a file");
+    assert_eq!(bounded.len(), 255, "{bounded}");
+    assert!(
+        out_dir.join("long-names").join(bounded).is_file(),
+        "bounded name must be writable: {bounded}"
+    );
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_bounds_generated_file_name_length() {
+    // An LLM-authored topic is unbounded; NAME_MAX is not.
+    let long_topic = "n".repeat(5000);
+    let mut first = make_entry("wiki-export-long-name-a");
+    first.path = "/wiki/long-names".to_string();
+    first.topic = format!("{long_topic}-alpha");
+    first.summary = "First long-topic entry".to_string();
+    let mut second = make_entry("wiki-export-long-name-b");
+    second.path = first.path.clone();
+    second.topic = format!("{long_topic}-beta");
+    second.summary = "Second long-topic entry".to_string();
+
+    let (server, _home) = seed_wiki_project_entries(vec![first, second]);
+    let out_dir =
+        crate::utils::test_fixture_path(format!("wiki-export-long-names-{}", uuid::Uuid::new_v4()));
+    let result = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("unbounded topics must not make the export unwritable");
+    assert_eq!(result["count"], json!(2));
+
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(out_dir.join("_manifest.json")).unwrap())
+            .unwrap();
+    let output_paths = manifest["entries"]
+        .as_array()
+        .expect("manifest entries")
+        .iter()
+        .map(|entry| {
+            entry["output_path"]
+                .as_str()
+                .expect("output path")
+                .to_string()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        output_paths.len(),
+        2,
+        "topics sharing a truncated prefix must stay distinct: {output_paths:?}"
+    );
+    for output_path in &output_paths {
+        let name = Path::new(output_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name");
+        assert!(
+            name.len() <= 255,
+            "generated name must fit NAME_MAX: {} bytes",
+            name.len()
+        );
+        assert!(
+            name.trim_end_matches(".md").len() <= 252,
+            "generated stem must stay within the stem bound: {name}"
+        );
+        assert!(
+            out_dir.join(output_path).is_file(),
+            "bounded name must be writable: {output_path}"
+        );
+    }
+
+    let manifest_bytes = std::fs::read_to_string(out_dir.join("_manifest.json")).unwrap();
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("rerun long-name export");
+    assert_eq!(
+        std::fs::read_to_string(out_dir.join("_manifest.json")).unwrap(),
+        manifest_bytes,
+        "bounded names must be deterministic across runs"
     );
     let _ = std::fs::remove_dir_all(out_dir);
 }
