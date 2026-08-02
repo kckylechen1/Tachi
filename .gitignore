@@ -6,7 +6,7 @@
 .claude/
 
 # Amp worktrees / local session artifacts
-.amp/
+/.amp/
 
 # One-off local migration helper (machine-specific ~/.tachi / ~/.openclaw paths)
 scripts/migrate_openclaw_central.py
