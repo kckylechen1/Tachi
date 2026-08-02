@@ -54,6 +54,8 @@ use self::store::{
 };
 
 pub(crate) use self::export::export_wiki_obsidian;
+#[cfg(test)]
+pub(crate) use self::export::{export_wiki_obsidian_with_hook, ExportTestHook};
 pub(crate) use self::handoff_lookup::list_handoff_mirrors_for_repo;
 pub(crate) use self::ingest::handle_wiki_ingest;
 pub(crate) use self::lint::{handle_wiki_lint, wiki_hygiene_counts};

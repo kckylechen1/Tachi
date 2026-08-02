@@ -1,10 +1,11 @@
 use super::*;
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_docs_accepts_docs_prefixed_category_frontmatter() {
     let server = make_server();
-    let temp_docs = tempdir().expect("create temp docs dir");
-    let docs_path = temp_docs.path();
+    let workspace = DocsWorktree::new();
+    let docs_path = workspace.docs_path();
     let source = docs_path.join("random.md");
     fs::write(
         &source,

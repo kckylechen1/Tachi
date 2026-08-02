@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes HOME/TACHI_HOME across async mock LLM + REM run
@@ -260,6 +261,66 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
     let _ = std::fs::remove_dir_all(temp_home);
 }
 
+struct BlockingExportHook {
+    acquired: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+impl crate::wiki_ops::ExportTestHook for BlockingExportHook {
+    fn after_lock_acquired(&self) -> Result<(), String> {
+        self.acquired.wait();
+        self.release.wait();
+        Ok(())
+    }
+}
+
+struct FailExportInstallHook {
+    installed_count: usize,
+}
+
+impl crate::wiki_ops::ExportTestHook for FailExportInstallHook {
+    fn before_install(&self, installed: usize, _path: &Path) -> Result<(), String> {
+        if installed == self.installed_count {
+            Err(format!(
+                "injected export commit failure after {installed} installs"
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn export_file_snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn visit(
+        root: &Path,
+        current: &Path,
+        snapshot: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) {
+        let mut entries = std::fs::read_dir(current)
+            .expect("read export snapshot directory")
+            .map(|entry| entry.expect("read export snapshot entry").path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                visit(root, &path, snapshot);
+            } else {
+                snapshot.insert(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    std::fs::read(&path).expect("read export snapshot file"),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = std::collections::BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
 #[tokio::test]
 async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     let mut entry = make_entry("wiki-export-entry");
@@ -285,7 +346,326 @@ async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
         "[[MCP]] export lesson references [[MCP]] explicitly; [[MCP]] stays linked; MCPing stays plain."
     ));
     let index = std::fs::read_to_string(out_dir.join("_index.md")).expect("read index");
-    assert!(index.contains("[[export-mcp]]"));
+    assert!(index.contains("[[engineering/debugging/export/export-mcp]]"));
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[tokio::test]
+async fn wiki_export_obsidian_collision_manifest_and_rerun_are_deterministic() {
+    let mut first = make_entry("wiki-export-collision-a");
+    first.path = "/wiki/collisions".to_string();
+    first.topic = "same-topic".to_string();
+    first.summary = "First collision entry".to_string();
+    first.text = "First collision body.".to_string();
+
+    let mut second = make_entry("wiki-export-collision-b");
+    second.path = first.path.clone();
+    second.topic = first.topic.clone();
+    second.summary = "Second collision entry".to_string();
+    second.text = "Second collision body.".to_string();
+
+    let (server, _home) = seed_wiki_project_entries(vec![first, second]);
+    let out_dir =
+        crate::utils::test_fixture_path(format!("wiki-export-collision-{}", uuid::Uuid::new_v4()));
+
+    let first_result = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("collision export should succeed");
+    assert_eq!(first_result["count"], json!(2));
+    assert_eq!(first_result["written_files"], json!(2));
+
+    let manifest_path = out_dir.join("_manifest.json");
+    let index_path = out_dir.join("_index.md");
+    let first_manifest = std::fs::read_to_string(&manifest_path).expect("read export manifest");
+    let first_index = std::fs::read_to_string(&index_path).expect("read export index");
+    let manifest: Value = serde_json::from_str(&first_manifest).expect("parse export manifest");
+    assert_eq!(manifest["count"], json!(2));
+    let entries = manifest["entries"].as_array().expect("manifest entries");
+    assert_eq!(entries.len(), 2);
+
+    let mut output_paths = std::collections::BTreeSet::new();
+    for entry in entries {
+        let entry_id = entry["entry_id"].as_str().expect("manifest entry id");
+        let output_path = entry["output_path"].as_str().expect("manifest output path");
+        assert!(
+            entry["store_ref"]["kind"] == json!("named_project"),
+            "manifest must retain the logical store ref: {entry:?}"
+        );
+        assert_eq!(entry["wiki_path"], json!("/wiki/collisions"));
+        assert!(
+            output_paths.insert(output_path),
+            "collision entries must map to distinct output paths"
+        );
+        assert!(
+            output_path.contains(&entry_id.replace(':', "_")),
+            "collision filename must carry a stable ID-derived suffix: {output_path}"
+        );
+        assert!(out_dir.join(output_path).is_file());
+        assert!(first_index.contains(&format!("[[{}]]", output_path.trim_end_matches(".md"))));
+    }
+    assert_eq!(output_paths.len(), 2);
+    assert_eq!(
+        std::fs::read_dir(out_dir.join("collisions"))
+            .expect("collision output directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+            .count(),
+        2,
+        "written entry files must equal the manifest/source count"
+    );
+
+    let second_result = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("re-running collision export should succeed");
+    assert_eq!(second_result["count"], json!(2));
+    assert_eq!(
+        std::fs::read_to_string(&manifest_path).expect("read rerun manifest"),
+        first_manifest,
+        "rerunning the same export must preserve the exact deterministic plan"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&index_path).expect("read rerun index"),
+        first_index,
+        "rerunning the same export must preserve deterministic index ordering"
+    );
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_obsidian_preflights_existing_output_before_mutation() {
+    let mut entry = make_entry("wiki-export-preflight");
+    entry.path = "/wiki/preflight".to_string();
+    entry.topic = "preflight".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+    let out_dir =
+        crate::utils::test_fixture_path(format!("wiki-export-preflight-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(out_dir.join("preflight")).expect("create preflight output");
+    let sentinel = out_dir.join("preflight/preflight.md");
+    std::fs::write(&sentinel, "sentinel").expect("write preflight sentinel");
+
+    let error = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect_err("existing unmanaged output must be refused before mutation");
+    assert!(error.contains("refusing to overwrite"), "{error}");
+    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "sentinel");
+    assert!(!out_dir.join("_index.md").exists());
+    assert!(!out_dir.join("_manifest.json").exists());
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_obsidian_refuses_unmanaged_reserved_index() {
+    let mut entry = make_entry("wiki-export-reserved-index");
+    entry.path = "/wiki/reserved".to_string();
+    entry.topic = "reserved".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-reserved-index-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&out_dir).expect("create reserved output");
+    let index = out_dir.join("_index.md");
+    std::fs::write(&index, "unmanaged index sentinel").expect("write unmanaged index");
+
+    let error = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect_err("unmanaged reserved index must be refused before mutation");
+    assert!(error.contains("reserved managed artifact"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&index).unwrap(),
+        "unmanaged index sentinel"
+    );
+    assert!(!out_dir.join("_manifest.json").exists());
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_obsidian_reconciles_stale_prior_manifest_entries() {
+    let mut first = make_entry("wiki-export-stale-a");
+    first.path = "/wiki/stale".to_string();
+    first.topic = "same-topic".to_string();
+    first.summary = "Stale collision A".to_string();
+    first.text = "First stale collision body.".to_string();
+    let mut second = make_entry("wiki-export-stale-b");
+    second.path = first.path.clone();
+    second.topic = first.topic.clone();
+    second.summary = "Stale collision B".to_string();
+    second.text = "Second stale collision body.".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![first, second]);
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-stale-cleanup-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("initial collision export");
+    let first_manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(out_dir.join("_manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(first_manifest["count"], json!(2));
+    let stale_paths = first_manifest["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["output_path"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    server
+        .with_named_project_store("wiki", |store| {
+            store
+                .connection()
+                .execute(
+                    "DELETE FROM memories WHERE id = ?1",
+                    rusqlite::params!["wiki-export-stale-b"],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("remove second source entry");
+
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("rerun after source contraction");
+    assert!(out_dir.join("stale/same-topic.md").is_file());
+    for stale in stale_paths {
+        assert!(
+            !out_dir.join(&stale).exists(),
+            "prior-manifest-owned stale file must be removed: {stale}"
+        );
+    }
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(out_dir.join("_manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["count"], json!(1));
+    assert_eq!(manifest["entries"].as_array().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_obsidian_index_links_complete_relative_output_path() {
+    let mut entry = make_entry("wiki-export-relative-index");
+    entry.path = "/wiki/engineering/deep".to_string();
+    entry.topic = "nested-entry".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-relative-index-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("nested export should succeed");
+    let index = std::fs::read_to_string(out_dir.join("_index.md")).expect("read export index");
+    assert!(
+        index.contains("[[engineering/deep/nested-entry]]"),
+        "index must link the complete relative output path: {index}"
+    );
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_obsidian_concurrent_run_refuses_shared_output_lock() {
+    let mut entry = make_entry("wiki-export-lock");
+    entry.path = "/wiki/export-lock".to_string();
+    entry.topic = "locked-entry".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+    let out_dir =
+        crate::utils::test_fixture_path(format!("wiki-export-lock-{}", uuid::Uuid::new_v4()));
+    let acquired = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let first_server = server.clone();
+    let first_output = out_dir.clone();
+    let first_acquired = acquired.clone();
+    let first_release = release.clone();
+    let first = std::thread::spawn(move || {
+        crate::wiki_ops::export_wiki_obsidian_with_hook(
+            &first_server,
+            "wiki",
+            &first_output,
+            &BlockingExportHook {
+                acquired: first_acquired,
+                release: first_release,
+            },
+        )
+    });
+
+    acquired.wait();
+    let concurrent = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir);
+    release.wait();
+    let first_result = first.join().expect("join locked export");
+
+    first_result.expect("lock owner export should complete after release");
+    let error = concurrent.expect_err("concurrent export must not share staging or output");
+    assert!(error.contains("per-output export lock"), "{error}");
+    assert!(out_dir.join("_manifest.json").is_file());
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_obsidian_commit_failure_restores_complete_prior_state() {
+    let mut original_entry = make_entry("wiki-export-rollback");
+    original_entry.path = "/wiki/rollback".to_string();
+    original_entry.topic = "rollback-entry".to_string();
+    original_entry.text = "Prior managed body.".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![original_entry.clone()]);
+    let out_dir =
+        crate::utils::test_fixture_path(format!("wiki-export-rollback-{}", uuid::Uuid::new_v4()));
+
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("create prior managed export");
+    std::fs::write(out_dir.join("unmanaged-sentinel.txt"), "leave unmanaged")
+        .expect("write unmanaged sentinel");
+    let prior = export_file_snapshot(&out_dir);
+
+    let mut updated_entry = original_entry;
+    updated_entry.text = "New body that must roll back.".to_string();
+    server
+        .with_named_project_store("wiki", |store| {
+            store
+                .upsert(&updated_entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("update export source");
+
+    let error = crate::wiki_ops::export_wiki_obsidian_with_hook(
+        &server,
+        "wiki",
+        &out_dir,
+        &FailExportInstallHook { installed_count: 1 },
+    )
+    .expect_err("injected commit failure must abort export");
+    assert!(
+        error.contains("prior managed state was restored"),
+        "{error}"
+    );
+    assert_eq!(
+        export_file_snapshot(&out_dir),
+        prior,
+        "rollback must restore entries, index, manifest, and preserve unmanaged files exactly"
+    );
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[test]
+fn wiki_export_obsidian_refuses_invalid_prior_manifest_count_without_mutation() {
+    let mut entry = make_entry("wiki-export-invalid-manifest");
+    entry.path = "/wiki/invalid-manifest".to_string();
+    entry.topic = "manifest-entry".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+    let out_dir = crate::utils::test_fixture_path(format!(
+        "wiki-export-invalid-manifest-{}",
+        uuid::Uuid::new_v4()
+    ));
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("create managed export");
+    let manifest_path = out_dir.join("_manifest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["count"] = json!(2);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let before = export_file_snapshot(&out_dir);
+
+    let error = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect_err("invalid ownership manifest must be refused");
+    assert!(error.contains("count"), "{error}");
+    assert_eq!(export_file_snapshot(&out_dir), before);
     let _ = std::fs::remove_dir_all(out_dir);
 }
 

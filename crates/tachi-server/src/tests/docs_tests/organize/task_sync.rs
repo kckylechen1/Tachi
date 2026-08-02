@@ -1,10 +1,11 @@
 use super::*;
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_docs_organization_and_task_sync() {
     let server = make_server();
-    let temp_docs = tempdir().expect("create temp docs dir");
-    let docs_path = temp_docs.path();
+    let workspace = DocsWorktree::new();
+    let docs_path = workspace.docs_path();
 
     // 1. 在 DB 中插入一些测试卡片（Kanban/Handoff）
     let resolved_card_1 = memcore::MemoryEntry {

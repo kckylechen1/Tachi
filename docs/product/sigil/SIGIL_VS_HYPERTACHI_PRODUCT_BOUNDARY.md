@@ -54,7 +54,7 @@ Sigil (藏经阁/Tachi) and HyperTachi share Rust crates but serve **different p
 ## Implementation checklist (Sigil / HyperTachi fork)
 
 - [ ] **Profile gate**: Hyperion MCP/tool profile excludes `tachi_wiki_organize` for trading agents
-- [ ] **`dry_run` mode** for `tachi_wiki_organize` before physical moves
+- [ ] **`dry_run=true` by default** for `tachi_wiki_organize` before physical moves; pass `false` to apply only within the current repository's canonical `docs/` subtree
 - [ ] **Dogfood**: run organize on Sigil `docs/` (non-destructive dry-run first)
 - [ ] **HyperTachi intel organize** (separate track): research path normalization, dedupe — **do not** reuse `handle_wiki_organize` for PDF/intel
 - [ ] **Docs sync**: keep this file aligned with Quant Spec copy when boundary changes
