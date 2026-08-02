@@ -1,10 +1,12 @@
 # The Dispatch Lifecycle canon (怎么派 / 怎么回 / 怎么load card)
 
 Status: canonical doctrine record, ratified by owner across 2026-07-04/05/06 and amended by the #1202 card-authority ruling on 2026-07-17. Implementable and auditable in Tachi; portable to zeroclaw.
-Updated: 2026-07-19
+Doctrine amended: 2026-08-02
+Owner review-routing ruling (2026-08-02): every non-trivial delivery requires distinct implementer/reviewer models with role separation and exact-head evidence. Same-vendor, different-model review satisfies the diversity gate for every risk class; cross-vendor review is optional defense-in-depth unless the owner explicitly freezes it for that delivery.
+Current-state reconciliation base: `274b930a` (2026-07-30). Rows changed by the 2026-08-02 amendment were reverified against that base; untouched historical rows retain their `7c56a130` (2026-07-06) anchors and were not re-audited.
 Related: [`experience-to-card-evolution.md`](./experience-to-card-evolution.md), [`dispatch-policy-learning-spec.md`](./dispatch-policy-learning-spec.md), [`subagent-eval-system.md`](./subagent-eval-system.md), [`agent-router-spec.md`](./agent-router-spec.md), [`credentialed-dispatch-profiles.md`](./credentialed-dispatch-profiles.md), [`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md), [`issue-refinery-memory-lanes.md`](./issue-refinery-memory-lanes.md). Issues/PRs: [#734](https://github.com/kckylechen1/tachi/issues/734), [#735](https://github.com/kckylechen1/tachi/issues/735), [#516](https://github.com/kckylechen1/tachi/issues/516), [#534](https://github.com/kckylechen1/tachi/issues/534), PR [#738](https://github.com/kckylechen1/tachi/pull/738).
 
-This document is the source of truth for how bounded work is dispatched to a lane, how the lane returns evidence, and how a lane's card is loaded and evolved. It distills two days of live multi-vendor dispatch practice (2026-07-05/06) into one canon so the loop can be (a) implemented and audited inside Tachi and (b) ported when zeroclaw — the Rust agent runtime behind the Quant and RomanBath products — adopts the same loop. The doctrine bodies below are owner-ratified law; the current-state map (§6) is the only part that changes as code lands, and every claim there carries a `file:line` / issue / PR anchor.
+This document is the source of truth for how bounded work is dispatched to a lane, how the lane returns evidence, and how a lane's card is loaded and evolved. It distills live dispatch practice (2026-07-05/06) into one canon so the loop can be (a) implemented and audited inside Tachi and (b) ported when zeroclaw — the Rust agent runtime behind the Quant and RomanBath products — adopts the same loop. The doctrine bodies below are owner-ratified law; the current-state map (§6) is the only part that changes as code lands, and every claim there carries a `file:line` / issue / PR anchor.
 
 ---
 
@@ -12,11 +14,11 @@ This document is the source of truth for how bounded work is dispatched to a lan
 
 Two forces make the loop necessary, and neither is optional.
 
-**Short-context lanes.** A dispatch is worthwhile precisely because the worker lane runs in a *fresh, bounded context* — it does not carry the leader's whole session, and often runs on a different vendor with a different failure profile. That is the value (parallelism, cost, cross-vendor discrimination) and the hazard (a lane that cannot see the leader's intent will faithfully execute a flawed spec, invent an alternative, or silently under-deliver). The loop exists to make the packet self-sufficient: the issue body *is* the spec, and both implementer and reviewer read the same frozen text.
+**Short-context lanes.** A dispatch is worthwhile precisely because the worker lane runs in a *fresh, bounded context* — it does not carry the leader's whole session and may have a different failure profile. That is the value (parallelism, cost, and independent discrimination) and the hazard (a lane that cannot see the leader's intent will faithfully execute a flawed spec, invent an alternative, or silently under-deliver). The loop exists to make the packet self-sufficient: the issue body *is* the spec, and both implementer and reviewer read the same frozen text.
 
-**Accountability.** A lane's self-report is the *weakest* evidence in the system. On 2026-07-05 one vendor falsified a "clippy clean" checkbox and faked a security fix four times running. The only thing that caught it was cross-vendor adversarial review on real data plus leader re-verification. So the loop is built around a single invariant — **roles, not vendors, are the invariant**: the implementer lane and the adversarial-review lane must be different vendors, the leader freezes the spec and adjudicates, and implementers never merge. The leader seat is itself role-based (Fable, Opus, or any strong model may hold it), which forces the corollary: **the law must live in files and machinery, never in the leader's head.** This document, the packet template, and the card store are that machinery.
+**Accountability.** A lane's self-report is the *weakest* evidence in the system. A historical 2026 campaign showed that independent cross-vendor review can catch falsified checks and fake security fixes, but the load-bearing separation is model and role, not vendor. Every non-trivial delivery gets a fresh, read-only reviewer using a different model from the implementer and bound to the actual candidate head. Same-vendor, different-model review satisfies this gate for every risk class; cross-vendor review is optional defense-in-depth unless the owner explicitly freezes it for that delivery. If a different-model reviewer is unavailable, the delivery is incomplete. The leader freezes the spec and adjudicates, and implementers never merge. The leader seat is role-based, which forces the corollary: **the law must live in files and machinery, never in the leader's head.** This document, the packet template, and the card store are that machinery.
 
-**The worked case — PR #733 (2026-07-06).** The stdio-daemon-reuse fix is the loop end-to-end, and its adjudication record ([#733 comment, leader 2026-07-06](https://github.com/kckylechen1/tachi/pull/733)) is the canonical trace:
+**Historical worked case — PR #733 (2026-07-06; not a current routing default).** The stdio-daemon-reuse fix is the loop end-to-end, and its adjudication record ([#733 comment, leader 2026-07-06](https://github.com/kckylechen1/tachi/pull/733)) is the canonical trace:
 
 1. **Implementation** (codex) from a leader-verified base commit `e1c05854` — daemon-side project registry, per-session binding, cross-project override rejection, HTTP-backed write-routing e2e tests.
 2. **Adversarial review** (opus, cross-vendor, numbered checkpoints) returned **3 BUGs** — proxied reads narrowed to project-only losing all global recall (empirically proven: 33 global rows → 0 with an injected project); `clippy -D warnings` RED ×3 on `await_holding_lock`; proxied delete/archive of global ids silently no-op'd — plus **2 CONCERNs** explicitly ruled out of Phase-1 scope and tracked as follow-ups.
@@ -36,16 +38,16 @@ Every task is placed on a five-tier ladder; the tier decides the ceremony, not t
 | Tier | When | Dispatch shape |
 |---|---|---|
 | **T0** trivial | conversational, tiny edits, docs batches | leader inline, zero ceremony |
-| **T1** lookup / 摸现状 | point questions, current-state maps | one cheap read-only explorer (sonnet) |
-| **T2** implementation (default) | any real code change | freeze spec+goldens → implementer on isolated worktree → cross-vendor adversarial reviewer returns numbered-checkpoint verdicts (OK / CONCERN / BUG + evidence + Not-checked) → leader adjudicates, merges, dogfoods |
+| **T1** lookup / 摸现状 | point questions, current-state maps | one cheap read-only explorer |
+| **T2** implementation (default) | any real code change | freeze spec+goldens → implementer on isolated worktree → fresh independent read-only reviewer, distinct from the implementer, checks the actual candidate head and returns numbered-checkpoint verdicts (OK / CONCERN / BUG + evidence + Not-checked) → leader adjudicates, merges, dogfoods |
 | **T3** design research | open architecture questions | scout → 2–3 diverse strong lanes on the *same frozen question* → verifiers grep-check every citation → leader trap-scores and synthesizes |
 | **T4** capstone (rare) | architecture-changing questions | full model×effort collision grid with kill-test-grade verification |
 
-The tier is a routing-topology decision, not merely a vendor choice: high-severity domains (security, credentials, merge-gate changes) *escalate the tier* to mandatory dual-track, never merely swap the vendor.
+The tier is a routing-topology decision, not merely a carrier choice. Security, credentials, identity/authority, egress, merge/release gates, and other high-risk work escalate verification depth and may justify dual-track review, but the required diversity boundary remains a fresh different-model reviewer. Cross-vendor routing is optional defense-in-depth unless the owner explicitly freezes it for that delivery.
 
 **Execution-owner invariant.** These topologies describe roles and evidence gates, not a command to use Tachi as the worker launcher. The host harness's native subagent owns ordinary local execution and session lifecycle. Tachi supplies memory, policy/card advice, claims, ledger, receipts, and eval—including mirrored native-worker outcomes. Every launch-capable Tachi surface (`tachi_task(action="dispatch")`, `tachi_shell(async_dispatch=true)`, and `tachi_arena(spawn, launch=true)` for a launch-capable lane) is opt-in only for an explicit owner request, durable work that must outlive the current harness session, cross-device/remote pickup, or absence of a usable native subagent, expressed as a closed typed `dispatch_reason` before any run/flow/mission artifact is created. Packet-only shell and arena operations remain available without that exception. `recommend` is advisory and never converts into dispatch authority by itself.
 
-Examples: “inspect these three modules in parallel” stays inside the harness's native subagents, even if the leader records their outcomes in Tachi. “Run this overnight after my current harness exits and let another device pick it up” may use Tachi dispatch with `dispatch_reason="durable_cross_session"` or `"cross_device_remote"`. “Use Codex” alone still uses a native Codex seat when the harness provides one; vendor selection is not a dispatch exception.
+Examples: “inspect these three modules in parallel” stays inside the harness's native subagents, even if the leader records their outcomes in Tachi. “Run this overnight after my current harness exits and let another device pick it up” may use managed dispatch with an explicit durable or cross-device reason. Choosing a carrier alone is not a managed-dispatch exception.
 
 ### 2.2 Pre-dispatch card consult
 
@@ -78,11 +80,11 @@ A T2 packet is a frozen leaf issue. Its body is the single text both implementer
    - **Recycle patrol (tachi#1184 item 2).** `tachi doctor` folds in a report-only build-resource section (`crate::doctor::build_resources`): private, dead-looking `CARGO_TARGET_DIR`-shaped directories (name-matched, not on the blessed shared-target allowlist, stale, unheld) and inspection notes on every registered managed worktree (age, existence, attribution) — sizes, ages, and a suggested reclaim command, never an auto-delete. It answers "is there a build-resource orphan on this machine right now", reusing `exec_env_reaper`'s already-certified (#1062) scan/protection/holder-probe machinery rather than re-deriving it. It does **not** compute a worktree "safe to close" verdict — that reconciliation semantic is tachi#1118's frozen scope, not this patrol's.
 12. **Leaf issues ARE the bounded dispatch spec** — frozen at dispatch time and carrying the `Execution:` lane marker. Durable architecture remains in a canonical repo doc. During the #1002 migration window, the leader snapshots the exact body/doc revision and records its reproducible hash in the dispatch run artifact; `Spec-Ref` and `Derived-From` are recommended. After the typed resolver/receipt slice lands, every new leaf pins `Spec-Ref: owner/repo:path@commit_sha/blob_sha#section`, `Derived-From: <owner ruling/comment ids@body_hash>`, and `Freeze-Receipt: <append-only receipt id>` per [`issue-refinery-memory-lanes.md`](./issue-refinery-memory-lanes.md). Existing leaves are not retroactively invalidated. A changed issue body hash, source comment body hash, or trusted doc revision requires explicit re-freezing.
 
-### 2.4 Lane selection under the cross-vendor law
+### 2.4 Lane selection and review diversity
 
-The implementer lane and the adversarial-review lane are *different vendors* — this is non-negotiable and is the whole reason a self-report can be checked. The current default assignment (owner 2026-07-04) is opus-implements / codex-reviews; the pre-07-04 assignment (codex-implements / opus-reviews, the #733 lane) is a valid alternate — pick per task, never let one side self-grade. Whoever implements does not review the same slice. The leader freezes and adjudicates and belongs to neither lane.
+Review diversity is model- and role-based, not pinned to a carrier assignment. For every non-trivial delivery, the reviewer is fresh, independent, read-only, uses a different model from the implementer, and checks the actual candidate head. The launcher or route receipt must show a distinct model identity; a new session, profile alias, persona, or reasoning-effort change on the same model does not count. Same-vendor, different-model review satisfies the diversity gate for every risk class. Cross-vendor routing may add defense-in-depth or satisfy an owner-frozen delivery requirement, but it is not an automatic release gate. An unavailable different-model reviewer leaves the gate incomplete; self-review or a fabricated verdict never substitutes. Any repair, rebase, merge, or other candidate-changing action invalidates the prior verdict, so the new candidate head receives a fresh review. Whoever implements does not review the same slice. The leader freezes and adjudicates and belongs to neither lane.
 
-**Helper-agent routing (owner-ratified 2026-07-20):** a session that needs helper agents spawns them through its own harness's native subagent mechanism. Tachi task dispatch is a leader-level cross-carrier lane mechanism, not a substitute subagent pool — a session that keeps routing helper work through Tachi dispatch instead of its own agents is mis-routing, even when each individual dispatch succeeds. This is a routing rule, not a ban on helpers: cross-vendor review and the rest of this section's law still apply to whatever helpers a session spawns.
+**Helper-agent routing (owner-ratified 2026-07-20):** a session that needs helper agents spawns them through its own harness's native subagent mechanism. Tachi task dispatch is a leader-level cross-carrier lane mechanism, not a substitute subagent pool — a session that keeps routing helper work through Tachi dispatch instead of its own agents is mis-routing, even when each individual dispatch succeeds. This is a routing rule, not a ban on helpers: different-model independent review still applies to whatever helpers a session spawns.
 
 ---
 
@@ -90,7 +92,7 @@ The implementer lane and the adversarial-review lane are *different vendors* —
 
 The return path is a contract, not a courtesy. A delivery that omits any required element is *incomplete*, and the leader treats it as launch-not-done.
 
-**Report contract.** Verbatim `test result:` lines for every suite the packet enumerated; the exact CI-gate output (not a self-graded checkbox); the base SHA the work was cut from; the file scope actually touched. A red test reported red is a complete delivery; a green claim without the verbatim line is not.
+**Report contract.** Verbatim `test result:` lines for every suite the packet enumerated; the exact CI-gate output (not a self-graded checkbox); the base SHA the work was cut from; the exact file scope actually touched; and the candidate head reviewed. A red test reported red is a complete delivery; a green claim without the verbatim line is not. A candidate-changing repair or rebase makes the prior verdict stale.
 
 **Red-then-green golden evidence.** Every new or extended test that guards a behavior/security change must be shown to FAIL on the pre-fix code and PASS after — the discrimination check. #733's verification is the model: the reviewer rebuilt the pre-fix commit from scratch and showed `{project:20, global:0}` → `{global:15, project:5}`. Where a structural (not runtime) discrimination is the honest justification, that justification is stated, not skipped.
 
@@ -102,13 +104,13 @@ The return path is a contract, not a courtesy. A delivery that omits any require
 
 **判决单三档制 (three-tier verdict protocol).** A reviewer's verdict is routed by severity class, and the routing is doctrine, not discretion:
 
-- **① trivial** (EOF newline, missing import, assertion-wording) → fixed inside the review round under pre-authorization ("trivial findings may be patched in the workspace-write session with an attached diff"), or leader T0-inline. No re-dispatch ceremony.
+- **① trivial** (EOF newline, missing import, assertion-wording) → a distinct writer (the implementation lane or leader) may patch under pre-authorization with an attached diff; the reviewer remains read-only. The changed head always receives a fresh different-model review, although no new issue or packet ceremony is required.
 - **② prescription** (finding is unambiguous, the fix is unique) → the verdict text goes *verbatim* to an implementation lane with a one-line adjudication header (accept/reject per finding); the leader does not rewrite it into a new spec. This is the #733 rework: review verdict → verbatim → codex → one-shot correct.
 - **③ adjudication** (spec right-or-wrong, fix-vs-revert-vs-seal, doctrine conflict, suspected non-bug) → must pass through the leader.
 
 The load-bearing rule underneath all three: **reviewers never self-fix their own findings into main.** Self-fixing is a blind-spot pass-through (the reviewer's own gaps go unreviewed), builds level-2 on a possibly-wrong foundation, and makes the next round review the reviewer's own patch — a conflicted seat. The correct disposition of a review finding is sometimes *revert + seal*, not *build the suggested fix*; only response/execution separation surfaces that.
 
-**Adjudication + merge authority.** Merging is the adjudicator's act, performed *after reading the diff personally*. Implementers open PRs and STOP. Per-goal integration branches (`goal/<issue>`) let an autonomous implementer self-merge slices without touching main; exactly one reviewed PR goes `goal/* → main`. PRs `Refs`/`Related`, never `Closes`, umbrella and no-close issues.
+**Adjudication + merge authority.** Merging is the adjudicator's act, performed *after reading the diff personally*. Implementers open PRs and STOP. Per-goal integration branches (`goal/<issue>`) can bound integration without transferring merge authority; exactly one reviewed PR goes `goal/* → main`. PRs `Refs`/`Related`, never `Closes`, umbrella and no-close issues.
 
 **What gets recorded on complete.** `tachi_task(action="complete")` / `tachi_complete` writes a per-dispatch eval row under `/eval/YYYY-MM-DD/<task_id>` (`category="eval"`, excluded from ordinary recall) — mechanical facts extracted deterministically (test counts, CI conclusion, rework rounds, reviewer OK/CONCERN/BUG tally, wall-clock) plus a judgment distillation (signature classification, per-axis scores, counter-clause proposals) authored by a reasoning seat reading the adjudication trace. This is recorded *even on failure* — a failed dispatch is a labeled training row, not wasted effort. Lore trailers on the merge commit (`Constraint:`, `Rejected:`, `Confidence:`, `Tested:`/`Not-tested:`) are decision records the diff cannot carry.
 
@@ -121,7 +123,7 @@ The load-bearing rule underneath all three: **reviewers never self-fix their own
 A card is not flavor text; a card that does not change routing is not a valid card.
 
 1. **Capability** (擅长什么) — a routing score per task type; the machine-readable form of the intuition hexagon.
-2. **Failure modes** (哪会出错) — error signatures + risk gates. High-severity domains change routing *topology*, not just vendor choice (security → mandatory dual-track + cross-vendor adversarial review).
+2. **Failure modes** (哪会出错) — error signatures + risk gates. High-severity domains change verification depth and may add dual-track review, while preserving the same required diversity boundary: a fresh different-model reviewer at the actual candidate head. Cross-vendor routing is optional defense-in-depth.
 3. **Constraint interface** (怎么约束) — the carrier layers, ordered by durability (proven 2026-07-05): prompt-layer (decays) < one-line config < per-dispatch packet clauses < structural gates (scripts/CI, cannot be ignored).
 4. **Constraint efficacy** (约束有效性) — the most valuable field: *which carrier layer actually works for which failure mode, per vendor*. Evidence: one vendor's false-`Closes` was NOT prompt-fixable (the adjudication comment sat on the issue and was violated anyway) — only structural gates caught it; another vendor's parking urge WAS prompt-fixable by remapping "mandate = the whole ledger" onto its own end-to-end vocabulary. Same disease class, different medicine layer per vendor.
 
@@ -145,9 +147,9 @@ The card store is consumed through the existing domain facades — no new `tachi
 - `tachi_skill(action="loadout" | "bundle")` — sparse skill loadout + capability bundle for a profile/task.
 - `tachi_task(action="complete")` — writes the eval evidence row that feeds card evolution.
 
-### 4.4 Vaccination projection (as of PR #738)
+### 4.4 Vaccination projection (landed by PR #738)
 
-The vaccination wire — record a `(vendor, role, signature)` row on adjudication, then project that card's top-N ACT-R-decayed counter-clauses (verbatim from the frozen taxonomy) into the next packet's frozen-spec section — is specified in [`experience-to-card-evolution.md`](./experience-to-card-evolution.md) and implemented in PR [#738](https://github.com/kckylechen1/tachi/pull/738) (`feat/735-vendor-signature-vaccination`, **OPEN, not yet merged into main**). Until it merges, the projection is doctrine + in-flight code, and the card overlay at HEAD projects *skills / passive-traits / weak-against* only, keyed by profile name — not error-signature counter-clauses keyed by `(role, vendor)`. The signature taxonomy is frozen from the 07-05 campaign (`fake_security_fix`, `zero_discriminating_test`, `falsified_ci_report` [critical — degrades global self-report trust], `self_close_overreach`, `inherited_base_commit`, `stale_rlib_poisoning`, `breadcrumb_violation`, `parking_after_contract`). See §6 for the exact merged-vs-in-flight boundary.
+The vaccination wire — record a `(vendor, role, signature)` row on adjudication, then project that card's top-N ACT-R-decayed counter-clauses (verbatim from the frozen taxonomy) into the next packet's frozen-spec section — is specified in [`experience-to-card-evolution.md`](./experience-to-card-evolution.md) and landed through PR [#738](https://github.com/kckylechen1/tachi/pull/738). Current source stores signature evidence in `crates/tachi-server/src/signature_evidence.rs`, computes the taxonomy and trust projection in `crates/tachi-dispatch/src/signatures.rs`, and injects it through `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs`. The signature taxonomy remains frozen from the 07-05 campaign (`fake_security_fix`, `zero_discriminating_test`, `falsified_ci_report` [critical — degrades global self-report trust], `self_close_overreach`, `inherited_base_commit`, `stale_rlib_poisoning`, `breadcrumb_violation`, `parking_after_contract`).
 
 **Versioning caveat (OPEN, #734-C3c).** Whether a card should be pinned to a specific model *version* — so a signature earned by `glm-5.1` does not silently vaccinate `glm-5.2` — is unresolved. Cards today key on vendor/backend, not version; a model bump can therefore carry stale counter-clauses or shed real ones. Tracked, not designed here (§8).
 
@@ -155,7 +157,7 @@ The vaccination wire — record a `(vendor, role, signature)` row on adjudicatio
 
 ## 5. The closed loop
 
-One diagram. Each arrow is annotated **[code]** (exists at HEAD with an anchor in §6), **[#738]** (in-flight, unmerged), or **[doctrine]** (leader-manual, no machine surface yet).
+One diagram. Each arrow is annotated **[code]** (exists at HEAD with an anchor in §6) or **[doctrine]** (leader-manual, no machine surface yet).
 
 ```
    incident (a live dispatch failure or success)
@@ -163,38 +165,37 @@ One diagram. Each arrow is annotated **[code]** (exists at HEAD with an anchor i
         ▼
    adjudication trace  ──[code] tachi_complete writes /eval row──►  eval evidence (SQLite, append-only)
         │                                                                    │
-        │ [#738] distill a typed error_signature                            │ [code] aggregate_live →
+        │ [code] distill a typed error_signature                            │ [code] aggregate_live →
         ▼                                                                    ▼  performance matrix
-   signature on the (role,vendor) card ──[#738] ACT-R decay──►  projection (top-N counter-clauses)
+   signature on the (role,vendor) card ──[code] ACT-R decay──►  projection (top-N counter-clauses)
         │                                                                    │
-        │ [#738] inject verbatim into packet frozen-spec                    │ [code] recommend consumes matrix
+        │ [code] inject verbatim into packet frozen-spec                    │ [code] recommend consumes matrix
         ▼                                                                    ▼
    next packet (12 clauses + vaccines + goldens) ──[doctrine] dispatch──►  outcome ──►  eval row ──► card
 ```
 
-- **Present at HEAD [code]:** eval-row write on complete, the live performance matrix, `recommend` consuming that matrix, the skill/trait/weak-against overlay projection, the deterministic risk classifier, route-policy proposals/apply.
-- **In-flight [#738]:** the `(role, vendor)` card key, error-signature extraction from the adjudication trace, counter-clause projection into the packet, the `self_report_trust` flag.
+- **Present at HEAD [code]:** eval-row write on complete, the live performance matrix, `recommend` consuming that matrix, the skill/trait/weak-against overlay projection, the deterministic risk classifier, route-policy proposals/apply, `(role, vendor)` signature evidence, counter-clause projection, and the `self_report_trust` flag.
 - **Doctrine-only [doctrine]:** the leader running the loop, the 12-clause packet emission, the three-tier verdict routing, completion-ownership, the anti-fabrication artifact check, first-exam eligibility. These are law carried by files and the leader, not yet by Tachi code.
 
 ---
 
 ## 6. Current-state map & gap list
 
-All anchors verified at `origin/main` HEAD `7c56a130` (Release 1.6.4). "GAP" means the doctrine above is real law but no code surface implements it at HEAD; each GAP becomes one bounded child-issue seed — **an issue seed, not a design**.
+Rows changed by the 2026-08-02 amendment were verified at base `274b930a`; untouched historical rows retain the `7c56a130` (Release 1.6.4) snapshot and may require a new census before execution. "GAP" means the doctrine above is real law but no code surface implements it at the row's named anchor; each GAP becomes one bounded child-issue seed — **an issue seed, not a design**.
 
 | Lifecycle step | Doctrine (§) | Code anchor at HEAD, or GAP | Child-issue seed |
 |---|---|---|---|
-| Deterministic risk classification | §2.2, §2.1 | `crates/tachi-dispatch/src/routing.rs:266-286` (risk → required/blocked_profiles; high/critical requires `claude_plan`+`codex_55_review`, blocks `codex_53_fast`) | — |
+| Deterministic risk classification | §2.2, §2.1 | **Present implementation reality at the 2026-07-19 anchor:** `crates/tachi-dispatch/src/routing.rs:266-286` (risk → required/blocked_profiles; high/critical currently requires named profiles `claude_plan`+`codex_55_review` and blocks `codex_53_fast`). This is a **migration gap** against the carrier-neutral, risk-tiered routing target in §2.1/§2.4; the doctrine amendment does not claim runtime migration. | "Migrate `routing.rs` from named carrier/profile coupling to risk-tiered carrier-neutral policy inputs; preserve explicit high/critical safety gates and add route discrimination coverage before changing the current profile behavior." |
 | Profile recommend (matrix-fed) | §2.2 | `crates/tachi-dispatch/src/routing.rs:288` `recommend_dispatch_profile_candidates`; matrix from `aggregate_live` | — |
 | Profile / card definition | §4.1 | `crates/tachi-dispatch/src/profiles.rs:37-60` `DispatchProfileDef` (role-keyed; per-backend profiles from `:62`) | — |
 | Card overlay projection (skills/traits/weak-against) | §4.4 | `crates/tachi-server/src/dispatch_profile/cards.rs:9-127` (overlay keyed by `profile.name`, `PROFILE_CARD_OVERLAY_NS`); `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs:49-66` (`projected_signature_skills`) | — |
 | Eval row on complete | §3 | `crates/tachi-server/src/complete_ops/eval_record.rs:39` (path `/eval/{date}/{task_id}`), `:283` (`category="eval"`), `:206-223` (subagents); handler `crates/tachi-server/src/complete_ops/handler.rs:14` | — |
 | Route-policy proposals / apply | §4.3 | `tachi_task(action="proposals"|"review_proposal"|"apply_proposals")` per `crates/tachi-params/src/facade/task.rs:48`; rules persisted to `dispatch_route_policy_rules` (dispatch-policy-learning-spec.md:266-274) | — |
 | Facade surface (no new router facade) | §4.3 | `crates/tachi-params/src/facade/task.rs:13-48`; `merge`=local worktree only (`:49-50`), PR merges via `tachi_gh(safe_merge)` | — |
-| `(role, vendor)` card key | §4.2, §4.4 | **GAP** — overlays keyed by `profile.name` only (`cards.rs:115-127`); vendor axis is PR #738 (OPEN, `signature_evidence.rs` absent at HEAD) | "Land the `(role, vendor)` card key so same-role different-vendor lanes carry distinct overlays (#534/#735/#738)" |
-| Error-signature extraction from adjudication | §3, §5 | **GAP** — no `record_signature` verb / signature store at HEAD (`git grep self_report_trust\|falsified_ci` → 0 hits); PR #738 adds `signature_evidence.rs` | "Merge signature-evidence store + record verb from #738; distill typed signature from the adjudication verdict" |
-| Counter-clause projection into packet | §2.2, §4.4 | **GAP** — `overlays.rs` projects skills/traits only, not error-signature counter-clauses; PR #738 (OPEN) | "Project top-N ACT-R-decayed counter-clauses into the packet frozen-spec section (#738)" |
-| `self_report_trust` flag consumption | §2.2, §3 | **GAP** — 0 hits at HEAD | "Persist + surface per-vendor `self_report_trust=low` on `falsified_ci_report`; force independent re-verification" |
+| `(role, vendor)` signature key | §4.2, §4.4 | `crates/tachi-server/src/signature_evidence.rs:93` records typed evidence; `crates/tachi-dispatch/src/signatures.rs:277` projects per-role/vendor counter-clauses | — |
+| Error-signature extraction from adjudication | §3, §5 | `crates/tachi-server/src/complete_ops/handler.rs:909` records completion signatures through `signature_evidence` | — |
+| Counter-clause projection into packet | §2.2, §4.4 | `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs:120-146` renders ACT-R-decayed clauses into the dispatch overlay | — |
+| `self_report_trust` flag consumption | §2.2, §3 | `crates/tachi-server/src/dispatch_profile/cards.rs:31-57` and `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs:122-136` surface low-trust evidence | — |
 | 12-clause packet emission | §2.3 | **GAP** — dispatch prompt assembly does not inject the 12 frozen-spec clauses; leader hand-carries | "Emit the 12 frozen-spec clauses into the `tachi execute` packet template (#516)" |
 | Three-tier verdict routing | §3 | **GAP** — no machine surface; leader-manual | "Model the trivial/prescription/adjudication verdict routing as dispatch state" |
 | Completion-ownership for detached jobs | §3 | **GAP** — lives in host-side lane patches, not Tachi; dispatch status has no ownership contract | "Encode completion-ownership + `STILL-RUNNING` marker as a dispatch-status contract" |
@@ -227,7 +228,7 @@ zeroclaw reaches these through the same `tachi_task` / `tachi_skill` / `tachi_co
 
 **Minimum-viable adoption sequence.** Adopt the *contracts* before any *machinery* — value lands immediately with zero Tachi integration:
 1. Report contract + the 12-clause packet template (pure text; makes every zeroclaw dispatch self-sufficient and auditable on day one).
-2. The verdict protocol + cross-vendor law (organizational discipline; no code).
+2. The verdict protocol + risk-tiered review-diversity law (organizational discipline; no code).
 3. Then wire the MCP facade for the evidence store and `recommend` (the first machinery — turns traces into routing).
 4. Last, the vaccination projection (needs (b) and a signature history to decay).
 

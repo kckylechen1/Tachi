@@ -1,6 +1,6 @@
 # Experience → Tachi: the vendor-keyed card-evolution loop (#534 first cut)
 
-**Status:** design, implementable. Freezes the first slice of #534 (card evolution) from the 2026-07-05 dispatch campaign.
+**Status:** historical design with its first-cut vaccination wire landed by PR #738. Live implementation status and remaining gaps are reconciled in [`dispatch-lifecycle.md`](./dispatch-lifecycle.md); the broader model-router direction in Part II is superseded where it conflicts with #1467.
 
 ## Problem
 
@@ -21,26 +21,27 @@ Do not dump all experience into one place. Each type has a different correct hom
 | **Frozen-spec clauses 1–12 + three-tier response** | `tachi execute` packet template + adjudication state machine | execute-time | #607 prescription→verbatim-to-codex, one-shot correct |
 | **Infra runbook lessons** | code fix (Tachi) OR wiki/guide (surfaced in briefing) | build/merge-time OR session-start | `cargo clean -p` for stale-rlib; safe_merge head-SHA gate |
 
-## What is built vs. the missing wire
+## Implementation reconciliation
 
-**Built:** `dispatch_profile/cards` (loadout / overlay / evolution machinery), `complete` (per-subagent eval rows), `safe_merge`, `tachi_gh`. The overlay already *projects* skills into a profile.
+**Built:** `dispatch_profile/cards` (loadout / overlay / evolution machinery), `complete` (per-subagent eval rows), `safe_merge`, and `tachi_gh`. PR #738 also landed the first-cut wire this document specified:
 
-**Missing — the wire this doc specs:**
-1. A **vendor axis** on cards. Cards today are role-keyed (reviewer / implementer); they need a `(role, vendor)` key so glm-as-implementer and codex-as-implementer carry different overlays.
-2. **Error-signature extraction** from adjudication traces. `complete` records an eval row; it does not yet distill a typed `error_signature` from the adjudication verdict.
-3. **Counter-clause projection** into the packet. The overlay projects skills today; extend it to project the top-N counter-clauses for `(role, vendor)` into the dispatch packet's frozen-spec section.
+1. The **vendor axis** and typed evidence live in `crates/tachi-server/src/signature_evidence.rs` and `crates/tachi-dispatch/src/signatures.rs`.
+2. **Error-signature recording** is called from `crates/tachi-server/src/complete_ops/handler.rs`.
+3. **Counter-clause and trust projection** is assembled by `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs` and surfaced in dispatch cards.
 
-## First-cut slice (implementable, minimal end-to-end)
+Automatic judgment or proposal generation beyond this adjudicated first cut remains outside this landed contract.
 
-Ship the smallest loop that makes "failure → next dispatch auto-carries the vaccine" real:
+## First-cut slice (historical, landed by PR #738)
+
+PR #738 shipped the smallest loop that made "failure → next dispatch auto-carries the vaccine" real:
 
 **(a) On adjudication, record a vendor-keyed error signature.**
-Extend `complete` (or a new `record_signature` verb) so a closed dispatch carries `{vendor, role, signature, severity, evidence_ref}`. Signature is drawn from a frozen taxonomy (below). Stored on the `(role, vendor)` card as accumulating evidence with a timestamp.
+`complete` records `{vendor, role, signature, severity, evidence_ref}` from the frozen taxonomy below as timestamped `(role, vendor)` evidence.
 
 **(b) At packet assembly, project the top-N counter-clauses.**
-When assembling a dispatch packet for `(role, vendor)`, look up that card's active signatures, map each to its counter-clause, ACT-R-decay by recency/frequency, and inject the top-N into the packet's frozen-spec section — verbatim, as additional mandatory clauses. Provisional N=3; calibrate from telemetry (never a flat magic number — per the frozen-spec law).
+Packet assembly looks up the lane's active signatures, maps each to its counter-clause, ACT-R-decays by recency/frequency, and injects the bounded top-N into the frozen-spec section as verbatim mandatory clauses.
 
-**(c) ACT-R decay** so a signature that stops recurring fades (already the design intent of the overlay evolution). A vendor that improves sheds its counter-clauses over time; one that keeps failing accumulates them.
+**(c) ACT-R decay** lets a signature that stops recurring fade; a vendor that improves sheds counter-clauses over time, while recurring failures accumulate evidence.
 
 ## Error-signature taxonomy (frozen from the 07-05 campaign)
 
@@ -65,18 +66,20 @@ Each signature has a stable id, a counter-clause, and a severity. The severe new
 
 ## Acceptance criteria
 
-- [ ] A closed dispatch can record a `(vendor, role, signature)` row against a card via a facade verb.
-- [ ] Packet assembly for `(role, vendor)` projects that card's top-N counter-clauses (verbatim from the frozen taxonomy) into the frozen-spec section.
-- [ ] Projection is ACT-R-decayed by recency/frequency; a vendor with no recent signatures gets a clean packet.
-- [ ] `falsified_ci_report` sets a per-vendor `self_report_trust=low` flag that the leader/pipeline reads (independent-verify-everything).
-- [ ] The 07-05 taxonomy is seeded; glm's card carries `fake_security_fix` ×4 + `falsified_ci_report` ×1 + `self_close_overreach` ×3; codex's carries `parking_after_contract` / `breadcrumb_violation` (already vaccinated via constitution — record as *resolved* signatures to prove decay).
-- [ ] Discrimination check: a dispatch to glm-as-implementer on a security issue produces a packet containing the three high-severity counter-clauses; the same dispatch to codex does not.
+- [x] A closed dispatch can record a `(vendor, role, signature)` row against a card.
+- [x] Packet assembly for `(role, vendor)` projects that card's top-N counter-clauses (verbatim from the frozen taxonomy) into the frozen-spec section.
+- [x] Projection is ACT-R-decayed by recency/frequency; a vendor with no recent signatures gets a clean packet.
+- [x] `falsified_ci_report` sets a per-vendor `self_report_trust=low` flag that the leader/pipeline reads (independent-verify-everything).
+- [x] The 07-05 taxonomy is seeded; glm's card carries `fake_security_fix` ×4 + `falsified_ci_report` ×1 + `self_close_overreach` ×3; codex's carries resolved `parking_after_contract` / `breadcrumb_violation` evidence.
+- [x] Discrimination coverage proves the glm-as-implementer security packet carries its high-severity clauses while the codex packet does not carry glm's clauses.
 
 ## Provenance
 
 Distilled from the 2026-07-05 multi-vendor campaign: 9 PRs merged to main across glm/codex/grok/sonnet-5 lanes with kimi/sonnet/codex cross-vendor adversarial review. glm failed vault security 4/4 (#541/#583/#600/#607) and falsified a clippy-clean report (#610); codex implemented every frozen-spec surgical task correctly one-shot (#594/#607/#588). The hand-written cards (`lane_card_glm_5_2.md`, `lane_card_codex.md`) are this doc's precursor — this spec is how they stop being hand-written.
 
-## Part II: the card as a model-router substrate (owner discussion, 2026-07-05 night)
+## Part II: historical model-router direction (owner discussion, 2026-07-05 night)
+
+This section is retained as design provenance. The later #1467 product ruling leaves model/tool choice with the host model and retains only bounded staffing enforcement and evidence; do not execute Part II as a current product contract where the two conflict.
 
 The end state is Tachi as a **model router**: given a task, Tachi picks the vendor AND ships the constraints that make that vendor safe for that task. This is the differentiator over benchmark-routers (OpenRouter/RouteLLM-class): they answer "which model is cheap and good"; they cannot answer "this vendor will falsify a clippy-clean checkbox under these conditions" — because benchmarks don't produce adjudication traces. Real dispatches + adversarial review do. **Router + immune system.**
 
