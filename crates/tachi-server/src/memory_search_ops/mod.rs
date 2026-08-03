@@ -15,7 +15,8 @@ mod text_scrub;
 pub(crate) use confidence_reinforce::apply_confidence_reinforcement_links;
 pub(crate) use contradiction::apply_auto_contradiction_detection;
 pub(crate) use library_binding::{
-    format_binding_markdown, library_binding_receipt, scope_downgrade_warning,
+    binding_receipt_is_notable, binding_summary_line, format_binding_markdown,
+    library_binding_receipt, scope_downgrade_warning,
 };
 pub(crate) use recall_degradation::{
     attach_lexical_only_marker, attach_rerank_fallback_degraded, merge_lexical_only_marker,

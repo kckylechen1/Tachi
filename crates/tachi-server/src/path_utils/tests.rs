@@ -206,6 +206,56 @@ fn named_project_from_path_rejects_external_projects_dir() {
     assert!(named_project_from_path_in_home(&path, Path::new("/tmp/tachi-home")).is_none());
 }
 
+/// Display identity vs wire identity: a repo addressed through a deprecated
+/// hash generation must be SHOWN under the gen-4 canonical name (the one
+/// `server_methods/db.rs` migrates the binding to and the only one new
+/// registrations emit), while an already-stable identity — gen-4 itself or
+/// the gen-1 legacy bare basename, both of which a binding keeps per #1061 —
+/// is left exactly as the caller spelled it.
+#[test]
+fn canonical_identity_for_display_replaces_only_deprecated_alias_generations() {
+    let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+    let repo = tmp.path().join("Sigil");
+    let local_db = repo.join(".tachi").join("tachi-memory.db");
+    std::fs::create_dir_all(local_db.parent().expect("local parent")).expect("local parent");
+    std::fs::write(&local_db, b"").expect("local db placeholder");
+    crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
+
+    let canonical = plan_c_dir_name_from_root(&repo).expect("gen-4 identity");
+    let gen3 = plan_c_previous_dir_name_from_root(&repo).expect("gen-3 identity");
+    let gen2 = plan_c_previous_raw_dir_name_from_root(&repo).expect("gen-2 identity");
+    let legacy = plan_c_legacy_dir_name_from_root(&repo).expect("gen-1 identity");
+    assert_ne!(gen3, canonical, "generations must be distinguishable");
+
+    assert_eq!(
+        canonical_identity_for_display(&local_db, &gen3).as_deref(),
+        Some(canonical.as_str()),
+        "a gen-3 compatibility alias must display as the canonical identity"
+    );
+    assert_eq!(
+        canonical_identity_for_display(&local_db, &gen2).as_deref(),
+        Some(canonical.as_str()),
+        "a gen-2 compatibility alias must display as the canonical identity"
+    );
+    assert_eq!(
+        canonical_identity_for_display(&local_db, &canonical),
+        None,
+        "the canonical identity needs no substitute"
+    );
+    assert_eq!(
+        canonical_identity_for_display(&local_db, &legacy),
+        None,
+        "the gen-1 legacy basename is a stable caller identity (#1061), not a \
+         deprecated alias to be renamed under the caller"
+    );
+
+    // A path that is not a repo-local `.tachi/<db>` yields no root identity,
+    // so callers keep showing what they have instead of inventing a name.
+    let standalone = tmp.path().join("standalone.db");
+    std::fs::write(&standalone, b"").expect("standalone db placeholder");
+    assert_eq!(canonical_identity_for_display(&standalone, &gen3), None);
+}
+
 #[test]
 fn named_project_for_db_path_accepts_plan_c_symlink_target() {
     with_env_lock(|| {

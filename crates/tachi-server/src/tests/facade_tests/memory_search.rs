@@ -121,6 +121,183 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
     assert!(markdown.starts_with("## Tachi search:"), "{markdown}");
 }
 
+/// A binding receipt is a diagnostic, not a result. `serde_json::Map` is a
+/// `BTreeMap` (this workspace never enables `preserve_order`), so `"binding"`
+/// sorts ahead of `"sections"` on key name alone and an unconditional receipt
+/// buried the answer to every successful search under ~15 lines of paths.
+///
+/// Discrimination on ONE variable at a time, same server, same seeded row:
+/// a routine hit carries only the one-line `binding_summary`; an un-honored
+/// `scope`, and an empty result set (the exact "there is no memory" moment
+/// the #898 receipts exist for), each put the full receipt back.
+#[tokio::test]
+async fn tachi_memory_search_json_attaches_full_binding_only_when_it_has_news() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("binding-news");
+    let sentinel = "BindingNewsSearchSentinel";
+    let mut entry = make_entry("binding-news-search-sentinel");
+    entry.path = "/facade/binding-news".to_string();
+    entry.summary = format!("{sentinel} summary");
+    entry.text = format!("{sentinel} row so a routine search returns results");
+    entry.keywords = vec![sentinel.to_string()];
+    server
+        .with_project_store(|store| {
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("seed project row: {e}"))
+        })
+        .expect("seed project row");
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("seed global row: {e}"))
+        })
+        .expect("seed global row");
+
+    // 1. Routine hit: project-bound process, honored scope, rows returned.
+    let mut hit = tachi_memory_params("search");
+    hit.format = Some("json".to_string());
+    hit.scope = Some("memory".to_string());
+    hit.query = Some(sentinel.to_string());
+    let hit_body = crate::facade_memory_ops::handle_tachi_memory(&server, hit)
+        .await
+        .expect("routine search should succeed");
+    let hit_json: Value = serde_json::from_str(&hit_body).expect("routine search JSON");
+    let hit_rows = hit_json["sections"]
+        .as_array()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .find(|section| section["name"] == json!("Memory"))
+        })
+        .and_then(|section| section["rows"].as_array())
+        .expect("memory rows");
+    assert!(
+        !hit_rows.is_empty(),
+        "fixture precondition: the routine arm must actually return rows, \
+         otherwise it is testing the empty-result arm; got {hit_json:#}"
+    );
+    assert!(
+        hit_json.get("binding").is_none(),
+        "a routine successful search must not bury its results under a \
+         diagnostic receipt: {hit_json:#}"
+    );
+    assert!(
+        hit_json["binding_summary"]
+            .as_str()
+            .is_some_and(|line| line.starts_with("Library binding:")),
+        "provenance is suppressed to one line, never dropped: {hit_json:#}"
+    );
+
+    // 2. Same query, un-honored `scope`: the caller did not get what it asked
+    //    for, so the full receipt comes back.
+    let mut remapped = tachi_memory_params("search");
+    remapped.format = Some("json".to_string());
+    remapped.scope = Some("not-a-scope".to_string());
+    remapped.query = Some(sentinel.to_string());
+    let remapped_body = crate::facade_memory_ops::handle_tachi_memory(&server, remapped)
+        .await
+        .expect("scope-remapped search should succeed");
+    let remapped_json: Value =
+        serde_json::from_str(&remapped_body).expect("scope-remapped search JSON");
+    assert_eq!(remapped_json["scope_remapped"], json!(true));
+    assert!(
+        remapped_json["binding"]["global_path"].as_str().is_some(),
+        "an un-honored scope must carry the full binding receipt: \
+         {remapped_json:#}"
+    );
+
+    // 3. Same server, honored scope, nothing found: the "there is no memory"
+    //    moment must say which libraries were actually addressed.
+    let mut empty = tachi_memory_params("search");
+    empty.format = Some("json".to_string());
+    empty.scope = Some("memory".to_string());
+    empty.query = Some("ZqxvBindingNewsNoSuchTokenAnywhere".to_string());
+    let empty_body = crate::facade_memory_ops::handle_tachi_memory(&server, empty)
+        .await
+        .expect("empty search should succeed");
+    let empty_json: Value = serde_json::from_str(&empty_body).expect("empty search JSON");
+    assert!(
+        empty_json["sections"]
+            .as_array()
+            .expect("sections")
+            .iter()
+            .all(|section| section["rows"]
+                .as_array()
+                .is_some_and(|rows| rows.is_empty())),
+        "fixture precondition: this arm must return no rows; got {empty_json:#}"
+    );
+    assert!(
+        empty_json["binding"]["global_path"].as_str().is_some(),
+        "an empty result set must carry the full binding receipt: {empty_json:#}"
+    );
+}
+
+/// Companion to the receipt-volume test above, and the reason no
+/// `explicit_project != effective_named_project` trigger was added to
+/// `binding_receipt_is_notable`: on this surface a caller who names a project
+/// that does not exist is NOT silently downgraded to the bound project DB.
+/// `search_memory/rows.rs`'s named-project branch returns
+/// `Project '<name>' not found` whenever `project_only` is false — which every
+/// receipt-carrying caller passes (`facade_search_ops.rs`,
+/// `tools/memory_facade.rs`, `bootstrap/cli_tool.rs`) — and
+/// `json_search_section` turns that into a typed `search_failure` section.
+///
+/// The discrimination that matters is the sentinel: it exists ONLY in the
+/// bound project DB, so if the named-project miss ever starts falling through
+/// to the bound store, this arm returns rows and goes red instead of quietly
+/// answering a different question than the one asked.
+#[tokio::test]
+async fn tachi_memory_search_names_a_missing_project_instead_of_answering_from_the_bound_db() {
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("missing-project");
+    let sentinel = "MissingProjectDowngradeSentinel";
+    let mut entry = make_entry("missing-project-downgrade-sentinel");
+    entry.path = "/facade/missing-project".to_string();
+    entry.summary = format!("{sentinel} summary");
+    entry.text = format!("{sentinel} row that lives only in the bound project DB");
+    entry.keywords = vec![sentinel.to_string()];
+    server
+        .with_project_store(|store| {
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("seed project row: {e}"))
+        })
+        .expect("seed project row");
+
+    let mut params = tachi_memory_params("search");
+    params.format = Some("json".to_string());
+    params.scope = Some("memory".to_string());
+    params.query = Some(sentinel.to_string());
+    params.project = Some("ZqxvNoSuchNamedProjectAnywhere".to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("a missing named project is reported in-band, not as a transport error");
+    let parsed: Value = serde_json::from_str(&body).expect("search JSON");
+    let memory = parsed["sections"]
+        .as_array()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .find(|section| section["name"] == json!("Memory"))
+        })
+        .expect("memory section");
+
+    assert_eq!(
+        memory["rows"],
+        json!([]),
+        "a named project that does not exist must not be served from the \
+         bound project DB: {parsed:#}"
+    );
+    assert_eq!(memory["error"]["kind"], json!("search_failure"));
+    assert!(
+        memory["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("ZqxvNoSuchNamedProjectAnywhere")
+                && message.contains("not found")),
+        "the failure must name the project the caller asked for: {memory:#}"
+    );
+}
+
 #[tokio::test]
 async fn tachi_memory_search_json_failure_keeps_rows_an_array_and_exposes_typed_error() {
     let server = make_server();

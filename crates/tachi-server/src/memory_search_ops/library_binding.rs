@@ -154,8 +154,14 @@ pub(crate) fn receipt_has_single_db_workspace_warning(receipt: &Value) -> bool {
         })
 }
 
-/// Format a short markdown block for human briefing surfaces.
-pub(crate) fn format_binding_markdown(receipt: &Value) -> String {
+/// The one-line provenance summary of a binding receipt: which posture the
+/// process is in and which libraries it addressed.
+///
+/// This is the line [`format_binding_markdown`] leads with, extracted so a
+/// *result* surface that suppresses the full receipt (see
+/// [`binding_receipt_is_notable`]) can still carry provenance in one line
+/// instead of dropping it silently.
+pub(crate) fn binding_summary_line(receipt: &Value) -> String {
     let single = receipt
         .get("single_db_mode")
         .and_then(Value::as_bool)
@@ -172,9 +178,55 @@ pub(crate) fn format_binding_markdown(receipt: &Value) -> String {
         .get("global_path")
         .and_then(Value::as_str)
         .unwrap_or("-");
-    let mut lines = vec![format!(
+    format!(
         "Library binding: single_db_mode={single} project_path=`{project_path}` effective_named=`{effective}` global=`{global}`"
-    )];
+    )
+}
+
+/// Does this receipt carry news — something the caller has to act on — as
+/// opposed to routine provenance?
+///
+/// News is either of:
+///   * a warned posture (`warnings` non-empty: the two loud #898 postures and
+///     the #925 scope downgrade), or
+///   * a global-only process that resolved **no** named library at all, so
+///     every row came from global and an explicitly requested library (if any)
+///     did not resolve.
+///
+/// Callers that own a *result* surface add their own outcome-shaped triggers
+/// (empty result set, un-honored `scope`); see `facade_memory_ops`.
+///
+/// Deliberately NOT a trigger: `explicit_project != effective_named_project`
+/// compared as raw strings. One physical DB is addressable by any of its four
+/// historical alias generations (`path_utils::alias`), so that comparison
+/// fires on *spelling*, not on scope — including on every daemon-forwarded CLI
+/// call, which addresses the DB by whichever alias generation exists on disk.
+/// A genuinely un-honored request shows up as `warnings` or as a null
+/// `effective_named_project`, both of which are covered above.
+pub(crate) fn binding_receipt_is_notable(receipt: &Value) -> bool {
+    let has_warnings = receipt
+        .get("warnings")
+        .and_then(Value::as_array)
+        .is_some_and(|warnings| !warnings.is_empty());
+    if has_warnings {
+        return true;
+    }
+    // Both defaults are the reporting side: a receipt whose shape drifted is
+    // reported in full rather than silently suppressed.
+    let single_db_mode = receipt
+        .get("single_db_mode")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let no_named_library = receipt
+        .get("effective_named_project")
+        .map(Value::is_null)
+        .unwrap_or(true);
+    single_db_mode && no_named_library
+}
+
+/// Format a short markdown block for human briefing surfaces.
+pub(crate) fn format_binding_markdown(receipt: &Value) -> String {
+    let mut lines = vec![binding_summary_line(receipt)];
     if let Some(warnings) = receipt.get("warnings").and_then(Value::as_array) {
         for w in warnings {
             if let Some(text) = w.as_str() {
@@ -220,6 +272,81 @@ mod tests {
         assert_eq!(
             workspace_local_db_for_root(root),
             PathBuf::from("/tmp/repo/.tachi/memory.db")
+        );
+    }
+
+    /// The summary line is the markdown block's first line — extracting it
+    /// must not have changed either surface's bytes.
+    #[test]
+    fn binding_summary_line_is_the_markdown_first_line() {
+        let receipt = json!({
+            "single_db_mode": true,
+            "project_path": null,
+            "effective_named_project": "Quant",
+            "global_path": "/tmp/global/memory.db",
+            "warnings": [WARN_SINGLE_DB_WITH_WORKSPACE_DB],
+        });
+        let md = format_binding_markdown(&receipt);
+        assert_eq!(
+            md.lines().next(),
+            Some(binding_summary_line(&receipt).as_str())
+        );
+        assert!(binding_summary_line(&receipt).contains("effective_named=`Quant`"));
+    }
+
+    /// Discrimination for the receipt half of the "no news, no receipt" rule:
+    /// a routine bound posture is quiet; a warned posture and an unscoped
+    /// global-only posture are both news.
+    #[test]
+    fn notable_receipt_discriminates_news_from_routine_provenance() {
+        let routine = json!({
+            "single_db_mode": false,
+            "project_path": "/repo/.tachi/tachi-memory.db",
+            "effective_named_project": null,
+            "global_path": "/tmp/global/memory.db",
+            "warnings": [],
+        });
+        assert!(
+            !binding_receipt_is_notable(&routine),
+            "a project-bound process with no warnings has nothing to say"
+        );
+
+        let named_global_only = json!({
+            "single_db_mode": true,
+            "project_path": null,
+            "effective_named_project": "Sigil-82fc54652d7d59f09166f0e3",
+            "global_path": "/tmp/global/memory.db",
+            "warnings": [],
+        });
+        assert!(
+            !binding_receipt_is_notable(&named_global_only),
+            "a global-only process that DID resolve a named library is the \
+             ordinary CLI forwarding path, not news"
+        );
+
+        let mut warned = routine.clone();
+        warned["warnings"] = json!([WARN_SINGLE_DB_WITH_WORKSPACE_DB]);
+        assert!(
+            binding_receipt_is_notable(&warned),
+            "a warned posture is always news"
+        );
+
+        let unscoped = json!({
+            "single_db_mode": true,
+            "project_path": null,
+            "effective_named_project": null,
+            "global_path": "/tmp/global/memory.db",
+            "warnings": [],
+        });
+        assert!(
+            binding_receipt_is_notable(&unscoped),
+            "global-only with no named library resolved is news even when no \
+             warning fired (e.g. an explicit project= that did not resolve)"
+        );
+
+        assert!(
+            binding_receipt_is_notable(&json!({})),
+            "a receipt whose shape drifted must report, not suppress"
         );
     }
 

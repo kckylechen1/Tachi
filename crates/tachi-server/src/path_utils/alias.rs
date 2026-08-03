@@ -124,6 +124,73 @@ fn plan_c_alias_identity(canonical: &Path) -> Vec<u8> {
     }
 }
 
+/// Is `project_name` an identity a caller gets to KEEP as its binding label
+/// for `project_root`, rather than a deprecated compatibility alias that
+/// resolution migrates to the gen-4 canonical name?
+///
+/// Single source for the #1061 immutable-binding rule: the gen-4 canonical
+/// name and the human-meaningful gen-1 legacy bare basename are both stable
+/// first-class identities; the machine-generated gen-3 (case-folded FNV-8)
+/// and gen-2 (raw-canonical FNV-8) hashes are read/alias compatibility
+/// candidates only. `server_methods/db.rs` uses it to decide the session
+/// label it settles on; the CLI uses it to decide which identity to *show* a
+/// human for the same binding, so neither side can evolve its own notion of
+/// "stable". It does NOT make the two paths agree end-to-end: they feed this
+/// predicate from different root derivations — see
+/// `canonical_identity_for_display`'s KNOWN NARROW FACE note.
+pub(crate) fn is_stable_caller_identity(
+    project_name: &str,
+    project_root: &Path,
+    canonical_name: &str,
+) -> bool {
+    project_name == canonical_name
+        || plan_c_legacy_dir_name_from_root(project_root).as_deref() == Some(project_name)
+}
+
+/// Display-only: the canonical (gen-4) identity that a binding to `db_path`
+/// under `project_name` will actually settle on, or `None` when
+/// `project_name` is already the identity that survives (or when no stable
+/// root identity is derivable, in which case a caller shows what it has).
+///
+/// Pure: it canonicalizes and hashes, and registers, resolves, repairs or
+/// migrates nothing. The resolution candidate chain
+/// (`existing_compatible_alias_for_root` / `resolve_existing_alias_paths`) is
+/// fail-closed anti-orphan machinery (#1228) and is deliberately untouched —
+/// a deprecated alias must keep RESOLVING; it just must not be what a human
+/// is told the daemon bound.
+///
+/// KNOWN NARROW FACE — read before assuming this and the daemon agree on
+/// every topology. Only the *stability predicate*
+/// (`is_stable_caller_identity`) is shared with the daemon's binding label
+/// path. The project-root derivation is NOT: this uses bare
+/// `plan_c_project_root_from_local_db`, which yields a root only when the
+/// DB's parent directory is literally named `.tachi`, while
+/// `server_methods/db.rs`'s `resolve_named_project_binding_in_home` adds an
+/// `.or_else` Git-root fallback for the topology where `TACHI_HOME` itself
+/// lives inside a repository (Hyperion). In that topology the daemon still
+/// derives a root and may still migrate a gen-3/gen-2 alias, while this
+/// returns `None` and the caller prints the wire alias plainly.
+///
+/// That asymmetry is deliberate, and it is the safe direction: the fallback
+/// is parameterized on the daemon's own `TACHI_HOME`-resolved `db_path`
+/// (`named_project_from_path_in_home` + `symlink_metadata` on the pre-
+/// canonicalize path), which the CLI does not hold — the CLI holds the
+/// already-resolved project DB path. Feeding the CLI's path into the same
+/// fallback would not reproduce the daemon's answer; it would compute a
+/// *different* root and could advertise a canonical name the daemon never
+/// binds. Narrow-to-`None` degrades to "shows the alias it forwarded on",
+/// which is at worst incomplete; widening with the wrong inputs would be
+/// confidently wrong. Widening for real means giving display access to the
+/// daemon's resolution chain, which is a separate change on a fail-closed
+/// surface, not a doc tweak.
+pub(crate) fn canonical_identity_for_display(db_path: &Path, project_name: &str) -> Option<String> {
+    let canonical_db = std::fs::canonicalize(db_path).ok()?;
+    let project_root = plan_c_project_root_from_local_db(&canonical_db)?;
+    let canonical_name = plan_c_dir_name_from_root(&project_root)?;
+    (!is_stable_caller_identity(project_name, &project_root, &canonical_name))
+        .then_some(canonical_name)
+}
+
 /// Legacy (pre-hash) sanitized alias directory name: just the sanitized basename.
 ///
 /// Retained so we can resolve and keep using alias directories created before the

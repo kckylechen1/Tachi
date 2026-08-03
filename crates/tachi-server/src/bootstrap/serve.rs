@@ -1907,7 +1907,8 @@ mod tests {
             gc_initial_delay_secs: None,
             gc_interval_secs: None,
             command: Some(Commands::Remember {
-                text: "#1131 cli migration authority regression".to_string(),
+                text: Some("#1131 cli migration authority regression".to_string()),
+                text_flag: None,
                 tags: vec![],
                 scope: None,
                 project: None,

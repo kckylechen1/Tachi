@@ -1037,3 +1037,119 @@ fn help_reports_api_only_distill_and_canonical_db_paths() {
         "{backfill_help}"
     );
 }
+
+// Regression coverage for the `save`-alias / `--text` CLI ergonomics bug: a
+// user ran `tachi save --path X --text "content"` and hit
+// `error: unexpected argument '--text' found` with a misleading `-- --text`
+// tip and a `Usage: tachi remember ...` line that never explained `save` is
+// an alias of `remember`. `--text` is now an accepted named form of the
+// positional TEXT argument, and `save` is a *visible* alias so it shows up
+// in `--help` output.
+
+fn effective_remember_text(cli: &Cli) -> Option<String> {
+    match &cli.command {
+        Some(Commands::Remember {
+            text, text_flag, ..
+        }) => text.clone().or_else(|| text_flag.clone()),
+        other => panic!("expected Commands::Remember, got {other:?}"),
+    }
+}
+
+#[test]
+fn save_text_flag_is_equivalent_to_remember_positional_text() {
+    // Exact repro from the bug report, modulo the actual note text.
+    let via_save_flag = Cli::try_parse_from([
+        "tachi",
+        "save",
+        "--path",
+        "/scratch/x",
+        "--text",
+        "hello world",
+    ])
+    .expect("`tachi save --path X --text Y` must parse: --text is now an accepted named form");
+
+    let via_remember_positional =
+        Cli::try_parse_from(["tachi", "remember", "--path", "/scratch/x", "hello world"])
+            .expect("`tachi remember --path X Y` positional form must still parse");
+
+    assert_eq!(
+        effective_remember_text(&via_save_flag),
+        effective_remember_text(&via_remember_positional),
+        "save --text and remember <TEXT> must resolve to the same effective text"
+    );
+    assert_eq!(
+        effective_remember_text(&via_save_flag).as_deref(),
+        Some("hello world")
+    );
+
+    // `save` really did resolve through the `Remember` variant (i.e. it is
+    // dispatching as the alias, not some separate command), and --path
+    // still parses correctly alongside --text.
+    assert!(matches!(
+        via_save_flag.command,
+        Some(Commands::Remember { ref path, .. }) if path.as_deref() == Some("/scratch/x")
+    ));
+}
+
+#[test]
+fn remember_positional_still_works_without_text_flag() {
+    let parsed = Cli::try_parse_from(["tachi", "remember", "plain positional note"])
+        .expect("bare positional TEXT must still parse");
+    assert_eq!(
+        effective_remember_text(&parsed).as_deref(),
+        Some("plain positional note")
+    );
+}
+
+#[test]
+fn remember_text_flag_alone_works_without_positional() {
+    let parsed = Cli::try_parse_from(["tachi", "remember", "--text", "flag-only note"])
+        .expect("`--text` alone (no positional) must parse");
+    assert_eq!(
+        effective_remember_text(&parsed).as_deref(),
+        Some("flag-only note")
+    );
+}
+
+#[test]
+fn remember_rejects_both_positional_and_text_flag() {
+    let err = Cli::try_parse_from([
+        "tachi",
+        "remember",
+        "--text",
+        "flag note",
+        "positional note",
+    ])
+    .expect_err(
+        "passing both the positional TEXT and --text must be a clear conflict, not a silent pick",
+    );
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn remember_rejects_missing_text_entirely() {
+    let err = Cli::try_parse_from(["tachi", "remember"])
+        .expect_err("remember with neither positional TEXT nor --text must fail clearly");
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn save_is_a_discoverable_visible_alias_of_remember() {
+    // Before this fix `save` was a hidden `alias`: it parsed, but nothing in
+    // `--help` output told the user `save` and `remember` are the same
+    // command, so the Usage line "changing name" on error looked like a bug
+    // rather than a documented alias.
+    //
+    // Only the *parent's* subcommand list renders `[aliases: ...]`
+    // (clap_builder-4.6.0 output/help_template.rs: `sc_spec_vals` is reached
+    // solely from `write_subcommand`/`will_subcommands_wrap`), so the root
+    // long help is the surface that discriminates `visible_alias` from a
+    // hidden `alias`. Asserting on `remember --help` would NOT: a subcommand's
+    // own `render_long_help()` never prints its own aliases, and the string
+    // "save" appears there anyway via the `--text` arg's doc comment.
+    let root_help = Cli::command().render_long_help().to_string();
+    assert!(
+        root_help.contains("save"),
+        "top-level --help should surface the `save` alias next to `remember`: {root_help}"
+    );
+}

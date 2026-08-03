@@ -46,7 +46,8 @@ pub enum Commands {
         project: Option<String>,
     },
     // Save is now an alias of `remember` — see `Remember` below, which carries
-    // `#[command(alias = "save")]`.
+    // `#[command(visible_alias = "save")]` (visible so `tachi remember --help`
+    // / `tachi --help` list it, rather than a silent hidden alias).
     //
     // Historically `save` only accepted `--path` / `--importance`. We now
     // route it through the same `remember`-backed handler so the full flag
@@ -286,10 +287,24 @@ pub enum Commands {
     /// `--project` binds the (one-time) daemon session to that project at
     /// initialize, so the write lands in that project's DB — it is not a
     /// project param on an otherwise-unbound session.
-    #[command(alias = "save")]
+    // Visible (not hidden) alias: `tachi remember --help` and `tachi --help`
+    // now list `save` as an alias, so a user who reaches for `save` first can
+    // discover it is the same command rather than hitting an unexplained
+    // "Usage: tachi remember ..." after typing `tachi save ...`.
+    #[command(visible_alias = "save")]
     Remember {
-        /// Full text content to remember.
-        text: String,
+        /// Full text content to remember. Positional form:
+        /// `tachi remember "content"`. `--text` below is an accepted
+        /// alternative for callers that pass it as a named flag (e.g.
+        /// `tachi save --path <PATH> --text "content"`); supply exactly one
+        /// of the two, not both.
+        #[arg(required_unless_present = "text_flag")]
+        text: Option<String>,
+        /// Equivalent to the positional TEXT argument above — accepted
+        /// because `--text` is what most users try first. Conflicts with
+        /// the positional form.
+        #[arg(long = "text", value_name = "TEXT", conflicts_with = "text")]
+        text_flag: Option<String>,
         /// Optional comma-separated tags (forwarded as keywords).
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
