@@ -595,6 +595,116 @@ fn store_identity_namespace_is_write_once_at_the_api() {
     crate::db::set_state(store.connection(), "scratch", "k", "\"v\"").expect("ordinary set_state");
 }
 
+/// The write-once guard on `set_state`/`delete_state`/`set_state_if_version`
+/// (above) is only half the API surface: `MemoryStore::insert_state_if_absent`
+/// is a *forgery* vector rather than an overwrite one — a bare `&MemoryStore`
+/// holder could otherwise stamp a brand-new `store_identity` key that the
+/// schema-init transaction never wrote, since `ON CONFLICT DO NOTHING` would
+/// happily succeed against an absent key. `crate::db::state::insert_state_if_absent`
+/// itself is deliberately unguarded (it is the exact primitive the legitimate
+/// stamp writer calls), so the refusal must live on the pub
+/// `MemoryStore::insert_state_if_absent` wrapper — this pins that it does.
+#[test]
+fn store_identity_pub_wrapper_refuses_forged_insert() {
+    let dir = temp_dir("write-once-forged-insert");
+    let path = db_in(&dir, "memory.db");
+    let store =
+        MemoryStore::open_with_label_and_context(&path, "wiki", &deny(StoreProfile::TachiFull))
+            .expect("stamp the store as wiki");
+
+    // A key the schema-init transaction never wrote: if the pub wrapper had no
+    // guard, `ON CONFLICT DO NOTHING` would find no existing row and this
+    // would silently succeed, planting a forged stamp.
+    let forged = store
+        .insert_state_if_absent("store_identity", "not_a_real_stamp", "\"forged\"")
+        .expect_err("the pub insert_state_if_absent wrapper must refuse the namespace typed");
+    assert!(
+        forged.to_string().contains("write-once"),
+        "refusal must name the reason: {forged}"
+    );
+
+    // Confirm it is a real refusal, not an incidental error: nothing was
+    // written under that key.
+    let conn = raw(&path);
+    assert_eq!(
+        identity_stamp(&conn, "not_a_real_stamp"),
+        None,
+        "a refused insert must not have planted the forged row"
+    );
+
+    // Ordinary namespaces are unaffected by this wrapper either.
+    assert!(store
+        .insert_state_if_absent("scratch", "k2", "\"v\"")
+        .expect("ordinary insert_state_if_absent"));
+}
+
+/// Belt-and-braces exclusion pin (`db::reap_expired_state`'s fifth exclusion,
+/// #1579/#1585 review round 2): a `store_identity` row is never written with
+/// an `expires_at` field by the real stamp writer, but this test simulates
+/// **pre-guard damage** — a row that acquired one anyway, by hand-inserting
+/// through a raw, unguarded second connection to the same file (the sanctioned
+/// fixture-only escape hatch documented on `MemoryStore::connection`) — and
+/// asserts the generic, cross-namespace reaper still will not delete it, while
+/// an ordinary namespace's equally-expired row is removed in the same call.
+#[test]
+fn store_identity_row_with_expires_at_survives_reap() {
+    let dir = temp_dir("write-once-survives-reap");
+    let path = db_in(&dir, "memory.db");
+    let store =
+        MemoryStore::open_with_label_and_context(&path, "wiki", &deny(StoreProfile::TachiFull))
+            .expect("stamp the store as wiki");
+
+    let past = "2000-01-01T00:00:00Z";
+    {
+        // Simulated pre-guard damage: a store_identity row carrying
+        // expires_at, planted directly via raw SQL (never through the typed
+        // API, which refuses this namespace outright).
+        let conn = raw(&path);
+        conn.execute(
+            "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
+             VALUES ('store_identity', 'damaged_stamp', ?1, 1, ?2, ?2)",
+            rusqlite::params![
+                format!(r#"{{"value":"forged","expires_at":"{past}"}}"#),
+                past,
+            ],
+        )
+        .expect("hand-insert the damaged store_identity row");
+        // Positive control: an ordinary namespace's equally-expired row must
+        // still be reapable, so this test cannot pass vacuously (e.g. because
+        // reap_expired_state stopped removing anything at all).
+        conn.execute(
+            "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
+             VALUES ('scratch', 'stale_key', ?1, 1, ?2, ?2)",
+            rusqlite::params![
+                format!(r#"{{"value":"v","expires_at":"{past}"}}"#),
+                past,
+            ],
+        )
+        .expect("hand-insert the ordinary expired row");
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let removed = store
+        .reap_expired_state(&now)
+        .expect("reap_expired_state must not error on the damaged row");
+    assert_eq!(
+        removed, 1,
+        "exactly the ordinary expired row must be removed, not the store_identity one"
+    );
+
+    let conn = raw(&path);
+    assert_eq!(
+        identity_stamp(&conn, "damaged_stamp").as_deref(),
+        Some("forged"),
+        "a store_identity row must survive reap_expired_state even with expires_at set"
+    );
+    assert_eq!(
+        crate::db::get_state(&conn, "scratch", "stale_key").expect("get_state"),
+        None,
+        "the ordinary namespace's equally-expired row must have been reaped"
+    );
+}
+
 // ── D7: profile-invariant completeness ──────────────────────────────────────
 
 #[test]
