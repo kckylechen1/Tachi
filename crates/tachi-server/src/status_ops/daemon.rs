@@ -72,6 +72,11 @@ pub(crate) fn collect_daemon_inventory(
         ));
     }
 
+    // Stable lock paths intentionally outlive their owners. Without a PID
+    // record or live process they carry no inventory state and must not become
+    // permanent phantom `state: none` rows in `tachi status`.
+    entries.retain(|entry| entry.state != "none");
+
     let known_pids = entries
         .iter()
         .filter_map(|entry| entry.pid)
@@ -330,4 +335,36 @@ fn path_matches_string(left: &Path, right: &str) -> bool {
         .zip(std::fs::canonicalize(right).ok())
         .map(|(left, right)| left == right)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_omits_retained_lock_paths_without_receipts_or_live_owners() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_db_path = dir.path().join("global").join("tachi-memory.db");
+        let scoped_lock = dir.path().join("daemon-retained-only.lock");
+        let legacy_lock = crate::daemon_lock::legacy_daemon_lock_path(dir.path());
+        std::fs::write(&scoped_lock, []).expect("seed retained scoped lock path");
+        std::fs::write(&legacy_lock, []).expect("seed retained legacy lock path");
+
+        let inventory = collect_daemon_inventory(dir.path(), &global_db_path);
+
+        assert!(
+            inventory
+                .iter()
+                .all(|entry| entry.scope != "retained-only" && entry.scope != "legacy"),
+            "bare retained lock paths must not surface as inventory entries: {inventory:?}"
+        );
+        assert!(
+            scoped_lock.exists(),
+            "inventory must not unlink scoped locks"
+        );
+        assert!(
+            legacy_lock.exists(),
+            "inventory must not unlink legacy locks"
+        );
+    }
 }
