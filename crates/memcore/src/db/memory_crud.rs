@@ -827,15 +827,6 @@ fn merge_ordinary_reserved_metadata(
     Ok(sanitized)
 }
 
-fn atomic_evidence_path_validation_disabled() -> bool {
-    matches!(
-        std::env::var("TACHI_DISABLE_PATH_VALIDATION")
-            .ok()
-            .as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes")
-    )
-}
-
 impl crate::MemoryStore {
     /// Save through the normal upsert body while atomically preserving and
     /// mutating reserved reference metadata. The validated mutations and
@@ -868,7 +859,7 @@ impl crate::MemoryStore {
         metadata_removals: &[&str],
         mutations: &[ValidatedReferenceMutation],
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
-        if self.path_validation && !atomic_evidence_path_validation_disabled() {
+        if self.path_validation && !self.policy.path_validation_escape_hatch {
             let allow_cross = entry
                 .metadata
                 .get("allow_cross_project")
@@ -911,7 +902,7 @@ impl crate::MemoryStore {
         metadata_patch: &Map<String, Value>,
         mutations: &[ValidatedReferenceMutation],
     ) -> Result<InsertMemoryResult, MemoryError> {
-        if self.path_validation && !atomic_evidence_path_validation_disabled() {
+        if self.path_validation && !self.policy.path_validation_escape_hatch {
             let allow_cross = entry
                 .metadata
                 .get("allow_cross_project")

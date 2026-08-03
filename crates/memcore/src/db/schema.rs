@@ -1637,12 +1637,15 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     Ok(())
 }
 
+// tachi#1585 D5: `crate::kernel_policy::migration_backup_retain_count` — a
+// `OnceLock<usize>` defaulting to the historical literal (3) with zero env
+// reads, injectable once by an adapter via `set_migration_backup_retain`.
+// This call site fires mid schema-init, before any `MemoryStore` exists to
+// carry a per-instance `KernelPolicy` on, so unlike the other three D5 sites
+// it cannot read `self`; see `kernel_policy.rs` module docs for why this one
+// knob stays process-wide instead.
 fn migration_backup_retain_count() -> usize {
-    std::env::var("TACHI_MIGRATION_BACKUP_RETAIN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3)
-        .max(1)
+    crate::kernel_policy::migration_backup_retain_count()
 }
 
 fn migration_marker_path(db_path: &Path) -> PathBuf {
