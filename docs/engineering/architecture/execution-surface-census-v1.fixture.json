@@ -22,9 +22,9 @@
                 "rationale": "Post-#1540 managed-worker compatibility ceiling."
             },
             "coordinate": {
-                "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 134194,
-                "max_total_tool_definition_bytes": 153230,
+                "max_visible_tools": 39,
+                "max_total_input_schema_bytes": 129171,
+                "max_total_tool_definition_bytes": 147246,
                 "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
             },
             "operate": {
@@ -34,9 +34,9 @@
                 "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice."
             },
             "admin": {
-                "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 188983,
-                "max_total_tool_definition_bytes": 227129,
+                "max_visible_tools": 102,
+                "max_total_input_schema_bytes": 183960,
+                "max_total_tool_definition_bytes": 221145,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
@@ -65,14 +65,6 @@
     },
     "observed": {
         "canonical_action_inventories": {
-            "tachi_arena": {
-                "action_count": 3,
-                "actions": [
-                    "board",
-                    "collect",
-                    "spawn"
-                ]
-            },
             "tachi_component": {
                 "action_count": 4,
                 "actions": [
@@ -228,9 +220,9 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 188983,
-                "total_tool_definition_bytes": 227129,
-                "visible_tool_count": 103,
+                "total_input_schema_bytes": 183960,
+                "total_tool_definition_bytes": 221145,
+                "visible_tool_count": 102,
                 "visible_tools": [
                     "archive_memory",
                     "capture_session",
@@ -284,7 +276,6 @@
                     "sync_memories",
                     "tachi_agent_eval",
                     "tachi_agents",
-                    "tachi_arena",
                     "tachi_audit_log",
                     "tachi_briefing",
                     "tachi_browse",
@@ -338,9 +329,9 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 134194,
-                "total_tool_definition_bytes": 153230,
-                "visible_tool_count": 40,
+                "total_input_schema_bytes": 129171,
+                "total_tool_definition_bytes": 147246,
+                "visible_tool_count": 39,
                 "visible_tools": [
                     "extract_facts",
                     "hub_discover",
@@ -354,7 +345,6 @@
                     "runtime_info",
                     "tachi_agent_eval",
                     "tachi_agents",
-                    "tachi_arena",
                     "tachi_briefing",
                     "tachi_browse",
                     "tachi_complete",
@@ -484,7 +474,7 @@
             }
         },
         "registered_native_tools": {
-            "tool_count": 103,
+            "tool_count": 102,
             "tools": [
                 "archive_memory",
                 "capture_session",
@@ -538,7 +528,6 @@
                 "sync_memories",
                 "tachi_agent_eval",
                 "tachi_agents",
-                "tachi_arena",
                 "tachi_audit_log",
                 "tachi_briefing",
                 "tachi_browse",
@@ -605,39 +594,6 @@
                             "limit",
                             "observe",
                             "register"
-                        ]
-                    },
-                    "tachi_arena": {
-                        "input_schema_bytes": 5023,
-                        "property_count": 27,
-                        "property_names": [
-                            "action",
-                            "arena_id",
-                            "auto_capability_bundle",
-                            "credential_profiles",
-                            "cwd",
-                            "dispatch_reason",
-                            "flow_id",
-                            "format",
-                            "harness",
-                            "issue_ref",
-                            "launch",
-                            "mission_id",
-                            "model",
-                            "objective",
-                            "permission_profile",
-                            "permissions",
-                            "pr_ref",
-                            "profile",
-                            "project",
-                            "prompt",
-                            "role",
-                            "sandbox",
-                            "scope",
-                            "skills",
-                            "timeout_secs",
-                            "title",
-                            "tool_profile"
                         ]
                     },
                     "tachi_orchestrator": {
@@ -790,39 +746,6 @@
                             "limit",
                             "observe",
                             "register"
-                        ]
-                    },
-                    "tachi_arena": {
-                        "input_schema_bytes": 5023,
-                        "property_count": 27,
-                        "property_names": [
-                            "action",
-                            "arena_id",
-                            "auto_capability_bundle",
-                            "credential_profiles",
-                            "cwd",
-                            "dispatch_reason",
-                            "flow_id",
-                            "format",
-                            "harness",
-                            "issue_ref",
-                            "launch",
-                            "mission_id",
-                            "model",
-                            "objective",
-                            "permission_profile",
-                            "permissions",
-                            "pr_ref",
-                            "profile",
-                            "project",
-                            "prompt",
-                            "role",
-                            "sandbox",
-                            "scope",
-                            "skills",
-                            "timeout_secs",
-                            "title",
-                            "tool_profile"
                         ]
                     },
                     "tachi_orchestrator": {

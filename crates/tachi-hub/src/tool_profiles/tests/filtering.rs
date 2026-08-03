@@ -27,7 +27,7 @@ fn coordinate_surface_includes_memory_and_workflow_tools() {
             test_tool("search_memory"),
             test_tool("save_memory"),
             test_tool("ingest_event"),
-            test_tool("tachi_arena"),
+            test_tool("tachi_verify"),
             test_tool("post_card"),
             test_tool("hub_register"),
         ],
@@ -44,7 +44,7 @@ fn coordinate_surface_includes_memory_and_workflow_tools() {
             "tachi_memory".to_string(),
             "tachi_save".to_string(),
             "ingest_event".to_string(),
-            "tachi_arena".to_string()
+            "tachi_verify".to_string()
         ]
     );
 }
@@ -105,7 +105,6 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("runtime_info"),
             test_tool("tachi_status"),
             test_tool("tachi_task"),
-            test_tool("tachi_arena"),
             test_tool("tachi_verify"),
             test_tool("tachi_agent_eval"),
             test_tool("tachi_memory"),

@@ -153,7 +153,6 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "tachi_handoff",
     "tachi_memory",
     "tachi_orchestrator",
-    "tachi_arena",
     "tachi_verify",
     "tachi_save",
     "tachi_wiki_write",

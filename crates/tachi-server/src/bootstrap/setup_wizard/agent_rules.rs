@@ -16,7 +16,7 @@ pub(super) fn agent_memory_rules_block() -> String {
 - Treat `cycle_plan` as read-only navigation; follow its `next_step`, blockers, and readiness flags.\n\n\
 ### Delegation — native subagent first\n\
 - Use the host harness's native subagent for ordinary local delegation. Tachi remains memory, policy, claims, ledger, receipts, and eval.\n\
-- `tachi_task` `action=\"dispatch\"` is only for an explicit user request, durable cross-session work, cross-device/remote pickup, or when no native subagent exists, and requires `dispatch_reason`. Tachi availability, parallelism, tracking, or vendor choice alone is not a reason.\n\n\
+- `tachi_task` no longer owns worker launch (`action=\"dispatch\"`/`wait`/`cancel` were removed): use the host harness's native subagent, or `tachi_staff(action=\"start\")` for an explicit durable/remote exception. Tachi availability, parallelism, tracking, or vendor choice alone is not a reason.\n\n\
 ### Save — call proactively after any meaningful milestone\n\
 - **Do NOT wait until session end.** Save after: decision made, root cause found, sub-task done, key command confirmed.\n\
 - **`tachi_memory` `action=\"save\"`**: your own concise conclusion. Pass `project` (git repo), `path` under `/scratch/…` or `/code-review/…`, `keywords` + `entities`.\n\
