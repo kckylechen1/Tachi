@@ -149,6 +149,7 @@ mod host_profile;
 mod host_spawn_bridge;
 mod hub_ops;
 mod kanban;
+pub mod kernel_policy_adapter;
 pub mod lesson_forge_ops;
 mod manifest;
 mod mcp_connection;
