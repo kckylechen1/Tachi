@@ -183,6 +183,7 @@ pub use schema::{init_schema, init_schema_with_label_mut, SchemaInitOutcome};
 pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
+pub(crate) use state::refuse_store_identity_namespace;
 pub use state::{
     backfill_missing_expires_at, delete_state, get_state, insert_state_if_absent,
     list_derived_by_source, list_state, reap_expired_state, save_derived, save_derived_with_id,
