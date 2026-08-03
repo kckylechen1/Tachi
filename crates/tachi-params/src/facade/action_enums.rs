@@ -77,7 +77,6 @@ pub enum TachiTaskAction {
     Briefing,
     DocIndex,
     Recommend,
-    Dispatch,
     Complete,
     Profiles,
     Profile,
@@ -87,9 +86,7 @@ pub enum TachiTaskAction {
     ReviewProposal,
     ApplyProposals,
     Status,
-    Cancel,
     Board,
-    Wait,
     Merge,
     Intake,
     CycleStatus,
@@ -112,7 +109,6 @@ impl TachiTaskAction {
         Self::Briefing,
         Self::DocIndex,
         Self::Recommend,
-        Self::Dispatch,
         Self::Complete,
         Self::Profiles,
         Self::Profile,
@@ -122,9 +118,7 @@ impl TachiTaskAction {
         Self::ReviewProposal,
         Self::ApplyProposals,
         Self::Status,
-        Self::Cancel,
         Self::Board,
-        Self::Wait,
         Self::Merge,
         Self::Intake,
         Self::CycleStatus,
@@ -146,7 +140,6 @@ impl TachiTaskAction {
             Self::Briefing => "briefing",
             Self::DocIndex => "doc_index",
             Self::Recommend => "recommend",
-            Self::Dispatch => "dispatch",
             Self::Complete => "complete",
             Self::Profiles => "profiles",
             Self::Profile => "profile",
@@ -156,9 +149,7 @@ impl TachiTaskAction {
             Self::ReviewProposal => "review_proposal",
             Self::ApplyProposals => "apply_proposals",
             Self::Status => "status",
-            Self::Cancel => "cancel",
             Self::Board => "board",
-            Self::Wait => "wait",
             Self::Merge => "merge",
             Self::Intake => "intake",
             Self::CycleStatus => "cycle_status",
@@ -197,7 +188,6 @@ impl FromStr for TachiTaskAction {
             "briefing" => Ok(Self::Briefing),
             "doc_index" => Ok(Self::DocIndex),
             "recommend" => Ok(Self::Recommend),
-            "dispatch" => Ok(Self::Dispatch),
             "complete" => Ok(Self::Complete),
             "profiles" => Ok(Self::Profiles),
             "profile" => Ok(Self::Profile),
@@ -207,9 +197,7 @@ impl FromStr for TachiTaskAction {
             "review_proposal" => Ok(Self::ReviewProposal),
             "apply_proposals" => Ok(Self::ApplyProposals),
             "status" => Ok(Self::Status),
-            "cancel" => Ok(Self::Cancel),
             "board" => Ok(Self::Board),
-            "wait" => Ok(Self::Wait),
             "merge" => Ok(Self::Merge),
             "intake" => Ok(Self::Intake),
             "cycle_status" => Ok(Self::CycleStatus),
@@ -227,6 +215,23 @@ impl FromStr for TachiTaskAction {
             "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
                 "Invalid tachi_task action '{s}'. GitHub PR lifecycle actions live on tachi_gh(action='{s}')."
             )),
+            // #1319-C2: dispatch/cancel/wait were removed from tachi_task.
+            //   dispatch  — the worker launch lifecycle left Task entirely;
+            //               use the host harness's native subagent, or
+            //               tachi_arena(action='spawn', launch=true) for an
+            //               explicit durable/remote exception.
+            //   wait      — temporarily equivalent to repeated
+            //               action='status'; call status again until terminal.
+            //   cancel    — not exposed until a real termination contract lands.
+            "dispatch" => Err(
+                "Invalid tachi_task action 'dispatch'. Worker launch left Task in #1319-C2; use the host harness's native subagent, or tachi_arena(action='spawn', launch=true) for an explicit durable/remote exception.".to_string(),
+            ),
+            "wait" => Err(
+                "Invalid tachi_task action 'wait'. Use action='status' (wait is temporarily equivalent to repeated status until a real poll contract lands).".to_string(),
+            ),
+            "cancel" => Err(
+                "Invalid tachi_task action 'cancel'. Cancellation is not exposed until a real termination contract lands.".to_string(),
+            ),
             other => Err(format!(
                 "Invalid tachi_task action '{other}'. See primary task actions or use tachi_gh for GitHub PR lifecycle."
             )),

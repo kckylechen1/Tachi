@@ -23,21 +23,21 @@ fn tachi_task_action_schema(
     // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation. action='dispatch' is only an explicit durable/remote/native-unavailable exception and requires dispatch_reason; action='recommend' is advisory and does not authorize dispatch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage existing explicit dispatches; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; action='recommend' is advisory and does not authorize spawning a worker. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'board' read existing explicit run state; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
         generator,
     )
 }
 
-// ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle) ──
+// ─── Facade: task (plan / recommend / board / merge / lifecycle) ─────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
     /// Primary actions (F4 enum): plan, briefing,
-    /// doc_index, recommend, dispatch, complete, adjudicate, profiles, profile, card,
+    /// doc_index, recommend, complete, adjudicate, profiles, profile, card,
     /// route_simulate, proposals, review_proposal, apply_proposals, status,
-    /// cancel, board, wait, merge, intake, cycle_status, cycle_plan, ux_matrix,
+    /// board, merge, intake, cycle_status, cycle_plan, ux_matrix,
     /// build_references, close_loop, claim, release, heartbeat, handoff.
-    /// action="merge" is local dispatched worktree git merge only; use
+    /// action="merge" is local worktree git merge only; use
     /// tachi_gh(action='safe_merge') for GitHub PR merges.
     /// action="intake" binds a GitHub issue to a flow.
     /// action="cycle_status" / "cycle_plan" are read-only lifecycle models.
@@ -84,28 +84,20 @@ pub struct TachiTaskParams {
     // plan fields
     #[serde(default)]
     #[schemars(
-        description = "[action=plan|recommend|dispatch|route_simulate|complete|intake|ux_matrix] Task description / prompt text."
+        description = "[action=plan|recommend|route_simulate|complete|intake|ux_matrix] Task description / prompt text."
     )]
     pub task: Option<String>,
-    /// [action=dispatch|recommend|route_simulate] Declared side-effect level:
+    /// [action=recommend|route_simulate] Declared side-effect level:
     /// L0 source/metadata read, L1 temporary local state, L2 product-data
     /// diagnostics, or L3 product data/resident runtime side effects. Omitted
     /// values resolve to L1 for host-profile admission without task-text inference.
     #[serde(default)]
     #[schemars(
-        description = "[action=dispatch|recommend|route_simulate] Declared side-effect level L0–L3. Omitted → L1 for host admission."
+        description = "[action=recommend|route_simulate] Declared side-effect level L0–L3. Omitted → L1 for host admission."
     )]
     pub execution_level: Option<super::ExecutionLevel>,
-    /// [action=dispatch] Required exception to the native-subagent-first law.
-    /// Installing Tachi, wanting parallelism, ordinary tracking, or choosing
-    /// a model/vendor is not sufficient. Omit for every non-dispatch action.
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Required native-first exception: explicit_user_request, durable_cross_session, cross_device_remote, or native_subagent_unavailable. Ordinary local delegation must use the host harness's native subagent."
-    )]
-    pub dispatch_reason: Option<TachiDispatchReason>,
-    #[serde(default)]
-    #[schemars(description = "[action=plan|recommend|dispatch] Requesting agent id.")]
+    #[schemars(description = "[action=plan|recommend] Requesting agent id.")]
     pub agent_id: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -532,15 +524,6 @@ pub struct TachiTaskParams {
         description = "Bypass wiki noise filtering for action='close_loop'. Does not force dispatch or merge behavior."
     )]
     pub force: bool,
-    /// [action=dispatch] tachi#1202/#993: suppress the `/cards/<seat>`
-    /// lane-card countermeasures overlay for this dispatch. Forwarded
-    /// verbatim to `TachiDispatchParams::inject_card`. Placed as a trailing
-    /// field (rather than next to `verbose`, its semantic sibling) to keep
-    /// this additive slice out of the high-churn action=recommend/profiles
-    /// region other in-flight tachi#1201 work also edits — same trailing
-    /// pattern as `eval_run_ids`/`project_explicit` above.
-    #[serde(default)]
-    pub inject_card: Option<bool>,
     // --- canonical WorkClaim fields (#1253) ---
     #[serde(default)]
     #[schemars(
@@ -584,25 +567,40 @@ pub struct TachiTaskParams {
 
 #[cfg(test)]
 mod tests {
-    use super::{TachiDispatchReason, TachiTaskParams};
+    use super::TachiTaskParams;
 
+    /// #1319-C2: dispatch/cancel/wait were removed from `tachi_task`. The
+    /// removed action strings must fail to parse back into `TachiTaskAction`,
+    /// and the from_str error must name the removed action so a caller learns
+    /// where the lifecycle went.
     #[test]
-    fn dispatch_reason_is_allowlisted_not_free_form() {
-        let params: TachiTaskParams = serde_json::from_value(serde_json::json!({
-            "action": "dispatch",
-            "dispatch_reason": "durable_cross_session"
-        }))
-        .expect("allowlisted reason deserializes");
-        assert_eq!(
-            params.dispatch_reason,
-            Some(TachiDispatchReason::DurableCrossSession)
-        );
+    fn removed_dispatch_actions_fail_to_parse() {
+        for removed in ["dispatch", "cancel", "wait"] {
+            let err = removed
+                .parse::<crate::facade::action_enums::TachiTaskAction>()
+                .expect_err("removed task action must not parse");
+            assert!(
+                err.contains(removed),
+                "parse error for {removed:?} should name it, got: {err}"
+            );
+        }
+    }
 
-        let error = serde_json::from_value::<TachiTaskParams>(serde_json::json!({
-            "action": "dispatch",
-            "dispatch_reason": "want_parallelism"
+    /// #1319-C2: a payload that still sends the deleted `dispatch_reason` /
+    /// `inject_card` fields alongside a surviving action must NOT break —
+    /// serde ignores unknown fields by default — but the fields are gone from
+    /// the struct, so the parsed params carry no such accessor.
+    #[test]
+    fn removed_dispatch_fields_are_dropped_on_deserialize() {
+        let params: TachiTaskParams = serde_json::from_value(serde_json::json!({
+            "action": "complete",
+            "task": "t",
+            "agent": "claude",
+            "outcome": "success",
+            "dispatch_reason": "durable_cross_session",
+            "inject_card": true,
         }))
-        .expect_err("free-form reasons must fail schema deserialization");
-        assert!(error.to_string().contains("unknown variant"));
+        .expect("surviving action + stale dispatch-only fields must still parse");
+        assert_eq!(params.action.as_str(), "complete");
     }
 }

@@ -36,13 +36,15 @@ const LONG_POLL_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 ///
 /// - `action == "wait"` polls up to `timeout_secs`, default
 ///   [`TASK_WAIT_TIMEOUT_DEFAULT_SECS`] (600s), capped at
-///   [`TASK_WAIT_TIMEOUT_CAP_SECS`] (86_400s / 24h) —
-///   `tools/task_facade.rs::handle_tachi_task_wait`.
-/// - `action == "status"` / `action == "cancel"` drive the acpx
-///   control-plane call with the same shape, default
-///   [`TASK_CONTROL_TIMEOUT_DEFAULT_SECS`] (30s), capped at
+///   [`TASK_WAIT_TIMEOUT_CAP_SECS`] (86_400s / 24h). The wait action was
+///   removed from `tachi_task` in #1319-C2 (temporarily equivalent to
+///   repeated `status`), but this arm still derives an RPC timeout for any
+///   caller that sends `action='wait'` in arguments.
+/// - `action == "status"` drives the acpx control-plane call with the same
+///   shape, default [`TASK_CONTROL_TIMEOUT_DEFAULT_SECS`] (30s), capped at
 ///   [`TASK_CONTROL_TIMEOUT_CAP_SECS`] (300s) —
-///   `handle_tachi_task_status` / `handle_tachi_task_cancel`.
+///   `handle_tachi_task_status`. (`action == "cancel"` was removed in
+///   #1319-C2 but still derives an RPC timeout for legacy callers.)
 ///
 /// These four constants are shared (`crate::tools::TASK_*`) with the
 /// daemon-side handlers rather than mirrored, so the RPC-layer default/cap

@@ -49,12 +49,17 @@ fn tachi_task_schema_advertises_recommend_and_profiles() {
         action_description.contains("profiles"),
         "tachi_task.action schema must advertise profile discovery: {action_description}"
     );
+    // #1319-C2: the Dispatch action was removed from tachi_task (external
+    // staffing now flows through tachi_staff). The action description must NOT
+    // advertise dispatch as a tachi_task capability — only the local-worktree
+    // "merge" action remains, and it is deliberately not a worker launch.
     assert!(
-        action_description.contains("dispatch"),
-        "tachi_task.action schema must still advertise dispatch: {action_description}"
+        !action_description.contains("authorize dispatch")
+            && !action_description.contains("action='dispatch'"),
+        "tachi_task.action schema must not advertise dispatch after [1319-C2]: {action_description}"
     );
     assert!(
-        action_description.contains("local dispatched worktree git merge only"),
+        action_description.contains("local worktree git merge only"),
         "tachi_task.action schema must distinguish local worktree merge from GitHub PR merge: {action_description}"
     );
     assert!(

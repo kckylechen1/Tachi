@@ -5,12 +5,11 @@
 //! Every method in this file is a thin shim that delegates to a `handle_*`
 //! function in one of the `*_ops` siblings — no business logic lives here.
 
-use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::time::{Duration as StdDuration, Instant};
+use std::time::Duration as StdDuration;
 
 use crate::arena_ops::handle_tachi_arena;
 use crate::capability_ops::handle_prepare_capability_bundle;
@@ -33,21 +32,20 @@ use crate::wiki_ops::{
 };
 use crate::MemoryServer;
 
-const TASK_WAIT_INITIAL_POLL_DELAY: StdDuration = StdDuration::from_millis(250);
-const TASK_WAIT_MAX_POLL_DELAY: StdDuration = StdDuration::from_secs(2);
-
-/// `tachi_task(action='wait')` timeout_secs default/cap (see
-/// `task_facade::handle_tachi_task_wait`). `pub(crate)` so
-/// `cli_client::transport::daemon_call_timeout` can derive the outer RPC
-/// timeout from the *same* numbers instead of a hand-mirrored copy that can
-/// drift out of sync (see #970, #1028).
+/// `tachi_task(action='wait')` timeout_secs default/cap. The wait action was
+/// removed in #1319-C2 (temporarily equivalent to repeated status), but these
+/// numbers are still read by `cli_client::transport::daemon_call_timeout` to
+/// derive an outer RPC timeout for any caller that still sends `action='wait'`
+/// in arguments — kept `pub(crate)` so the RPC-layer default/cap can't drift
+/// out of sync. See #970, #1028.
 pub(crate) const TASK_WAIT_TIMEOUT_DEFAULT_SECS: u64 = 600;
 pub(crate) const TASK_WAIT_TIMEOUT_CAP_SECS: u64 = 86_400;
 
-/// `tachi_task(action='status'|'cancel')` timeout_secs default/cap for the
-/// acpx control-plane call (see `task_facade::handle_tachi_task_status` and
-/// `handle_tachi_task_cancel`). Same cross-module sharing rationale as
-/// `TASK_WAIT_TIMEOUT_DEFAULT_SECS` above.
+/// `tachi_task(action='status')` timeout_secs default/cap for the acpx
+/// control-plane call (see `task_facade::handle_tachi_task_status`). Same
+/// cross-module sharing rationale as `TASK_WAIT_TIMEOUT_DEFAULT_SECS` above.
+/// (`action='cancel'` was removed in #1319-C2 but the cli_client transport
+/// still derives an RPC timeout for callers that send it.)
 pub(crate) const TASK_CONTROL_TIMEOUT_DEFAULT_SECS: u64 = 30;
 pub(crate) const TASK_CONTROL_TIMEOUT_CAP_SECS: u64 = 300;
 

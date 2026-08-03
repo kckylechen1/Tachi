@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_schema_hides_operator_dispatch_while_admin_keeps_it() {
+    fn dispatch_is_removed_from_every_profile_after_1319_c2() {
         fn task_tool() -> rmcp::model::Tool {
             MemoryServer::workflow_tool_router()
                 .list_all()
@@ -1207,16 +1207,23 @@ mod tests {
             assert!(!standard_schema.contains(hidden_text), "{hidden_text}");
         }
 
+        // #1319-C2: dispatch is gone for EVERY profile, including admin. The
+        // old operator-only distinction no longer exists — admin no more
+        // advertises dispatch than delegate does.
         for profile in [
             tachi_hub::ToolProfile::coordinate(),
             tachi_hub::ToolProfile::delegate(),
+            tachi_hub::ToolProfile::admin(),
         ] {
             let mut tools = vec![task_tool()];
             narrow_gated_action_schemas(&mut tools, Some(profile));
             let actions = tools[0].input_schema["properties"]["action"]["enum"]
                 .as_array()
                 .expect("non-admin action enum");
-            assert!(!actions.contains(&json!("dispatch")));
+            assert!(
+                !actions.contains(&json!("dispatch")),
+                "dispatch must not appear under {profile:?}"
+            );
             assert!(!tools[0].input_schema["properties"]
                 .as_object()
                 .expect("non-admin properties")
@@ -1233,22 +1240,6 @@ mod tests {
                     .contains("dispatch")
             );
         }
-
-        let mut admin = vec![task_tool()];
-        narrow_gated_action_schemas(&mut admin, Some(tachi_hub::ToolProfile::admin()));
-        let admin_actions = admin[0].input_schema["properties"]["action"]["enum"]
-            .as_array()
-            .expect("admin action enum");
-        assert!(admin_actions.contains(&json!("dispatch")));
-        assert!(admin[0].input_schema["properties"]
-            .as_object()
-            .expect("admin properties")
-            .contains_key("dispatch_reason"));
-        assert!(admin[0]
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .contains("dispatch"));
     }
 
     #[test]

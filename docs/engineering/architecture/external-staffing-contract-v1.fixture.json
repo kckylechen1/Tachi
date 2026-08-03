@@ -45,19 +45,16 @@
     "production_adopters": [
       "crates/tachi-server/src/arena_ops/actions/spawn.rs::handle_spawn::dispatch-kernel-call#1",
       "crates/tachi-server/src/bootstrap/poke_cli/probes/dispatch.rs::probe_dispatch_mock::dispatch-kernel-call#1",
-      "crates/tachi-server/src/staffing_ops/mod.rs::staff_start::dispatch-kernel-call#1",
-      "crates/tachi-server/src/tools/task_router.rs::handle_tachi_task_facade::dispatch-kernel-call#1"
+      "crates/tachi-server/src/staffing_ops/mod.rs::staff_start::dispatch-kernel-call#1"
     ],
     "request_builders": [
       "crates/tachi-server/src/arena_ops/dispatch_bridge.rs::dispatch_params_for_mission::request-literal#1",
       "crates/tachi-server/src/bootstrap/poke_cli/probes/dispatch.rs::probe_dispatch_mock::request-literal#1",
       "crates/tachi-server/src/staffing_ops/mod.rs::into_params::request-literal#1",
-      "crates/tachi-server/src/staffing_ops/mod.rs::into_params::request-literal#2",
-      "crates/tachi-server/src/tools/task_router.rs::handle_tachi_task_facade::request-literal#1"
+      "crates/tachi-server/src/staffing_ops/mod.rs::into_params::request-literal#2"
     ],
     "launch_advertising_facades": [
-      "crates/tachi-server/src/tools/workflow_facade.rs::tachi_arena",
-      "crates/tachi-server/src/tools/workflow_facade.rs::tachi_task"
+      "crates/tachi-server/src/tools/workflow_facade.rs::tachi_arena"
     ],
     "legacy_secondary_ledger_roots": [
       "crates/tachi-server/src/arena_ops/state.rs::arena_root",
@@ -92,13 +89,13 @@
   },
   "contraction_budgets": {
     "launch_kernels": 1,
-    "production_adopters": 4,
-    "request_builders": 5,
-    "launch_advertising_facades": 2,
+    "production_adopters": 3,
+    "request_builders": 4,
+    "launch_advertising_facades": 1,
     "legacy_secondary_ledger_roots": 2,
     "legacy_staffing_projection_writer_sites": 21,
     "linked_result_copies": 1,
-    "direction": "budgets may only decrease as deletion leaves land; [1319-B7] retired the Shell runtime (shell_ops/, tachi_shell facade, TachiShellParams) and replaced it with the minimal tachi_staff facade delegating to the canonical staffing_ops contract (E1). The Shell dispatch adopter/builder and all six Shell-owned ledger writer sites are gone; the Staff adopter remains the single canonical external-staffing path. shell_runs_root stays counted as a legacy owner by the path rule (it lives in task_lifecycle/flow_artifacts.rs, relocated in #1337); relocating it is a separate concern."
+    "direction": "budgets may only decrease as deletion leaves land; [1319-B7] retired the Shell runtime (shell_ops/, tachi_shell facade, TachiShellParams) and replaced it with the minimal tachi_staff facade delegating to the canonical staffing_ops contract (E1). [1319-C2] removed the tachi_task Dispatch arm (and its TachiDispatchParams rebuild), the dispatch_reason + inject_card fields, and the wait/cancel actions — dropping the Task dispatch adopter/builder and removing tachi_task from launch_advertising_facades (tachi_arena remains the single launch-advertising facade). shell_runs_root stays counted as a legacy owner by the path rule (it lives in task_lifecycle/flow_artifacts.rs, relocated in #1337); relocating it is a separate concern."
   },
   "legacy_debt": [
     {

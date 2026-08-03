@@ -287,38 +287,6 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
     serde_json::to_string(&receipt).map_err(|e| format!("serialize pr_handoff: {e}"))
 }
 
-pub(crate) fn guard_issue_flow_dispatch(params: &TachiTaskParams) -> Result<(), String> {
-    let Some(flow_id) = params
-        .flow_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    else {
-        return Ok(());
-    };
-    let run_dir = run_dir_for_flow_id(flow_id)?;
-    let status = read_json_file(&run_dir.join("status.json"))?.unwrap_or_else(|| json!({}));
-    let Some(plan) = status.get("automation_plan") else {
-        return Ok(());
-    };
-    let dispatch_allowed = plan
-        .get("dispatch_allowed")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    if dispatch_allowed || params.confirm {
-        return Ok(());
-    }
-    let reasons = string_array_field(plan, "leader_gate_reasons");
-    let reason_text = if reasons.is_empty() {
-        "automation plan requires leader confirmation".to_string()
-    } else {
-        reasons.join(", ")
-    };
-    Err(format!(
-        "dispatch requires leader confirmation for flow_id '{flow_id}': {reason_text}. Re-run with confirm=true only after leader review."
-    ))
-}
-
 pub(super) fn issue_has_acceptance_criteria(issue: &IssueSnapshot) -> bool {
     let text = issue_text_for_gate(issue);
     [

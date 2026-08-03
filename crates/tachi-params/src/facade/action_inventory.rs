@@ -122,7 +122,7 @@ pub const TACHI_ORCHESTRATOR_ACTIONS: &[&str] = &[
 ];
 
 /// Soft ceilings for F0 monitoring (primary schema actions only).
-pub const TACHI_TASK_PRIMARY_ACTION_SOFT_MAX: usize = 30;
+pub const TACHI_TASK_PRIMARY_ACTION_SOFT_MAX: usize = 27;
 pub const TACHI_MEMORY_ACTION_SOFT_MAX: usize = 25;
 pub const TACHI_GH_ACTION_SOFT_MAX: usize = 20;
 
@@ -149,8 +149,10 @@ mod tests {
         // #1002 Issue Refinery plus append-only adjudication bumped this from
         // 24 -> 26. #1253 WorkClaim lifecycle then intentionally adds four
         // canonical task actions: claim, release, heartbeat, and handoff.
+        // #1319-C2 removed the worker launch lifecycle from tachi_task
+        // (dispatch/cancel/wait), dropping this from 30 -> 27.
         // Keep this exact so the next inventory addition gets explicit review.
-        assert_eq!(primary.len(), 30);
+        assert_eq!(primary.len(), 27);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 

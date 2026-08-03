@@ -400,24 +400,6 @@ fn facade_response_recommend_json_slims_candidates_and_gates_cards() {
 }
 
 #[test]
-fn task_wait_poll_delay_backs_off_to_cap() {
-    let mut delay = TASK_WAIT_INITIAL_POLL_DELAY;
-    assert_eq!(delay, StdDuration::from_millis(250));
-
-    delay = next_task_wait_poll_delay(delay);
-    assert_eq!(delay, StdDuration::from_millis(500));
-
-    delay = next_task_wait_poll_delay(delay);
-    assert_eq!(delay, StdDuration::from_secs(1));
-
-    delay = next_task_wait_poll_delay(delay);
-    assert_eq!(delay, StdDuration::from_secs(2));
-
-    delay = next_task_wait_poll_delay(delay);
-    assert_eq!(delay, TASK_WAIT_MAX_POLL_DELAY);
-}
-
-#[test]
 fn local_skill_discovery_scans_host_skill_dirs() {
     let _guard = crate::utils::global_test_lock()
         .lock()
