@@ -18,8 +18,9 @@
 //!   accounting for all 400 uniquely keyed calls.
 //! - [`report`] — legacy, non-authoritative preview aggregation. It cannot
 //!   render or claim D2 pilot completion.
-//! - `storage` (crate-private) — persist a forged candidate as a pending
-//!   row, never an established `/precedents` row.
+//! - `storage` (crate-private) — the `lesson_candidate` memory domain tag.
+//!   Its pending-row writer was deleted in #1564 (never wired); see that
+//!   module's doc.
 //!
 //! ## What this module explicitly does NOT do (honestly, not silently)
 //!
@@ -45,9 +46,7 @@ pub mod report;
 pub mod runner;
 pub mod selection;
 pub mod source;
-// `storage` is `pub(crate)`, not `pub`: its one entry point takes
-// `&crate::MemoryServer`, which is itself `pub(crate)` — a public function
-// can never expose a less-visible type in its signature (E0446), so this
-// module cannot be widened the way its siblings were without also widening
-// `MemoryServer`'s own visibility, which is out of this leaf's scope.
+// `storage` is `pub(crate)`, not `pub`: it is consumed inside this crate by
+// the recall containment gate, and nothing outside the crate has a use for a
+// bare domain tag.
 pub(crate) mod storage;

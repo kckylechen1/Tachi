@@ -1,16 +1,22 @@
-//! Wiki reviewed-projection lifecycle, provenance, and closure-boundary
-//! types (#1072).
+//! Wiki reviewed-projection lifecycle and provenance types (#1072).
 //!
 //! Frozen design authority: `docs/engineering/architecture/issue-refinery-memory-lanes.md`
 //! §7 (wiki is a reviewed projection) and §7.1 (reference compatibility and
 //! closure state). This module implements the subset of that document's
 //! target contracts #1072 lands as callable runtime shapes:
-//! `KnowledgeArtifactV1`'s closed lifecycle/authority vocabulary,
+//! `KnowledgeArtifactV1`'s closed lifecycle/authority vocabulary and
 //! `WikiEvidenceRefV1` (the canonical typed evidence-ref write shape, with
-//! legacy `metadata.source_refs: string[]` retained as a read fallback), and
-//! `ClosureProposalV1` / `ClosureApprovalReceiptV1` (the
-//! `closure_candidate → pending_approval → applied` lifecycle's
-//! hash-invalidation core).
+//! legacy `metadata.source_refs: string[]` retained as a read fallback).
+//!
+//! §7.1's `ClosureProposalV1` / `ClosureApprovalReceiptV1` types and their
+//! `closure_candidate → pending_approval → applied` hash-invalidation core
+//! also shipped here, ahead of the `propose_closure`/`approve_closure`/
+//! `apply_closure` surface that would have called them. That surface was
+//! never built, so the types sat with zero production callers and were
+//! deleted in #1564. Canon §7.1 is unaffected: it still requires an
+//! independent review and approval receipt before `close_loop`, active-wiki
+//! writes, or GitHub writeback, and whoever builds that surface should
+//! derive the payload from the canon doc against the code as it stands then.
 //!
 //! Deliberately NOT implemented in this leaf (left for a later leaf, and
 //! explicitly checklisted in the #1072 PR body rather than hidden):
@@ -18,8 +24,7 @@
 //! - a generic `EngineReceiptV1` — no live wiki-write path in this leaf runs
 //!   an engine that needs one (mirrors #1002/#1071's same deferral);
 //! - an MCP-exposed `propose_closure`/`approve_closure`/`apply_closure`
-//!   `tachi_task` action surface — the type + hash-invalidation logic below
-//!   is real and unit-tested; wiring a new `TachiTaskAction` touches ~7
+//!   `tachi_task` action surface — wiring a new `TachiTaskAction` touches ~7
 //!   exhaustively-matched call sites this leaf's no-cargo-build
 //!   hand-verification budget cannot safely cover in one pass;
 //! - full external trusted-doc blob-SHA drift detection for semantic
@@ -36,9 +41,6 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::SourceKindV1;
-// Used only by the closure-boundary stack below (gated per #1564).
-#[cfg(feature = "contract-leaves")]
-use crate::{canonical_json_sha256, sha256_hex};
 
 // ─── §7: KnowledgeArtifactV1 lifecycle/authority vocabulary ────────────────
 
@@ -827,218 +829,6 @@ pub fn build_candidate_knowledge_artifact_fields(
     })
 }
 
-// ─── §7.1 closure boundary: ClosureProposalV1 / ClosureApprovalReceiptV1 ──
-//
-// Gated per #1564 pending owner disposition (verified dead: zero
-// production callers anywhere in the workspace; only this file's own
-// tests construct these types). Owning contract: #1072 §7.1.
-
-#[cfg(feature = "contract-leaves")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClosureLifecycleV1 {
-    ClosureCandidate,
-    PendingApproval,
-    Applied,
-}
-
-#[cfg(feature = "contract-leaves")]
-impl ClosureLifecycleV1 {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ClosureCandidate => "closure_candidate",
-            Self::PendingApproval => "pending_approval",
-            Self::Applied => "applied",
-        }
-    }
-}
-
-#[cfg(feature = "contract-leaves")]
-impl fmt::Display for ClosureLifecycleV1 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Canon doc §7.1's closure-boundary payload. `build_closure_proposal`
-/// (below) is the only constructor this leaf ships, and it is deliberately
-/// pure (no `&MemoryServer`, no I/O, not `async`) — the frozen contract's
-/// closure boundary ("wiki evolution and closure synthesis... do not call
-/// current `close_loop`, write `close_loop.json`, mark the task closed,
-/// write active wiki, or post GitHub") is enforced *structurally*: a
-/// function with this signature cannot reach any of those side effects, not
-/// merely by convention.
-#[cfg(feature = "contract-leaves")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClosureProposalV1 {
-    pub proposal_id: String,
-    pub lifecycle: ClosureLifecycleV1,
-    pub issue_ref: String,
-    pub wiki_title: String,
-    pub wiki_text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wiki_path: Option<String>,
-    pub doc_paths: Vec<String>,
-    pub related_issues: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_id: Option<String>,
-    /// `"explicit" | "flow_result" | "notes"` — where `wiki_title`/`wiki_text`
-    /// were drafted from, mirroring `workflow_closure::handle_workflow`'s
-    /// existing `draft_source` vocabulary for `close_loop` so a future apply
-    /// step can reuse the same source-resolution convention.
-    pub source_kind: String,
-    pub proposal_hash: String,
-    pub source_bundle_hash: String,
-    pub captured_at: String,
-}
-
-#[cfg(feature = "contract-leaves")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClosureApprovalReceiptV1 {
-    pub proposal_id: String,
-    pub proposal_hash: String,
-    pub source_bundle_hash: String,
-    pub approver: String,
-    pub decision: String,
-    pub decided_at: String,
-}
-
-#[cfg(feature = "contract-leaves")]
-fn closure_proposal_hash_basis(
-    issue_ref: &str,
-    wiki_title: &str,
-    wiki_text: &str,
-    wiki_path: &Option<String>,
-    doc_paths: &[String],
-    related_issues: &[String],
-) -> serde_json::Value {
-    serde_json::json!({
-        "issue_ref": issue_ref,
-        "wiki_title": wiki_title,
-        "wiki_text": wiki_text,
-        "wiki_path": wiki_path,
-        "doc_paths": doc_paths,
-        "related_issues": related_issues,
-    })
-}
-
-/// Pure builder for a `ClosureProposalV1`. See the struct doc for why this
-/// signature (no I/O) is itself the RED-case-5 guarantee: "candidate closure
-/// must leave flow state not closed and create no close-loop artifact/
-/// comment." Starts at `PendingApproval` — this leaf ships no automatic
-/// closure-synthesis producer that would need the raw `ClosureCandidate`
-/// stage (see module doc); `propose_closure` IS the explicit "submit for
-/// review" action.
-#[cfg(feature = "contract-leaves")]
-#[allow(clippy::too_many_arguments)]
-pub fn build_closure_proposal(
-    proposal_id: String,
-    issue_ref: String,
-    wiki_title: String,
-    wiki_text: String,
-    wiki_path: Option<String>,
-    doc_paths: Vec<String>,
-    related_issues: Vec<String>,
-    flow_id: Option<String>,
-    source_kind: &str,
-    source_bundle_content: &str,
-    captured_at: String,
-) -> Result<ClosureProposalV1, String> {
-    let source_bundle_hash = sha256_hex(source_bundle_content.as_bytes());
-    let basis = closure_proposal_hash_basis(
-        &issue_ref,
-        &wiki_title,
-        &wiki_text,
-        &wiki_path,
-        &doc_paths,
-        &related_issues,
-    );
-    let proposal_hash = canonical_json_sha256(&basis)?;
-    Ok(ClosureProposalV1 {
-        proposal_id,
-        lifecycle: ClosureLifecycleV1::PendingApproval,
-        issue_ref,
-        wiki_title,
-        wiki_text,
-        wiki_path,
-        doc_paths,
-        related_issues,
-        flow_id,
-        source_kind: source_kind.to_string(),
-        proposal_hash,
-        source_bundle_hash,
-        captured_at,
-    })
-}
-
-#[cfg(feature = "contract-leaves")]
-fn recompute_proposal_hash(proposal: &ClosureProposalV1) -> Result<String, String> {
-    let basis = closure_proposal_hash_basis(
-        &proposal.issue_ref,
-        &proposal.wiki_title,
-        &proposal.wiki_text,
-        &proposal.wiki_path,
-        &proposal.doc_paths,
-        &proposal.related_issues,
-    );
-    canonical_json_sha256(&basis)
-}
-
-/// Canon doc §7.1's replay-staleness guarantee ("a changed proposal or
-/// source snapshot invalidates approval; apply cannot replay it" — RED case
-/// 6): recomputes both hashes from whatever the caller currently has in
-/// hand — the STORED proposal object (tamper/mutation check) and, when
-/// re-resolvable, the CURRENT source content (drift check, e.g. a flow's
-/// `result.md` overwritten by a later run after approval) — and refuses to
-/// authorize apply unless both still match the approval receipt's pinned
-/// hashes. `current_source_bundle_content: None` means the source cannot be
-/// re-resolved at apply time (e.g. an explicit-text proposal with no
-/// `flow_id`) — the drift check is then skipped, since there is nothing
-/// mutable to have drifted; the tamper check on the proposal itself still
-/// runs unconditionally.
-#[cfg(feature = "contract-leaves")]
-pub fn check_closure_apply_preconditions(
-    proposal: &ClosureProposalV1,
-    receipt: &ClosureApprovalReceiptV1,
-    current_source_bundle_content: Option<&str>,
-) -> Result<(), String> {
-    if receipt.proposal_id != proposal.proposal_id {
-        return Err(format!(
-            "approval receipt proposal_id '{}' does not match proposal '{}'",
-            receipt.proposal_id, proposal.proposal_id
-        ));
-    }
-    if !receipt.decision.eq_ignore_ascii_case("approved") {
-        return Err(format!(
-            "proposal '{}' was not approved (decision={}) — apply refused",
-            proposal.proposal_id, receipt.decision
-        ));
-    }
-    let recomputed_proposal_hash = recompute_proposal_hash(proposal)?;
-    if recomputed_proposal_hash != proposal.proposal_hash {
-        return Err(format!(
-            "proposal '{}' has a corrupted proposal_hash field — apply refused",
-            proposal.proposal_id
-        ));
-    }
-    if recomputed_proposal_hash != receipt.proposal_hash {
-        return Err(format!(
-            "proposal '{}' content changed since approval (proposal_hash mismatch) — apply refused, approval cannot be replayed",
-            proposal.proposal_id
-        ));
-    }
-    if let Some(current_source) = current_source_bundle_content {
-        let current_source_bundle_hash = sha256_hex(current_source.as_bytes());
-        if current_source_bundle_hash != receipt.source_bundle_hash {
-            return Err(format!(
-                "proposal '{}' source snapshot changed since approval (source_bundle_hash mismatch) — apply refused, approval cannot be replayed",
-                proposal.proposal_id
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1516,152 +1306,5 @@ mod tests {
         assert_eq!(refs[1].target_kind, None);
         let wire = serde_json::to_value(&refs[0]).expect("serialize");
         assert_eq!(wire["ref"], serde_json::json!("kckylechen1/tachi#1072"));
-    }
-
-    // ─── closure boundary (RED case 5/6) ───────────────────────────────
-    // Gated per #1564 pending owner disposition (verified dead: only
-    // this test module exercises these types). Owning contract: #1072 §7.1.
-
-    #[cfg(feature = "contract-leaves")]
-    fn sample_proposal() -> ClosureProposalV1 {
-        build_closure_proposal(
-            "proposal-1".to_string(),
-            "kckylechen1/tachi#1072".to_string(),
-            "Wiki lifecycle lesson".to_string(),
-            "Body text of the durable lesson.".to_string(),
-            Some("/wiki/engineering/closure-boundary".to_string()),
-            vec!["docs/engineering/architecture/issue-refinery-memory-lanes.md".to_string()],
-            vec![],
-            Some("flow-abc".to_string()),
-            "flow_result",
-            "original result.md content",
-            "2026-07-17T00:00:00Z".to_string(),
-        )
-        .expect("build proposal")
-    }
-
-    #[cfg(feature = "contract-leaves")]
-    #[test]
-    fn build_closure_proposal_is_pure_and_starts_pending_approval() {
-        let proposal = sample_proposal();
-        assert_eq!(proposal.lifecycle, ClosureLifecycleV1::PendingApproval);
-        assert!(!proposal.proposal_hash.is_empty());
-        assert!(!proposal.source_bundle_hash.is_empty());
-        // Determinism: same inputs -> same hash, so a later re-derivation
-        // (e.g. `apply`'s tamper check) can recompute and compare.
-        let proposal_again = sample_proposal();
-        assert_eq!(proposal.proposal_hash, proposal_again.proposal_hash);
-    }
-
-    #[cfg(feature = "contract-leaves")]
-    fn approve(proposal: &ClosureProposalV1) -> ClosureApprovalReceiptV1 {
-        ClosureApprovalReceiptV1 {
-            proposal_id: proposal.proposal_id.clone(),
-            proposal_hash: proposal.proposal_hash.clone(),
-            source_bundle_hash: proposal.source_bundle_hash.clone(),
-            approver: "owner".to_string(),
-            decision: "approved".to_string(),
-            decided_at: "2026-07-17T00:05:00Z".to_string(),
-        }
-    }
-
-    #[cfg(feature = "contract-leaves")]
-    #[test]
-    fn apply_preconditions_pass_when_nothing_changed() {
-        let proposal = sample_proposal();
-        let receipt = approve(&proposal);
-        // RED (naive apply): a check that never re-hashes the current source
-        // would also return Ok here, so this alone doesn't discriminate —
-        // paired with the two failure tests below, it proves the checker
-        // distinguishes "unchanged" from "changed" rather than always
-        // passing.
-        assert!(check_closure_apply_preconditions(
-            &proposal,
-            &receipt,
-            Some("original result.md content"),
-        )
-        .is_ok());
-    }
-
-    #[cfg(feature = "contract-leaves")]
-    #[test]
-    fn apply_preconditions_reject_changed_proposal_content_red_case_6a() {
-        let proposal = sample_proposal();
-        let receipt = approve(&proposal);
-        let mut tampered = proposal.clone();
-        tampered.wiki_text = "A different body written after approval.".to_string();
-        // Re-derive `proposal_hash` from the tampered content so `tampered`
-        // is internally self-consistent (as it would be after a real
-        // edit-and-resubmit, e.g. another `build_closure_proposal` call) —
-        // this exercises the receipt/proposal MISMATCH check (case 6a's
-        // actual target). Leaving the stale `proposal_hash` field on the
-        // clone instead trips the *earlier* internal-corruption guard
-        // (`recomputed_proposal_hash != proposal.proposal_hash`, "has a
-        // corrupted proposal_hash field") before the receipt comparison is
-        // ever reached — a different failure mode than this RED case
-        // documents, and not what "cannot be replayed" describes.
-        tampered.proposal_hash =
-            recompute_proposal_hash(&tampered).expect("recompute tampered proposal hash");
-        // RED: a naive apply that only checks `receipt.decision == "approved"`
-        // and never recomputes the proposal hash would let this replay
-        // silently. GREEN: the mismatch is caught and apply is refused.
-        let err = check_closure_apply_preconditions(&tampered, &receipt, None)
-            .expect_err("tampered proposal content must fail preconditions");
-        assert!(err.contains("cannot be replayed"), "err: {err}");
-    }
-
-    #[cfg(feature = "contract-leaves")]
-    #[test]
-    fn apply_preconditions_reject_changed_source_snapshot_red_case_6b() {
-        let proposal = sample_proposal();
-        let receipt = approve(&proposal);
-        // RED: a naive apply that never re-reads/re-hashes the current
-        // source (e.g. a flow's result.md overwritten by a later run after
-        // approval) would replay the stale approval. GREEN: the drift is
-        // caught and apply is refused.
-        let err = check_closure_apply_preconditions(
-            &proposal,
-            &receipt,
-            Some("a DIFFERENT result.md content written after approval"),
-        )
-        .expect_err("changed source snapshot must fail preconditions");
-        assert!(err.contains("cannot be replayed"), "err: {err}");
-    }
-
-    #[cfg(feature = "contract-leaves")]
-    #[test]
-    fn apply_preconditions_reject_unapproved_or_mismatched_receipt() {
-        let proposal = sample_proposal();
-        let mut rejected = approve(&proposal);
-        rejected.decision = "rejected".to_string();
-        assert!(check_closure_apply_preconditions(&proposal, &rejected, None).is_err());
-
-        let mut wrong_id = approve(&proposal);
-        wrong_id.proposal_id = "some-other-proposal".to_string();
-        assert!(check_closure_apply_preconditions(&proposal, &wrong_id, None).is_err());
-    }
-
-    #[cfg(feature = "contract-leaves")]
-    #[test]
-    fn apply_preconditions_skip_source_drift_check_when_source_unresolvable() {
-        // An explicit-text proposal with no flow_id has nothing mutable to
-        // re-read at apply time; `current_source_bundle_content: None` must
-        // not be treated as a mismatch.
-        let proposal = build_closure_proposal(
-            "proposal-2".to_string(),
-            "kckylechen1/tachi#1072".to_string(),
-            "Explicit lesson".to_string(),
-            "Explicit body, no flow_id.".to_string(),
-            None,
-            vec![],
-            vec![],
-            None,
-            "explicit",
-            "explicit body, no flow_id.",
-            "2026-07-17T00:00:00Z".to_string(),
-        )
-        .expect("build proposal");
-        let receipt = approve(&proposal);
-        assert!(check_closure_apply_preconditions(&proposal, &receipt, None).is_ok());
     }
 }

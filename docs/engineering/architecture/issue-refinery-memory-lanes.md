@@ -394,6 +394,13 @@ Required behavior:
   an independent review and approval receipt are required before invoking
   `close_loop`, writing active wiki, or posting GitHub writeback.
 
+`ClosureProposalV1` names a required payload, not a type that currently exists:
+a draft of it landed in `tachi-params` ahead of the surface that would call it,
+never acquired a production caller, and was deleted in #1564. The requirement
+above is unaffected and still owned by this document — an implementation
+defines the payload against the code as it stands then, rather than restoring
+the deleted draft.
+
 A wiki entry can explain a canonical doc. It cannot replace the doc, approve a
 deviation, close an issue, or establish precedent.
 

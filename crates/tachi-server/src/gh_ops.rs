@@ -67,11 +67,12 @@ pub(crate) struct GhApiContext {
 }
 
 impl GhApiContext {
-    /// `#[cfg(any(feature = "contract-leaves", test))]`: the production caller
-    /// is `resolve_gh_api_context` below, gated per #1564 with the approver
-    /// gate that consumes it; `for_test` keeps this reachable — and the
-    /// empty-credential refusal covered — in a default `cfg(test)` build.
-    #[cfg(any(feature = "contract-leaves", test))]
+    /// `#[cfg(test)]`: the production resolver that called this
+    /// (`resolve_gh_api_context`) was deleted with the dormant approver
+    /// choke-point chain in #1564, so `for_test` is the only remaining
+    /// constructor — it keeps the empty-credential refusal covered until
+    /// #1077 wires a real one.
+    #[cfg(test)]
     fn new(gh_path: String, token: String) -> Result<Self, String> {
         if token.trim().is_empty() {
             return Err(
@@ -94,20 +95,6 @@ impl GhApiContext {
     pub(crate) fn for_test(gh_path: String, token: String) -> Result<Self, String> {
         Self::new(gh_path, token)
     }
-}
-
-/// Resolve the executable and explicit credential once for a security-sensitive
-/// GitHub probe. A caller must retain the returned context for the complete
-/// issuance or revalidation round; resolving a new one is a new round.
-///
-/// `#[cfg(feature = "contract-leaves")]`: its only caller is
-/// `approver_authority::GhApproverAuthorityProbe::new`, gated per #1564 with
-/// the `governed_precedent_establishment` module at the top of that chain.
-#[cfg(feature = "contract-leaves")]
-pub(crate) fn resolve_gh_api_context(server: &MemoryServer) -> Result<GhApiContext, String> {
-    let gh_path = resolve_gh_path()?;
-    let token = resolve_gh_token(server)?.unwrap_or_default();
-    GhApiContext::new(gh_path, token)
 }
 
 /// Build the same hardened `gh api` command used elsewhere, but from an
