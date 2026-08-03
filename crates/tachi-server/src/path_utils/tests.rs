@@ -99,7 +99,9 @@ fn tachi_home_defaults_to_dot_tachi_under_user_home() {
         let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        assert_eq!(tachi_home(), home.join(".tachi"));
+        let resolution = resolve_tachi_home();
+        assert_eq!(resolution.path, home.join(".tachi"));
+        assert_eq!(resolution.source, TachiHomeSource::UserDefault);
 
         std::env::set_current_dir(saved_cwd).expect("restore cwd");
     });
@@ -111,10 +113,20 @@ fn tachi_home_honors_tilde_and_tilde_slash() {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
         let _tachi_home = EnvRestore::set("TACHI_HOME", "~");
-        assert_eq!(tachi_home(), home);
+        let resolution = resolve_tachi_home();
+        assert_eq!(resolution.path, home);
+        assert_eq!(
+            resolution.source,
+            TachiHomeSource::ExplicitEnv("TACHI_HOME")
+        );
 
         std::env::set_var("TACHI_HOME", "~/custom-tachi");
-        assert_eq!(tachi_home(), home.join("custom-tachi"));
+        let resolution = resolve_tachi_home();
+        assert_eq!(resolution.path, home.join("custom-tachi"));
+        assert_eq!(
+            resolution.source,
+            TachiHomeSource::ExplicitEnv("TACHI_HOME")
+        );
     });
 }
 
@@ -125,7 +137,12 @@ fn tachi_home_falls_back_to_tachi_app_home() {
         let _sigil_home = EnvRestore::remove("SIGIL_HOME");
         let _app_home = EnvRestore::set("TACHI_APP_HOME", "/tmp/legacy-app-home");
 
-        assert_eq!(tachi_home(), PathBuf::from("/tmp/legacy-app-home"));
+        let resolution = resolve_tachi_home();
+        assert_eq!(resolution.path, PathBuf::from("/tmp/legacy-app-home"));
+        assert_eq!(
+            resolution.source,
+            TachiHomeSource::ExplicitEnv("TACHI_APP_HOME")
+        );
     });
 }
 
@@ -153,7 +170,9 @@ fn tachi_home_detects_workspace_data_tachi_layout() {
         let _cwd = CwdRestore::set(&nested);
         let local_home = std::fs::canonicalize(local_home).expect("canonical local home");
         let repo = std::fs::canonicalize(repo).expect("canonical repo");
-        assert_eq!(tachi_home(), local_home);
+        let resolution = resolve_tachi_home();
+        assert_eq!(resolution.path, local_home);
+        assert_eq!(resolution.source, TachiHomeSource::WorkspaceData);
         assert_eq!(
             plan_c_global_db_path("hyperion"),
             repo.join("data/tachi/projects/hyperion")

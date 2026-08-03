@@ -242,10 +242,28 @@ async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn s
     Ok(())
 }
 
+fn workspace_home_selection_notice(
+    source: crate::path_utils::TachiHomeSource,
+    app_home: &Path,
+) -> Option<String> {
+    (source == crate::path_utils::TachiHomeSource::WorkspaceData).then(|| {
+        format!(
+            "[tachi-home] selected workspace home {} from cwd ancestry; set TACHI_HOME to pin a different home",
+            app_home.display()
+        )
+    })
+}
+
 fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let app_home = crate::path_utils::tachi_home();
+    let app_home_resolution = crate::path_utils::resolve_tachi_home();
+    if let Some(notice) =
+        workspace_home_selection_notice(app_home_resolution.source, &app_home_resolution.path)
+    {
+        eprintln!("{notice}");
+    }
+    let app_home = app_home_resolution.path;
 
     // PR7 — install the tracing sink before doing anything else so early errors
     // (config load, manifest resolution, daemon bind) are captured.
@@ -2059,6 +2077,29 @@ mod tests {
         assert_eq!(
             primary_log_path(app_home),
             app_home.join("logs").join("tachi.log")
+        );
+    }
+
+    #[test]
+    fn workspace_home_notice_is_emitted_only_for_implicit_workspace_selection() {
+        let path = Path::new("/tmp/repo/data/tachi");
+        assert_eq!(
+            workspace_home_selection_notice(crate::path_utils::TachiHomeSource::WorkspaceData, path)
+                .as_deref(),
+            Some(
+                "[tachi-home] selected workspace home /tmp/repo/data/tachi from cwd ancestry; set TACHI_HOME to pin a different home"
+            )
+        );
+        assert_eq!(
+            workspace_home_selection_notice(
+                crate::path_utils::TachiHomeSource::ExplicitEnv("TACHI_HOME"),
+                path,
+            ),
+            None
+        );
+        assert_eq!(
+            workspace_home_selection_notice(crate::path_utils::TachiHomeSource::UserDefault, path),
+            None
         );
     }
 
