@@ -474,8 +474,18 @@ async fn save_memory_named_project_update_preserves_existing_typed_evidence() {
         .join("projects")
         .join(project_name)
         .join("memory.db");
+    // An unlabelled open, not `MemoryServer::new(project_db, …)`: that
+    // constructor treats the path it is handed as its own *global* store and
+    // since tachi#1579 stamps `store_identity/role = "global"` into the file.
+    // The named-project writes below correctly claim `project_name`, which a
+    // `"global"`-stamped file refuses with `StoreRoleConflict`. `MemoryStore::open`
+    // builds the identical schema (same `init_schema_with_label_mut` DDL +
+    // migration chain) while conferring no role, so the first named-project
+    // open stamps it correctly.
+    std::fs::create_dir_all(project_db.parent().expect("named-project DB parent"))
+        .expect("create named-project DB parent");
     drop(
-        crate::MemoryServer::new(project_db, None)
+        memcore::MemoryStore::open(project_db.to_str().expect("utf8 named-project DB"))
             .expect("initialize named-project database schema"),
     );
     let id = "direct-named-project-evidence-update";
