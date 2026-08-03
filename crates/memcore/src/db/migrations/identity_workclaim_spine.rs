@@ -152,7 +152,10 @@ fn column_is_not_null(conn: &Connection, table: &str, column: &str) -> Result<bo
     Ok(false)
 }
 
-#[cfg(test)]
+// admin-gated: these tests exercise the Product-scoped v21 migration against
+// `db::session_claims`, which does not exist in a portable build (where this
+// migration marks its sentinel without executing).
+#[cfg(all(test, feature = "admin"))]
 mod tests {
     use super::*;
 
