@@ -549,15 +549,13 @@ fn store_identity_namespace_is_write_once_at_the_api() {
 
     let overwrite =
         crate::db::set_state(store.connection(), "store_identity", "role", "\"global\"")
-            .err()
-            .expect("set_state must refuse the store_identity namespace");
+            .expect_err("set_state must refuse the store_identity namespace");
     assert!(
         overwrite.to_string().contains("write-once"),
         "refusal must name the reason: {overwrite}"
     );
     let removal = crate::db::delete_state(store.connection(), "store_identity", "role")
-        .err()
-        .expect("delete_state must refuse the store_identity namespace");
+        .expect_err("delete_state must refuse the store_identity namespace");
     assert!(removal.to_string().contains("write-once"), "{removal}");
 
     // Ordinary namespaces are unaffected.
