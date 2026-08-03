@@ -564,12 +564,14 @@ fn finite_or_default(value: f64, default: f64) -> f64 {
     }
 }
 
+#[cfg(any(feature = "admin", test))]
 fn process_recall_env() -> HashMap<String, String> {
     std::env::vars()
         .filter(|(key, _)| key.starts_with("TACHI_RECALL_"))
         .collect()
 }
 
+#[cfg(any(feature = "admin", test))]
 fn read_config_env_bounded(path: &std::path::Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
@@ -634,6 +636,7 @@ fn unquote_env_value(value: &str) -> &str {
 /// so a whitespace-only value like `SIGIL_HOME="   "` was NOT skipped here
 /// (unlike the canonical funnel, which moves on to the next key) — the app's
 /// resolved home and this crate's recall-config home silently disagreed.
+#[cfg(any(feature = "admin", test))]
 fn config_env_path() -> Option<PathBuf> {
     for key in ["TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"] {
         let Ok(value) = std::env::var(key) else {
@@ -655,6 +658,7 @@ fn config_env_path() -> Option<PathBuf> {
     Some(app_home.join("config.env"))
 }
 
+#[cfg(any(feature = "admin", test))]
 fn env_truthy(key: &str) -> bool {
     matches!(
         std::env::var(key).ok().as_deref(),

@@ -1,5 +1,6 @@
 //! Core CRUD, search, and diagnostics methods on [`MemoryStore`].
 
+#[cfg(any(feature = "admin", test))]
 use rusqlite::Connection;
 use std::time::{Duration, Instant};
 

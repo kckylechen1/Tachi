@@ -44,3 +44,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# receipts_workloads drives admin-side surfaces (raw connection access);
+# it is not part of the portable build shape (#1585).
+[[example]]
+name = "receipts_workloads"
+required-features = ["admin"]
