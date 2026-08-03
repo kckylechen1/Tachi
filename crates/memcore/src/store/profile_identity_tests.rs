@@ -558,6 +558,39 @@ fn store_identity_namespace_is_write_once_at_the_api() {
         .expect_err("delete_state must refuse the store_identity namespace");
     assert!(removal.to_string().contains("write-once"), "{removal}");
 
+    // CAS (set_state_if_version) must refuse the namespace too, not just the
+    // unconditional set_state/delete_state pair (kckylechen1/Sigil#1585 review).
+    let cas = crate::db::set_state_if_version(
+        store.connection(),
+        "store_identity",
+        "role",
+        "\"global\"",
+        1,
+    )
+    .expect_err("set_state_if_version must refuse the store_identity namespace");
+    assert!(cas.to_string().contains("write-once"), "{cas}");
+
+    // The backfill must skip store_identity rows outright rather than stamp
+    // them with an expires_at that would hand the reaper an unstamp path.
+    let backfilled = crate::db::backfill_missing_expires_at(
+        store.connection(),
+        "store_identity",
+        "2999-01-01T00:00:00Z",
+        None,
+    )
+    .expect("backfill call against store_identity must not error, just no-op");
+    assert_eq!(
+        backfilled, 0,
+        "backfill_missing_expires_at must not touch store_identity rows"
+    );
+    let (role_value, _) = crate::db::get_state(store.connection(), "store_identity", "role")
+        .expect("get role stamp")
+        .expect("role stamp exists");
+    assert!(
+        !role_value.contains("expires_at"),
+        "store_identity rows must never acquire expires_at, even when backfill is asked: {role_value}"
+    );
+
     // Ordinary namespaces are unaffected.
     crate::db::set_state(store.connection(), "scratch", "k", "\"v\"").expect("ordinary set_state");
 }

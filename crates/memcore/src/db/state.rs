@@ -92,6 +92,7 @@ pub fn set_state_if_version(
     value_json: &str,
     expected_version: u32,
 ) -> Result<bool, MemoryError> {
+    refuse_store_identity_namespace(namespace, "overwritten")?;
     let now = now_utc_iso();
     let changed = conn.execute(
         "UPDATE hard_state
@@ -241,6 +242,14 @@ pub fn backfill_missing_expires_at(
     ttl_rfc3339: &str,
     terminal_status: Option<(&str, &[&str])>,
 ) -> Result<usize, MemoryError> {
+    // The `store_identity` namespace (#1579) must never acquire an
+    // `expires_at` field: doing so would make `reap_expired_state`'s generic
+    // TTL sweep (which runs against every namespace) an unstamp path for the
+    // write-once store identity. Skip it unconditionally rather than trust
+    // every future call site to avoid passing this namespace in.
+    if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE {
+        return Ok(0);
+    }
     match terminal_status {
         None => {
             let updated = conn.execute(
