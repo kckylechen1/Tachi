@@ -1,0 +1,30 @@
+{
+  "schema_version": "tachi.instruction_surfaces.v1",
+  "root": "..",
+  "surfaces": [
+    {
+      "id": "public-agents",
+      "source": "AGENTS.md",
+      "audience": "public",
+      "tier": "compressed-adapter",
+      "density_budget": {
+        "name": "provisional-public-agents",
+        "bytes": 32768
+      },
+      "remediation_owner": "repository-owner",
+      "targets": []
+    },
+    {
+      "id": "claude-private-manual",
+      "source": "CLAUDE.md",
+      "audience": "carrier-private",
+      "tier": "expanded-manual",
+      "density_budget": {
+        "name": "provisional-claude-private-manual",
+        "bytes": 65536
+      },
+      "remediation_owner": "carrier-manual-owner",
+      "targets": []
+    }
+  ]
+}

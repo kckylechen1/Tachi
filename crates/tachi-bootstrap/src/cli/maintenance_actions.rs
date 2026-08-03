@@ -704,6 +704,9 @@ pub enum HarnessAction {
         /// Override home directory for testing or dry-run inventory
         #[arg(long, value_name = "PATH")]
         home: Option<PathBuf>,
+        /// Optional repository-owned instruction-surface manifest to scan.
+        #[arg(long, value_name = "PATH")]
+        manifest: Option<PathBuf>,
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,
