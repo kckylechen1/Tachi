@@ -38,6 +38,7 @@ mod sqlite_extensions;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
+pub mod store_identity;
 pub mod store_profile;
 #[cfg(feature = "admin")]
 mod vault_db;
@@ -165,9 +166,6 @@ pub(crate) use open::{
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
 };
-pub use store_profile::{
-    StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
-};
 pub use recall_cache::{
     recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
     recall_cache_record_hit, recall_cache_stats, RecallCacheHit, RecallCacheStats,
@@ -179,7 +177,7 @@ pub use sandbox::{
 };
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
-pub use schema::{init_schema, init_schema_with_label_mut};
+pub use schema::{init_schema, init_schema_with_label_mut, SchemaInitOutcome};
 pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
@@ -192,6 +190,10 @@ pub(crate) use stats_gc::write_gc_archived_receipt;
 pub use stats_gc::{
     archive_stale_memories, archive_stale_memories_with_config, gc_tables, stats,
     GC_MEMORY_ARCHIVED_EVENT_TYPE,
+};
+pub use store_identity::StoreIdentity;
+pub use store_profile::{
+    StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
 };
 #[cfg(feature = "admin")]
 pub use vault_db::{

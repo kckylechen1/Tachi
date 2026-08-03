@@ -223,7 +223,19 @@ pub struct MemoryStore {
     pub vec_available: bool,
     /// Manifest label for this DB ("global", "wiki", a project name, or
     /// "unknown"). Used by path validation at write time.
+    ///
+    /// tachi#1579: **stamp-derived**. This is the role resolved from the
+    /// write-once `store_identity` rows inside the database file, not the
+    /// `db_label` argument a caller passed to `open_with_label` — that argument
+    /// is now a *claim* that the open verifies against the stamp and refuses on
+    /// conflict. Identity therefore travels with the bytes and cannot be forged
+    /// by moving the file into a differently-named directory.
     pub(crate) db_label: String,
+    /// This store's effective schema profile (#1585): whether it carries the
+    /// Tachi product tables or only the portable memory kernel. Read from the
+    /// store's own profile stamp at open — never from the caller's
+    /// `DbOpenContext::required_profile`, which is an admission check only.
+    pub(crate) profile: db::StoreProfile,
     /// Whether path validation is enforced for this store. Disabled when
     /// db_label is unknown to avoid breaking unlabeled callers.
     pub(crate) path_validation: bool,

@@ -6,7 +6,7 @@ use super::runtime::{
 use super::tachi_server::MemoryServer;
 use super::{
     configured_memory_read_pool_size, DbRuntime, DbScope, ProjectDbState, RateLimiter,
-    ReadStorePool, VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
+    ReadStorePool, StoreLabel, VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
 };
 use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::{
@@ -182,19 +182,34 @@ impl MemoryServer {
             // surface (Vault, Hub, Foundry, dispatch ledgers).
             required_profile: StoreProfile::TachiFull,
         };
+        // tachi#1579: `"global"` here is a RESOLVED role, not a guess — this is
+        // the server's own global store by construction — so it is a legitimate
+        // conferral. On a store already stamped `global` it verifies; on one
+        // stamped anything else the open fails loudly rather than the server
+        // quietly operating someone else's database as its global store.
         let global_store =
             MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?;
         let read_pool_size = configured_memory_read_pool_size();
         // Same label as the write store two lines up (tachi#1569): the read
         // pool's handles must not disagree with it about which store this is.
+        // Taken from the resolved handle rather than re-typed, so the two
+        // cannot drift.
         let global_read_pool =
-            ReadStorePool::open_read_only(global_db_str, read_pool_size, "global")?;
+            ReadStorePool::open_read_only(global_db_str, read_pool_size, global_store.db_label())?;
         let global_vec_available = global_store.vec_available;
 
         let project_db_state = if let Some(ref p) = project_db_path {
             Some(
-                ProjectDbState::open(p.clone(), read_pool_size, &schema_migration)
-                    .map_err(std::io::Error::other)?,
+                // The `--project-db` path is an operator-supplied path with no
+                // resolved manifest role, so it confers nothing: the store's
+                // own stamp answers (tachi#1579).
+                ProjectDbState::open(
+                    p.clone(),
+                    read_pool_size,
+                    &schema_migration,
+                    StoreLabel::inferred(p),
+                )
+                .map_err(std::io::Error::other)?,
             )
         } else {
             None

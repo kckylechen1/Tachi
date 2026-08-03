@@ -766,10 +766,14 @@ impl DbRuntime {
     }
 
     pub fn activate_project_db(&self, db_path: PathBuf) -> Result<bool, String> {
+        // A bare path with no resolved manifest role: this route may not
+        // confer identity (tachi#1579). The store's own stamp answers.
+        let conferral = StoreLabel::inferred(&db_path);
         let state = ProjectDbState::open(
-            db_path,
+            db_path.clone(),
             configured_memory_read_pool_size(),
             &self.schema_migration,
+            conferral,
         )
         .map_err(|e| format!("open project db: {e}"))?;
 
@@ -784,7 +788,11 @@ impl DbRuntime {
         db_path: &Path,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.with_path_store_with_label(db_path, path_store_label(db_path), f)
+        // tachi#1579: symmetrical with `with_path_store_read`. This route takes
+        // an arbitrary path and has no caller-declared role for it, so its
+        // label is a guess — usable for lock names and error text, never for
+        // conferring identity on the store.
+        self.with_path_store_labelled(db_path, StoreLabel::inferred(db_path), f)
     }
 
     pub fn with_path_store_read<T>(
@@ -832,15 +840,33 @@ impl DbRuntime {
         f(&mut store)
     }
 
+    /// Write a DB whose manifest role the caller has already resolved — the
+    /// `validate_named_project`-checked project name whose path was derived
+    /// *from* that name (`server_methods::db`'s named-project resolver). Only
+    /// such a declared label may be conferred on a store that carries no
+    /// identity stamp yet, and only on the first attach; afterwards the stamp
+    /// answers and a disagreeing claim fails the open (tachi#1579).
     pub fn with_path_store_with_label<T>(
         &self,
         db_path: &Path,
         label: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let state = self.attached_project_state(db_path)?;
+        self.with_path_store_labelled(db_path, StoreLabel::Declared(label), f)
+    }
+
+    /// Shared body of [`Self::with_path_store`] and
+    /// [`Self::with_path_store_with_label`]; the two differ only in whether the
+    /// label carries authority to confer identity (see [`StoreLabel`]).
+    fn with_path_store_labelled<T>(
+        &self,
+        db_path: &Path,
+        label: StoreLabel<'_>,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let state = self.attached_project_state(db_path, label)?;
         let _gate = write_or_recover(&state.rw_gate, "path_db_rw_gate");
-        let mut store = lock_or_recover(&state.store, label);
+        let mut store = lock_or_recover(&state.store, label.text());
         f(&mut store)
     }
 
@@ -894,7 +920,17 @@ impl DbRuntime {
         Ok(Some(RequestScopedReadStore { store }))
     }
 
-    fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
+    /// `conferral` is consumed only on the attach that actually opens the
+    /// store; a cache hit returns the already-resolved state. That is safe now
+    /// in a way it was not before tachi#1579: identity no longer depends on
+    /// which caller attached first, because the losing caller's claim is
+    /// verified against the stamp on its own next open rather than silently
+    /// discarded.
+    fn attached_project_state(
+        &self,
+        db_path: &Path,
+        conferral: StoreLabel<'_>,
+    ) -> Result<ProjectDbState, String> {
         let key = project_db_cache_key(db_path)?;
         if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
             return Ok(state);
@@ -907,8 +943,12 @@ impl DbRuntime {
         }
 
         let migration = self.named_project_write_migration_authority(&key);
-        let state =
-            ProjectDbState::open(key.clone(), configured_memory_read_pool_size(), &migration)?;
+        let state = ProjectDbState::open(
+            key.clone(),
+            configured_memory_read_pool_size(),
+            &migration,
+            conferral,
+        )?;
         let mut guard = self
             .attached_project_dbs
             .write()
@@ -1385,33 +1425,26 @@ impl ProjectDbState {
     /// normally the deploy-time value; dynamic named-project write attachment
     /// may instead pass the exact v22-to-v23 guard-migration authority above.
     ///
-    /// # Known narrow face: the label here is inferred, not resolved
+    /// # Identity comes from the database, not from its directory (tachi#1579)
     ///
-    /// `project_label` below is the parent directory's name. That predates
-    /// tachi#1569 and is already the identity the **write** path enforces
-    /// against (`path_router::validate_path_for_db`), so a DB placed at
-    /// `.../wiki/memory.db` has always been allowed to accept `/wiki` writes.
-    /// #1569 gives the read pool the *same* label, so reads and writes agree —
-    /// which also means a false positive here now over-filters reads instead
-    /// of only over-permitting writes.
+    /// This used to label the store with its parent directory's name — so a DB
+    /// that happened to sit under a directory called `wiki` acquired Wiki
+    /// authority for both reads and writes, and the real Wiki DB lost it the
+    /// moment it was relocated. That inference is gone.
     ///
-    /// It is left inferred deliberately. This function receives a `PathBuf`
-    /// and a `MigrationAuthority`; the authoritative mapping (manifest role /
-    /// validated named project) lives in `tachi-server` and is not passed in,
-    /// and both ways of plumbing it here are worse than the current rule:
-    /// taking the label from whichever caller happens to create the cached
-    /// state first is order-dependent and fails *open* (a wiki read that lost
-    /// the race would silently skip the gate), and defaulting the unlabelled
-    /// callers to `unknown` would change write-side path routing for stores
-    /// that rely on today's derivation. Under the shipped layout the two
-    /// agree anyway: attached paths are `~/.tachi/projects/<validated
-    /// name>/memory.db` (`path_utils::alias::plan_c_global_db_path_in_home`),
-    /// so parent-directory == project name. Giving a database a real
-    /// self-describing identity is its own issue.
+    /// `conferral` is the caller's *authority to name this store*, not a name:
+    /// [`StoreLabel::Declared`] only from a caller that RESOLVED the role (the
+    /// manifest-validated named project, the global store), and
+    /// [`StoreLabel::Inferred`] — which confers nothing — for the path-addressed
+    /// routes that are only guessing. Whatever is passed, the resulting
+    /// handle's `db_label` is what `MemoryStore` resolved from the store's own
+    /// write-once identity stamp; a declared claim that disagrees with the
+    /// stamp fails the open loudly rather than winning by arriving first.
     pub fn open(
         db_path: PathBuf,
         read_pool_size: usize,
         migration: &MigrationAuthority,
+        conferral: StoreLabel<'_>,
     ) -> Result<Self, String> {
         project_db_leaf_exists_without_symlink(&db_path)?;
         let db_str = db_path.to_str().ok_or_else(|| {
@@ -1420,12 +1453,6 @@ impl ProjectDbState {
                 db_path.display()
             )
         })?;
-        let project_label = db_path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|os| os.to_str())
-            .unwrap_or("project")
-            .to_string();
         let ctx = DbOpenContext {
             intent: OpenIntent::OpenExisting,
             migration: migration.clone(),
@@ -1435,10 +1462,14 @@ impl ProjectDbState {
             // rather than producing `no such table` at the first product call.
             required_profile: StoreProfile::TachiFull,
         };
-        let store = MemoryStore::open_with_label_and_context(db_str, &project_label, &ctx)
+        let store = MemoryStore::open_with_label_and_context(db_str, conferral.identity(), &ctx)
             .map_err(|e| format!("open project db: {e}"))?;
         let vec_available = store.vec_available;
-        let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size, &project_label)
+        // The RESOLVED role, not the conferral: on a stamped store this is the
+        // stamp even when the caller conferred nothing, which is exactly how
+        // the read pool stops depending on which caller attached first.
+        let resolved_label = store.db_label().to_string();
+        let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size, &resolved_label)
             .map_err(|e| format!("open project read db: {e}"))?;
         Ok(Self {
             store: Arc::new(StdMutex::new(store)),
@@ -1647,7 +1678,7 @@ fn path_store_label(db_path: &Path) -> &str {
 /// A leak is visible to whoever reads the output; over-filtering is not
 /// visible to anyone.
 #[derive(Clone, Copy)]
-enum StoreLabel<'a> {
+pub enum StoreLabel<'a> {
     /// The caller knows this store's manifest role: the global store, or a
     /// named project whose path was derived from its validated name. Becomes
     /// the handle's `db_label`.
@@ -1659,19 +1690,20 @@ enum StoreLabel<'a> {
 }
 
 impl<'a> StoreLabel<'a> {
-    fn inferred(db_path: &'a Path) -> Self {
+    pub fn inferred(db_path: &'a Path) -> Self {
         Self::Inferred(path_store_label(db_path))
     }
 
     /// The human-facing name, whatever its authority.
-    fn text(self) -> &'a str {
+    pub fn text(self) -> &'a str {
         match self {
             Self::Declared(label) | Self::Inferred(label) => label,
         }
     }
 
-    /// The label that may become `MemoryStore::db_label`.
-    fn identity(self) -> &'a str {
+    /// The claim that may be conferred on a store that carries no identity
+    /// stamp yet. An inferred name confers nothing.
+    pub fn identity(self) -> &'a str {
         match self {
             Self::Declared(label) => label,
             Self::Inferred(_) => memcore::path_router::UNKNOWN_DB_LABEL,

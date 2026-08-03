@@ -28,6 +28,7 @@
 use rusqlite::Connection;
 use serde::Deserialize;
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
 use super::dispatch_outcomes_reported::table_exists;
@@ -124,7 +125,18 @@ struct ReceiptSkeleton {
 
 pub(super) fn migrate_v17_dispatch_outcomes_attribution_basis(
     conn: &Connection,
+    profile: StoreProfile,
 ) -> Result<usize, MemoryError> {
+    // #1585 D3: product-scoped migration. A PortableKernel store never
+    // created the table(s) this touches, so the work is vacuously done.
+    // Returning Ok here (rather than skipping the call) is deliberate:
+    // `apply_versioned_migration` still marks the sentinel, so a portable
+    // database is a COMPLETE stamped-28 database by every existing gate's
+    // definition (`validate_current_schema_integrity`,
+    // `MIGRATION_SENTINEL_KEYS`) — the sentinel set is profile-invariant.
+    if !profile.includes_product() {
+        return Ok(0);
+    }
     if !table_exists(conn, "dispatch_outcomes")? {
         return Ok(0);
     }
@@ -324,7 +336,8 @@ mod tests {
         insert(&conn, "o-legacy", "codex", None, None);
         insert(&conn, "o-void", "unknown", None, None);
 
-        let first = migrate_v17_dispatch_outcomes_attribution_basis(&conn).unwrap();
+        let first = migrate_v17_dispatch_outcomes_attribution_basis(&conn, StoreProfile::TachiFull)
+            .unwrap();
         assert_eq!(first, 4, "four rows earn a non-unknown basis");
         assert_eq!(basis(&conn, "o-unconfirmed"), "planned_unconfirmed");
         assert_eq!(basis(&conn, "o-substituted"), "observed");
@@ -341,7 +354,9 @@ mod tests {
 
         // Re-run: column exists, only still-unknown rows are revisited, and
         // they legitimately stay unknown — no churn.
-        let second = migrate_v17_dispatch_outcomes_attribution_basis(&conn).unwrap();
+        let second =
+            migrate_v17_dispatch_outcomes_attribution_basis(&conn, StoreProfile::TachiFull)
+                .unwrap();
         assert_eq!(second, 0);
     }
 }

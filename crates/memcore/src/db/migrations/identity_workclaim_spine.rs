@@ -6,11 +6,23 @@
 
 use rusqlite::{params, Connection};
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
 pub(super) fn migrate_v21_identity_workclaim_spine(
     conn: &Connection,
+    profile: StoreProfile,
 ) -> Result<usize, MemoryError> {
+    // #1585 D3: product-scoped migration. A PortableKernel store never
+    // created the table(s) this touches, so the work is vacuously done.
+    // Returning Ok here (rather than skipping the call) is deliberate:
+    // `apply_versioned_migration` still marks the sentinel, so a portable
+    // database is a COMPLETE stamped-28 database by every existing gate's
+    // definition (`validate_current_schema_integrity`,
+    // `MIGRATION_SENTINEL_KEYS`) — the sentinel set is profile-invariant.
+    if !profile.includes_product() {
+        return Ok(0);
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_identities (
             agent_identity_id TEXT PRIMARY KEY,
@@ -155,7 +167,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(migrate_v21_identity_workclaim_spine(&conn).unwrap(), 11);
+        assert_eq!(
+            migrate_v21_identity_workclaim_spine(&conn, StoreProfile::TachiFull).unwrap(),
+            11
+        );
         assert_eq!(
             conn.query_row(
                 "SELECT agent_identity_id FROM session_claims WHERE claim_id='legacy-claim'",
@@ -176,7 +191,10 @@ mod tests {
             None,
             "migration must leave legacy ExecEnv holder evidence absent"
         );
-        assert_eq!(migrate_v21_identity_workclaim_spine(&conn).unwrap(), 0);
+        assert_eq!(
+            migrate_v21_identity_workclaim_spine(&conn, StoreProfile::TachiFull).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -204,7 +222,7 @@ mod tests {
         )
         .unwrap();
 
-        migrate_v21_identity_workclaim_spine(&conn).unwrap();
+        migrate_v21_identity_workclaim_spine(&conn, StoreProfile::TachiFull).unwrap();
         let first = crate::db::session_claims::upsert_or_heartbeat_claim(
             &mut conn,
             &crate::db::session_claims::NewSessionClaim {
@@ -258,7 +276,7 @@ mod tests {
         )
         .unwrap();
 
-        migrate_v21_identity_workclaim_spine(&conn).unwrap();
+        migrate_v21_identity_workclaim_spine(&conn, StoreProfile::TachiFull).unwrap();
         let row: (String, Option<String>) = conn
             .query_row(
                 "SELECT connection_id, rejection_evidence FROM identity_admissions WHERE admission_id='legacy-admission'",

@@ -18,8 +18,17 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     crate::db::migrations::validate_current_schema_integrity(conn)?;
     apply_connection_pragmas(conn)?;
     let tx = conn.unchecked_transaction()?;
-    init_schema_inner(&tx)?;
-    crate::db::migrations::run_data_migrations_in_tx(&tx, "global", Path::new(":memory:"))?;
+    // In-memory stores are ephemeral and carry no manifest identity, so they
+    // are built at the default (full) profile and stamped with nothing: there
+    // is no file for an identity to travel with (#1585 D3).
+    let profile = crate::db::StoreProfile::default();
+    init_schema_inner(&tx, profile)?;
+    crate::db::migrations::run_data_migrations_in_tx(
+        &tx,
+        "global",
+        Path::new(":memory:"),
+        profile,
+    )?;
     crate::db::migrations::write_schema_version_stamp(&tx)?;
     super::validate_persistent_trigger_inventory(&tx, true)?;
     validate_recall_impression_ledger_schema(&tx)?;
@@ -38,7 +47,7 @@ pub(crate) fn init_unversioned_schema_for_migration_tests(
 ) -> Result<(), MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     apply_connection_pragmas(conn)?;
-    init_schema_inner(conn)?;
+    init_schema_inner(conn, crate::db::StoreProfile::default())?;
     install_reserved_reference_guard(conn)?;
     super::validate_persistent_trigger_inventory(conn, true)
 }
@@ -76,7 +85,7 @@ pub fn init_schema_with_label_mut(
     db_label: &str,
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
-) -> Result<crate::db::migrations::MigrationReport, MemoryError> {
+) -> Result<SchemaInitOutcome, MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     crate::db::migrations::check_schema_version_gate(conn)?;
     // #1119: typed migration gate. Runs BEFORE any backup/DDL/migration/stamp
@@ -85,14 +94,30 @@ pub fn init_schema_with_label_mut(
     // DDL or the final `write_schema_version_stamp` touches the file.
     crate::db::migrations::check_db_open_context_gate(conn, current_db_path, ctx)?;
     crate::db::migrations::validate_current_schema_integrity(conn)?;
+    // The same discriminator `check_db_open_context_gate` uses: an unstamped
+    // file is fresh, whatever its content (#1119 owner ruling A). Sampled
+    // BEFORE the transaction writes the new stamp.
+    let fresh = crate::db::migrations::read_schema_version(conn)? == 0;
     maybe_backup_before_migration(conn, current_db_path)?;
     apply_connection_pragmas(conn)?;
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    init_schema_inner(&tx)?;
+    // #1585/#1579: resolve identity BEFORE any DDL runs, so a refused open
+    // (role conflict, profile mismatch, unstamped-under-portable) leaves the
+    // database byte-identical. Everything below is inside the same
+    // BEGIN IMMEDIATE, so even a later failure rolls the stamps back with it.
+    let identity = resolve_store_identity_in_tx(&tx, db_label, current_db_path, ctx, fresh)?;
+    init_schema_inner(&tx, identity.profile)?;
+    stamp_store_identity_in_tx(&tx, &identity, ctx)?;
     #[cfg(test)]
     test_hooks::fail_after_legacy_work_before_stamp()?;
-    let report = crate::db::migrations::run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
+    // The RESOLVED label, not the caller's claim: from here down, one authority.
+    let report = crate::db::migrations::run_data_migrations_in_tx(
+        &tx,
+        &identity.db_label,
+        current_db_path,
+        identity.profile,
+    )?;
     crate::db::migrations::write_schema_version_stamp(&tx)?;
     super::validate_persistent_trigger_inventory(&tx, true)?;
     validate_recall_impression_ledger_schema(&tx)?;
@@ -101,7 +126,80 @@ pub fn init_schema_with_label_mut(
     tx.commit()?;
 
     remember_migration_fingerprint(conn, current_db_path)?;
-    Ok(report)
+    Ok(SchemaInitOutcome { report, identity })
+}
+
+/// What `init_schema_with_label_mut` hands back: the migration report it always
+/// returned, plus the store identity it resolved (#1579/#1585).
+///
+/// The identity is a return value rather than something the caller re-reads,
+/// because the caller must use *exactly* what the schema transaction committed
+/// — re-reading opens a window where another process's stamp is observed
+/// instead.
+#[derive(Debug)]
+pub struct SchemaInitOutcome {
+    pub report: crate::db::migrations::MigrationReport,
+    pub identity: crate::db::store_identity::StoreIdentity,
+}
+
+/// Read both identity stamps and apply the #1579 role table and the #1585 D2
+/// admission table. Errors here abort the open with the transaction untouched.
+fn resolve_store_identity_in_tx(
+    tx: &Connection,
+    claimed_label: &str,
+    current_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    fresh: bool,
+) -> Result<crate::db::store_identity::StoreIdentity, MemoryError> {
+    use crate::db::store_identity;
+
+    let (stored_role, stored_profile) = store_identity::read_identity(tx, current_db_path)?;
+    let profile = store_identity::resolve_profile(
+        stored_profile,
+        fresh,
+        ctx.required_profile,
+        current_db_path,
+    )?;
+    let db_label =
+        store_identity::resolve_role(stored_role.as_deref(), claimed_label, current_db_path)?;
+    Ok(store_identity::StoreIdentity { db_label, profile })
+}
+
+/// Write the write-once identity rows. Runs AFTER `init_schema_inner` because
+/// `hard_state` may not have existed yet, and inside the same transaction so a
+/// later failure cannot leave a stamp behind on a database that never finished
+/// initializing.
+///
+/// A role is stamped only when the caller actually declared one: an unlabelled
+/// open (`MemoryStore::open`, CLI diagnostics, fixtures) must never confer
+/// identity, which is precisely the order-dependence #1579 removes.
+fn stamp_store_identity_in_tx(
+    tx: &Connection,
+    identity: &crate::db::store_identity::StoreIdentity,
+    ctx: &crate::db::DbOpenContext,
+) -> Result<(), MemoryError> {
+    use crate::db::store_identity;
+    use crate::db::store_profile::{STORE_PROFILE_KEY, STORE_ROLE_KEY};
+
+    let conferred_by = match ctx.intent {
+        crate::db::OpenIntent::CreateFresh => "open:create-fresh",
+        crate::db::OpenIntent::OpenExisting => "open:existing",
+    };
+    store_identity::write_stamp_if_absent(
+        tx,
+        STORE_PROFILE_KEY,
+        identity.profile.as_str(),
+        conferred_by,
+    )?;
+    if identity.db_label != crate::path_router::UNKNOWN_DB_LABEL {
+        store_identity::write_stamp_if_absent(
+            tx,
+            STORE_ROLE_KEY,
+            &identity.db_label,
+            conferred_by,
+        )?;
+    }
+    Ok(())
 }
 
 /// Test-only fault-injection hook for proving the compatibility transaction
@@ -152,8 +250,32 @@ fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
-    execute_batch_retry(conn, ddl::BASE_SCHEMA_SQL)?;
+/// Run one scoped DDL chunk list, skipping product chunks when the effective
+/// profile does not include the product surface (#1585 D3).
+///
+/// `profile` is the store's **effective** profile — the stored one for an
+/// existing database, the requested one only when building a fresh file. It is
+/// never `DbOpenContext::required_profile` on an existing store; see
+/// [`crate::db::store_profile`].
+fn execute_schema_chunks(
+    conn: &Connection,
+    chunks: &[(ddl::SchemaScope, &str)],
+    profile: crate::db::StoreProfile,
+) -> Result<(), MemoryError> {
+    for (scope, sql) in chunks {
+        if matches!(scope, ddl::SchemaScope::Product) && !profile.includes_product() {
+            continue;
+        }
+        execute_batch_retry(conn, sql)?;
+    }
+    Ok(())
+}
+
+fn init_schema_inner(
+    conn: &Connection,
+    profile: crate::db::StoreProfile,
+) -> Result<(), MemoryError> {
+    execute_schema_chunks(conn, ddl::BASE_SCHEMA_CHUNKS, profile)?;
 
     // Legacy recall-cache rows predate database-authoritative generation
     // snapshots. The empty default is intentionally non-matching, so the first
@@ -270,63 +392,22 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         "TEXT NOT NULL DEFAULT ''",
     )?;
 
-    // Hub governance columns for review + health + routing metadata
-    ensure_column(
-        conn,
-        "hub_capabilities",
-        "review_status",
-        "TEXT NOT NULL DEFAULT 'approved'",
-    )?;
-    ensure_column(
-        conn,
-        "hub_capabilities",
-        "health_status",
-        "TEXT NOT NULL DEFAULT 'healthy'",
-    )?;
-    ensure_column(conn, "hub_capabilities", "last_error", "TEXT")?;
-    ensure_column(conn, "hub_capabilities", "last_success_at", "TEXT")?;
-    ensure_column(conn, "hub_capabilities", "last_failure_at", "TEXT")?;
-    ensure_column(
-        conn,
-        "hub_capabilities",
-        "fail_streak",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    ensure_column(conn, "hub_capabilities", "active_version", "TEXT")?;
-    ensure_column(
-        conn,
-        "hub_capabilities",
-        "exposure_mode",
-        "TEXT NOT NULL DEFAULT 'direct'",
-    )?;
-
-    // v21 identity/WorkClaim spine columns referenced by MIGRATED_INDEXES_SQL
-    // below. The v21 sentinel migration (identity_workclaim_spine.rs) also adds
-    // these, but that migration runs AFTER init_schema_inner — so on a legacy
-    // pre-v21 DB the index build below would `no such column`-crash unless the
-    // columns are ensured here first (#1289). Idempotent: no-op on a fresh DB
-    // whose CREATE TABLE already carries them, and the later v21 ALTER is then
-    // skipped by its own `column_exists` guard.
-    ensure_column(conn, "exec_envs", "agent_identity_id", "TEXT")?;
-    ensure_column(conn, "exec_envs", "claim_id", "TEXT")?;
-    ensure_column(conn, "session_claims", "mode", "TEXT")?;
-
-    // #1289: collapse any pre-existing duplicate *modeless* active claims for
-    // the same identity triple BEFORE MIGRATED_INDEXES_SQL builds the partial
-    // UNIQUE index `idx_session_claims_identity_active` (WHERE state = 'active'
-    // AND mode IS NULL). A legacy DB written by the pre-#1001-round-2 kernel can
-    // carry such duplicates; without this the CREATE UNIQUE INDEX below crashes
-    // init on that DB (a crash previously masked by the mode-column ordering
-    // bug fixed above). Reuses the v12 migration's dedup logic (single source),
-    // scoped to `mode IS NULL` to match the index predicate exactly — v21
-    // WorkClaims carrying a non-null mode legitimately share an identity and are
-    // never deduped. No-op on a fresh/empty table and idempotent on every
-    // subsequent startup (the index then prevents any new duplicate).
-    crate::db::migrations::dedupe_session_claims_identity_conflicts(conn)?;
+    // ── Product-scoped legacy-column work (#1585 D3) ──────────────────────
+    //
+    // Everything above this line ensures columns on PORTABLE tables and is
+    // unconditional. Everything inside this block touches tables a
+    // `PortableKernel` store never creates (`hub_capabilities`, `exec_envs`,
+    // `session_claims`, `vault_entries`), so an `ALTER TABLE` here would fail
+    // with `no such table` rather than being a harmless no-op. The guard is an
+    // explicit profile check, not a `table_exists` sniff: sniffing would
+    // quietly "adapt" to a half-built full store instead of refusing it.
+    if profile.includes_product() {
+        init_product_schema_columns(conn)?;
+    }
 
     // Indexes on migrated columns — MUST come after ensure_column so the
     // columns exist on legacy databases that were created without them.
-    execute_batch_retry(conn, ddl::MIGRATED_INDEXES_SQL)?;
+    execute_schema_chunks(conn, ddl::MIGRATED_INDEXES_CHUNKS, profile)?;
 
     // Backfill empty values for legacy rows.
     conn.execute(
@@ -365,6 +446,79 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
+    Ok(())
+}
+
+/// Evolutionary columns on PRODUCT tables, plus the one pre-index repair that
+/// touches a product table. Reached only when the effective profile
+/// [`crate::db::StoreProfile::includes_product`] (#1585 D3) — the tables these
+/// statements alter simply do not exist on a `PortableKernel` store.
+///
+/// Split out of `init_schema_inner` rather than sprinkled with `if` so the
+/// portable/product line is a single visible seam: anything added here is
+/// product by construction.
+fn init_product_schema_columns(conn: &Connection) -> Result<(), MemoryError> {
+    // Hub governance columns for review + health + routing metadata
+    ensure_column(
+        conn,
+        "hub_capabilities",
+        "review_status",
+        "TEXT NOT NULL DEFAULT 'approved'",
+    )?;
+    ensure_column(
+        conn,
+        "hub_capabilities",
+        "health_status",
+        "TEXT NOT NULL DEFAULT 'healthy'",
+    )?;
+    ensure_column(conn, "hub_capabilities", "last_error", "TEXT")?;
+    ensure_column(conn, "hub_capabilities", "last_success_at", "TEXT")?;
+    ensure_column(conn, "hub_capabilities", "last_failure_at", "TEXT")?;
+    ensure_column(
+        conn,
+        "hub_capabilities",
+        "fail_streak",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(conn, "hub_capabilities", "active_version", "TEXT")?;
+    ensure_column(
+        conn,
+        "hub_capabilities",
+        "exposure_mode",
+        "TEXT NOT NULL DEFAULT 'direct'",
+    )?;
+
+    // Vault entry ACL column. This used to live inside `ensure_fts_backfilled`,
+    // which has nothing to do with the vault; it is a product-table
+    // `ensure_column` and belongs with the others (#1585 D3). Ordering is
+    // unchanged in effect: no index or migration between the two positions
+    // reads `vault_entries.allowed_agents`.
+    ensure_column(conn, "vault_entries", "allowed_agents", "TEXT")?;
+
+    // v21 identity/WorkClaim spine columns referenced by the product chunks of
+    // MIGRATED_INDEXES_CHUNKS below. The v21 sentinel migration
+    // (identity_workclaim_spine.rs) also adds these, but that migration runs
+    // AFTER init_schema_inner — so on a legacy pre-v21 DB the index build below
+    // would `no such column`-crash unless the columns are ensured here first
+    // (#1289). Idempotent: no-op on a fresh DB whose CREATE TABLE already
+    // carries them, and the later v21 ALTER is then skipped by its own
+    // `column_exists` guard.
+    ensure_column(conn, "exec_envs", "agent_identity_id", "TEXT")?;
+    ensure_column(conn, "exec_envs", "claim_id", "TEXT")?;
+    ensure_column(conn, "session_claims", "mode", "TEXT")?;
+
+    // #1289: collapse any pre-existing duplicate *modeless* active claims for
+    // the same identity triple BEFORE MIGRATED_INDEXES_CHUNKS builds the partial
+    // UNIQUE index `idx_session_claims_identity_active` (WHERE state = 'active'
+    // AND mode IS NULL). A legacy DB written by the pre-#1001-round-2 kernel can
+    // carry such duplicates; without this the CREATE UNIQUE INDEX below crashes
+    // init on that DB (a crash previously masked by the mode-column ordering
+    // bug fixed above). Reuses the v12 migration's dedup logic (single source),
+    // scoped to `mode IS NULL` to match the index predicate exactly — v21
+    // WorkClaims carrying a non-null mode legitimately share an identity and are
+    // never deduped. No-op on a fresh/empty table and idempotent on every
+    // subsequent startup (the index then prevents any new duplicate).
+    crate::db::migrations::dedupe_session_claims_identity_conflicts(conn)?;
     Ok(())
 }
 
@@ -1422,8 +1576,10 @@ fn quote_sql_identifier(identifier: &str) -> Result<String, MemoryError> {
 }
 
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
-    ensure_column(conn, "vault_entries", "allowed_agents", "TEXT")?;
-
+    // (The stray `vault_entries.allowed_agents` ensure_column that used to sit
+    // here moved to `init_product_schema_columns` in #1585 D3: it is a product
+    // table and would `no such table`-crash a PortableKernel init, and it never
+    // had anything to do with FTS backfill.)
     let memories_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
     if memories_count == 0 {

@@ -9,6 +9,7 @@
 
 use rusqlite::Connection;
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
 use super::legacy_columns::table_has_column;
@@ -19,7 +20,18 @@ use super::legacy_columns::table_has_column;
 /// recoverable self-report, so the new column is legitimately NULL for them.
 pub(super) fn migrate_v14_dispatch_outcomes_reported_outcome(
     conn: &Connection,
+    profile: StoreProfile,
 ) -> Result<usize, MemoryError> {
+    // #1585 D3: product-scoped migration. A PortableKernel store never
+    // created the table(s) this touches, so the work is vacuously done.
+    // Returning Ok here (rather than skipping the call) is deliberate:
+    // `apply_versioned_migration` still marks the sentinel, so a portable
+    // database is a COMPLETE stamped-28 database by every existing gate's
+    // definition (`validate_current_schema_integrity`,
+    // `MIGRATION_SENTINEL_KEYS`) — the sentinel set is profile-invariant.
+    if !profile.includes_product() {
+        return Ok(0);
+    }
     // Guard: if the table doesn't exist yet (a DB that never created it),
     // there is nothing to alter — the DDL will create it with the column.
     if !table_exists(conn, "dispatch_outcomes")? {
@@ -80,7 +92,8 @@ mod tests {
 
         // First run adds the column and reports one alteration; the legacy row
         // survives with the new column reading NULL (no recoverable report).
-        let added = migrate_v14_dispatch_outcomes_reported_outcome(&conn).unwrap();
+        let added =
+            migrate_v14_dispatch_outcomes_reported_outcome(&conn, StoreProfile::TachiFull).unwrap();
         assert_eq!(added, 1);
         assert!(table_has_column(&conn, "dispatch_outcomes", "reported_outcome").unwrap());
         let reported: Option<String> = conn
@@ -93,7 +106,8 @@ mod tests {
         assert_eq!(reported, None, "legacy row keeps a NULL self-report");
 
         // Second run is a no-op (idempotent add-column): column already present.
-        let again = migrate_v14_dispatch_outcomes_reported_outcome(&conn).unwrap();
+        let again =
+            migrate_v14_dispatch_outcomes_reported_outcome(&conn, StoreProfile::TachiFull).unwrap();
         assert_eq!(again, 0);
     }
 
@@ -102,7 +116,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         // No dispatch_outcomes table at all — nothing to alter.
         assert_eq!(
-            migrate_v14_dispatch_outcomes_reported_outcome(&conn).unwrap(),
+            migrate_v14_dispatch_outcomes_reported_outcome(&conn, StoreProfile::TachiFull).unwrap(),
             0
         );
     }

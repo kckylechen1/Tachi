@@ -508,7 +508,11 @@ impl MemoryStore {
             .map(|_| db::try_load_sqlite_vec(&conn))
             .unwrap_or(false);
         drop(migration_authorization);
-        let _ = schema_result?;
+        // tachi#1579: the store's identity is what the schema transaction just
+        // resolved from the stamp inside the file — NOT `db_label`, which is
+        // only the caller's claim and may legitimately be `unknown`. A conflict
+        // between the two already failed the open above.
+        let identity = schema_result?.identity;
         db::validate_persistent_trigger_inventory(&conn, true)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
             db_path,
@@ -532,7 +536,7 @@ impl MemoryStore {
             drop(conn);
             return Self::reopen_initialized_file_store(
                 db_path,
-                db_label,
+                identity,
                 path_validation,
                 initialized_identity,
                 busy_timeout,
@@ -542,7 +546,8 @@ impl MemoryStore {
             conn,
             reserved_reference_write,
             vec_available,
-            db_label: db_label.to_string(),
+            db_label: identity.db_label,
+            profile: identity.profile,
             path_validation,
             opened_physical_db_identity,
         })
@@ -550,7 +555,7 @@ impl MemoryStore {
 
     fn reopen_initialized_file_store(
         db_path: &str,
-        db_label: &str,
+        identity: db::StoreIdentity,
         path_validation: bool,
         initialized_identity: String,
         busy_timeout: Option<Duration>,
@@ -584,11 +589,16 @@ impl MemoryStore {
         let vec_available = db::try_load_sqlite_vec(&conn);
         let opened_physical_db_identity =
             validate_physical_db_identity_across_open(db_path, Some(before_reopen))?;
+        // The identity resolved by the initializing transaction, carried across
+        // the reopen rather than re-derived: re-reading the stamp here would
+        // open a window in which another process's write is observed instead of
+        // the one this open committed.
         Ok(Self {
             conn,
             reserved_reference_write,
             vec_available,
-            db_label: db_label.to_string(),
+            db_label: identity.db_label,
+            profile: identity.profile,
             path_validation,
             opened_physical_db_identity,
         })
@@ -698,11 +708,26 @@ impl MemoryStore {
             validate_read_only_backfill_compat_schema(&conn, operation)?;
         }
         let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
+        // tachi#1579: a read-only handle resolves identity from the stamp too,
+        // so read-side predicates (`is_wiki_corpus_store`) and the write path
+        // read ONE authority. It cannot stamp, so an unstamped store keeps the
+        // #1569 behavior of honoring a declared role — once, loudly.
+        let path = std::path::Path::new(db_path);
+        let (stored_role, stored_profile) = db::store_identity::read_identity(&conn, path)?;
+        if stored_role.is_none() && db_label != UNKNOWN_DB_LABEL {
+            db::store_identity::warn_read_only_declared_unstamped_once(db_path, db_label);
+        }
+        let resolved_label =
+            db::store_identity::resolve_role(stored_role.as_deref(), db_label, path)?;
         Ok(Self {
             conn,
             reserved_reference_write,
             vec_available,
-            db_label: db_label.to_string(),
+            db_label: resolved_label,
+            // An unstamped store read read-only is a pre-#1585 database, i.e.
+            // full Tachi. Nothing is written, so this is a description, not an
+            // adoption.
+            profile: stored_profile.unwrap_or_default(),
             path_validation: false,
             opened_physical_db_identity,
         })
@@ -752,11 +777,16 @@ impl MemoryStore {
         // usable; a missing or unloadable memories_vec simply disables vector
         // evidence for this apply.
         let vec_available = conn.prepare("SELECT id FROM memories_vec LIMIT 0").is_ok();
+        // Unlabelled maintenance handle: it claims no role, so it resolves to
+        // whatever the file is stamped with, or `unknown` when it is unstamped.
+        let path = std::path::Path::new(db_path);
+        let (stored_role, stored_profile) = db::store_identity::read_identity(&conn, path)?;
         Ok(Self {
             conn,
             reserved_reference_write,
             vec_available,
-            db_label: UNKNOWN_DB_LABEL.to_string(),
+            db_label: stored_role.unwrap_or_else(|| UNKNOWN_DB_LABEL.to_string()),
+            profile: stored_profile.unwrap_or_default(),
             path_validation: false,
             opened_physical_db_identity,
         })
@@ -786,6 +816,7 @@ impl MemoryStore {
             reserved_reference_write,
             vec_available,
             db_label: UNKNOWN_DB_LABEL.to_string(),
+            profile: crate::db::StoreProfile::default(),
             path_validation: false,
             opened_physical_db_identity: None,
         })
@@ -809,6 +840,22 @@ impl MemoryStore {
     /// CLI diagnostics and fixtures that never asked.
     pub fn is_wiki_corpus_store(&self) -> bool {
         path_router::db_label_is_wiki_corpus(&self.db_label)
+    }
+
+    /// This store's resolved manifest role (tachi#1579).
+    ///
+    /// Stamp-derived: for a store carrying a `store_identity` role row this is
+    /// that row, whatever the caller passed at open. `unknown` means the store
+    /// has no stamp AND the caller declared nothing — never "we could not be
+    /// bothered to look".
+    pub fn db_label(&self) -> &str {
+        &self.db_label
+    }
+
+    /// This store's effective schema profile (#1585): the stamped one, or the
+    /// full profile for a pre-#1585 database that has not been stamped yet.
+    pub fn store_profile(&self) -> crate::db::StoreProfile {
+        self.profile
     }
 
     /// Verify that this already-open connection still addresses the physical

@@ -15,6 +15,32 @@ pub struct StateRow {
 
 // ─── Hard State Operations ─────────────────────────────────────────────────────
 
+/// Write-once guard for the `store_identity` namespace (#1579).
+///
+/// The store's role and profile stamps are the *authority* every identity
+/// decision downstream reads (`is_wiki_corpus_store`, path routing, product
+/// admission). They are written exactly once, by the schema-init transaction,
+/// through [`insert_state_if_absent`]. Making the general-purpose
+/// `set_state`/`delete_state` API refuse the namespace turns "write-once" from
+/// a convention every future caller has to remember into something the API
+/// will not let them break — the identity is not re-negotiable by whoever
+/// happens to hold a `&Connection`.
+///
+/// Deliberately at this layer rather than a SQLite trigger: `hard_state` is
+/// also written by migrations and fixtures that must remain able to build the
+/// table itself, and a trigger would have to be installed before the first
+/// stamp and validated forever after by the trigger-inventory gate.
+fn refuse_store_identity_namespace(namespace: &str, operation: &str) -> Result<(), MemoryError> {
+    if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE {
+        return Err(MemoryError::InvalidArg(format!(
+            "hard_state namespace '{namespace}' is write-once store identity and cannot be \
+             {operation} (kckylechen1/Sigil#1579); it is stamped once by schema init via \
+             insert_state_if_absent"
+        )));
+    }
+    Ok(())
+}
+
 /// Set a key-value pair in the hard_state table. INSERT OR UPDATE with version bump.
 pub fn set_state(
     conn: &Connection,
@@ -22,6 +48,7 @@ pub fn set_state(
     key: &str,
     value_json: &str,
 ) -> Result<u32, MemoryError> {
+    refuse_store_identity_namespace(namespace, "overwritten")?;
     let now = now_utc_iso();
     conn.execute(
         "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
@@ -99,6 +126,7 @@ pub fn get_state(
 
 /// Delete a single state row. Returns whether a row was actually removed.
 pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<bool, MemoryError> {
+    refuse_store_identity_namespace(namespace, "deleted")?;
     let changed = conn.execute(
         "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
         params![namespace, key],

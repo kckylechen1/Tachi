@@ -85,6 +85,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
 use super::common::now_utc_iso;
@@ -467,11 +468,24 @@ pub fn run_data_migrations(
     db_label: &str,
     current_db_path: &Path,
 ) -> Result<MigrationReport, MemoryError> {
+    run_data_migrations_with_profile(conn, db_label, current_db_path, StoreProfile::default())
+}
+
+/// [`run_data_migrations`] for a caller that knows the store's effective
+/// profile (#1585 D3). `run_data_migrations` itself is the standalone/legacy
+/// entry point and assumes the full product profile — the shape every database
+/// written before #1585 has.
+pub fn run_data_migrations_with_profile(
+    conn: &mut Connection,
+    db_label: &str,
+    current_db_path: &Path,
+    profile: StoreProfile,
+) -> Result<MigrationReport, MemoryError> {
     check_schema_version_gate(conn)?;
     validate_current_schema_integrity(conn)?;
 
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let report = run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
+    let report = run_data_migrations_in_tx(&tx, db_label, current_db_path, profile)?;
     write_schema_version_stamp(&tx)?;
     tx.commit()?;
 
@@ -491,6 +505,7 @@ pub(crate) fn run_data_migrations_in_tx(
     conn: &Connection,
     db_label: &str,
     current_db_path: &Path,
+    profile: StoreProfile,
 ) -> Result<MigrationReport, MemoryError> {
     let mut report = MigrationReport::default();
 
@@ -556,12 +571,11 @@ pub(crate) fn run_data_migrations_in_tx(
     )?
     .unwrap_or(0);
 
-    report.session_claims_duplicates_deduped = apply_versioned_migration(
-        conn,
-        "v12_session_claims_unique_identity",
-        migrate_v12_session_claims_unique_identity,
-    )?
-    .unwrap_or(0);
+    report.session_claims_duplicates_deduped =
+        apply_versioned_migration(conn, "v12_session_claims_unique_identity", |conn| {
+            migrate_v12_session_claims_unique_identity(conn, profile)
+        })?
+        .unwrap_or(0);
 
     report.hard_state_index_added = apply_versioned_migration(
         conn,
@@ -570,40 +584,35 @@ pub(crate) fn run_data_migrations_in_tx(
     )?
     .unwrap_or(0);
 
-    report.dispatch_outcomes_reported_outcome_added = apply_versioned_migration(
-        conn,
-        "v14_dispatch_outcomes_reported_outcome",
-        migrate_v14_dispatch_outcomes_reported_outcome,
-    )?
-    .unwrap_or(0);
+    report.dispatch_outcomes_reported_outcome_added =
+        apply_versioned_migration(conn, "v14_dispatch_outcomes_reported_outcome", |conn| {
+            migrate_v14_dispatch_outcomes_reported_outcome(conn, profile)
+        })?
+        .unwrap_or(0);
 
-    report.exec_envs_env_class_added = apply_versioned_migration(
-        conn,
-        "v15_exec_envs_env_class",
-        migrate_v15_exec_envs_env_class,
-    )?
-    .unwrap_or(0);
+    report.exec_envs_env_class_added =
+        apply_versioned_migration(conn, "v15_exec_envs_env_class", |conn| {
+            migrate_v15_exec_envs_env_class(conn, profile)
+        })?
+        .unwrap_or(0);
 
-    report.dispatch_outcomes_identity_receipt_added = apply_versioned_migration(
-        conn,
-        "v16_dispatch_outcomes_identity_receipt",
-        migrate_v16_dispatch_outcomes_identity_receipt,
-    )?
-    .unwrap_or(0);
+    report.dispatch_outcomes_identity_receipt_added =
+        apply_versioned_migration(conn, "v16_dispatch_outcomes_identity_receipt", |conn| {
+            migrate_v16_dispatch_outcomes_identity_receipt(conn, profile)
+        })?
+        .unwrap_or(0);
 
-    report.dispatch_outcomes_attribution_basis_backfilled = apply_versioned_migration(
-        conn,
-        "v17_dispatch_outcomes_attribution_basis",
-        migrate_v17_dispatch_outcomes_attribution_basis,
-    )?
-    .unwrap_or(0);
+    report.dispatch_outcomes_attribution_basis_backfilled =
+        apply_versioned_migration(conn, "v17_dispatch_outcomes_attribution_basis", |conn| {
+            migrate_v17_dispatch_outcomes_attribution_basis(conn, profile)
+        })?
+        .unwrap_or(0);
 
-    report.dispatch_adjudications_created = apply_versioned_migration(
-        conn,
-        "v18_dispatch_adjudications",
-        migrate_v18_dispatch_adjudications,
-    )?
-    .unwrap_or(0);
+    report.dispatch_adjudications_created =
+        apply_versioned_migration(conn, "v18_dispatch_adjudications", |conn| {
+            migrate_v18_dispatch_adjudications(conn, profile)
+        })?
+        .unwrap_or(0);
 
     report.idless_identity_constraint_added = apply_versioned_migration(
         conn,
@@ -613,13 +622,15 @@ pub(crate) fn run_data_migrations_in_tx(
     .unwrap_or(0);
 
     report.mirror_eval_tables_created =
-        apply_versioned_migration(conn, "v20_mirror_eval", migrate_v20_mirror_eval)?.unwrap_or(0);
-    report.identity_workclaim_columns_added = apply_versioned_migration(
-        conn,
-        "v21_identity_workclaim_spine",
-        migrate_v21_identity_workclaim_spine,
-    )?
-    .unwrap_or(0);
+        apply_versioned_migration(conn, "v20_mirror_eval", |conn| {
+            migrate_v20_mirror_eval(conn, profile)
+        })?
+        .unwrap_or(0);
+    report.identity_workclaim_columns_added =
+        apply_versioned_migration(conn, "v21_identity_workclaim_spine", |conn| {
+            migrate_v21_identity_workclaim_spine(conn, profile)
+        })?
+        .unwrap_or(0);
 
     // After every earlier migration that can rewrite indexed memory fields
     // (path/summary/text/keywords/…), rebuild the symbolic trigram projection
@@ -1850,7 +1861,9 @@ mod tests {
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .unwrap();
-            let report = run_data_migrations_in_tx(&tx, "global", tmp.path()).unwrap();
+            let report =
+                run_data_migrations_in_tx(&tx, "global", tmp.path(), StoreProfile::TachiFull)
+                    .unwrap();
             assert_eq!(
                 report.pack_tables_dropped, 1,
                 "v10 should have real work here"
