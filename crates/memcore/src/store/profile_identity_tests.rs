@@ -254,7 +254,8 @@ fn full_tachi_refuses_portable_store() {
     let before = schema_snapshot(&raw(&path));
 
     let err = MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
-        .expect_err("a full-profile caller must refuse a portable store");
+        .err()
+        .expect("a full-profile caller must refuse a portable store");
     match &err {
         MemoryError::StoreProfileMismatch {
             required, stored, ..
@@ -438,7 +439,8 @@ fn portable_refuses_unstamped_store() {
     }
 
     let err = MemoryStore::open_with_context(&path, &deny(StoreProfile::PortableKernel))
-        .expect_err("a portable caller must not adopt an unstamped (pre-#1585, full) store");
+        .err()
+        .expect("a portable caller must not adopt an unstamped (pre-#1585, full) store");
     assert!(
         matches!(err, MemoryError::StoreProfileUnstamped { .. }),
         "expected StoreProfileUnstamped, got {err:?}"
@@ -520,9 +522,8 @@ fn conflicting_role_claim_is_refused_not_resolved() {
 
     let err =
         MemoryStore::open_with_label_and_context(&path, "global", &deny(StoreProfile::TachiFull))
-            .expect_err(
-                "a claim that disagrees with the stamp must refuse, not win or lose silently",
-            );
+            .err()
+            .expect("a claim that disagrees with the stamp must refuse, not win or lose silently");
     match &err {
         MemoryError::StoreRoleConflict {
             claimed, stored, ..
@@ -548,13 +549,15 @@ fn store_identity_namespace_is_write_once_at_the_api() {
 
     let overwrite =
         crate::db::set_state(store.connection(), "store_identity", "role", "\"global\"")
-            .expect_err("set_state must refuse the store_identity namespace");
+            .err()
+            .expect("set_state must refuse the store_identity namespace");
     assert!(
         overwrite.to_string().contains("write-once"),
         "refusal must name the reason: {overwrite}"
     );
     let removal = crate::db::delete_state(store.connection(), "store_identity", "role")
-        .expect_err("delete_state must refuse the store_identity namespace");
+        .err()
+        .expect("delete_state must refuse the store_identity namespace");
     assert!(removal.to_string().contains("write-once"), "{removal}");
 
     // Ordinary namespaces are unaffected.

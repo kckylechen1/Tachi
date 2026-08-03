@@ -2949,7 +2949,7 @@ mod tests {
         // attempt, proving the map still points at the same ProjectDbState
         // rather than having recreated it under a new gate.
         let entry0_state_after = runtime
-            .attached_project_state(&project_dbs[0])
+            .attached_project_state(&project_dbs[0], StoreLabel::inferred(&project_dbs[0]))
             .expect("re-attach entry 0 after eviction attempt");
         assert!(
             Arc::ptr_eq(&entry0_state_before.rw_gate, &entry0_state_after.rw_gate),

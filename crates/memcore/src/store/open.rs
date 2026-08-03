@@ -1033,7 +1033,10 @@ mod exact_dedupe_open_tests {
 
         let error = match MemoryStore::reopen_initialized_file_store(
             path.to_str().unwrap(),
-            "unknown",
+            db::StoreIdentity {
+                db_label: "unknown".to_string(),
+                profile: db::StoreProfile::TachiFull,
+            },
             false,
             initialized_identity,
             None,
