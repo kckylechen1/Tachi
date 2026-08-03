@@ -54,6 +54,7 @@ pub mod error;
 pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
+pub mod kernel_policy;
 pub mod namespace;
 pub mod near_dup;
 pub mod noise;
@@ -150,6 +151,7 @@ pub use foundry::{
 };
 #[cfg(feature = "admin")]
 pub use hub::{HubCapability, VirtualCapabilityBinding};
+pub use kernel_policy::{EmbedPolicy, KernelPolicy};
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,
@@ -243,6 +245,11 @@ pub struct MemoryStore {
     /// Long-lived runtimes use it to fail closed if the path is later replaced
     /// while SQLite still holds the original file descriptor.
     pub(crate) opened_physical_db_identity: Option<String>,
+    /// Host-injected recall/decay/embed configuration (tachi#1585 D5). Every
+    /// constructor sets this to [`KernelPolicy::default()`] (pure, no env) —
+    /// see [`Self::with_kernel_policy`] for how a caller attaches a
+    /// non-default policy after opening.
+    pub(crate) policy: KernelPolicy,
 }
 
 #[cfg(test)]

@@ -246,18 +246,6 @@ fn require_exact_virtual_shape(
     )))
 }
 
-/// Test/operator escape hatch: when set to a truthy value, the path-routing
-/// validation in `MemoryStore::upsert` is bypassed entirely. Useful for test
-/// fixtures that intentionally write across the canonical layout.
-fn path_validation_disabled() -> bool {
-    matches!(
-        std::env::var("TACHI_DISABLE_PATH_VALIDATION")
-            .ok()
-            .as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes")
-    )
-}
-
 /// Filesystem presence does not distinguish an operational database from an
 /// empty path reservation. Only an unstamped database with no application
 /// schema may enter ordinary initialization and install the canonical guards.
@@ -550,6 +538,9 @@ impl MemoryStore {
             profile: identity.profile,
             path_validation,
             opened_physical_db_identity,
+            // tachi#1585 D5: pure default, no env. `with_kernel_policy`
+            // attaches a host-injected policy after open.
+            policy: crate::KernelPolicy::default(),
         })
     }
 
@@ -601,6 +592,7 @@ impl MemoryStore {
             profile: identity.profile,
             path_validation,
             opened_physical_db_identity,
+            policy: crate::KernelPolicy::default(),
         })
     }
 
@@ -730,6 +722,7 @@ impl MemoryStore {
             profile: stored_profile.unwrap_or_default(),
             path_validation: false,
             opened_physical_db_identity,
+            policy: crate::KernelPolicy::default(),
         })
     }
 
@@ -789,6 +782,7 @@ impl MemoryStore {
             profile: stored_profile.unwrap_or_default(),
             path_validation: false,
             opened_physical_db_identity,
+            policy: crate::KernelPolicy::default(),
         })
     }
 
@@ -819,6 +813,7 @@ impl MemoryStore {
             profile: crate::db::StoreProfile::default(),
             path_validation: false,
             opened_physical_db_identity: None,
+            policy: crate::KernelPolicy::default(),
         })
     }
 
@@ -893,7 +888,9 @@ impl MemoryStore {
     }
 
     fn validate_write_path(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
-        if self.path_validation && !path_validation_disabled() {
+        // tachi#1585 D5: this store's `KernelPolicy::path_validation_escape_hatch`,
+        // not a `TACHI_DISABLE_PATH_VALIDATION` env read.
+        if self.path_validation && !self.policy.path_validation_escape_hatch {
             let allow_cross = entry
                 .metadata
                 .get("allow_cross_project")
