@@ -157,6 +157,7 @@ use self::workspace_setup::prepare_workspace_and_mcp;
 
 #[cfg(test)]
 pub(crate) use self::credentials::apply_unlocked_vault_env;
+pub(crate) use self::dedupe::dispatch_runs_root;
 pub(crate) use self::dedupe::new_dispatch_id;
 pub(crate) use self::dedupe::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
 pub(crate) use self::recovery::recover_orphaned_dispatch_runs;
