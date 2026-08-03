@@ -29,6 +29,7 @@ pub mod mirror_eval;
 mod open;
 pub mod open_context;
 mod recall_cache;
+#[cfg(feature = "admin")]
 mod sandbox;
 mod schema;
 mod search_generation;
@@ -170,6 +171,7 @@ pub use recall_cache::{
     recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
     recall_cache_record_hit, recall_cache_stats, RecallCacheHit, RecallCacheStats,
 };
+#[cfg(feature = "admin")]
 pub use sandbox::{
     check_sandbox_access, evaluate_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit,
     list_sandbox_exec_audit, list_sandbox_policies, list_sandbox_rules_for_role,

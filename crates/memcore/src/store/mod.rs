@@ -10,8 +10,12 @@
 //! contains exactly one `impl MemoryStore { … }` block; Rust merges
 //! them at compile time, so the public API is unchanged.
 //!
-//! **Admin domains** (`hub`, `vault`) compile only with the
-//! `admin` feature (default on). Portable builds omit those methods.
+//! **Admin domains** (`hub`, `vault`, `sandbox`, `llm_usage`,
+//! `dispatch_outcomes`) compile only with the `admin` feature (default on).
+//! Portable builds omit those methods — and since #1585 a
+//! `StoreProfile::PortableKernel` database does not even carry the tables
+//! behind them, so compiling them in would be a promise the schema cannot
+//! keep.
 //!
 //! Adding a new domain:
 //!   1. Create `store/<domain>.rs` with `use super::super::*;` then a
@@ -40,12 +44,14 @@ pub mod immutable_supersession;
 pub mod lessons;
 pub mod lifecycle_consistency;
 pub mod linking;
+#[cfg(feature = "admin")]
 pub mod llm_usage;
 pub mod maintenance;
 pub mod memory_lifecycle;
 pub mod open;
 pub mod recall_cache;
 pub mod rem;
+#[cfg(feature = "admin")]
 pub mod sandbox;
 pub mod state;
 pub mod tasks;

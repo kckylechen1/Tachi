@@ -3323,7 +3323,12 @@ const IN_BATCH_SIZE: usize = 900;
 
 /// Delete a memory entry by ID from main table, FTS index, and vector table.
 /// Returns true if an entry was found and deleted.
-pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bool, MemoryError> {
+pub fn delete(
+    conn: &mut Connection,
+    id: &str,
+    vec_available: bool,
+    profile: StoreProfile,
+) -> Result<bool, MemoryError> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
         return Err(MemoryError::InvalidArg("empty ID".to_string()));
@@ -3356,11 +3361,15 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
             params![trimmed],
         )?;
 
-        // Clean up agent known state (CASCADE)
-        tx.execute(
-            "DELETE FROM agent_known_state WHERE memory_id = ?1",
-            params![trimmed],
-        )?;
+        // Clean up agent known state (CASCADE). PRODUCT table (#1585 D4): a
+        // PortableKernel store never created it, so there is nothing to
+        // cascade to. Explicit profile check, not a `table_exists` sniff.
+        if profile.includes_product() {
+            tx.execute(
+                "DELETE FROM agent_known_state WHERE memory_id = ?1",
+                params![trimmed],
+            )?;
+        }
     }
 
     tx.commit()?;

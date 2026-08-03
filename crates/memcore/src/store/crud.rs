@@ -290,8 +290,9 @@ impl MemoryStore {
     /// Delete a memory entry by ID. Returns true if found and deleted.
     pub fn delete(&mut self, id: &str) -> Result<bool, MemoryError> {
         let db_label = self.db_label.clone();
+        let profile = self.profile;
         db::retry_memory_locked("delete", &db_label, || {
-            db::delete(&mut self.conn, id, self.vec_available)
+            db::delete(&mut self.conn, id, self.vec_available, profile)
         })
     }
 

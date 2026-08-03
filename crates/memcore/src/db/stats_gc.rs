@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 use crate::types::{AuthorityLevel, EffectScope, GcConfig, TachiEventRecord};
 
@@ -12,7 +13,19 @@ use super::event_ledger::insert_tachi_event;
 /// Retention-based cleanup of growing tables.
 /// Thresholds are driven by `GcConfig` (replaces previously hardcoded literals).
 /// Returns a summary of how many rows were deleted from each table.
-pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Value, MemoryError> {
+/// `profile` is the store's effective [`StoreProfile`] (#1585 D4). `audit_log`
+/// and `agent_known_state` are PRODUCT tables: on a `PortableKernel` store they
+/// do not exist, and their prunes would fail the whole GC transaction with
+/// `no such table`. The guard is an explicit profile check rather than a
+/// `table_exists` sniff — a missing table on a store that is supposed to have
+/// one is a broken database, and GC quietly skipping it is how that stays
+/// invisible.
+pub fn gc_tables(
+    conn: &mut Connection,
+    cfg: &GcConfig,
+    profile: StoreProfile,
+) -> Result<serde_json::Value, MemoryError> {
+    let product = profile.includes_product();
     let tx = conn.transaction()?;
 
     // 1. access_history: retain latest N entries per (memory_id, event_kind),
@@ -54,29 +67,38 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
     );
     let pe_deleted: usize = tx.execute(&pe_sql, [])?;
 
-    // 3. audit_log: delete older than N days OR keep only latest M rows
-    let al_sql = format!(
-        "DELETE FROM audit_log
+    // 3. audit_log (PRODUCT): delete older than N days OR keep only latest M rows
+    let (al_deleted, al_cap_deleted) = if product {
+        let al_sql = format!(
+            "DELETE FROM audit_log
          WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
-        cfg.audit_log_max_days
-    );
-    let al_deleted: usize = tx.execute(&al_sql, [])?;
-    // Also cap at max_rows total
-    let al_cap_sql = format!(
-        "DELETE FROM audit_log WHERE id NOT IN (
+            cfg.audit_log_max_days
+        );
+        let al_deleted: usize = tx.execute(&al_sql, [])?;
+        // Also cap at max_rows total
+        let al_cap_sql = format!(
+            "DELETE FROM audit_log WHERE id NOT IN (
             SELECT id FROM audit_log ORDER BY id DESC LIMIT {}
         )",
-        cfg.audit_log_max_rows
-    );
-    let al_cap_deleted: usize = tx.execute(&al_cap_sql, [])?;
+            cfg.audit_log_max_rows
+        );
+        let al_cap_deleted: usize = tx.execute(&al_cap_sql, [])?;
+        (al_deleted, al_cap_deleted)
+    } else {
+        (0, 0)
+    };
 
-    // 4. agent_known_state: delete older than N days
-    let aks_sql = format!(
-        "DELETE FROM agent_known_state
+    // 4. agent_known_state (PRODUCT): delete older than N days
+    let aks_deleted: usize = if product {
+        let aks_sql = format!(
+            "DELETE FROM agent_known_state
          WHERE synced_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
-        cfg.agent_known_state_max_days
-    );
-    let aks_deleted: usize = tx.execute(&aks_sql, [])?;
+            cfg.agent_known_state_max_days
+        );
+        tx.execute(&aks_sql, [])?
+    } else {
+        0
+    };
 
     // 5. Orphaned access_history (memory was deleted but history remained)
     let orphan_deleted: usize = tx.execute(
@@ -95,11 +117,16 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
         [],
     )?;
 
-    // 6. Orphaned agent_known_state (memory was deleted but known-state remained)
-    let orphan_aks_deleted: usize = tx.execute(
-        "DELETE FROM agent_known_state WHERE memory_id NOT IN (SELECT id FROM memories)",
-        [],
-    )?;
+    // 6. Orphaned agent_known_state (PRODUCT; memory was deleted but
+    //    known-state remained)
+    let orphan_aks_deleted: usize = if product {
+        tx.execute(
+            "DELETE FROM agent_known_state WHERE memory_id NOT IN (SELECT id FROM memories)",
+            [],
+        )?
+    } else {
+        0
+    };
 
     // Recall impressions own their retention. Deleting groups cascades rows;
     // access_history and query_diversity are intentionally untouched.

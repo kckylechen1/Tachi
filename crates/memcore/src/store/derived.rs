@@ -105,10 +105,11 @@ impl MemoryStore {
     /// Thresholds are driven by `GcConfig` (replaces previously hardcoded literals).
     pub fn gc_tables(&mut self, cfg: &GcConfig) -> Result<serde_json::Value, MemoryError> {
         let db_label = self.db_label.clone();
+        let profile = self.profile;
         let authorization = self.reserved_reference_write.clone();
         db::retry_memory_locked("gc_tables", &db_label, || {
             let _authorization = db::authorize_reserved_reference_write(&authorization)?;
-            db::gc_tables(&mut self.conn, cfg)
+            db::gc_tables(&mut self.conn, cfg, profile)
         })
     }
 

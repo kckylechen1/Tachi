@@ -77,7 +77,7 @@ fn gc_tables_prunes_retention_and_orphans() {
         )
         .unwrap();
 
-    let summary = gc_tables(&mut conn, &GcConfig::default()).unwrap();
+    let summary = gc_tables(&mut conn, &GcConfig::default(), StoreProfile::TachiFull).unwrap();
 
     let kept_access: i64 = conn
         .query_row(
@@ -161,7 +161,7 @@ fn gc_tables_reconciles_query_diversity_after_prune() {
         access_history_keep_per_memory: 2,
         ..GcConfig::default()
     };
-    gc_tables(&mut conn, &cfg).unwrap();
+    gc_tables(&mut conn, &cfg, StoreProfile::TachiFull).unwrap();
 
     let qd: i64 = conn
         .query_row(
@@ -214,7 +214,7 @@ fn gc_tables_gives_each_event_kind_its_own_quota() {
         access_history_keep_per_memory: 2,
         ..GcConfig::default()
     };
-    gc_tables(&mut conn, &cfg).unwrap();
+    gc_tables(&mut conn, &cfg, StoreProfile::TachiFull).unwrap();
 
     let count_kind = |kind: &str| -> i64 {
         conn.query_row(
@@ -552,7 +552,7 @@ fn gc_archival_receipts_survive_the_table_sweep_that_reaps_audit_log() {
         agent_known_state_max_days: 1,
         ..GcConfig::default()
     };
-    gc_tables(&mut conn, &cfg).unwrap();
+    gc_tables(&mut conn, &cfg, StoreProfile::TachiFull).unwrap();
 
     assert_eq!(
         gc_archival_receipts(&conn).len(),

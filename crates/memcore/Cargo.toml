@@ -11,8 +11,11 @@ license = "AGPL-3.0-only"
 # - --no-default-features (or default-features = false) builds the
 #   *portable kernel only*: store/search/scorer/schema/events/sandbox.
 #   Vault / Hub / Foundry job queue / Pack product APIs are omitted.
-# - Schema DDL still creates admin tables so a portable build can open
-#   DBs written by full Tachi (empty tables are fine).
+# - Since #1585 the DDL is ALSO profile-scoped at runtime: a database created
+#   under `StoreProfile::PortableKernel` never gets the product tables at all.
+#   A portable build can still open a full Tachi database (TachiFull satisfies
+#   a PortableKernel requirement); the reverse is refused with a typed
+#   `StoreProfileMismatch`.
 #
 # Downstream forks (HyperTachi, HyperMemory) should depend via the
 # `portable-kernel` facade crate, which disables `admin` by default.
