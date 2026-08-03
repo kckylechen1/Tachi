@@ -683,3 +683,27 @@ fn portable_store_survives_crud_gc_and_maintenance() {
         .expect("reopen portable store");
     assert_eq!(reopened.store_profile(), StoreProfile::PortableKernel);
 }
+
+/// #1585 integration hardening: `agent_known_state` is a product table, so
+/// the store wrappers must refuse typed on a `PortableKernel` store instead
+/// of surfacing `no such table` mid-operation.
+#[test]
+fn portable_store_refuses_agent_state_wrappers_typed() {
+    let dir = temp_dir("portable-agent-state");
+    let path = db_in(&dir, "memory.db");
+
+    let store = MemoryStore::open_with_context(&path, &deny(StoreProfile::PortableKernel))
+        .expect("fresh portable create");
+
+    let write = store.update_agent_known_state("agent-x", &[("m-1".to_string(), 1)]);
+    assert!(
+        matches!(write, Err(MemoryError::StoreProfileMismatch { .. })),
+        "portable agent-state write must refuse typed, got {write:?}"
+    );
+
+    let read = store.get_agent_known_revisions("agent-x", &["m-1".to_string()]);
+    assert!(
+        matches!(read, Err(MemoryError::StoreProfileMismatch { .. })),
+        "portable agent-state read must refuse typed, got {read:?}"
+    );
+}

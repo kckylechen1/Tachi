@@ -26,6 +26,7 @@
 //!      etc. — those fields are `pub(crate)`.
 
 pub mod agent_state;
+#[cfg(feature = "admin")]
 pub mod audit;
 pub mod crud;
 pub mod daily_pipeline;
