@@ -9,9 +9,11 @@ pub struct TierHealthCounts {
 }
 
 impl MemoryStore {
-    /// Archive stale low-value memories using the process recall configuration.
+    /// Archive stale low-value memories using this store's host-injected
+    /// recall configuration (tachi#1585 D5; was the process-wide
+    /// `RecallConfig::get()`).
     pub fn archive_stale_low_value_memories(&self) -> Result<usize, MemoryError> {
-        self.archive_stale_low_value_memories_with_config(crate::RecallConfig::get())
+        self.archive_stale_low_value_memories_with_config(&self.policy.recall)
     }
 
     /// Archive low-importance memories that have no qualifying activity and
@@ -136,7 +138,12 @@ impl MemoryStore {
     /// rows for the memory graph, never content that should burn embedding
     /// budget or surface as recall).
     pub fn entries_missing_vectors(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
-        let tier_filter = crate::embed_config::embed_raw_tier_sql_filter("m.");
+        // tachi#1585 D5: this store's `KernelPolicy::embed`, not a
+        // `TACHI_EMBED_RAW_TIER` env read.
+        let tier_filter = crate::embed_config::embed_raw_tier_sql_filter(
+            "m.",
+            self.policy.embed.raw_tier_enabled,
+        );
         let order_by = crate::embed_config::embed_selection_order_by("m.");
         let sql = format!(
             "SELECT m.id FROM memories m
@@ -551,31 +558,17 @@ mod tests {
 
     #[test]
     fn entries_missing_vectors_embed_selection_and_tier_gate() {
-        struct EmbedRawTierEnvRestore {
-            saved: Option<std::ffi::OsString>,
-        }
-
-        impl EmbedRawTierEnvRestore {
-            fn capture_and_clear() -> Self {
-                let saved = std::env::var_os("TACHI_EMBED_RAW_TIER");
-                std::env::remove_var("TACHI_EMBED_RAW_TIER");
-                Self { saved }
-            }
-        }
-
-        impl Drop for EmbedRawTierEnvRestore {
-            fn drop(&mut self) {
-                match &self.saved {
-                    Some(v) => std::env::set_var("TACHI_EMBED_RAW_TIER", v),
-                    None => std::env::remove_var("TACHI_EMBED_RAW_TIER"),
-                }
-            }
-        }
-
-        let _restore = EmbedRawTierEnvRestore::capture_and_clear();
-
+        // tachi#1585 D5: `entries_missing_vectors` reads
+        // `self.policy.embed.raw_tier_enabled` (host-injected), not a
+        // `TACHI_EMBED_RAW_TIER` env read, so this test drives the gate
+        // through the store's `KernelPolicy` directly instead of mutating
+        // process env.
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         assert!(store.vec_available, "sqlite-vec required for this test");
+        assert!(
+            store.kernel_policy().embed.raw_tier_enabled,
+            "pure default matches the historical TACHI_EMBED_RAW_TIER-unset behavior: on"
+        );
 
         let mut missing = test_entry("missing");
         missing.tier = "consolidated".to_string();
@@ -586,7 +579,7 @@ mod tests {
         store.upsert(&embedded).expect("seed embedded");
         store.upsert(&test_entry("raw-entry")).expect("seed raw");
 
-        std::env::set_var("TACHI_EMBED_RAW_TIER", "1");
+        store.policy.embed.raw_tier_enabled = true;
         let entries = store.entries_missing_vectors(50).expect("scan vectors");
         let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(
@@ -611,7 +604,7 @@ mod tests {
             "non-raw rows must sort before raw regardless of importance"
         );
 
-        std::env::set_var("TACHI_EMBED_RAW_TIER", "0");
+        store.policy.embed.raw_tier_enabled = false;
         let entries = store
             .entries_missing_vectors(50)
             .expect("scan with raw excluded");

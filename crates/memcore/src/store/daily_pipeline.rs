@@ -28,7 +28,9 @@ impl MemoryStore {
         &self,
         limit: usize,
     ) -> Result<Vec<String>, MemoryError> {
-        db::list_memory_ids_needing_embedding(&self.conn, limit)
+        // tachi#1585 D5: this store's `KernelPolicy::embed`, not a
+        // `TACHI_EMBED_RAW_TIER` env read.
+        db::list_memory_ids_needing_embedding(&self.conn, limit, self.policy.embed.raw_tier_enabled)
     }
 
     pub fn list_promotion_candidate_ids(&self, limit: usize) -> Result<Vec<String>, MemoryError> {

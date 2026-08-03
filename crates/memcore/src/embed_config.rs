@@ -25,10 +25,16 @@ pub fn embed_raw_tier_enabled() -> bool {
     enabled
 }
 
-/// SQL fragment excluding raw tier when [`embed_raw_tier_enabled`] is false.
+/// SQL fragment excluding raw tier when `raw_tier_enabled` is false.
 /// `$alias` is the memories table alias (e.g. `m` or none for unaliased).
-pub(crate) fn embed_raw_tier_sql_filter(table_prefix: &str) -> String {
-    if embed_raw_tier_enabled() {
+///
+/// tachi#1585 D5: takes the gate explicitly instead of calling
+/// [`embed_raw_tier_enabled`] (a `TACHI_EMBED_RAW_TIER` env read) itself.
+/// Callers pass `MemoryStore`'s `KernelPolicy::embed.raw_tier_enabled`; the
+/// env-reading function remains available for the tachi-server adapter to
+/// resolve that field's value once.
+pub(crate) fn embed_raw_tier_sql_filter(table_prefix: &str, raw_tier_enabled: bool) -> String {
+    if raw_tier_enabled {
         String::new()
     } else {
         format!("AND {table_prefix}tier != 'raw' ")

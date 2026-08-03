@@ -154,11 +154,16 @@ pub fn count_consolidated_active_memories(conn: &Connection) -> Result<i64, Memo
     .map_err(MemoryError::from)
 }
 
+/// tachi#1585 D5: `raw_tier_enabled` is the caller's (a `MemoryStore`'s
+/// `KernelPolicy::embed.raw_tier_enabled`) explicit gate, not a
+/// `TACHI_EMBED_RAW_TIER` env read — this free function takes a bare
+/// `Connection` and has no store to draw one from itself.
 pub fn list_memory_ids_needing_embedding(
     conn: &Connection,
     limit: usize,
+    raw_tier_enabled: bool,
 ) -> Result<Vec<String>, MemoryError> {
-    let tier_filter = crate::embed_config::embed_raw_tier_sql_filter("m.");
+    let tier_filter = crate::embed_config::embed_raw_tier_sql_filter("m.", raw_tier_enabled);
     let order_by = crate::embed_config::embed_selection_order_by("m.");
     let sql = format!(
         "SELECT m.id FROM memories m

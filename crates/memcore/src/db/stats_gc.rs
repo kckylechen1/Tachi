@@ -294,8 +294,15 @@ pub(crate) fn write_gc_archived_receipt(
 /// The sweep is also now a single transaction. It has to be, for the receipt to
 /// mean anything: four autocommit statements could half-apply and leave a
 /// receipt describing an archival that partially rolled back.
+/// tachi#1585 D5: defaults to the pure `RecallConfig::default()`, not the
+/// process-wide `RecallConfig::get()`. This free function takes a bare
+/// `Connection` (no `MemoryStore` to draw a host-injected policy from); the
+/// real production entry point is `MemoryStore::archive_stale_memories`
+/// (`store/derived.rs`), which calls `archive_stale_memories_with_config`
+/// directly with the store's `KernelPolicy::recall` and never reaches this
+/// default.
 pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64, MemoryError> {
-    archive_stale_memories_with_config(conn, stale_days, crate::RecallConfig::get())
+    archive_stale_memories_with_config(conn, stale_days, &crate::RecallConfig::default())
 }
 
 /// Configurable twin used by discrimination tests and explicit rollback.
