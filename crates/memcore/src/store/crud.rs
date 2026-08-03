@@ -23,6 +23,11 @@ impl MemoryStore {
     ) -> Result<Vec<SearchResult>, MemoryError> {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
+        // tachi#1569: this is the only layer where both the store and the
+        // options exist, so it is where store identity enters the query. A
+        // caller-supplied value is overwritten on purpose — the store, not the
+        // request, is the authority on which database this is.
+        options.wiki_corpus_store = self.is_wiki_corpus_store();
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         retry_search_locked(&self.db_label, || {
@@ -40,6 +45,9 @@ impl MemoryStore {
     ) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
+        // Same store-identity injection as `search` (tachi#1569); the
+        // instrumented path must not measure a differently-gated query.
+        options.wiki_corpus_store = self.is_wiki_corpus_store();
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let (results, mut receipt) = retry_search_locked(&self.db_label, || {
@@ -56,6 +64,18 @@ impl MemoryStore {
     }
 
     /// Fetch a single entry by ID with archive visibility control.
+    ///
+    /// tachi#1569 deliberately leaves this route ungated, unlike the list
+    /// family above. An id-addressed read has no `path_prefix`, so it has no
+    /// shape to opt back in with (see
+    /// [`crate::namespace::is_internal_only_row`]'s doc), and the store's own
+    /// machinery addresses its bookkeeping rows by id through this exact
+    /// wrapper — `foundry_runtime_ops::wiki_evolver`'s REM ledger validation
+    /// calls `wiki_store.get_with_options("wiki-rem:…", true)` and treats a
+    /// `None` as a hard "ledger missing" error. Gating here would break that
+    /// on the Wiki store. The user-facing `get` surface stays filtered by
+    /// `tachi-server`'s `readable_entry`, whose predicate
+    /// (`is_internal_only_row`) is the exact negation of the wiki clause.
     pub fn get_with_options(
         &self,
         id: &str,
@@ -188,12 +208,22 @@ impl MemoryStore {
     }
 
     /// Fetch newest entries with archive visibility control.
+    ///
+    /// tachi#1569: like every list route on this store, the Wiki corpus's
+    /// internal rows are excluded in SQL when this handle *is* the Wiki
+    /// corpus — before the `limit` is applied, so bookkeeping rows can no
+    /// longer starve the caller's budget and then be dropped downstream.
     pub fn get_all_with_options(
         &self,
         limit: usize,
         include_archived: bool,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
-        db::get_all(&self.conn, limit, include_archived)
+        db::get_all(
+            &self.conn,
+            limit,
+            include_archived,
+            self.is_wiki_corpus_store(),
+        )
     }
 
     /// Id of an active non-REM row with the EXACT `path` and `text`, via a
@@ -214,7 +244,13 @@ impl MemoryStore {
         limit: usize,
         include_archived: bool,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
-        db::list_by_path(&self.conn, path_prefix, limit, include_archived)
+        db::list_by_path(
+            &self.conn,
+            path_prefix,
+            limit,
+            include_archived,
+            self.is_wiki_corpus_store(),
+        )
     }
 
     /// List active, unsuperseded entries under a path (exact + descendants).
@@ -223,7 +259,12 @@ impl MemoryStore {
         path_prefix: &str,
         limit: usize,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
-        db::list_by_path_active_unsuperseded(&self.conn, path_prefix, limit)
+        db::list_by_path_active_unsuperseded(
+            &self.conn,
+            path_prefix,
+            limit,
+            self.is_wiki_corpus_store(),
+        )
     }
 
     /// List entries under a path (exact + descendants), newest-first by
@@ -237,7 +278,13 @@ impl MemoryStore {
         limit: usize,
         include_archived: bool,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
-        db::list_by_path_recent(&self.conn, path_prefix, limit, include_archived)
+        db::list_by_path_recent(
+            &self.conn,
+            path_prefix,
+            limit,
+            include_archived,
+            self.is_wiki_corpus_store(),
+        )
     }
 
     /// Delete a memory entry by ID. Returns true if found and deleted.
@@ -406,5 +453,200 @@ mod tests {
             store.vec_available,
             "store capability, not caller input, controls the vector channel"
         );
+    }
+
+    fn store_identity_entry(id: &str, path: &str, text: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: path.to_string(),
+            summary: text.to_string(),
+            text: text.to_string(),
+            importance: 0.7,
+            timestamp: "2026-07-31T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "manual".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
+            revision: 1,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            metadata: serde_json::json!({}),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    /// tachi#1569 fixture: a file-backed store opened with an explicit
+    /// manifest label, seeded with one ordinary row and one recall-cache row.
+    /// Both ids carry the same needle so one query reaches both, and both
+    /// paths are write-legal in *any* labelled store, so the wiki and
+    /// non-wiki fixtures differ only by the store's identity — which is the
+    /// whole point of the comparison.
+    fn store_with_internal_rows(label: &str) -> (MemoryStore, std::path::PathBuf) {
+        let path = crate::test_fixtures::test_fixture_path(format!(
+            "memcore-store-identity-{}-{}.db",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        let path_string = path.to_string_lossy().into_owned();
+        let mut store =
+            MemoryStore::open_with_label(&path_string, label).expect("open labelled store");
+
+        store
+            .upsert(&store_identity_entry(
+                "store-identity-ordinary",
+                "/notes/store-identity",
+                "StoreIdentityNeedle ordinary user-facing content",
+            ))
+            .expect("seed ordinary row");
+        store
+            .upsert(&store_identity_entry(
+                "store-identity-cache",
+                "/recall-cache/store-identity",
+                "StoreIdentityNeedle rendered recall rows",
+            ))
+            .expect("seed recall-cache row");
+
+        (store, path)
+    }
+
+    fn search_ids(store: &MemoryStore, path_prefix: Option<&str>) -> Vec<String> {
+        let mut ids = store
+            .search(
+                "StoreIdentityNeedle",
+                Some(SearchOptions {
+                    top_k: 20,
+                    candidates_per_channel: 20,
+                    record_access: false,
+                    path_prefix: path_prefix.map(str::to_owned),
+                    ..Default::default()
+                }),
+            )
+            .expect("search")
+            .into_iter()
+            .map(|result| result.entry.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    /// (a) An unscoped query against the Wiki store must not return the
+    /// store's internal rows — and the reason must be the store's identity,
+    /// not the request's shape, which is what the identical query against an
+    /// identically-seeded non-wiki store proves is *not* doing the work here.
+    #[test]
+    fn unscoped_search_of_the_wiki_store_excludes_internal_rows() {
+        let (wiki_store, wiki_path) = store_with_internal_rows("wiki");
+        assert!(wiki_store.is_wiki_corpus_store());
+        assert_eq!(
+            search_ids(&wiki_store, None),
+            vec!["store-identity-ordinary".to_string()],
+            "an unscoped read of the wiki store must not surface its recall-cache rows"
+        );
+        drop(wiki_store);
+        let _ = std::fs::remove_file(wiki_path);
+    }
+
+    /// (b) The frozen tachi#1569 decision: an explicit `/recall-cache`
+    /// `path_prefix` still reaches those rows through the store-keyed gate.
+    /// Without this the SQL clause would drop them before the Rust classifier
+    /// (`is_namespace_search_noise`'s opt-in) could hand them back.
+    #[test]
+    fn recall_cache_opt_in_survives_the_store_keyed_gate() {
+        let (wiki_store, wiki_path) = store_with_internal_rows("wiki");
+        assert_eq!(
+            search_ids(&wiki_store, Some("/recall-cache")),
+            vec!["store-identity-cache".to_string()],
+            "an explicit /recall-cache prefix is an opt-in, not a leak"
+        );
+        drop(wiki_store);
+        let _ = std::fs::remove_file(wiki_path);
+    }
+
+    /// (c) A store that is not the Wiki corpus is unaffected: same rows, same
+    /// query, no gate. (The rows still reach the caller here because the Rust
+    /// noise classifier is a ranking-time filter for search *results*, and
+    /// this store is not the wiki corpus, so nothing in SQL excludes them.)
+    #[test]
+    fn a_non_wiki_store_is_not_gated_by_store_identity() {
+        let (project_store, project_path) = store_with_internal_rows("some-project");
+        assert!(!project_store.is_wiki_corpus_store());
+        assert!(
+            project_store
+                .list_by_path("/recall-cache", 10, false)
+                .expect("list")
+                .iter()
+                .any(|entry| entry.id == "store-identity-cache"),
+            "a non-wiki store must keep returning every row it did before"
+        );
+        drop(project_store);
+        let _ = std::fs::remove_file(project_path);
+    }
+
+    /// The list family is the surface tachi#1561 had to patch server-side
+    /// because it never reached the wiki clause at all. Store identity now
+    /// excludes internal rows *before* the `LIMIT` is applied.
+    #[test]
+    fn list_routes_of_the_wiki_store_exclude_internal_rows_before_the_limit() {
+        let (wiki_store, wiki_path) = store_with_internal_rows("wiki");
+        let listed = wiki_store.list_by_path("/", 10, false).expect("list");
+        assert!(
+            listed
+                .iter()
+                .any(|entry| entry.id == "store-identity-ordinary"),
+            "ordinary rows must still list"
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|entry| entry.id == "store-identity-cache"),
+            "the wiki store's internal rows must not consume a list budget"
+        );
+
+        // …and the same opt-in applies here.
+        let opted_in = wiki_store
+            .list_by_path("/recall-cache", 10, false)
+            .expect("list opted in");
+        assert!(
+            opted_in
+                .iter()
+                .any(|entry| entry.id == "store-identity-cache"),
+            "an explicit /recall-cache list prefix opts back in, exactly as search does"
+        );
+
+        let recent = wiki_store
+            .list_by_path_recent("/", 10, false)
+            .expect("list recent");
+        assert!(!recent
+            .iter()
+            .any(|entry| entry.id == "store-identity-cache"));
+        let all = wiki_store.get_all(10).expect("get_all");
+        assert!(!all.iter().any(|entry| entry.id == "store-identity-cache"));
+
+        // Id-addressed reads stay ungated on purpose: the store's own
+        // machinery fetches its bookkeeping rows this way (see
+        // `get_with_options`' doc).
+        assert!(
+            wiki_store
+                .get("store-identity-cache")
+                .expect("get by id")
+                .is_some(),
+            "an id-addressed read must still resolve internal rows"
+        );
+        drop(wiki_store);
+        let _ = std::fs::remove_file(wiki_path);
     }
 }

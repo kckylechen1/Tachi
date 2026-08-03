@@ -17,6 +17,20 @@
 
 use std::fmt;
 
+/// Manifest label of the Wiki corpus database.
+///
+/// One constant for both sides of the store: the write-time routing guard
+/// below and [`crate::MemoryStore::is_wiki_corpus_store`], which the read path
+/// uses to decide whether a query is reading the Wiki corpus (tachi#1569).
+/// Two separate literals is exactly the drift that made the read path key its
+/// Wiki gate on the request's `path_prefix` instead of on the store.
+pub const WIKI_CORPUS_DB_LABEL: &str = "wiki";
+
+/// Label carried by a store opened without a manifest identity. Path-routing
+/// validation is disabled for these, and every identity-keyed predicate must
+/// answer "no" for them.
+pub const UNKNOWN_DB_LABEL: &str = "unknown";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathRouting {
     /// Path belongs in the project DB (default).
@@ -137,6 +151,18 @@ pub(crate) fn classify_path(p: &str) -> PathRouting {
     PathRouting::Project
 }
 
+/// Whether `db_label` names the Wiki corpus store.
+///
+/// The single definition behind both the write-time routing guard and
+/// [`crate::MemoryStore::is_wiki_corpus_store`]. It is an exact match on
+/// [`WIKI_CORPUS_DB_LABEL`], not a prefix or suffix test: a label like
+/// `named-project:wiki` is deliberately *not* the Wiki corpus, because the
+/// read and write paths are required to hand the same store the same label
+/// (tachi#1569) rather than teaching every consumer to parse decorations.
+pub fn db_label_is_wiki_corpus(db_label: &str) -> bool {
+    db_label == WIKI_CORPUS_DB_LABEL
+}
+
 /// Validate that `path` is permitted in DB labelled `db_label`.
 ///
 /// `allow_cross_project=true` bypasses all rejections (used by handoff/kanban
@@ -152,7 +178,10 @@ pub(crate) fn validate_path_for_db(
     let normalized = normalize_path(path);
     match classify_path(&normalized) {
         PathRouting::WikiOnly => {
-            if db_label != "wiki" {
+            // Same predicate the read path consults through
+            // `MemoryStore::is_wiki_corpus_store` (tachi#1569): one definition
+            // of "this store is the Wiki corpus", consulted from both sides.
+            if !db_label_is_wiki_corpus(db_label) {
                 return Err(PathRoutingError::WikiPathInNonWikiDb {
                     path: normalized,
                     db_label: db_label.to_string(),

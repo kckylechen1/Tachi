@@ -40,6 +40,11 @@ pub(crate) async fn handle_sync_memories(
     // existing explicit opt-ins (`/recall-cache*`, `/kanban*`, `/handoff*`,
     // projection prefixes) still resolve. Runs before the limit so bookkeeping
     // rows cannot crowd out real changes.
+    //
+    // tachi#1569: for the Wiki store the same rows are already excluded in
+    // SQL by `list_by_path_recent` itself. This stays as the second line —
+    // it covers the classes the Wiki clause does not (kanban, handoff,
+    // projections) and every store that is not the Wiki corpus.
     all_entries.retain(|(entry, _)| crate::memory_ops::is_listable_row(entry, Some(path_prefix)));
     all_entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));
     all_entries.truncate(limit);

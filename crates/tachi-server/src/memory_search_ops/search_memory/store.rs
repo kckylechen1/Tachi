@@ -52,10 +52,13 @@ impl RequestScopedNamedProjectReads {
         if self.stores.contains_key(project_name) {
             return Ok(());
         }
-        let label = format!("named-project:{project_name}");
+        // Bare project name: this label becomes the opened store's `db_label`
+        // (tachi#1569), and it must equal the write-side label for the same
+        // file or the store-keyed Wiki gate sees a different store here than
+        // it does through the attached-path route.
         if let Some(store) = server
             .db
-            .open_unattached_path_store_read_session_with_label(canonical_path, &label)?
+            .open_unattached_path_store_read_session_with_label(canonical_path, project_name)?
         {
             self.stores.insert(project_name.to_string(), store);
         }

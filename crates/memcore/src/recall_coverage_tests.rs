@@ -283,6 +283,7 @@ fn recall_coverage_rejects_lexical_only_target_omitted_from_vector_channel() {
         None,
         None,
         None,
+        false,
     )
     .expect("vector candidate search");
 
@@ -320,6 +321,7 @@ fn recall_coverage_rejects_lexical_only_target_omitted_from_vector_channel() {
         None,
         None,
         None,
+        false,
     )
     .expect("repeat vector candidate search");
     assert!(
@@ -652,6 +654,7 @@ fn reviewed_equivalence_fixture(
         None,
         None,
         None,
+        false,
     )
     .expect("vector candidate search");
     let actual_canonical_id = vector_candidates

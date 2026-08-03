@@ -425,7 +425,7 @@ fn graph_limited_queries_stop_in_sql_before_decoding_rows_past_the_ceiling() {
         .unwrap()
         .is_empty());
 
-    let expanded = graph_expand_limited(&conn, &["limit-root".into()], 1, None, 2).unwrap();
+    let expanded = graph_expand_limited(&conn, &["limit-root".into()], 1, None, 2, false).unwrap();
     assert_eq!(expanded.edges.len(), 2);
     assert_eq!(expanded.entries.len(), 2);
 }
@@ -453,7 +453,7 @@ fn graph_limited_queries_do_not_let_seen_parent_edges_consume_the_budget() {
         .unwrap();
     }
 
-    let expanded = graph_expand_limited(&conn, &["a-root".into()], 2, None, 2).unwrap();
+    let expanded = graph_expand_limited(&conn, &["a-root".into()], 2, None, 2, false).unwrap();
     assert_eq!(expanded.edges.len(), 2);
     assert_eq!(expanded.entries.len(), 2);
 }
@@ -496,13 +496,13 @@ fn graph_expand_bfs() {
     // d is disconnected
 
     // Expand 1 hop from "a"
-    let r1 = graph_expand(&conn, &["a".into()], 1, None).unwrap();
+    let r1 = graph_expand(&conn, &["a".into()], 1, None, false).unwrap();
     assert_eq!(r1.entries.len(), 1); // should find b
     assert!(r1.distances.contains_key("b"));
     assert!(!r1.distances.contains_key("c")); // c is 2 hops
 
     // Expand 2 hops from "a"
-    let r2 = graph_expand(&conn, &["a".into()], 2, None).unwrap();
+    let r2 = graph_expand(&conn, &["a".into()], 2, None, false).unwrap();
     assert_eq!(r2.entries.len(), 2); // b and c
     assert!(r2.distances.contains_key("c"));
     assert!(!r2.distances.contains_key("d")); // d is disconnected
@@ -1775,4 +1775,97 @@ fn confirmed_contradiction_commits_despite_recall_count_drift_on_both_sides() {
         ConfirmedContradictionOutcome::Committed,
         "recall_count/query_diversity drift alone must not sink an otherwise-valid verdict"
     );
+}
+
+/// tachi#1569 (cross-vendor review, BUG 1): `graph_expand` is a public read
+/// surface with no post-expansion Rust filter of its own. On the Wiki store an
+/// ordinary seed that neighbours an internal row used to hand that row's full
+/// body back in `GraphExpandResult.entries`.
+///
+/// The `false`/`true` pair is the discrimination: same graph, same seed —
+/// deleting the store-identity argument from the entry fetch turns the second
+/// half of this test red.
+#[test]
+fn graph_expansion_entries_are_gated_on_store_identity() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("gx-seed", "public seed row"), false).unwrap();
+    upsert(
+        &mut conn,
+        &make_entry("gx-neighbour", "ordinary neighbour row"),
+        false,
+    )
+    .unwrap();
+    // An internal Wiki row reachable in one hop from the public seed. Its
+    // internal identity is the `metadata.wiki_log` flag, which `upsert`
+    // refuses to mint (the operation-log identity is reserved for the trusted
+    // Wiki log seam), so the fixture sets it afterwards on the raw connection
+    // — the same shape `search::tests::noise::hybrid_hides_operation_logs`
+    // uses. The primary key is left alone.
+    upsert(
+        &mut conn,
+        &make_entry("gx-internal", "wiki operation log body"),
+        false,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memories SET metadata = json_set(COALESCE(NULLIF(metadata, ''), '{}'), '$.wiki_log', 1) WHERE id = 'gx-internal'",
+        [],
+    )
+    .unwrap();
+
+    // `references` for both arms: the seed points at each neighbour the same
+    // way, so the only difference between them is the target's internal-ness —
+    // which is the single variable this test is about. (`related_to` is
+    // retired on new writes and is the relation `close_related_to_fog` closes,
+    // so it would have been the wrong shape here even if it still validated.)
+    for target in ["gx-neighbour", "gx-internal"] {
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "gx-seed".into(),
+                target_id: target.into(),
+                relation: "references".into(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+    }
+
+    let ungated = graph_expand(&conn, &["gx-seed".into()], 1, None, false).unwrap();
+    let ungated_ids = ungated
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        ungated_ids.contains("gx-neighbour") && ungated_ids.contains("gx-internal"),
+        "a non-wiki store must expand exactly as it did before: {ungated_ids:?}"
+    );
+
+    let gated = graph_expand(&conn, &["gx-seed".into()], 1, None, true).unwrap();
+    let gated_ids = gated
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        gated_ids.contains("gx-neighbour"),
+        "gating must not cost the caller ordinary neighbours: {gated_ids:?}"
+    );
+    assert!(
+        !gated_ids.contains("gx-internal"),
+        "the wiki store must not hand an internal row back through graph expansion: {gated_ids:?}"
+    );
+    // The traversal itself is unchanged: the edge and the distance still
+    // record that the graph reaches that node (see `graph_expand_limited`'s
+    // note on why edges are not withheld).
+    assert!(gated
+        .edges
+        .iter()
+        .any(|edge| edge.target_id == "gx-internal"));
+    assert!(gated.distances.contains_key("gx-internal"));
 }

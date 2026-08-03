@@ -846,7 +846,7 @@ fn run_recall_coverage_probe_internal(
     // store may itself be read-only; hybrid search stays read-only because the
     // options below set `record_access` false.
     let transaction = store.connection().unchecked_transaction()?;
-    let all_entries = crate::db::get_all(&transaction, i64::MAX as usize, true)?;
+    let all_entries = crate::db::get_all(&transaction, i64::MAX as usize, true, false)?;
     let supersession_links = supersession_links(&transaction)?;
 
     let mut partition = RecallCoveragePartitionCounts {

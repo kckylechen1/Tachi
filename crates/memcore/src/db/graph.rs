@@ -7,7 +7,7 @@ use crate::relation_ontology::ComponentGovernanceRelation;
 use crate::types::{ExpectedMemoryState, GraphExpandResult, MemoryEdge};
 
 use super::common::{normalize_utc_iso_or_now, now_utc_iso};
-use super::memory_crud::fetch_by_ids;
+use super::memory_crud::{fetch_by_ids, fetch_by_ids_excluding_store_internal};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -869,8 +869,16 @@ pub fn graph_expand(
     seed_ids: &[String],
     max_hops: u32,
     relation_filter: Option<&str>,
+    wiki_corpus_store: bool,
 ) -> Result<GraphExpandResult, MemoryError> {
-    graph_expand_limited(conn, seed_ids, max_hops, relation_filter, usize::MAX)
+    graph_expand_limited(
+        conn,
+        seed_ids,
+        max_hops,
+        relation_filter,
+        usize::MAX,
+        wiki_corpus_store,
+    )
 }
 
 /// BFS graph expansion with a global edge ceiling enforced in each SQLite batch.
@@ -880,6 +888,7 @@ pub fn graph_expand_limited(
     max_hops: u32,
     relation_filter: Option<&str>,
     edge_limit: usize,
+    wiki_corpus_store: bool,
 ) -> Result<GraphExpandResult, MemoryError> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -974,10 +983,19 @@ pub fn graph_expand_limited(
         .cloned()
         .collect();
 
+    // tachi#1569 (cross-vendor review): these rows are the *system's* choice,
+    // not ids the caller named, so on the Wiki store they carry the same
+    // internal-row exclusion search results do. Seeds keep their existing
+    // semantics — they are the caller's own ids and are excluded from
+    // `entries` anyway. `edges` and `distances` still reference internal ids
+    // where the graph really connects to one: withholding an edge would
+    // change hop counts and spreading-activation weights, which is a
+    // different decision from withholding a row's content.
     let entries = if non_seed_ids.is_empty() {
         Vec::new()
     } else {
-        let map = fetch_by_ids(conn, &non_seed_ids, false)?;
+        let map =
+            fetch_by_ids_excluding_store_internal(conn, &non_seed_ids, false, wiki_corpus_store)?;
         map.into_values().collect()
     };
 

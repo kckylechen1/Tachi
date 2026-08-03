@@ -23,13 +23,14 @@ pub use access::{
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{
-    fetch_by_ids, find_active_wiki_entry_by_path, find_exact_path_text_id, get_all,
-    is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
+    fetch_by_ids, fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path,
+    find_exact_path_text_id, get_all, is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
     list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
     list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
+pub(crate) use search::wiki_corpus_store_sql_splice;
 pub use search::{
     search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
@@ -3093,6 +3094,7 @@ mod idless_upsert_tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(
@@ -3303,6 +3305,7 @@ mod idless_upsert_tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(

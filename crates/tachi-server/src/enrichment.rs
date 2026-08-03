@@ -1183,6 +1183,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    false,
                 )
                 .map_err(|e| format!("fts before: {e}"))
             })
@@ -1257,6 +1258,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    false,
                 )
                 .map_err(|e| format!("fts after: {e}"))
             })
@@ -1746,6 +1748,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    false,
                 )
                 .map_err(|e| format!("fts: {e}"))
             })
