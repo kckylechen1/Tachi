@@ -15,6 +15,22 @@ use crate::{
 };
 
 impl MemoryStore {
+    /// Fill `options.recall_config`/`decay_policy` from this store's
+    /// host-injected [`crate::KernelPolicy`] when the caller left them
+    /// unset. A caller-supplied per-call override always wins (tachi#1585
+    /// D5 point 6) — this only supplies the store-level default that the
+    /// `SearchOptions` seam falls back to, in place of the process-wide
+    /// `RecallConfig::get()`/`DEFAULT_DECAY_POLICY` fallbacks those seams
+    /// used before a store existed to ask.
+    fn apply_kernel_policy_defaults(&self, options: &mut SearchOptions) {
+        if options.recall_config.is_none() {
+            options.recall_config = Some(self.policy.recall.clone());
+        }
+        if options.decay_policy.is_none() {
+            options.decay_policy = Some(self.policy.decay.clone());
+        }
+    }
+
     /// Hybrid search: Text + FTS5 + optional vector channel.
     pub fn search(
         &self,
@@ -28,6 +44,7 @@ impl MemoryStore {
         // caller-supplied value is overwritten on purpose — the store, not the
         // request, is the authority on which database this is.
         options.wiki_corpus_store = self.is_wiki_corpus_store();
+        self.apply_kernel_policy_defaults(&mut options);
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         retry_search_locked(&self.db_label, || {
@@ -48,6 +65,7 @@ impl MemoryStore {
         // Same store-identity injection as `search` (tachi#1569); the
         // instrumented path must not measure a differently-gated query.
         options.wiki_corpus_store = self.is_wiki_corpus_store();
+        self.apply_kernel_policy_defaults(&mut options);
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let (results, mut receipt) = retry_search_locked(&self.db_label, || {
