@@ -1,6 +1,12 @@
 use super::*;
 
 // ─── GitHub status / events helpers ──────────────────────────────────
+//
+// Relocated from `shell_ops/tests/github_status_events.rs` alongside the
+// implementation move in kckylechen1/tachi#1490. The assertions are unchanged;
+// they now prove the canonical Task-lifecycle owner preserves the same
+// persisted `status.json` / `events.jsonl` shape, deep-merge/null-clear
+// semantics, allow-lists, reserved framing keys, timestamps, and error text.
 
 fn read_events_jsonl(run_dir: &Path) -> Vec<Value> {
     let raw = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap_or_default();

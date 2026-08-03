@@ -25,17 +25,16 @@ mod actions;
 mod flow;
 mod injection;
 mod instruction;
-mod shell_github;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-use self::flow::new_flow_id;
 use self::flow::{
-    advance_stage, injection_to_json, read_status, read_status_async, resolve_or_create_flow,
-    slugify, validate_slice_id,
+    advance_stage, injection_to_json, read_status_async, resolve_or_create_flow, slugify,
+    validate_slice_id,
 };
+#[cfg(test)]
+use self::flow::{new_flow_id, read_status};
 #[cfg(test)]
 use self::injection::meta_skill_for_stage;
 use self::injection::{inject_meta_skill, InjectionResult};
@@ -46,4 +45,3 @@ pub(crate) use self::actions::handle_tachi_shell;
 use self::actions::{handle_status_action, resolve_slice_id};
 #[cfg(test)]
 pub(crate) use self::flow::tachi_run_root_env_lock;
-pub(crate) use shell_github::*;
