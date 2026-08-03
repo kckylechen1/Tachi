@@ -432,22 +432,33 @@ fn external_staffing_budgets_discriminate_every_growth_axis() {
         );
 
         let mut shrunk = fixture["observed_topology"].clone();
+        // An axis already at its empty floor (e.g. linked_result_copies after
+        // [1319-D1]) cannot be shrunk further, so its deletion-ratchet check is
+        // vacuous — skip the pop/assertion only when there is nothing to pop.
+        let already_empty = shrunk[key].as_array().is_some_and(|array| array.is_empty());
         shrunk[key].as_array_mut().expect("inventory array").pop();
-        assert!(
-            budget_violations(&shrunk, &fixture["contraction_budgets"])
-                .iter()
-                .any(|violation| violation.contains(key)),
-            "{key} deletion must ratchet its budget in the same change"
-        );
+        if !already_empty {
+            assert!(
+                budget_violations(&shrunk, &fixture["contraction_budgets"])
+                    .iter()
+                    .any(|violation| violation.contains(key)),
+                "{key} deletion must ratchet its budget in the same change"
+            );
+        }
         let mut ratcheted = fixture["contraction_budgets"].clone();
         ratcheted[budget_key] = json!(shrunk[key].as_array().expect("inventory").len());
         assert!(budget_violations(&shrunk, &ratcheted).is_empty());
-        assert!(
-            budget_violations(&fixture["observed_topology"], &ratcheted)
-                .iter()
-                .any(|violation| violation.contains(key)),
-            "{key} cannot regrow after a ratchet"
-        );
+        // The regrow check is only meaningful when observed is strictly above
+        // the floor: an axis already at 0 cannot regrow past a 0 budget, so the
+        // violation it would rely on is structurally absent.
+        if !already_empty {
+            assert!(
+                budget_violations(&fixture["observed_topology"], &ratcheted)
+                    .iter()
+                    .any(|violation| violation.contains(key)),
+                "{key} cannot regrow after a ratchet"
+            );
+        }
     }
 }
 

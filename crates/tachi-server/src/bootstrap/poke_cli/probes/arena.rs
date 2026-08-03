@@ -33,10 +33,6 @@ fn arena_params(action: &str) -> TachiArenaParams {
         credential_profiles: Vec::new(),
         tool_profile: None,
         auto_capability_bundle: None,
-        reason: None,
-        dry_run: None,
-        force: false,
-        require_collected: None,
     }
 }
 
@@ -47,30 +43,15 @@ fn parse_json(label: &str, raw: &str) -> Result<Value, String> {
 pub(in crate::bootstrap::poke_cli) async fn probe_arena_lifecycle(
     server: &MemoryServer,
 ) -> Result<Value, String> {
-    let mut open = arena_params("open");
-    open.title = Some("Poke arena lifecycle".to_string());
-    open.objective = Some("Verify tachi_arena open/spawn/board/collect/close.".to_string());
-    let opened = parse_json("open", &server.tachi_arena(Parameters(open)).await?)?;
-    let arena_id = opened
-        .get("arena_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("open response lacks arena_id: {opened}"))?
-        .to_string();
-    let arena_dir = PathBuf::from(
-        opened
-            .get("arena_dir")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("open response lacks arena_dir: {opened}"))?,
-    );
-    if !arena_dir.join("manifest.json").exists() || !arena_dir.join("board.json").exists() {
-        return Err(format!(
-            "arena open did not create manifest/board in {}",
-            arena_dir.display()
-        ));
-    }
-
+    // [1319-D1] the open/abort/close/reap actions were removed (no real
+    // authority); spawn now auto-provisions the arena directory and is the last
+    // launch-advertising facade. The probe exercises the surviving
+    // spawn/board/collect path.
+    let arena_id = "arena_20260606T000000Z_poke".to_string();
     let mut spawn = arena_params("spawn");
     spawn.arena_id = Some(arena_id.clone());
+    spawn.title = Some("Poke arena lifecycle".to_string());
+    spawn.objective = Some("Verify tachi_arena spawn/board/collect.".to_string());
     spawn.role = Some("critic".to_string());
     spawn.harness = Some("manual".to_string());
     spawn.prompt = Some("Review this poke mission and write result.md.".to_string());
@@ -83,6 +64,13 @@ pub(in crate::bootstrap::poke_cli) async fn probe_arena_lifecycle(
     if spawned.get("state").and_then(Value::as_str) != Some("ready") {
         return Err(format!("manual spawn should be ready: {spawned}"));
     }
+    let arena_dir = PathBuf::from(
+        spawned
+            .get("mission_dir")
+            .and_then(Value::as_str)
+            .and_then(|dir| std::path::Path::new(dir).parent().and_then(|p| p.parent()))
+            .ok_or_else(|| format!("spawn response lacks mission_dir: {spawned}"))?,
+    );
     let plan_path = PathBuf::from(
         spawned
             .get("plan_path")
@@ -131,30 +119,21 @@ pub(in crate::bootstrap::poke_cli) async fn probe_arena_lifecycle(
         ));
     }
 
-    let mut close = arena_params("close");
-    close.arena_id = Some(arena_id.clone());
-    let closed = parse_json("close", &server.tachi_arena(Parameters(close)).await?)?;
-    if closed.get("state").and_then(Value::as_str) != Some("closed") {
-        return Err(format!("arena close did not close: {closed}"));
-    }
-
     Ok(json!({
         "name": "arena_lifecycle",
         "status": "passed",
-        "expected": "manual arena mission can open, spawn, refresh board, collect result, and close",
+        "expected": "manual arena mission can spawn, refresh board, and collect result",
         "observed": {
             "arena_id": arena_id,
             "mission_id": mission_id,
             "arena_dir": arena_dir.to_string_lossy(),
             "plan_path": plan_path.to_string_lossy(),
             "result_path": result_path.to_string_lossy(),
-            "close": closed,
         },
         "repro_steps": [
-            "tachi_arena open in isolated TACHI_ARENA_ROOT",
             "tachi_arena spawn harness=manual launch=false",
             "write plan.md/result.md",
-            "tachi_arena board then collect then close"
+            "tachi_arena board then collect"
         ],
     }))
 }

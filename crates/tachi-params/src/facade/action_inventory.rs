@@ -103,10 +103,11 @@ pub const TACHI_STAFF_ACTIONS: &[&str] = &["start", "status"];
 
 /// `tachi_arena` facade actions. Single source for
 /// `orchestration::tachi_arena_action_schema` and #1098's `action_effect`
-/// completeness test.
-pub const TACHI_ARENA_ACTIONS: &[&str] = &[
-    "open", "spawn", "board", "collect", "abort", "reap", "close",
-];
+/// completeness test. [1319-D1] removed the no-real-authority actions
+/// (open/abort/close/reap) and collect's linked-result COPY; arena now exposes
+/// only spawn (the last launch-advertising facade) plus board/collect that read
+/// canonical state. Full arena deletion lands in [D2].
+pub const TACHI_ARENA_ACTIONS: &[&str] = &["spawn", "board", "collect"];
 
 /// `tachi_orchestrator` facade actions. Single source for
 /// `orchestration::tachi_orchestrator_action_schema` and #1098's

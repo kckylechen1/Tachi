@@ -358,13 +358,6 @@ fn slugify(s: &str, fallback: &str) -> String {
     }
 }
 
-pub(super) fn new_arena_id(title: Option<&str>, objective: Option<&str>) -> String {
-    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let basis = title.or(objective).unwrap_or("arena");
-    let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
-    format!("arena_{}_{}_{}", stamp, slugify(basis, "arena"), suffix)
-}
-
 pub(super) fn new_mission_id(role: Option<&str>, prompt: Option<&str>) -> String {
     let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
     let basis = role.or(prompt).unwrap_or("mission");

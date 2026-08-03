@@ -43,20 +43,25 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
         } else {
             "result_read_error"
         };
+        let mut canonical_result_ref = Value::Null;
+        // collect no longer COPIES the linked dispatch result.md into the
+        // mission result.md (the linked_result_copies ratchet). Instead it
+        // reads the canonical dispatch run_dir/result.md reference and surfaces
+        // it for the caller; the canonical artifact stays the single source of
+        // truth.
         if result.trim().is_empty() && artifact_read_errors.is_empty() {
             if let Some(dispatch_id) = status_before.get("dispatch_id").and_then(Value::as_str) {
                 let run_dir_hint = status_before.get("run_dir").and_then(Value::as_str);
                 match read_linked_dispatch_result(dispatch_id, run_dir_hint) {
                     Ok(Some(dispatch_result)) => {
-                        crate::utils::write_owner_only_file_atomic(
-                            &result_path,
-                            dispatch_result.as_bytes(),
-                        )
-                        .map_err(|e| format!("write linked dispatch result.md: {e}"))?;
                         result = dispatch_result;
                         result_source = "linked_dispatch_result";
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        if let Some(run_dir) = run_dir_hint {
+                            canonical_result_ref = json!(format!("{run_dir}/result.md"));
+                        }
+                    }
                     Err(error) => {
                         artifact_read_errors.push(error);
                         result_source = "result_read_error";
@@ -83,9 +88,14 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
             }
         };
         let artifact_read_error = artifact_read_errors.first().cloned();
+        // [1319-D1] collect no longer copies the linked dispatch result into the
+        // mission result.md, so a collected state must be reachable from either
+        // a locally-written mission result OR a successfully-read canonical
+        // linked dispatch result (result_source == "linked_dispatch_result").
+        let canonical_result_read = result_source == "linked_dispatch_result";
         let state = if !artifact_read_errors.is_empty() {
             "artifact_read_error"
-        } else if result_written {
+        } else if result_written || canonical_result_read {
             "collected"
         } else {
             "pending_result"
@@ -119,6 +129,7 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
             "result_source": result_source,
             "plan_path": plan_path,
             "result_path": result_path,
+            "canonical_result_ref": canonical_result_ref,
             "result": result,
             "artifact_read_error": artifact_read_error,
             "artifact_read_errors": artifact_read_errors,

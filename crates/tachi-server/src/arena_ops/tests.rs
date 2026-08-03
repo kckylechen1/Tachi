@@ -89,9 +89,5 @@ fn params(action: &str) -> TachiArenaParams {
         credential_profiles: Vec::new(),
         tool_profile: None,
         auto_capability_bundle: None,
-        reason: None,
-        dry_run: None,
-        force: false,
-        require_collected: None,
     }
 }
