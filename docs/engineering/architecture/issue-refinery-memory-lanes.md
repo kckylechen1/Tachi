@@ -156,6 +156,8 @@ FreezeReceiptV1 {
 }
 ```
 
+> Status note (2026-08-03): the approver-authority leaf defining ApprovalReceiptV1 was deleted (#1583). This passage remains the normative target shape for any future implementation, to be built against the tree as it stands then.
+
 `SourceKindV1` is the one source-artifact vocabulary used by refs and recall.
 `authority_class` is deliberately separate: it describes what a source may
 decide, not what kind of source it is.

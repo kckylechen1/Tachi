@@ -81,20 +81,6 @@ mod action_effect;
 mod agent_eval;
 mod agent_markdown;
 mod agent_registry;
-/// #1382 — server-verified human approver authority for governed apply gates.
-/// The decision logic is `tachi_params::approver_authority` (pure); this
-/// module is its live GitHub probe plus the owner-controlled policy loader.
-///
-/// **NOT WIRED YET.** #1077 owns the governed precedent establishment /
-/// overturn transition that would call this gate at its mutation choke point
-/// and revalidate immediately before it writes. No such transition exists in
-/// this crate today, so this declaration is the module's only reference:
-/// nothing is gated by it yet. The crate-private choke-point entry points
-/// that used to wrap `tachi_params`'s pure decision functions for that
-/// caller were deleted with the dormant `governed_precedent_establishment`
-/// stack (#1564); #1077's real caller should re-derive them against the code
-/// that exists when it is built, not restore that scaffolding.
-pub mod approver_authority;
 mod arena_ops;
 mod bootstrap;
 mod build_broker;

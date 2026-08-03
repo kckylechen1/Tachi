@@ -12,10 +12,13 @@
 //! acceptance contract, left for later leaves per the canon doc's delivery
 //! sequence): the generic `EvidenceEnvelopeV1<T>` wrapper,
 //! `AuthorityClassV1`/`AdjudicationStatusV1`, `ApprovalReceiptV1`, and
-//! `FreezeReceiptV1`. The proposal replay-staleness *check* required by
-//! #1002 is implemented directly against `IssueDispositionProposalV1`'s own
-//! pinned fields (see [`check_proposal_replay`]) without a separate receipt
-//! type, since #1002's contract explicitly excludes the apply boundary.
+//! `FreezeReceiptV1` (of these, `ApprovalReceiptV1` was the approver-authority
+//! type, deleted with that dormant leaf — see #1583; `AuthorityClassV1` has
+//! since landed in `recall_evidence.rs`). The proposal replay-staleness
+//! *check* required by #1002 is implemented directly against
+//! `IssueDispositionProposalV1`'s own pinned fields (see
+//! [`check_proposal_replay`]) without a separate receipt type, since
+//! #1002's contract explicitly excludes the apply boundary.
 
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};

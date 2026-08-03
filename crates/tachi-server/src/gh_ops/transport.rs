@@ -191,10 +191,10 @@ pub(in crate::gh_ops) fn build_gh_command(
 }
 
 /// Rebuild the hardened `gh` command from an already-resolved executable and
-/// credential. The approver-authority probe uses this after it pins one
-/// credential context for an entire verification round; keeping the command
-/// hardening here prevents that special case from growing a second, weaker
-/// environment builder.
+/// credential, keeping the command hardening in one place so a caller that
+/// pins one credential context cannot grow a second, weaker environment
+/// builder. (The approver-authority probe that motivated this split was
+/// deleted at #1583.)
 pub(in crate::gh_ops) fn build_gh_command_for_resolved_credential(
     gh_path: &str,
     token: Option<&str>,
