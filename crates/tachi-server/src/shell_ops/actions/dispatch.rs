@@ -1,4 +1,3 @@
-use super::convoy::handle_convoy_dispatch_action;
 use super::*;
 
 pub(super) async fn handle_dispatch_action(
@@ -31,19 +30,6 @@ pub(super) async fn handle_dispatch_action(
 
     advance_stage(&run_dir, &flow_id, "dispatch", &task, &injection, created)?;
     let required_skills = crate::skill_policy::shell_stage_skills("dispatch");
-
-    if !params.slices.is_empty() {
-        return handle_convoy_dispatch_action(
-            server,
-            params,
-            &flow_id,
-            &run_dir,
-            created,
-            &injection,
-            &instr_path,
-        )
-        .await;
-    }
 
     // Phase 4 hook: optionally invoke the existing async dispatcher.
     let mut dispatch_id: Option<String> = None;

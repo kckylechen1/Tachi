@@ -79,25 +79,6 @@ pub(crate) fn shell_stage_skills(stage: &str) -> Vec<String> {
     }
 }
 
-pub(crate) fn worker_skills_for_task(task: &str) -> Vec<String> {
-    let route = crate::copilot_ops::build_task_brief_routing(task, &[]);
-    let mut skills = ids(&[WAZA_TACHI]);
-    append_builtin_sops(&mut skills, route.selected_sops.into_iter());
-    dedupe_preserve_order(&mut skills);
-    skills
-}
-
-pub(crate) fn worker_skills_for_convoy_slice(parent_task: &str, slice_task: &str) -> Vec<String> {
-    let combined = format!("{parent_task}\n{slice_task}");
-    let mut skills = ids(&[
-        SUPERPOWER_EXECUTING_PLANS,
-        SUPERPOWER_REQUESTING_CODE_REVIEW,
-    ]);
-    skills.extend(worker_skills_for_task(&combined));
-    dedupe_preserve_order(&mut skills);
-    skills
-}
-
 pub(crate) fn is_native_skill(id: &str) -> bool {
     matches!(
         id,
@@ -166,13 +147,6 @@ mod tests {
         let execute = dispatch_stage_skills("execute");
         assert!(!execute.contains(&SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT.to_string()));
         assert!(execute.contains(&SUPERPOWER_EXECUTING_PLANS.to_string()));
-    }
-
-    #[test]
-    fn worker_policy_maps_gh_review_tasks_to_check() {
-        let skills = worker_skills_for_task("look at the new GitHub PR and issues");
-        assert!(skills.contains(&WAZA_CHECK.to_string()), "{skills:?}");
-        assert!(skills.contains(&WAZA_TACHI.to_string()), "{skills:?}");
     }
 
     #[test]

@@ -29,7 +29,6 @@ fn resolve_or_create_flow_creates_dir() {
         notes: None,
         validation: vec![],
         allowed_scope: vec![],
-        slices: vec![],
     };
     let (fid, dir, created) = resolve_or_create_flow(&p, "hello").unwrap();
     assert!(created);
@@ -59,7 +58,6 @@ fn advance_stage_writes_status_and_events() {
         notes: None,
         validation: vec![],
         allowed_scope: vec![],
-        slices: vec![],
     };
     let (fid, dir, _created) = resolve_or_create_flow(&p, "t").unwrap();
     let inj = InjectionResult {
@@ -111,7 +109,6 @@ async fn async_shell_dispatch_requires_native_first_exception_before_artifacts()
         notes: None,
         validation: vec![],
         allowed_scope: vec![],
-        slices: vec![],
     };
 
     let error = handle_tachi_shell(&server, params.clone())
@@ -155,7 +152,6 @@ async fn status_action_returns_not_found_for_missing_flow() {
         notes: None,
         validation: vec![],
         allowed_scope: vec![],
-        slices: vec![],
     };
     let out = handle_status_action(p).await.unwrap();
     let v: Value = serde_json::from_str(&out).unwrap();
@@ -192,7 +188,6 @@ async fn status_action_lists_known_flows() {
         notes: None,
         validation: vec![],
         allowed_scope: vec![],
-        slices: vec![],
     };
     let out = handle_status_action(p).await.unwrap();
     let v: Value = serde_json::from_str(&out).unwrap();

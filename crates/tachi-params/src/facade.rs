@@ -627,8 +627,8 @@ mod orchestration;
 pub use orchestration::{
     MirrorEvalAdjudicateParams, MirrorEvalGetParams, MirrorEvalObserveParams,
     MirrorEvalRegisterParams, TachiAgentEvalParams, TachiAgentsParams, TachiArenaParams,
-    TachiBoardParams, TachiOrchestratorParams, TachiShellDispatchSliceParams, TachiShellParams,
-    TachiVerifyCheckItem, TachiVerifyParams,
+    TachiBoardParams, TachiOrchestratorParams, TachiShellParams, TachiVerifyCheckItem,
+    TachiVerifyParams,
 };
 
 #[cfg(test)]
