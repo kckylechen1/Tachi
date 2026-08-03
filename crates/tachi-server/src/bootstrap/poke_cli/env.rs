@@ -42,7 +42,7 @@ impl PokeEnvGuard {
 fn poke_env_lock() -> &'static std::sync::Mutex<()> {
     #[cfg(test)]
     {
-        crate::shell_ops::tachi_run_root_env_lock()
+        crate::utils::global_test_lock()
     }
     #[cfg(not(test))]
     {

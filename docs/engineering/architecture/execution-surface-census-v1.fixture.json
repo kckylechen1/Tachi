@@ -23,9 +23,9 @@
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 133575,
-                "max_total_tool_definition_bytes": 152754,
-                "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
+                "max_total_input_schema_bytes": 131511,
+                "max_total_tool_definition_bytes": 150846,
+                "rationale": "Post-#1540 expert coordination ceiling after the Shell->Staff cutover ([1319-B7]): tachi_shell retired, replaced by the minimal tachi_staff facade whose schema is smaller (start/status only, no execution fields)."
             },
             "operate": {
                 "max_visible_tools": 50,
@@ -35,8 +35,8 @@
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 198146,
-                "max_total_tool_definition_bytes": 236637,
+                "max_total_input_schema_bytes": 196082,
+                "max_total_tool_definition_bytes": 234729,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
@@ -162,13 +162,6 @@
                     "todo_update"
                 ]
             },
-            "tachi_shell": {
-                "action_count": 2,
-                "actions": [
-                    "dispatch",
-                    "status"
-                ]
-            },
             "tachi_skill": {
                 "action_count": 5,
                 "actions": [
@@ -177,6 +170,13 @@
                     "from_pattern",
                     "loadout",
                     "run"
+                ]
+            },
+            "tachi_staff": {
+                "action_count": 2,
+                "actions": [
+                    "start",
+                    "status"
                 ]
             },
             "tachi_task": {
@@ -235,8 +235,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 198146,
-                "total_tool_definition_bytes": 236637,
+                "total_input_schema_bytes": 196082,
+                "total_tool_definition_bytes": 234729,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -308,8 +308,8 @@
                     "tachi_sandbox",
                     "tachi_save",
                     "tachi_search",
-                    "tachi_shell",
                     "tachi_skill",
+                    "tachi_staff",
                     "tachi_status",
                     "tachi_task",
                     "tachi_task_brief",
@@ -345,8 +345,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 133575,
-                "total_tool_definition_bytes": 152754,
+                "total_input_schema_bytes": 131511,
+                "total_tool_definition_bytes": 150846,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -375,8 +375,8 @@
                     "tachi_research",
                     "tachi_save",
                     "tachi_search",
-                    "tachi_shell",
                     "tachi_skill",
+                    "tachi_staff",
                     "tachi_status",
                     "tachi_task",
                     "tachi_tools",
@@ -562,8 +562,8 @@
                 "tachi_sandbox",
                 "tachi_save",
                 "tachi_search",
-                "tachi_shell",
                 "tachi_skill",
+                "tachi_staff",
                 "tachi_status",
                 "tachi_task",
                 "tachi_task_brief",
@@ -678,28 +678,27 @@
                             "verification"
                         ]
                     },
-                    "tachi_shell": {
-                        "input_schema_bytes": 4953,
-                        "property_count": 18,
+                    "tachi_staff": {
+                        "input_schema_bytes": 2889,
+                        "property_count": 17,
                         "property_names": [
                             "action",
-                            "agent",
-                            "allowed_mcp_servers",
-                            "allowed_scope",
-                            "async_dispatch",
-                            "cwd",
-                            "dispatch_reason",
+                            "assignment_mode",
+                            "boundary_reason",
+                            "completion",
+                            "dispatch_id",
                             "flow_id",
                             "format",
-                            "limit",
-                            "mcp_access",
-                            "notes",
+                            "issue_ref",
+                            "pr_ref",
                             "profile",
                             "project",
+                            "routing_override",
+                            "routing_trigger",
+                            "scope",
+                            "stage",
                             "task",
-                            "title",
-                            "tool_profile",
-                            "validation"
+                            "worker"
                         ]
                     },
                     "tachi_task": {
@@ -893,28 +892,27 @@
                             "verification"
                         ]
                     },
-                    "tachi_shell": {
-                        "input_schema_bytes": 4953,
-                        "property_count": 18,
+                    "tachi_staff": {
+                        "input_schema_bytes": 2889,
+                        "property_count": 17,
                         "property_names": [
                             "action",
-                            "agent",
-                            "allowed_mcp_servers",
-                            "allowed_scope",
-                            "async_dispatch",
-                            "cwd",
-                            "dispatch_reason",
+                            "assignment_mode",
+                            "boundary_reason",
+                            "completion",
+                            "dispatch_id",
                             "flow_id",
                             "format",
-                            "limit",
-                            "mcp_access",
-                            "notes",
+                            "issue_ref",
+                            "pr_ref",
                             "profile",
                             "project",
+                            "routing_override",
+                            "routing_trigger",
+                            "scope",
+                            "stage",
                             "task",
-                            "title",
-                            "tool_profile",
-                            "validation"
+                            "worker"
                         ]
                     },
                     "tachi_task": {

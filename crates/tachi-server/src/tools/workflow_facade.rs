@@ -72,20 +72,45 @@ impl MemoryServer {
         handle_tachi_verify(self, params).await
     }
 
-    // ─── Tachi Shell: dispatch packet and flow-status facade ────────────────
+    // ─── Tachi Staff: external staffing via the canonical dispatch kernel ───
 
     #[tool(
-        description = "Dispatch packet and flow-status facade. This does not replace the host harness's native subagents. action='dispatch': prepare bounded handoff packets and inject the dispatch SOP, using native workers by default (legacy async Tachi execution is only for an explicit durable/remote exception); action='status': read flow progress without creating or mutating artifacts."
+        description = "External staffing: start a worker via the canonical dispatch kernel, or read a worker's canonical status receipt. action='start' maps a small semantic request (task, worker/profile/project hints, routing/boundary markers, completion intent); execution detail is resolved by profile/policy, not the caller. action='status' reads a worker's canonical status receipt by dispatch_id. This does not replace the host harness's native subagents — it is the canonical external-staffing adapter onto the single dispatch lifecycle."
     )]
-    pub(crate) async fn tachi_shell(
+    pub(crate) async fn tachi_staff(
         &self,
-        Parameters(params): Parameters<TachiShellParams>,
+        Parameters(params): Parameters<TachiStaffParams>,
     ) -> Result<String, String> {
         let action = params.action.to_ascii_lowercase();
         let format = params.format.clone();
-        let raw = crate::shell_ops::handle_tachi_shell(self, params).await?;
+        let raw = match action.as_str() {
+            "start" => {
+                let request = crate::staffing_ops::StaffStartRequest::from(params.start);
+                if request.task.trim().is_empty() {
+                    return Err(
+                        "tachi_staff: action='start' requires a non-empty `task`".to_string()
+                    );
+                }
+                crate::staffing_ops::staff_start(self, request).await?
+            }
+            "status" => {
+                let dispatch_id = params.dispatch_id.ok_or_else(|| {
+                    "tachi_staff: action='status' requires a `dispatch_id`".to_string()
+                })?;
+                crate::staffing_ops::staff_status(
+                    self,
+                    crate::staffing_ops::StaffStatusRequest { dispatch_id },
+                )
+                .await?
+            }
+            other => {
+                return Err(format!(
+                    "tachi_staff: unknown action '{other}' (start|status)"
+                ))
+            }
+        };
         format_facade_response(
-            &format!("Tachi shell {}", action),
+            &format!("Tachi staff {}", action),
             &action,
             &raw,
             format.as_deref(),

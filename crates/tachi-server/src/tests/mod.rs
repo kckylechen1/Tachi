@@ -1,5 +1,4 @@
 use crate::server_state::MemoryServer;
-use crate::tool_params::*;
 use chrono::Utc;
 use memcore::{HubCapability, MemoryEntry, MemoryStore, MigrationAuthority};
 use rusqlite::params;
@@ -423,29 +422,6 @@ pub(crate) fn make_server_with_temp_home_and_migration_authority(
     (server, temp_home)
 }
 
-fn shell_params(action: &str) -> TachiShellParams {
-    TachiShellParams {
-        action: action.to_string(),
-        format: None,
-        flow_id: None,
-        task: None,
-        title: None,
-        agent: None,
-        profile: None,
-        cwd: None,
-        tool_profile: None,
-        mcp_access: None,
-        allowed_mcp_servers: Vec::new(),
-        async_dispatch: false,
-        dispatch_reason: None,
-        project: None,
-        limit: None,
-        notes: None,
-        validation: Vec::new(),
-        allowed_scope: Vec::new(),
-    }
-}
-
 fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHomeGuard) {
     ensure_test_env();
     let temp_home = TempHomeGuard::new();
@@ -804,7 +780,6 @@ mod profile_tests;
 mod proxy_tests;
 mod sandbox_fold;
 mod sandbox_tests;
-mod shell_tests;
 mod skill_tests;
 mod tachi_handoff_tests;
 mod vault_tests;

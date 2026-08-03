@@ -151,20 +151,65 @@ fn tachi_skill_action_schema_declares_bundle_and_loadout() {
 }
 
 #[test]
-fn tachi_shell_schema_exposes_only_dispatch_and_status() {
-    let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiShellParams);
+fn tachi_staff_schema_exposes_only_start_and_status_and_no_execution_fields() {
+    // [1319-B7] `tachi_staff` replaces the retired `tachi_shell`. Its schema
+    // must advertise ONLY the canonical staffing verbs (start|status) and must
+    // NOT expose any execution-shaped knob — the boundary contract the
+    // external-staffing census enforces structurally. A caller that attempts
+    // cwd/command/transport/credentials/sandbox/allowed_tools finds no field
+    // to bind to, so the mapped TachiDispatchParams resolves every execution
+    // field through the canonical admission/profile pipeline instead.
+    let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiStaffParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
-    let properties = value["properties"].as_object().expect("shell properties");
+    let properties = value["properties"].as_object().expect("staff properties");
     let actions = properties["action"]["enum"]
         .as_array()
-        .expect("shell action enum");
+        .expect("staff action enum");
 
-    assert_eq!(actions, &vec![json!("dispatch"), json!("status")]);
-    for removed in ["brainstorm", "plan", "review", "ship", "kanban"] {
+    assert_eq!(actions, &vec![json!("start"), json!("status")]);
+    // Retired Shell verbs must not have leaked through.
+    for removed in ["dispatch", "brainstorm", "plan", "review", "ship", "kanban"] {
         assert!(!actions.contains(&json!(removed)));
     }
-    assert!(!properties.contains_key("state_filter"));
-    assert!(properties.contains_key("limit"));
+    // ── Boundary contract: NO execution-shaped field is exposed ─────────────
+    for forbidden in [
+        "cwd",
+        "command",
+        "transport",
+        "harness_transport",
+        "credentials",
+        "credential_profiles",
+        "sandbox",
+        "allowed_tools",
+        "allowed_mcp_servers",
+        "inject_tachi_mcp",
+        "permission_profile",
+        "tool_profile",
+        "env_id",
+        "unmanaged_cwd",
+        "dispatch_reason",
+        "async_dispatch",
+    ] {
+        assert!(
+            !properties.contains_key(forbidden),
+            "tachi_staff schema must NOT expose execution field `{forbidden}`; the canonical admission/profile pipeline owns it"
+        );
+    }
+    // Semantic fields that ARE allowed on a start request.
+    assert!(properties.contains_key("task"));
+    assert!(properties.contains_key("dispatch_id"));
+    assert!(properties.contains_key("format"));
+    // Retired Shell-only knobs must not appear.
+    for retired in [
+        "title",
+        "limit",
+        "notes",
+        "validation",
+        "allowed_scope",
+        "mcp_access",
+    ] {
+        assert!(!properties.contains_key(retired));
+    }
 }
 
 #[test]

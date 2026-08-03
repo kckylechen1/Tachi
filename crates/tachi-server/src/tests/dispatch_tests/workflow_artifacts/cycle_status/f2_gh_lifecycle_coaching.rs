@@ -29,7 +29,7 @@ fn assert_no_deprecated_lifecycle_coaching(surface: &str, text: &str) {
 async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
     // Pre-fix RED: next_action for ready PR + passed verify without release_note
     // used to say tachi_task(action='release_note'...).
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp tachi home");
@@ -84,7 +84,7 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn f2_cycle_status_next_action_coaches_tachi_gh_to_link_pr() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp tachi home");

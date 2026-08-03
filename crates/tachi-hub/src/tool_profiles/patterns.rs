@@ -77,8 +77,8 @@ pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_gh",
     // Facade task dispatch/merge/board
     "tachi_task",
-    // Tachi Shell — coordination/orchestration facade
-    "tachi_shell",
+    // Tachi Staff — external staffing facade (canonical dispatch kernel adapter)
+    "tachi_staff",
     // Tachi Arena - tracked worker mission ledger
     "tachi_arena",
     // Tachi Verify - background verification evidence ledger

@@ -16,14 +16,13 @@ async fn poke_smoke_suite_writes_report_and_probe_artifacts() {
         "poke suite failed; probes={}",
         report.get("probes").cloned().unwrap_or_else(|| json!([]))
     );
-    assert_eq!(report["summary"]["total"], json!(6));
+    assert_eq!(report["summary"]["total"], json!(5));
     let run_dir = PathBuf::from(report["run_dir"].as_str().expect("run_dir"));
     assert!(run_dir.join("report.json").exists());
     assert!(run_dir.join("report.md").exists());
     for name in [
         "memory_basic",
         "skill_surface",
-        "shell_artifact",
         "dispatch_mock",
         "arena_lifecycle",
         "verify_ledger",

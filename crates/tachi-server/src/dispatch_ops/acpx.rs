@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn acpx_command_spec_uses_file_prompt_and_read_approved_posture() {
-        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _cmd = EnvRestore::set("TACHI_ACPX_COMMAND", "python3");
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn acpx_session_mode_maps_card_hint_to_named_session_and_controls() {
-        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _cmd = EnvRestore::set("TACHI_ACPX_COMMAND", "python3");
@@ -148,7 +148,7 @@ mod tests {
     /// dropped.
     #[test]
     fn acpx_session_derives_raven_from_a_review_dispatch_profile() {
-        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _cmd = EnvRestore::set("TACHI_ACPX_COMMAND", "python3");
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn acpx_rejects_full_permission_profile() {
-        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _cmd = EnvRestore::set("TACHI_ACPX_COMMAND", "python3");
@@ -189,7 +189,7 @@ mod tests {
         // acpx has no `--sandbox`-equivalent knob; a caller-supplied sandbox
         // request must fail closed with a receipt naming the backend and the
         // requested level, never be silently dropped (#894 S0).
-        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _cmd = EnvRestore::set("TACHI_ACPX_COMMAND", "python3");
@@ -223,7 +223,7 @@ mod tests {
     fn acpx_sandbox_rejection_runs_before_node_preflight_spawn() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp_path = tempfile::tempdir().expect("fake node PATH dir");
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn acpx_missing_command_error_is_actionable() {
-        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp_path = tempfile::tempdir().expect("empty PATH dir");
@@ -304,7 +304,7 @@ mod tests {
     fn acpx_rejects_unsupported_node_runtime_with_upgrade_guidance() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp_path = tempfile::tempdir().expect("fake node PATH dir");

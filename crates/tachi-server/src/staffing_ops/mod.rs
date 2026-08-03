@@ -1,8 +1,8 @@
 //! Internal Staff start/status contract — a thin semantic adapter onto the
 //! canonical dispatch kernel.
 //!
-//! This is NOT a public MCP tool, NOT a new facade, and NOT a parallel
-//! lifecycle. It maps a small model-decidable request into
+//! This is NOT a new facade and NOT a parallel lifecycle. It maps a small
+//! model-decidable request into
 //! [`TachiDispatchParams`](crate::tool_params::TachiDispatchParams) and delegates
 //! to the single canonical choke-point [`crate::dispatch_ops::handle_tachi_dispatch`];
 //! it creates no second result/status store.
@@ -26,15 +26,11 @@
 //! every execution field to its kernel-side default — exactly the
 //! discrimination the [`external_staffing_contract`][crate::tests::docs_tests]
 //! census enforces structurally.
-//
-// `#[allow(dead_code)]` until PR4 ([1319-B7]) wires this contract to the
-// `tachi_staff` facade caller. The items ARE exercised by this module's
-// discrimination tests, so `--all-targets` sees them as live and
-// `#[expect(dead_code)]` would go red there as an unfulfilled expectation;
-// only the `--lib` gate (tests are not roots) reports them. Delete this
-// attribute in the PR that adds the public caller. (Same convention as
-// `governed_precedent_establishment.rs:132-137`.)
-#![allow(dead_code)]
+//!
+//! The public caller is the `tachi_staff` MCP facade
+//! ([`crate::tools::workflow_facade`]); it constructs a [`StaffStartRequest`]
+//! from the params-side [`StaffStartFields`](tachi_params::StaffStartFields)
+//! allowlist via the `From` impl below (field-for-field, no execution knob).
 
 use crate::dispatch_ops::{
     canonical_dir_is_within, dispatch_runs_root, handle_tachi_dispatch, is_valid_dispatch_id,
@@ -42,6 +38,7 @@ use crate::dispatch_ops::{
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
 use rmcp::schemars::{self, JsonSchema};
+use tachi_params::StaffStartFields;
 
 /// Default per-dispatch timeout (seconds) when the Staff request does not
 /// declare one. Mirrors [`default_dispatch_timeout`] in `tachi-params` (600s);
@@ -88,20 +85,38 @@ pub(crate) struct StaffStartRequest {
     /// Tachi flow id for feature-scoped briefing/dispatch/eval linkage.
     #[serde(default)]
     pub flow_id: Option<String>,
+    // ── Marker-only fields (carried for future policy projection) ─────────
+    //
+    // These six fields are accepted on the wire (part of the semantic
+    // allowlist the boundary contract advertises) and round-trip through the
+    // `From<StaffStartFields>` conversion, but `into_params` deliberately
+    // DROPS them: they are v1 informational markers for a future policy-
+    // projection slice, not execution knobs, so mapping them to a
+    // `TachiDispatchParams` field would invent a contract that does not exist
+    // yet. `#[allow(dead_code)]` is therefore field-scoped rather than
+    // module-wide: the functions/structs that ARE the public contract
+    // (`staff_start`/`staff_status`/`StaffStartRequest`/`StaffStatusRequest`)
+    // are now live via the `tachi_staff` facade; only these unmapped markers
+    // remain unread in non-test code. The discrimination tests exercise them.
     /// Declared scope marker (informational; does not override kernel scoping).
     #[serde(default)]
+    #[allow(dead_code, reason = "carried marker; into_params drops it by design")]
     pub scope: Option<String>,
     /// Declared assignment mode marker (informational).
     #[serde(default)]
+    #[allow(dead_code, reason = "carried marker; into_params drops it by design")]
     pub assignment_mode: Option<String>,
     /// Declared boundary reason (why this work is externally staffed).
     #[serde(default)]
+    #[allow(dead_code, reason = "carried marker; into_params drops it by design")]
     pub boundary_reason: Option<String>,
     /// Declared routing trigger marker (informational).
     #[serde(default)]
+    #[allow(dead_code, reason = "carried marker; into_params drops it by design")]
     pub routing_trigger: Option<String>,
     /// Declared routing override marker (informational; never a raw transport).
     #[serde(default)]
+    #[allow(dead_code, reason = "carried marker; into_params drops it by design")]
     pub routing_override: Option<String>,
     /// Completion intent marker. The model may declare intent, but the
     /// machine-checkable predicate object is policy-shaped, so for v1 this is
@@ -109,7 +124,37 @@ pub(crate) struct StaffStartRequest {
     // TODO(1319): if a structured completion predicate is exposed to Staff
     // callers in a later slice, promote this to Option<CompletionPredicate>.
     #[serde(default)]
+    #[allow(dead_code, reason = "carried marker; into_params drops it by design")]
     pub completion: Option<String>,
+}
+
+/// Construct a [`StaffStartRequest`] from the params-side
+/// [`StaffStartFields`] allowlist. Field-for-field: every name on the source
+/// struct is an intent field, and every execution-shaped name is absent from
+/// BOTH structs, so the conversion structurally cannot smuggle a forbidden
+/// knob through. The caller (`tachi_staff` facade) validates that `task` is
+/// present before calling [`staff_start`]; a missing task maps to an empty
+/// string here only to keep this `From` infallible, and the empty case is
+/// rejected upstream by `handle_tachi_dispatch`'s admission gate.
+impl From<StaffStartFields> for StaffStartRequest {
+    fn from(start: StaffStartFields) -> Self {
+        StaffStartRequest {
+            task: start.task.unwrap_or_default(),
+            profile: start.profile,
+            worker: start.worker,
+            project: start.project,
+            stage: start.stage,
+            issue_ref: start.issue_ref,
+            pr_ref: start.pr_ref,
+            flow_id: start.flow_id,
+            scope: start.scope,
+            assignment_mode: start.assignment_mode,
+            boundary_reason: start.boundary_reason,
+            routing_trigger: start.routing_trigger,
+            routing_override: start.routing_override,
+            completion: start.completion,
+        }
+    }
 }
 
 impl StaffStartRequest {
