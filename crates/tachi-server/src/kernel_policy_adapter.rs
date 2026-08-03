@@ -26,22 +26,43 @@
 //! Call [`resolve_kernel_policy`] once, early in process startup, before any
 //! store opens.
 //!
-//! ## Known gap (tachi#1585 D5, this lane)
+//! ## Where it is wired (tachi#1585 D5)
 //!
-//! Building this adapter is this lane's D5 deliverable; *wiring* it into
-//! tachi-server's `MemoryStore::open*` call sites (the global-store and
-//! per-project funnels in `memory-server-runtime`, plus ~200 direct call
-//! sites elsewhere in this crate) is NOT done here — those funnels are
-//! actively owned by a parallel #1585 lane (D1/D2 identity + profile
-//! threading) and touching them here would collide. Until that wiring
-//! lands, every `MemoryStore` this crate opens carries the pure default
-//! policy, not this adapter's resolution — including
-//! `TACHI_DISABLE_PATH_VALIDATION`, which several existing test fixtures
-//! (`tests/mod.rs::ensure_test_env`,
-//! `tests/profile_tests/tool_profile_router_coverage.rs::ensure_test_env`)
-//! set expecting ambient, store-independent effect. That expectation no
-//! longer holds for any store not explicitly given this adapter's
-//! `KernelPolicy` via `MemoryStore::with_kernel_policy`.
+//! `MemoryServer`'s constructor
+//! (`server_state::init::new_with_migration_authority_and_home`) is the ONE
+//! caller: it resolves the policy before its first open and hands the same
+//! value to every store the server owns —
+//!
+//! - the global write store (`MemoryStore::with_kernel_policy`),
+//! - the global read pool (`ReadStorePool::open_read_only`'s `policy` arg),
+//! - the bound `--project-db` store and its read pool (`ProjectDbState::open`),
+//! - `DbRuntime::kernel_policy`, from which every *dynamic* open inherits it:
+//!   `activate_project_db`, `attached_project_state` (named-project attach),
+//!   and the request-scoped `open_read_store` path reads.
+//!
+//! Read and write handles on one file therefore rank with the same weights;
+//! before this seam existed they both reached the same ambient `OnceLock`, so
+//! "same tuning" was accidental rather than structural.
+//!
+//! Two consequences worth naming:
+//!
+//! - The test fixtures that set `TACHI_DISABLE_PATH_VALIDATION` expecting
+//!   ambient effect (`tests/mod.rs::ensure_test_env`,
+//!   `tests/profile_tests/tool_profile_router_coverage.rs::ensure_test_env`)
+//!   keep working *unchanged*, because the stores whose writes they need the
+//!   hatch for are opened through the funnels above. A store some test opens
+//!   directly via `MemoryStore::open*` gets the pure default instead — that
+//!   only matters for a `/wiki/...` write into a store whose resolved role is
+//!   not `wiki`, which no direct-open fixture in this crate performs.
+//! - One in-daemon store is opened outside those funnels and consumes tuning:
+//!   `daily_pipeline::maintenance::run_truth_maintenance_for_target`. It is
+//!   handed `DbRuntime::kernel_policy` at its own open site (its recall
+//!   argument still comes from the explicit `RecallConfig::get()` seam it
+//!   always used; the injected policy is what its `entries_missing_vectors`
+//!   raw-tier gate now reads). Remaining opens — CLI subcommands under
+//!   `bootstrap/` and `status_ops/`, the foundry scheduler — still carry the
+//!   pure default; wiring them is follow-up work, and it should be checked
+//!   per-site rather than assumed harmless.
 
 use std::sync::Arc;
 

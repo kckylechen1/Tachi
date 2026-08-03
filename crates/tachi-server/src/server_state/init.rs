@@ -187,15 +187,27 @@ impl MemoryServer {
         // conferral. On a store already stamped `global` it verifies; on one
         // stamped anything else the open fails loudly rather than the server
         // quietly operating someone else's database as its global store.
+        // #1585 D5: resolve `TACHI_*` / `config.env` exactly ONCE, here, before
+        // the first store opens — `memcore` reads no environment of its own
+        // any more. Every store this server owns (global write handle, global
+        // read pool, the bound project DB, and every dynamic project open the
+        // `DbRuntime` performs later) carries this same resolution, so read
+        // and write handles for one file cannot rank with different weights.
+        let kernel_policy = crate::kernel_policy_adapter::resolve_kernel_policy();
         let global_store =
-            MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?;
+            MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?
+                .with_kernel_policy(kernel_policy.clone());
         let read_pool_size = configured_memory_read_pool_size();
         // Same label as the write store two lines up (tachi#1569): the read
         // pool's handles must not disagree with it about which store this is.
         // Taken from the resolved handle rather than re-typed, so the two
         // cannot drift.
-        let global_read_pool =
-            ReadStorePool::open_read_only(global_db_str, read_pool_size, global_store.db_label())?;
+        let global_read_pool = ReadStorePool::open_read_only(
+            global_db_str,
+            read_pool_size,
+            global_store.db_label(),
+            &kernel_policy,
+        )?;
         let global_vec_available = global_store.vec_available;
 
         let project_db_state = if let Some(ref p) = project_db_path {
@@ -208,6 +220,7 @@ impl MemoryServer {
                     read_pool_size,
                     &schema_migration,
                     StoreLabel::inferred(p),
+                    &kernel_policy,
                 )
                 .map_err(std::io::Error::other)?,
             )
@@ -282,6 +295,11 @@ impl MemoryServer {
             attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
             project_attach_init_gate: Arc::new(StdMutex::new(())),
             schema_migration,
+            // #1585 D5: the same single resolution the startup opens above
+            // used, carried so dynamic project opens (activate/attach,
+            // request-scoped path reads) get it too instead of silently
+            // falling back to `RecallConfig::default()`.
+            kernel_policy,
         };
 
         let server = Self {

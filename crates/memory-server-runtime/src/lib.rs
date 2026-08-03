@@ -1,5 +1,5 @@
 use memcore::MemoryStore;
-use memcore::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+use memcore::{DbOpenContext, KernelPolicy, MigrationAuthority, OpenIntent, StoreProfile};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
@@ -270,23 +270,32 @@ pub struct ReadStorePool {
 
 impl ReadStorePool {
     /// Open `size` read-only handles on `db_path`, every one of them carrying
-    /// `db_label`.
+    /// `db_label` and the host's [`KernelPolicy`].
     ///
     /// tachi#1569: `db_label` must be the same manifest label the write store
     /// for this path was opened with (`global`, `wiki`, the project name).
     /// Pooled read stores used to be born unlabelled, which is why read-side
     /// gates could not be keyed on store identity at all.
+    ///
+    /// tachi#1585 D5: `policy` must be the same host-resolved policy the write
+    /// store for this path carries. `MemoryStore` no longer reads `TACHI_*`
+    /// itself, so a pooled read handle that is not given the policy silently
+    /// ranks with `RecallConfig::default()` while the writer ranks with the
+    /// operator's `config.env` — the read/write split tachi#1569 closed for
+    /// identity, reopened for tuning.
     pub fn open_read_only(
         db_path: &str,
         size: usize,
         db_label: &str,
+        policy: &KernelPolicy,
     ) -> Result<Self, memcore::MemoryError> {
         let size = size.clamp(1, MAX_MEMORY_READ_POOL_SIZE);
         let mut stores = Vec::with_capacity(size);
         for _ in 0..size {
-            stores.push(StdMutex::new(MemoryStore::open_read_only_with_label(
-                db_path, db_label,
-            )?));
+            stores.push(StdMutex::new(
+                MemoryStore::open_read_only_with_label(db_path, db_label)?
+                    .with_kernel_policy(policy.clone()),
+            ));
         }
         Ok(Self {
             inner: Arc::new(ReadPoolInner {
@@ -684,6 +693,14 @@ pub struct DbRuntime {
     /// refusing. The policy lives HERE, at the open site, not only in
     /// bootstrap — every runtime project open must express it.
     pub schema_migration: MigrationAuthority,
+    /// #1585 D5: host-injected kernel tuning (recall weights, decay, embed
+    /// raw-tier gate, path-validation escape hatch), resolved ONCE by the
+    /// host's adapter from `TACHI_*`/`config.env` and carried here for the
+    /// same reason `schema_migration` is — every *dynamic* store this runtime
+    /// opens (activate, attach, request-scoped path reads) must express it.
+    /// `memcore` reads no environment of its own, so a store opened without
+    /// this silently runs on `RecallConfig::default()`.
+    pub kernel_policy: KernelPolicy,
 }
 
 /// A request-owned read-only store.
@@ -774,6 +791,7 @@ impl DbRuntime {
             configured_memory_read_pool_size(),
             &self.schema_migration,
             conferral,
+            &self.kernel_policy,
         )
         .map_err(|e| format!("open project db: {e}"))?;
 
@@ -836,7 +854,7 @@ impl DbRuntime {
         }
 
         let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
-        let mut store = open_read_store(&key, label)?;
+        let mut store = open_read_store(&key, label, &self.kernel_policy)?;
         f(&mut store)
     }
 
@@ -915,7 +933,7 @@ impl DbRuntime {
         // read closure does. It is dropped before the request session escapes.
         let store = {
             let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
-            open_read_store(&key, StoreLabel::Declared(label))?
+            open_read_store(&key, StoreLabel::Declared(label), &self.kernel_policy)?
         };
         Ok(Some(RequestScopedReadStore { store }))
     }
@@ -948,6 +966,7 @@ impl DbRuntime {
             configured_memory_read_pool_size(),
             &migration,
             conferral,
+            &self.kernel_policy,
         )?;
         let mut guard = self
             .attached_project_dbs
@@ -1440,11 +1459,21 @@ impl ProjectDbState {
     /// handle's `db_label` is what `MemoryStore` resolved from the store's own
     /// write-once identity stamp; a declared claim that disagrees with the
     /// stamp fails the open loudly rather than winning by arriving first.
+    ///
+    /// # Tuning comes from the host, not from the environment (tachi#1585 D5)
+    ///
+    /// `policy` is the host-resolved [`KernelPolicy`] (for the shipped daemon,
+    /// `tachi_server::kernel_policy_adapter::resolve_kernel_policy`'s single
+    /// `TACHI_*`/`config.env` resolution). `MemoryStore` itself no longer reads
+    /// the environment, so a project store opened without it would silently
+    /// fall back to `RecallConfig::default()` and lose every operator knob.
+    /// Both the write handle and its read pool receive the same policy.
     pub fn open(
         db_path: PathBuf,
         read_pool_size: usize,
         migration: &MigrationAuthority,
         conferral: StoreLabel<'_>,
+        policy: &KernelPolicy,
     ) -> Result<Self, String> {
         project_db_leaf_exists_without_symlink(&db_path)?;
         let db_str = db_path.to_str().ok_or_else(|| {
@@ -1463,14 +1492,16 @@ impl ProjectDbState {
             required_profile: StoreProfile::TachiFull,
         };
         let store = MemoryStore::open_with_label_and_context(db_str, conferral.identity(), &ctx)
-            .map_err(|e| format!("open project db: {e}"))?;
+            .map_err(|e| format!("open project db: {e}"))?
+            .with_kernel_policy(policy.clone());
         let vec_available = store.vec_available;
         // The RESOLVED role, not the conferral: on a stamped store this is the
         // stamp even when the caller conferred nothing, which is exactly how
         // the read pool stops depending on which caller attached first.
         let resolved_label = store.db_label().to_string();
-        let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size, &resolved_label)
-            .map_err(|e| format!("open project read db: {e}"))?;
+        let read_pool =
+            ReadStorePool::open_read_only(db_str, read_pool_size, &resolved_label, policy)
+                .map_err(|e| format!("open project read db: {e}"))?;
         Ok(Self {
             store: Arc::new(StdMutex::new(store)),
             read_pool,
@@ -1721,7 +1752,15 @@ impl<'a> StoreLabel<'a> {
 /// read-side identity predicates (`is_wiki_corpus_store`) see the same
 /// identity the write path uses for the same file — and see *nothing* when
 /// the caller was only guessing.
-fn open_read_store(db_path: &Path, label: StoreLabel<'_>) -> Result<MemoryStore, String> {
+///
+/// tachi#1585 D5: `policy` is the host-resolved [`KernelPolicy`] every store
+/// this runtime opens carries, so a request-scoped read handle ranks with the
+/// same tuning as the pooled and write handles for the same file.
+fn open_read_store(
+    db_path: &Path,
+    label: StoreLabel<'_>,
+    policy: &KernelPolicy,
+) -> Result<MemoryStore, String> {
     let name = label.text();
     let db_str = db_path.to_str().ok_or_else(|| {
         format!(
@@ -1731,7 +1770,8 @@ fn open_read_store(db_path: &Path, label: StoreLabel<'_>) -> Result<MemoryStore,
         )
     })?;
     let store = MemoryStore::open_read_only_with_label(db_str, label.identity())
-        .map_err(|e| format!("open {name} read store: {e}"))?;
+        .map_err(|e| format!("open {name} read store: {e}"))?
+        .with_kernel_policy(policy.clone());
     #[cfg(feature = "test-support")]
     record_read_store_open(db_path);
     Ok(store)
@@ -1770,8 +1810,13 @@ mod tests {
             global_store: Arc::new(StdMutex::new(
                 MemoryStore::open_with_label(global_db_str, "global").expect("global store"),
             )),
-            global_read_pool: ReadStorePool::open_read_only(global_db_str, 1, "global")
-                .expect("global read pool"),
+            global_read_pool: ReadStorePool::open_read_only(
+                global_db_str,
+                1,
+                "global",
+                &KernelPolicy::default(),
+            )
+            .expect("global read pool"),
             global_rw_gate: Arc::new(StdRwLock::new(())),
             global_contention_recorder: Arc::new(OnceLock::new()),
             global_write_gate_contended_observers: Arc::new(StdMutex::new(Vec::new())),
@@ -1781,6 +1826,9 @@ mod tests {
             attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
             project_attach_init_gate: Arc::new(StdMutex::new(())),
             schema_migration: MigrationAuthority::Deny,
+            // Runtime unit tests assert routing/locking, not tuning: the pure
+            // default is the honest stand-in for a host that injected nothing.
+            kernel_policy: KernelPolicy::default(),
         }
     }
 
@@ -1944,7 +1992,11 @@ mod tests {
                 .expect("seed db"),
         );
         let db_str = db_path.to_str().expect("db path utf8").to_string();
-        let pool = ReadStorePool::open_read_only(&db_str, 4, "test-pool").expect("open pool");
+        // tachi#1579: the pool's label must be the role the seeding write
+        // store stamped into this file ("seed"), not a decorative one — a
+        // disagreeing claim is now a refused open, not a silent first-wins.
+        let pool = ReadStorePool::open_read_only(&db_str, 4, "seed", &KernelPolicy::default())
+            .expect("open pool");
 
         let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
         let (occupier_entered_tx, occupier_entered_rx) = std::sync::mpsc::channel();
@@ -2093,7 +2145,9 @@ mod tests {
                 .expect("seed db"),
         );
         let db_str = db_path.to_str().expect("db path utf8").to_string();
-        let pool = ReadStorePool::open_read_only(&db_str, 1, "test-pool").expect("open pool");
+        // Same tachi#1579 label rule as the convoy test above.
+        let pool = ReadStorePool::open_read_only(&db_str, 1, "seed", &KernelPolicy::default())
+            .expect("open pool");
 
         let panicker_gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
         let (panicker_entered_tx, panicker_entered_rx) = std::sync::mpsc::channel();
@@ -2668,6 +2722,7 @@ mod tests {
             1,
             &MigrationAuthority::Deny,
             StoreLabel::inferred(&impostor_db),
+            &KernelPolicy::default(),
         )
         .expect("open the impostor project db");
         {
@@ -2969,9 +3024,14 @@ mod bench {
             MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
                 .expect("seed db"),
         );
-        let pool =
-            ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4, "test-pool")
-                .expect("open pool");
+        let pool = ReadStorePool::open_read_only(
+            db_path.to_str().expect("db path utf8"),
+            4,
+            // tachi#1579: same role the seeding store stamped.
+            "seed",
+            &KernelPolicy::default(),
+        )
+        .expect("open pool");
 
         const ITERATIONS: usize = 500;
         let mut checkout_wait_us = Vec::with_capacity(ITERATIONS);
@@ -3036,9 +3096,14 @@ mod bench {
             MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
                 .expect("seed db"),
         );
-        let pool =
-            ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4, "test-pool")
-                .expect("open pool");
+        let pool = ReadStorePool::open_read_only(
+            db_path.to_str().expect("db path utf8"),
+            4,
+            // tachi#1579: same role the seeding store stamped.
+            "seed",
+            &KernelPolicy::default(),
+        )
+        .expect("open pool");
 
         const HOLD_DURATION: Duration = Duration::from_millis(200);
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();

@@ -231,8 +231,15 @@ async fn run_truth_maintenance_for_target(
     let Some(db_path) = target.path.to_str() else {
         return Ok(());
     };
+    // tachi#1585 D5: this store is opened outside the server's startup funnels,
+    // so it must be handed the server's already-resolved `KernelPolicy`
+    // explicitly — `memcore` reads no env of its own any more, and the
+    // embedding scan below (`entries_missing_vectors`) is gated on
+    // `policy.embed.raw_tier_enabled` (`TACHI_EMBED_RAW_TIER`). Reusing the
+    // startup resolution rather than re-resolving keeps one answer per process.
     let store = MemoryStore::open_with_label(db_path, &target.label)
-        .map_err(|e| format!("open maintenance DB {}: {e}", target.label))?;
+        .map_err(|e| format!("open maintenance DB {}: {e}", target.label))?
+        .with_kernel_policy(server.db.kernel_policy.clone());
     let recall_config = memcore::RecallConfig::get();
 
     store
