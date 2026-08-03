@@ -927,6 +927,13 @@ impl MemoryStore {
     /// an external boundary before the database half becomes durable. The
     /// closure receives read access to the transaction for exact post-state
     /// accounting; any closure error drops the transaction without commit.
+    ///
+    /// Gated with the raw-`Connection` accessors (#1585 review round 4): the
+    /// closure's `&Transaction` derefs to `&Connection`, which would hand the
+    /// portable surface the same raw-SQL bypass of the `store_identity`
+    /// write-once guards. Its only production caller is tachi-server's tidy
+    /// migration (admin build).
+    #[cfg(any(feature = "admin", test))]
     pub fn upsert_batch_with_precommit<T, F>(
         &mut self,
         entries: &[MemoryEntry],
