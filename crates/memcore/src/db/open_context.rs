@@ -33,6 +33,8 @@
 //! #894 exec-env authorization pattern (`PrivateTargetApproval { approved_by,
 //! .. }`, `env_id`/`unmanaged_cwd`) already established in this codebase.
 
+use super::store_profile::StoreProfile;
+
 /// Legacy environment variable the first (reverted) fix attempt used to carry
 /// migration opt-in. **Never read** by this design — authorization is the
 /// typed [`DbOpenContext`] threaded through the call chain. The deploy
@@ -81,6 +83,16 @@ pub enum MigrationAuthority {
 pub struct DbOpenContext {
     pub intent: OpenIntent,
     pub migration: MigrationAuthority,
+    /// #1585 D2: the schema shape this caller demands of the store — an
+    /// **admission check only**.
+    ///
+    /// On a fresh build it selects the shape to create. On an existing store
+    /// it is compared against the STORED profile
+    /// ([`crate::db::StoreProfile::satisfies`]) and then discarded: the
+    /// effective profile driving DDL and the migration walk is always the
+    /// stored one. See [`crate::db::store_profile`] for why inverting that is
+    /// the worst failure mode in this design.
+    pub required_profile: StoreProfile,
 }
 
 impl DbOpenContext {
@@ -90,6 +102,7 @@ impl DbOpenContext {
         Self {
             intent: OpenIntent::CreateFresh,
             migration: MigrationAuthority::Deny,
+            required_profile: StoreProfile::default(),
         }
     }
 
@@ -100,6 +113,7 @@ impl DbOpenContext {
         Self {
             intent: OpenIntent::OpenExisting,
             migration: MigrationAuthority::Deny,
+            required_profile: StoreProfile::default(),
         }
     }
 
@@ -112,7 +126,16 @@ impl DbOpenContext {
             migration: MigrationAuthority::Allow {
                 approved_by: approved_by.into(),
             },
+            required_profile: StoreProfile::default(),
         }
+    }
+
+    /// Builder: declare the schema shape this caller needs (#1585 D2). The
+    /// only callers that lower it below [`StoreProfile::TachiFull`] are
+    /// portable-kernel embedders that touch no product table.
+    pub fn with_profile(mut self, required_profile: StoreProfile) -> Self {
+        self.required_profile = required_profile;
+        self
     }
 
     /// True iff this context authorizes migrating an existing older-schema DB.

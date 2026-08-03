@@ -27,7 +27,7 @@ mod malformed_json_middleware;
 mod service;
 
 use config::{Config, IN_MEMORY};
-use portable_kernel::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent};
+use portable_kernel::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, StoreProfile};
 use service::PortableServer;
 
 fn build_server(config: Config) -> Result<PortableServer, String> {
@@ -54,6 +54,14 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
             let ctx = DbOpenContext {
                 intent: OpenIntent::OpenExisting,
                 migration: migration.clone(),
+                // #1585 D2: this binary IS the portable kernel — save/search/
+                // get/status and nothing else — so it requires only the
+                // portable profile. It therefore also refuses an *unstamped*
+                // pre-#1585 database rather than adopting one: adopting would
+                // mean a portable binary silently claiming authority over a
+                // full Tachi store. See `StoreProfileUnstamped`'s remediation
+                // text for the operator route.
+                required_profile: StoreProfile::PortableKernel,
             };
             MemoryStore::open_with_context(path, &ctx)
                 .map_err(|e| format!("open store at {path}: {e}"))

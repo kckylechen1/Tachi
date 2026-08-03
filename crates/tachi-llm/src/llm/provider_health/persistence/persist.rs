@@ -109,6 +109,8 @@ impl super::super::super::LlmClient {
         let open_context = memcore::DbOpenContext {
             intent: memcore::OpenIntent::OpenExisting,
             migration,
+            // #1585 D2: this writes `vault_key_health`, a product table.
+            required_profile: memcore::StoreProfile::TachiFull,
         };
         match memcore::MemoryStore::open_with_context_and_busy_timeout(
             db_path,

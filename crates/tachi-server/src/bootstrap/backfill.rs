@@ -6,7 +6,9 @@ use crate::vector_backfill::{
 use futures::{stream, StreamExt};
 use memcore::store::enrichment::EnrichmentInvocationReceipts;
 use memcore::store::open::ReadOnlyBackfillOperation;
-use memcore::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, VectorBackfillScope};
+use memcore::{
+    DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, StoreProfile, VectorBackfillScope,
+};
 use std::error::Error;
 use std::fmt::Display;
 use std::io::{Error as IoError, ErrorKind};
@@ -54,6 +56,9 @@ fn backfill_write_open_context(schema_migration: &MigrationAuthority) -> DbOpenC
     DbOpenContext {
         intent: OpenIntent::OpenExisting,
         migration: schema_migration.clone(),
+        // #1585 D2: `backfill-*` is a tachi-server operator command; it opens
+        // the same product databases `serve` does.
+        required_profile: StoreProfile::TachiFull,
     }
 }
 

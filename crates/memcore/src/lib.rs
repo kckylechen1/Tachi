@@ -139,7 +139,7 @@ pub use db::{
     InsertMemoryResult, PathPrefixMemoryRow,
 };
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
-pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
+pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 pub use embed_config::embed_raw_tier_enabled;
 pub use error::{MemoryError, WorkClaimTransitionReason};
 #[cfg(feature = "admin")]

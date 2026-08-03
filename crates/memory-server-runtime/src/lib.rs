@@ -1,5 +1,5 @@
 use memcore::MemoryStore;
-use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
+use memcore::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
@@ -1429,6 +1429,11 @@ impl ProjectDbState {
         let ctx = DbOpenContext {
             intent: OpenIntent::OpenExisting,
             migration: migration.clone(),
+            // #1585 D2: the runtime is the full Tachi product — it reaches
+            // exec_envs / session_claims / dispatch ledgers — so it demands
+            // the full profile. A portable store is refused loudly here
+            // rather than producing `no such table` at the first product call.
+            required_profile: StoreProfile::TachiFull,
         };
         let store = MemoryStore::open_with_label_and_context(db_str, &project_label, &ctx)
             .map_err(|e| format!("open project db: {e}"))?;

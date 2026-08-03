@@ -38,6 +38,7 @@ mod sqlite_extensions;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
+pub mod store_profile;
 #[cfg(feature = "admin")]
 mod vault_db;
 #[cfg(feature = "admin")]
@@ -163,6 +164,9 @@ pub(crate) use open::{
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
+};
+pub use store_profile::{
+    StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
 };
 pub use recall_cache::{
     recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
