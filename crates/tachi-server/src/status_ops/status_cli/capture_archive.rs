@@ -1,6 +1,7 @@
 //! Explicit, reversible archive sweep for #1301 auto-capture artifacts.
 
 use chrono::{DateTime, Utc};
+use memcore::path_router::UNKNOWN_DB_LABEL;
 use memcore::{MemoryEntry, MemoryStore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -589,9 +590,10 @@ pub(super) fn apply(
     if rebuilt.source_state_hash != plan.source_state_hash || rebuilt.rows != plan.rows {
         return Err("stale plan; zero writes performed".into());
     }
-    let store =
-        MemoryStore::open_with_label(&plan.db_identity.canonical_path, "capture-archive-apply")
-            .map_err(|e| e.to_string())?;
+    // tachi#1579: `db_label` is a verified role claim resolved against the
+    // store's identity stamp, not a diagnostic tag for this operation.
+    let store = MemoryStore::open_with_label(&plan.db_identity.canonical_path, UNKNOWN_DB_LABEL)
+        .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for (index, row) in plan.rows.iter().enumerate() {
         let mut status = row.status.clone();
@@ -741,11 +743,10 @@ pub(super) fn restore(
     if identity(path)? != receipt.db_identity {
         return Err("receipt DB identity mismatch".into());
     }
-    let store = MemoryStore::open_with_label(
-        &receipt.db_identity.canonical_path,
-        "capture-archive-restore",
-    )
-    .map_err(|e| e.to_string())?;
+    // tachi#1579: `db_label` is a verified role claim resolved against the
+    // store's identity stamp, not a diagnostic tag for this operation.
+    let store = MemoryStore::open_with_label(&receipt.db_identity.canonical_path, UNKNOWN_DB_LABEL)
+        .map_err(|e| e.to_string())?;
     let mut rows = Vec::new();
     for r in receipt.rows.iter().filter(|r| r.status == "archived") {
         let rev = r
