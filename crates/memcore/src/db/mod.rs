@@ -71,12 +71,17 @@ pub use dispatch_outcomes::{
     outcome_exists_for_dispatch, upsert_outcome, upsert_outcome_reconciling_terminal_placeholder,
     DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
 };
+// The three raw-`Connection` constructors are gated with the accessor pair on
+// `MemoryStore` (#1585 review round 3): a bare connection is a raw-SQL bypass
+// of the `store_identity` write-once guards, so the non-test portable surface
+// does not get one. The read-only probes below stay portable.
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
-    count_memories_vec_rows, foundry_job_status_counts, open_for_wal_checkpoint,
-    open_immutable_readonly, open_raw, probe_keyword_suspects, schema_version, table_exists,
-    FoundryJobStatusCounts, KeywordSuspectProbe,
+    count_memories_vec_rows, foundry_job_status_counts, probe_keyword_suspects, schema_version,
+    table_exists, FoundryJobStatusCounts, KeywordSuspectProbe,
 };
+#[cfg(any(feature = "admin", test))]
+pub use doctor_probe::{open_for_wal_checkpoint, open_immutable_readonly, open_raw};
 pub use event_ledger::{
     continuity_metrics, insert_tachi_event, insert_tachi_event_if_absent, list_tachi_events,
 };
