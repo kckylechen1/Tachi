@@ -105,6 +105,15 @@ impl Default for KernelPolicy {
 /// `db/memory_crud.rs::atomic_evidence_path_validation_disabled`) — a
 /// portable caller that never calls this now gets the pure default
 /// (`false`, validation stays on) with zero env involvement.
+///
+/// `admin`-gated (kckylechen1/Sigil#1585 review): `pub mod kernel_policy` is
+/// unconditional, so this `pub fn` is directly reachable as
+/// `memcore::kernel_policy::path_validation_escape_hatch_from_env()` by any
+/// portable-kernel embedder via that facade's `pub use memcore::*;` — being
+/// "kept for the tachi-server adapter" was a naming convention, not a
+/// structural guarantee. Under `not(admin)` this returns the pure default
+/// (`false`, validation stays on) with zero env reads.
+#[cfg(feature = "admin")]
 pub fn path_validation_escape_hatch_from_env() -> bool {
     matches!(
         std::env::var("TACHI_DISABLE_PATH_VALIDATION")
@@ -112,6 +121,14 @@ pub fn path_validation_escape_hatch_from_env() -> bool {
             .as_deref(),
         Some("1") | Some("true") | Some("TRUE") | Some("yes")
     )
+}
+
+/// See the `admin`-gated `path_validation_escape_hatch_from_env` above: under
+/// `not(admin)` this is the entire implementation — no env read, the pure
+/// default.
+#[cfg(not(feature = "admin"))]
+pub fn path_validation_escape_hatch_from_env() -> bool {
+    false
 }
 
 // ─── Migration-backup retention (TACHI_MIGRATION_BACKUP_RETAIN) ────────────
@@ -164,5 +181,24 @@ mod tests {
         // setter first, this assertion would observe that value instead of
         // the pure default. No such sibling exists today.
         assert_eq!(migration_backup_retain_count(), 3);
+    }
+}
+
+/// Portable-kernel pin (kckylechen1/Sigil#1585 review): under `not(admin)`,
+/// `path_validation_escape_hatch_from_env()` must ignore
+/// `TACHI_DISABLE_PATH_VALIDATION` entirely and return the pure default. Only
+/// runs under `--no-default-features`, which the build seat runs.
+#[cfg(all(test, not(feature = "admin")))]
+mod portable_tests {
+    use super::path_validation_escape_hatch_from_env;
+
+    #[test]
+    fn path_validation_escape_hatch_from_env_ignores_env_under_not_admin() {
+        std::env::set_var("TACHI_DISABLE_PATH_VALIDATION", "true");
+        assert!(
+            !path_validation_escape_hatch_from_env(),
+            "not(admin) must return the pure default (false) even with the env var set"
+        );
+        std::env::remove_var("TACHI_DISABLE_PATH_VALIDATION");
     }
 }

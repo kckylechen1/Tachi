@@ -203,6 +203,14 @@ impl RecallConfig {
         CONFIG.get_or_init(Self::load)
     }
 
+    /// `admin`-gated: a portable-kernel build (`--no-default-features`) must
+    /// not read the process environment or the filesystem at all — a
+    /// downstream fork (HyperTachi/HyperMemory) syncing the portable kernel
+    /// gets pure, deterministic defaults, byte-identical to
+    /// `RecallConfig::default()`, with zero env/config.env reads. Full-Tachi
+    /// (`admin` on, the default) keeps today's env/config.env resolution
+    /// unchanged (kckylechen1/Sigil#1585 review).
+    #[cfg(feature = "admin")]
     pub fn load() -> RecallConfig {
         if env_truthy("TACHI_TEST_DISABLE_RECALL_CONFIG") || cfg!(test) {
             return Self::default();
@@ -215,6 +223,15 @@ impl RecallConfig {
         }
         config.apply_config_env(&process_recall_env());
         config.sanitized()
+    }
+
+    /// See the `admin`-gated `load` above: under `not(admin)` this is the
+    /// entire implementation — no env reads, no filesystem reads, not even
+    /// the `TACHI_TEST_DISABLE_RECALL_CONFIG` escape hatch (that hatch is
+    /// meaningless here since this path already never reads env).
+    #[cfg(not(feature = "admin"))]
+    pub fn load() -> RecallConfig {
+        Self::default()
     }
 
     /// Parse the same config.env source consumed by production `load` without
@@ -1017,6 +1034,43 @@ mod tests {
             Some(home_dir.path().join(".tachi").join("config.env")),
             "whitespace-only SIGIL_HOME must be treated as unset, matching the \
              canonical funnel's trim-then-empty-check skip semantics"
+        );
+    }
+}
+
+/// Portable-kernel pin (kckylechen1/Sigil#1585 review): under `not(admin)`,
+/// `RecallConfig::get()` (and therefore `load()`) must equal
+/// `RecallConfig::default()` even when a `TACHI_RECALL_*` var is set in the
+/// process environment — the `not(admin)` arm of `load()` never reads env or
+/// config.env at all. This is a separate module (not the `mod tests` above)
+/// because that module's tests call `config_env_path`/`read_config_env_bounded`
+/// directly (those private helpers stay unconditionally compiled and remain
+/// exercisable either way) rather than through the `admin`-gated `load`/`get`
+/// entry points this pin is specifically about. Only runs under
+/// `--no-default-features`, which the build seat runs.
+#[cfg(all(test, not(feature = "admin")))]
+mod portable_tests {
+    use super::RecallConfig;
+
+    /// Local RAII guard (the `EnvVarSnapshotRestore` above is scoped inside
+    /// the `admin`-only `mod tests` and not visible here).
+    struct EnvGuard(&'static str);
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    #[test]
+    fn get_equals_default_under_not_admin_even_with_env_set() {
+        std::env::set_var("TACHI_RECALL_RRF_K", "999");
+        let _guard = EnvGuard("TACHI_RECALL_RRF_K");
+
+        assert_eq!(
+            RecallConfig::get(),
+            &RecallConfig::default(),
+            "not(admin) RecallConfig::get() must never read TACHI_RECALL_* env"
         );
     }
 }
