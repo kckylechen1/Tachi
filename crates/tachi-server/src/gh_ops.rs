@@ -57,64 +57,6 @@ use self::safe_merge::*;
 use self::ship::*;
 use self::transport::*;
 
-/// One resolved `gh` executable plus explicit credential. This deliberately
-/// implements neither `Debug` nor serialization: its token may only be passed
-/// into a hardened child environment or used by the authority gate to derive
-/// a one-way fingerprint/redact captured output.
-pub(crate) struct GhApiContext {
-    gh_path: String,
-    token: String,
-}
-
-impl GhApiContext {
-    /// `#[cfg(test)]`: the production resolver that called this
-    /// (`resolve_gh_api_context`) was deleted with the dormant approver
-    /// choke-point chain in #1564, so `for_test` is the only remaining
-    /// constructor — it keeps the empty-credential refusal covered until
-    /// #1077 wires a real one.
-    #[cfg(test)]
-    fn new(gh_path: String, token: String) -> Result<Self, String> {
-        if token.trim().is_empty() {
-            return Err(
-                "no explicit GitHub credential is available (Vault `GH_TOKEN`, or \
-                 `GH_TOKEN`/`GITHUB_TOKEN` in the daemon environment). Approval authority \
-                 must be bound to a credential context this gate can identify, and a `gh` \
-                 keyring session cannot be pinned, so this is a refusal rather than an \
-                 unpinned approval"
-                    .to_string(),
-            );
-        }
-        Ok(Self { gh_path, token })
-    }
-
-    pub(crate) fn token(&self) -> &str {
-        &self.token
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(gh_path: String, token: String) -> Result<Self, String> {
-        Self::new(gh_path, token)
-    }
-}
-
-/// Build the same hardened `gh api` command used elsewhere, but from an
-/// already-pinned context so no later request can splice in another token.
-///
-/// Ungated: the approver probe's request builders call this on every probe,
-/// including in this crate's default-feature tests.
-pub(crate) fn gh_api_command_for_context(context: &GhApiContext, args: &[&str]) -> Command {
-    let mut cmd = build_gh_command_for_resolved_credential(&context.gh_path, Some(context.token()));
-    cmd.arg("api");
-    cmd.args(args);
-    cmd
-}
-
-/// #1382: reuse this module's token/auth-header redaction on any captured
-/// GitHub output the approver gate is about to put into a denial message.
-pub(crate) fn gh_redact(text: &str, token: &str) -> String {
-    sanitize_output(text, token)
-}
-
 pub(crate) use self::ci_watch::{daemon_ci_reader, spawn_ci_watch};
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
 pub(crate) use self::issue_freshness::{
